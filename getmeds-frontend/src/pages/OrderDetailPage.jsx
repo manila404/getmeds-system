@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, Zap } from 'lucide-react';
+import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw } from 'lucide-react';
 import client from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPHT } from '../utils/dateUtils';
@@ -14,6 +14,7 @@ const STATUS_COLORS = {
   so_pending: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
   so_created: 'bg-getmeds-blue/10 text-getmeds-blue-dark border border-getmeds-blue/30',
   waiting_for_payment: 'bg-state-warning-light text-amber-950 border border-state-warning font-semibold',
+  invoice_drafted: 'bg-indigo-50 text-indigo-700 border border-indigo-300 font-semibold',
   payment_verified: 'bg-pharmacy-green/15 text-pharmacy-green-dark border border-pharmacy-green/30',
   ready_for_dispatch: 'bg-getmeds-blue/10 text-getmeds-blue-dark border border-getmeds-blue/30',
   picking_packing: 'bg-indigo-50 text-indigo-700 border border-indigo-200',
@@ -29,7 +30,9 @@ const EVENT_ICONS = {
   ORDER_CREATED: '📝', STATUS_CHANGE: '🔄', PAYMENT_VERIFIED: '✅',
   PAYMENT_REJECTED: '❌', ORDER_DISPATCHED: '🚚', TRACKING_ENTERED: '📍',
   ORDER_COMPLETED: '🎉', EXCEPTION_SET: '⚠️', DISPATCH_STATUS_UPDATE: '📦',
-  ZOHO_PAYMENT_SYNCED: '⚡'
+  ZOHO_PAYMENT_SYNCED: '⚡', ZOHO_SO_CONFIRMED: '📄', ZOHO_INVOICE_DRAFTED: '🧾',
+  ZOHO_PAYMENT_VERIFIED: '✅', ZOHO_PACKAGE_CREATED: '📦', ZOHO_DISPATCHED: '🚚',
+  ZOHO_DISPATCH_UPDATED: '🚚', ZOHO_SO_CANCELLED: '🚫', ZOHO_EVENT_RECEIVED: '🔔'
 };
 
 const OrderDetailPage = () => {
@@ -51,13 +54,22 @@ const OrderDetailPage = () => {
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Failed')
   });
 
-  const syncPaymentMutation = useMutation({
-    mutationFn: () => client.post(`/api/finance/orders/${id}/sync-payment`),
+  // Manual fallback for a missed webhook — pulls this order's current Sales
+  // Order status straight from Zoho and backfills the audit trail if the
+  // live webhook never reached this app (backend/ngrok wasn't running at
+  // the moment it was confirmed).
+  const zohoSyncMutation = useMutation({
+    mutationFn: () => client.post(`/api/orders/${id}/sync-from-zoho`).then(r => r.data),
     onSuccess: (res) => {
-      toast.success(res?.data?.data?.message || 'Zoho payment synced as Paid!');
+      const action = res?.data?.action;
+      if (action === 'SO_CONFIRMED_BACKFILLED') toast.success('Zoho confirmation added to the timeline.');
+      else if (action === 'SO_CANCELLED_BACKFILLED') toast.success('Zoho cancellation added to the timeline.');
+      else if (action === 'PACKAGE_BACKFILLED') toast.success('Zoho package (picking/packing) added to the timeline.');
+      else if (action === 'DISPATCHED_BACKFILLED') toast.success('Zoho shipment & tracking added to the timeline.');
+      else toast('Already up to date with Zoho.', { icon: 'ℹ️' });
       qc.invalidateQueries({ queryKey: ['order', id] });
     },
-    onError: (err) => toast.error(err.response?.data?.error?.message || 'Failed to sync payment to Zoho')
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not reach Zoho')
   });
 
   if (isLoading) return <div className="flex justify-center py-20"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-getmeds-blue" /></div>;
@@ -107,15 +119,30 @@ const OrderDetailPage = () => {
           </div>
           <div>
             <p className="text-xs font-medium text-ink-secondary uppercase mb-1">Zoho Integration</p>
-            <div className="flex flex-wrap gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
               {order.zoho_so_number ? (
                 <>
                   <span className="bg-pharmacy-green/15 text-pharmacy-green-dark px-2 py-0.5 rounded font-medium">SO: {order.zoho_so_number}</span>
                   <span className={`px-2 py-0.5 rounded ${order.zoho_sync_status === 'synced' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : 'bg-state-warning-light text-amber-900'}`}>
                     {order.zoho_sync_status}
                   </span>
+                  {order.zoho_invoice_number && (
+                    <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">Invoice: {order.zoho_invoice_number}</span>
+                  )}
                 </>
               ) : <span className="text-ink-secondary">Not yet synced</span>}
+              {order.zoho_so_id && !['completed', 'cancelled'].includes(order.status) && (
+                <button
+                  type="button"
+                  disabled={zohoSyncMutation.isPending}
+                  onClick={() => zohoSyncMutation.mutate()}
+                  title="Pull this order's current status from Zoho — catches up the timeline if a webhook was missed"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${zohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
+                  {zohoSyncMutation.isPending ? 'Checking Zoho...' : 'Sync from Zoho'}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -218,29 +245,6 @@ const OrderDetailPage = () => {
                   ))}
                 </div>
               )}
-
-              {/* Test Mode: Force Zoho Payment Sync Button */}
-              {import.meta.env.VITE_TEST_MODE === 'true' && payment && (
-                <div className="mt-4 pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 bg-amber-50/70 p-3 rounded-lg border border-amber-200">
-                  <div>
-                    <p className="text-xs font-semibold text-amber-900 flex items-center gap-1">
-                      <Zap className="w-3.5 h-3.5 text-amber-600" /> Test Mode: Force Zoho Payment Sync
-                    </p>
-                    <p className="text-[11px] text-amber-700">
-                      Instantly registers this payment in Zoho and changes the Sales Order status to <strong>Paid</strong>.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={syncPaymentMutation.isPending}
-                    onClick={() => syncPaymentMutation.mutate()}
-                    className="inline-flex items-center gap-1.5 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 active:bg-amber-800 px-3.5 py-2 rounded-md shadow-xs transition-colors disabled:opacity-50"
-                  >
-                    <Zap className="w-3.5 h-3.5" />
-                    {syncPaymentMutation.isPending ? 'Syncing with Zoho...' : 'Force Zoho Payment Sync'}
-                  </button>
-                </div>
-              )}
             </div>
           )}
 
@@ -258,7 +262,6 @@ const OrderDetailPage = () => {
                     ['Dispatch Status', <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold capitalize ${dispatch.status === 'dispatched' ? 'bg-getmeds-blue/15 text-getmeds-blue-dark border border-getmeds-blue/40' : 'bg-indigo-100 text-indigo-700'}`}>{dispatch.status}</span>],
                     ['Courier', dispatch.courier || '—'],
                     ['Tracking Number', dispatch.tracking_number ? <span className="font-mono font-bold text-getmeds-blue">{dispatch.tracking_number}</span> : '—'],
-                    ['Dispatched By', dispatch.dispatched_by_name || '—'],
                     ['Dispatched At', dispatch.dispatched_at ? formatPHT(dispatch.dispatched_at) : '—'],
                     ['Notes', dispatch.dispatch_notes || '—'],
                   ].map(([label, val]) => (
@@ -267,6 +270,15 @@ const OrderDetailPage = () => {
                       <div className="text-sm text-ink-primary font-medium">{val}</div>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {!['completed', 'cancelled'].includes(order.status) && (
+                <div className="mt-4 flex items-start gap-2 rounded-md border border-slate-200 bg-surface px-3 py-2 text-xs text-ink-secondary">
+                  <RefreshCw className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                  <p>Picking, packing and shipment status come from Zoho, not from this app — create the Package
+                    (picking &amp; packing) and Shipment (courier + tracking) in Zoho Inventory and this record
+                    updates automatically.</p>
                 </div>
               )}
             </div>

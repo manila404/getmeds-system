@@ -9,17 +9,33 @@
  *   never a code change, and it means every implementation is forced to
  *   expose the exact same, deliberately small, surface.
  *
- * Safety-by-design:
+ * Safety-by-design (Aug 27, 2026 — tightened to "create-only, read-only
+ * inventory/customers" per explicit policy before live-data testing):
  *   There is NO delete, void, bulk-delete, or write-off method on this
- *   contract — on purpose. Getmeds' order automation never needs to delete
- *   or void anything in Zoho; it only ever creates and reads sales orders,
- *   contacts, and items. Because the interface itself doesn't declare those
- *   destructive methods, no implementation (mock, sandbox, or live) can be
- *   called to do them through this adapter, and no future controller code
- *   can accidentally reach for `zoho.deleteSalesOrder(...)` — it simply
- *   doesn't exist. If a real destructive Zoho operation is ever genuinely
- *   needed, that should be a deliberate, reviewed addition to this file,
- *   not an ad-hoc call from a controller.
+ *   contract — on purpose. There is also no longer any method that can
+ *   confirm/pack/ship a Sales Order, record a payment, add a comment, or
+ *   create/edit/activate a Zoho Item or a Zoho Contact. The ONLY write this
+ *   app is allowed to make to Zoho at all is `createSalesOrder` — and that
+ *   creates the SO as a plain Draft (Zoho's own default when you don't also
+ *   call a separate confirm/submit action), never auto-confirmed. Every
+ *   other Zoho-side step (confirming the SO, invoicing, recording payment,
+ *   packing, shipping, adjusting stock, creating/editing items or contacts)
+ *   is expected to happen directly in Zoho, by a human, not through this
+ *   app. Because the interface itself doesn't declare those methods, no
+ *   implementation (mock, sandbox, or live) can be called to do them
+ *   through this adapter, and no future controller code can accidentally
+ *   reach for `zoho.confirmSalesOrder(...)` or `zoho.adjustStock(...)` — it
+ *   simply doesn't exist. If a real need for one of those ever comes up,
+ *   that should be a deliberate, reviewed addition to this file, not an
+ *   ad-hoc call from a controller.
+ *
+ *   `createSalesOrder` also never looks up or creates a Zoho contact or a
+ *   Zoho item on the fly — it requires the caller to already know the
+ *   Zoho contact id (`orderData.zoho_customer_id`) and, per line item, the
+ *   Zoho item id if one exists (`item.zoho_item_id`). Those ids only ever
+ *   come from a read (`listContacts`/`listItems`), never from a write this
+ *   adapter performs — see src/controllers/customers.controller.js and
+ *   inventory.controller.js's syncPullStock.
  *
  * Every method here mirrors the real Zoho Books/Inventory REST API's
  * request/response shape (see MockZohoAdapter.js and mock-server/ for the
@@ -33,9 +49,18 @@ class ZohoAdapter {
   }
 
   /**
-   * Create a Sales Order.
+   * Create a Sales Order. This is the ONLY write this adapter can make to
+   * Zoho. It is created as a plain Draft — nothing in this adapter ever
+   * confirms it, invoices it, or records payment against it; that happens
+   * directly in Zoho by Finance/Dispatch, never through this app.
+   *
+   * Never creates or looks up a Zoho contact or item — both must already
+   * be known and passed in, or the call fails loudly.
+   *
    * @param {object} orderData - {getmeds_order_id, customer_name, customer_type,
-   *   customer_master_type, total_amount, delivery_address, items: [{sku, name, quantity, unit_price, subtotal}]}
+   *   customer_master_type, total_amount, delivery_address,
+   *   zoho_customer_id: string (REQUIRED — an existing Zoho contact id),
+   *   items: [{sku, name, quantity, unit_price, subtotal, zoho_item_id?}]}
    * @returns {Promise<{code:number, message:string, salesorder:object}>}
    */
   async createSalesOrder(orderData) {
@@ -53,104 +78,40 @@ class ZohoAdapter {
   }
 
   /**
-   * Look up (or lazily create) the Zoho contact_id for a Getmeds customer.
-   * Read-mostly by design — order automation needs a contact_id to attach
-   * to a sales order, it does not need to edit or delete customer records.
-   * @returns {Promise<{code:number, message:string, contact:object}>}
+   * Read-only: list contacts already in Zoho. Used to mirror customers
+   * into the local `customers` table (see customers.controller.js) so an
+   * order can carry an existing `zoho_customer_id` — this adapter never
+   * creates a contact itself.
+   * @returns {Promise<{code:number, message:string, contacts:object[]}>}
    */
-  async findOrCreateContact(customerData) {
-    throw new Error('Not implemented');
-  }
-
-  /** @returns {Promise<{code:number, message:string, contacts:object[]}>} */
   async listContacts(params = {}) {
     throw new Error('Not implemented');
   }
 
-  /** @returns {Promise<{code:number, message:string, items:object[]}>} */
+  /**
+   * Read-only: list items already in Zoho Inventory. Used to compare/pull
+   * stock into the local `products` table (see inventory.controller.js's
+   * syncPullStock) — this adapter never creates, edits, or adjusts a Zoho
+   * item or its stock.
+   * @returns {Promise<{code:number, message:string, items:object[]}>}
+   */
   async listItems(params = {}) {
     throw new Error('Not implemented');
   }
 
   /**
-   * Register a new inventory item in Zoho.
-   * @param {object} itemData - {name, sku, rate, initial_stock, unit, description}
-   * @returns {Promise<{code:number, message:string, item:object}>}
+   * Read-only: fetch ONE contact's full detail, including its
+   * billing_address — a field Zoho's List Contacts response never carries
+   * (see LiveZohoAdapter's implementation comment). Used to auto-fill a
+   * customer's delivery address the moment a MedRep selects them on the
+   * order form (customers.controller.js's getZohoAddress), rather than
+   * fetching every contact's full detail during the bulk sync-from-zoho
+   * pull (which would multiply that pull's API calls by however many
+   * customers exist, for data most of them will never need in a given
+   * session).
+   * @returns {Promise<{code:number, message:string, contact:object}>}
    */
-  async createItem(itemData) {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Look up (or lazily create) an item in Zoho by SKU.
-   * @param {object} productData - {name, sku, unit_price, stock, unit}
-   * @returns {Promise<{code:number, message:string, item:object}>}
-   */
-  async findOrCreateItem(productData) {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Activate an item in Zoho to ensure it is in 'active' status.
-   * @param {string} itemId
-   * @returns {Promise<{code:number, message:string, item?:object}>}
-   */
-  async activateItem(itemId) {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Post an inventory adjustment (positive or negative quantity delta).
-   * @param {object} adjustmentData - {itemId, sku, quantityAdjusted, reason}
-   * @returns {Promise<{code:number, message:string, inventory_adjustment:object}>}
-   */
-  async adjustStock(adjustmentData) {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Confirm a Sales Order in Zoho (moves from Draft -> Confirmed).
-   * @param {string} salesorderId
-   * @returns {Promise<{code:number, message:string}>}
-   */
-  async confirmSalesOrder(salesorderId) {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Create a Package for a Sales Order in Zoho (moves from Confirmed -> Packed).
-   * @param {string} salesorderId
-   * @returns {Promise<{code:number, message:string, package:object}>}
-   */
-  async packSalesOrder(salesorderId) {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Create a Shipment Order in Zoho (moves from Packed -> Shipped).
-   * @param {object} shipmentData - {salesorderId, trackingNumber, courier}
-   * @returns {Promise<{code:number, message:string, shipment:object}>}
-   */
-  async shipSalesOrder(shipmentData) {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Post an internal comment/audit milestone to Zoho's transaction timeline.
-   * @param {string} salesorderId
-   * @param {string} commentText
-   * @returns {Promise<{code:number, message:string}>}
-   */
-  async addOrderComment(salesorderId, commentText) {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Record payment for a Sales Order in Zoho (creates invoice & applies customer payment).
-   * @param {object} paymentData - {salesorderId, amount, paymentReference, paymentDate, paymentMethod, notes}
-   * @returns {Promise<{code:number, message:string, invoice_id?:string, payment?:object}>}
-   */
-  async recordPaymentForSalesOrder(paymentData) {
+  async getContact(contactId) {
     throw new Error('Not implemented');
   }
 

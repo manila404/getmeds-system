@@ -7,6 +7,15 @@ const { items, contacts } = require('./fixtures');
  * physically incapable of touching any real Zoho organization because it
  * never opens a socket.
  *
+ * Mirrors the trimmed, create-only/read-only ZohoAdapter contract (Aug 27,
+ * 2026): no confirm/pack/ship/payment/comment, no item or contact write.
+ * `createSalesOrder` prefers an already-known `zoho_customer_id` /
+ * `zoho_item_id`, matching LiveZohoAdapter's strict behavior — but, unlike
+ * Live, falls back to a deterministic mock contact/item when one isn't
+ * given, so existing local/dev/demo flows (and fixtures/tests) that never
+ * bothered to pre-map a customer keep working without touching anything
+ * that resembles a real Zoho write.
+ *
  * Behavior mirrors the real Zoho Books/Inventory API response shape so
  * that controller code written against this adapter needs no changes to
  * run against LiveZohoAdapter later. Deterministic IDs (a counter, not
@@ -46,29 +55,27 @@ class MockZohoAdapter extends ZohoAdapter {
     };
   }
 
-  async findOrCreateContact(customerData) {
-    const existing = [...this._contacts.values()].find(
-      (c) => c.contact_name === customerData.customer_name
-    );
-    if (existing) {
-      return { code: 0, message: 'success', contact: existing };
-    }
-    const contact = {
-      contact_id: `MOCK-CONTACT-${this._contacts.size + 1}`,
-      contact_name: customerData.customer_name,
-      company_name: customerData.customer_name,
-      contact_type: 'customer',
-      customer_sub_type: customerData.customer_master_type === 'credit' ? 'business' : 'individual',
-      getmeds_customer_type: customerData.customer_type || customerData.customer_master_type || 'direct'
-    };
-    this._contacts.set(contact.contact_id, contact);
-    this._log('[ZOHO_MOCK] Created contact:', contact.contact_id, contact.contact_name);
-    return { code: 0, message: 'success', contact };
-  }
-
+  /**
+   * Create a sales order — the only write this class performs, matching
+   * LiveZohoAdapter. Prefers `orderData.zoho_customer_id` (an id already
+   * present in `this._contacts`, mirroring a real pre-synced mapping); if
+   * none is given, this MOCK-ONLY fallback fabricates a placeholder
+   * contact rather than rejecting, so dev/demo flows and existing tests
+   * that don't pre-map a customer keep working. LiveZohoAdapter has no
+   * equivalent fallback — there, a missing zoho_customer_id is a hard
+   * failure.
+   */
   async createSalesOrder(orderData) {
     if (this._simulatedOutage) {
       throw new Error('Simulated Zoho API outage (Test Mode) — createSalesOrder rejected on purpose.');
+    }
+
+    let contact = orderData.zoho_customer_id ? this._contacts.get(orderData.zoho_customer_id) : null;
+    if (!contact) {
+      contact = {
+        contact_id: orderData.zoho_customer_id || `MOCK-CONTACT-${orderData.customer_name || 'unknown'}`,
+        contact_name: orderData.customer_name || 'Unknown Customer'
+      };
     }
 
     const { salesorder_id, salesorder_number } = this._nextSalesOrderId();
@@ -79,42 +86,34 @@ class MockZohoAdapter extends ZohoAdapter {
       ? 'Credit Terms (Auto-approved)'
       : 'Pending Finance Verification';
 
+    // Mirrors LiveZohoAdapter's TestGM- notes-prefixing exactly, so the
+    // mock's response shape stays a faithful stand-in — see that file for
+    // why this exists.
+    const isTestOrder = /^TestGM-/i.test(orderData.getmeds_order_id || '');
+    const notes = isTestOrder
+      ? `TEST — DO NOT FULFILL. Getmeds Order: ${orderData.getmeds_order_id}`
+      : `Getmeds Order: ${orderData.getmeds_order_id}`;
+
     // Mirrors the real request body shape (organization_id + auth would be
     // added by LiveZohoAdapter; here we just log what *would* be sent).
     this._log('[ZOHO_MOCK] Would POST /inventory/v1/salesorders:', {
-      customer_name: orderData.customer_name,
+      customer_id: contact.contact_id,
       reference_number: orderData.getmeds_order_id,
       line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity }))
     });
-
-    // Ensure all order items exist in mock items and are active
-    for (const item of (orderData.items || [])) {
-      const existing = [...this._items.values()].find(
-        (i) => (item.sku && i.sku === item.sku) || i.name === item.name
-      );
-      if (existing) {
-        existing.status = 'active';
-      } else {
-        await this.createItem({
-          name: item.name,
-          sku: item.sku,
-          unit_price: item.unit_price || 0,
-          stock: item.stock || 100,
-          unit: item.unit || 'pc'
-        });
-      }
-    }
 
     const salesorder = {
       salesorder_id,
       salesorder_number,
       status: 'draft',
-      customer_name: orderData.customer_name,
+      customer_id: contact.contact_id,
+      customer_name: contact.contact_name || orderData.customer_name,
       total: orderData.total_amount,
       reference_number: orderData.getmeds_order_id,
+      notes,
       date: new Date().toISOString().slice(0, 10),
       line_items: (orderData.items || []).map((item) => ({
-        item_id: `MOCK-ITEM-${item.sku}`,
+        item_id: item.zoho_item_id || null,
         name: item.name,
         quantity: item.quantity,
         rate: item.unit_price,
@@ -152,119 +151,13 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', items: [...this._items.values()] };
   }
 
-  async activateItem(itemId) {
-    const item = this._items.get(itemId);
-    if (item) {
-      item.status = 'active';
-      this._log('[ZOHO_MOCK] Activated item:', itemId);
+  /** Mirrors LiveZohoAdapter.getContact's shape — returns the full seeded contact (including billing_address, if the fixture has one). */
+  async getContact(contactId) {
+    const contact = this._contacts.get(contactId);
+    if (!contact) {
+      return { code: 4, message: 'The contact ID given seems to be incorrect. [MOCK MODE]' };
     }
-    return { code: 0, message: 'Item status has been changed to Active. [MOCK MODE]' };
-  }
-
-  async createItem(itemData) {
-    const itemId = `MOCK-ITEM-${itemData.sku || this._items.size + 1}`;
-    const item = {
-      item_id: itemId,
-      name: itemData.name,
-      sku: itemData.sku,
-      rate: itemData.rate ?? itemData.unit_price ?? 0,
-      stock_on_hand: itemData.initial_stock ?? itemData.stock ?? 0,
-      unit: itemData.unit || 'pc',
-      status: 'active',
-      _mock: true
-    };
-    this._items.set(itemId, item);
-    this._log('[ZOHO_MOCK] Created item:', itemId, item.name);
-    return { code: 0, message: 'Item created successfully [MOCK MODE]', item };
-  }
-
-  async findOrCreateItem(productData) {
-    const existing = [...this._items.values()].find(
-      (i) => (productData.sku && i.sku === productData.sku) || i.name === productData.name
-    );
-    if (existing) {
-      if (existing.status === 'inactive') {
-        existing.status = 'active';
-      }
-      return { code: 0, message: 'success', item: existing };
-    }
-    return this.createItem(productData);
-  }
-
-  async adjustStock({ itemId, sku, quantityAdjusted, reason = 'Mock adjustment' }) {
-    let item = itemId ? this._items.get(itemId) : null;
-    if (!item && sku) {
-      item = [...this._items.values()].find((i) => i.sku === sku);
-    }
-    if (!item) {
-      throw new Error(`[ZOHO_MOCK] Item not found for adjustStock (itemId=${itemId}, sku=${sku})`);
-    }
-
-    item.stock_on_hand = Math.max(0, (item.stock_on_hand || 0) + quantityAdjusted);
-    this._log(`[ZOHO_MOCK] Adjusted stock for ${item.sku}: delta=${quantityAdjusted}, new stock=${item.stock_on_hand}`);
-    return {
-      code: 0,
-      message: 'Inventory adjusted successfully [MOCK MODE]',
-      inventory_adjustment: {
-        inventory_adjustment_id: `MOCK-ADJ-${Date.now()}`,
-        reason,
-        quantity_adjusted: quantityAdjusted,
-        line_items: [{ item_id: item.item_id, sku: item.sku, quantity_adjusted: quantityAdjusted }]
-      }
-    };
-  }
-
-  async confirmSalesOrder(salesorderId) {
-    const so = this._salesOrders.get(salesorderId);
-    if (so) {
-      so.status = 'confirmed';
-      this._log('[ZOHO_MOCK] Confirmed sales order:', salesorderId);
-    }
-    return { code: 0, message: 'Sales order status has been changed to Confirmed. [MOCK MODE]' };
-  }
-
-  async packSalesOrder(salesorderId) {
-    const so = this._salesOrders.get(salesorderId);
-    if (so) {
-      so.status = 'confirmed';
-      so.package_status = 'packed';
-      this._log('[ZOHO_MOCK] Packed sales order:', salesorderId);
-    }
-    return { code: 0, message: 'Package created successfully [MOCK MODE]', package: { package_id: `MOCK-PKG-${Date.now()}` } };
-  }
-
-  async shipSalesOrder({ salesorderId, trackingNumber, courier }) {
-    const so = this._salesOrders.get(salesorderId);
-    if (so) {
-      so.status = 'shipped';
-      so.shipped_status = 'shipped';
-      so.tracking_number = trackingNumber;
-      this._log(`[ZOHO_MOCK] Shipped sales order ${salesorderId}: ${courier} ${trackingNumber}`);
-    }
-    return { code: 0, message: 'Shipment Order Created Successfully. [MOCK MODE]' };
-  }
-
-  async addOrderComment(salesorderId, commentText) {
-    this._log(`[ZOHO_MOCK] Added comment to ${salesorderId}: ${commentText}`);
-    return { code: 0, message: 'Comments added. [MOCK MODE]' };
-  }
-
-  async recordPaymentForSalesOrder({ salesorderId, amount, paymentReference, paymentDate, paymentMethod, notes }) {
-    const so = this._salesOrders.get(salesorderId);
-    if (so) {
-      so.status = 'confirmed';
-      so.invoice_status = 'invoiced';
-      so.paid_status = 'paid';
-      so.payment_status = 'paid';
-      so.invoiced_status = 'invoiced';
-      so.payment_reference = paymentReference;
-      this._log(`[ZOHO_MOCK] Recorded payment for SO ${salesorderId}: PHP ${amount || so.total} | Ref: ${paymentReference}`);
-    }
-    return {
-      code: 0,
-      message: 'Payment recorded and invoice marked as paid [MOCK MODE]',
-      invoice: { invoice_id: `MOCK-INV-${Date.now()}`, status: 'paid' }
-    };
+    return { code: 0, message: 'success', contact };
   }
 }
 

@@ -4,7 +4,16 @@ const TRANSITIONS = {
   validating: ['so_pending', 'exception'],
   so_pending: ['so_created', 'exception'],
   so_created: ['waiting_for_payment', 'ready_for_dispatch'],
-  waiting_for_payment: ['payment_verified', 'on_hold', 'cancelled'],
+  // waiting_for_payment -> invoice_drafted happens when Finance converts the
+  // confirmed Sales Order to an Invoice in Zoho (webhook: invoice.created).
+  // waiting_for_payment -> payment_verified/ready_for_dispatch is kept for
+  // Zoho paths that register the Customer Payment directly without a
+  // separate "invoice created" call ever reaching us.
+  waiting_for_payment: ['invoice_drafted', 'payment_verified', 'ready_for_dispatch', 'on_hold', 'cancelled'],
+  // invoice_drafted -> ready_for_dispatch happens when Finance records the
+  // Customer Payment against that Invoice in Zoho (webhook: invoice paid /
+  // payment created).
+  invoice_drafted: ['payment_verified', 'ready_for_dispatch', 'on_hold', 'cancelled'],
   payment_verified: ['ready_for_dispatch'],
   ready_for_dispatch: ['picking_packing', 'on_hold'],
   picking_packing: ['dispatched', 'on_hold'],

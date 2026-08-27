@@ -19,15 +19,25 @@ export const fetchProducts = async () => {
 };
 
 /**
- * Fetch all active customer accounts from database
+ * Fetch customers for the MedRep order-creation dropdown.
+ *
+ * Aug 27, 2026: switched from /api/customers (the admin overview — always
+ * shows every active customer, no matter what) to /api/orders/meta/customers,
+ * which is the endpoint that actually applies the two Zoho testing safety
+ * flags: while ZOHO_TEST_CUSTOMER_ID is set (and ZOHO_DRY_RUN is not), this
+ * narrows the list to just the one designated TEST customer, so a MedRep
+ * physically cannot pick anyone else in this form — not just get rejected
+ * after submitting. While ZOHO_DRY_RUN is on, every customer is shown again
+ * (nothing can reach Zoho either way). Response shape is the same
+ * ({ data: { customers: [...] } }), so this is a drop-in swap.
  */
 export const fetchCustomers = async () => {
   const token = sessionStorage.getItem('token');
-  const response = await fetch(`${API_BASE_URL}/api/customers`, {
+  const response = await fetch(`${API_BASE_URL}/api/orders/meta/customers`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {}
   });
   if (!response.ok) {
-    const res = await client.get('/api/customers');
+    const res = await client.get('/api/orders/meta/customers');
     return res.data;
   }
   return response.json();
@@ -38,14 +48,6 @@ export const fetchCustomers = async () => {
  */
 export const fetchInventoryStatus = async () => {
   const res = await client.get('/api/inventory/status');
-  return res.data;
-};
-
-/**
- * Push all catalog products to Zoho Inventory
- */
-export const syncPushCatalog = async () => {
-  const res = await client.post('/api/inventory/sync-push');
   return res.data;
 };
 
@@ -62,5 +64,62 @@ export const syncPullStock = async () => {
  */
 export const adjustProductStock = async ({ product_id, delta, reason }) => {
   const res = await client.post('/api/inventory/adjust', { product_id, delta, reason });
+  return res.data;
+};
+
+/**
+ * Aug 27, 2026: fetch a single customer's full address (and refreshed
+ * contact person/number) straight from Zoho's "Get a Contact" detail call.
+ * Needed because Zoho's List Contacts response (what the bulk customer
+ * sync pulls) never includes billing_address — only this per-contact
+ * detail call does — so a synced customer's address never auto-filled on
+ * the order form until this existed. Called once, at the moment a MedRep
+ * selects a customer — read-only, nothing is ever sent to Zoho.
+ */
+export const fetchCustomerZohoAddress = async (customerId) => {
+  const res = await client.get(`/api/customers/${customerId}/address-from-zoho`);
+  return res.data;
+};
+
+/**
+ * Aug 27, 2026: Clients Directory (Management) — paginated, filterable list
+ * of every local customer (source: zoho or local), each tagged with its
+ * Credit/Direct payment type plus the new, purely-local `category`
+ * classification (doctor/hospital/distributor/pwd). Admin/management only.
+ * `params` may include { page, limit, search, category, type }.
+ */
+export const fetchClients = async (params = {}) => {
+  const res = await client.get('/api/customers', { params });
+  return res.data;
+};
+
+/**
+ * Aug 27, 2026 (2): the four Clients Directory KPI cards (Total/Credit/
+ * Direct/Uncategorized) used to be four separate `fetchClients({limit:1})`
+ * calls — four HTTP round trips just to read a count each. This is one
+ * grouped local query on the backend, one round trip here.
+ */
+export const fetchClientStats = async () => {
+  const res = await client.get('/api/customers/stats');
+  return res.data;
+};
+
+/**
+ * Pulls ALL contacts from Zoho (paginated on the backend, no 200-record
+ * cap) into the local customers table. Read-only towards Zoho — nothing is
+ * ever written back. Mirrors the Inventory page's "Pull from Zoho" action.
+ */
+export const syncCustomersFromZoho = async () => {
+  const res = await client.post('/api/customers/sync-from-zoho');
+  return res.data;
+};
+
+/**
+ * Sets (or clears, with category: null) a customer's local classification
+ * tag. Pure local write — never touches Zoho, never touches `type`
+ * (credit/direct), which keeps driving payment-workflow routing unchanged.
+ */
+export const updateCustomerCategory = async (customerId, category) => {
+  const res = await client.patch(`/api/customers/${customerId}/category`, { category });
   return res.data;
 };

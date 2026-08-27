@@ -1,40 +1,67 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import client from '../../api/client';
 import Modal from '../ui/Modal';
 import ProductAutocomplete from './ProductAutocomplete';
-import { 
-  Plus, 
-  Trash2, 
-  ShoppingCart, 
-  CheckCircle, 
-  AlertCircle, 
-  ArrowLeft, 
-  Send, 
+import CustomerAutocomplete from './CustomerAutocomplete';
+import {
+  Trash2,
+  ShoppingCart,
+  CheckCircle,
+  AlertCircle,
+  ArrowLeft,
   Sparkles,
-  Building2,
   Package,
-  Truck,
-  FileCheck2
+  ClipboardList,
+  Loader2
 } from 'lucide-react';
 import { useDebug } from '../../context/DebugContext';
+import { useAuth } from '../../hooks/useAuth';
 
 import { useProducts, useCustomers } from '../../hooks/useOrderData';
+import { fetchCustomerZohoAddress } from '../../api/queries';
+
+// Aug 27, 2026: "Order Intake Details" — a single label-left, spreadsheet
+// styled block (matching the team's old paper/Google-Forms order sheet)
+// that sits above the product cart. Every field here is OPTIONAL and
+// purely informational: none of it is required to submit, and none of it
+// is ever sent to Zoho (orders.controller.js's zohoPayload only ever
+// carries customer/items/address/total — see schema.sql's `orders` table
+// comment for the full list of new intake_* columns). "Order" and
+// "Amount" are read-only — they mirror the product cart below rather than
+// being typed in separately, so there's only ever one source of truth for
+// what's actually being ordered and what it costs.
+const IntakeRow = ({ label, children, alt, required }) => (
+  <div
+    className={`grid grid-cols-1 sm:grid-cols-[168px_1fr] border-t border-emerald-900/10 ${
+      alt ? 'bg-emerald-50/80' : 'bg-white'
+    }`}
+  >
+    <div className="px-4 py-2.5 flex items-start sm:items-center font-bold text-[11px] sm:text-xs text-slate-800 sm:border-r border-emerald-900/10 uppercase tracking-wide">
+      {label} {required && <span className="text-state-error ml-0.5">*</span>} :
+    </div>
+    <div className="px-4 py-2 flex items-center min-w-0">{children}</div>
+  </div>
+);
+
+const textInputClass =
+  'w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs transition-colors';
 
 /**
  * OrderForm Component
- * 
+ *
  * Implements:
  * - Step 1: React Query cached master data from useOrderData
- * - Step 2: Autocomplete integration via <ProductAutocomplete />
+ * - Step 2: Autocomplete integration via <CustomerAutocomplete /> and <ProductAutocomplete />
  * - Step 3: Cart state, .reduce() totals, useMutation to /api/orders, and fast-track debug button.
  */
 const OrderForm = ({ onCancel, onSuccess }) => {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { isDebug } = useDebug();
+  const { user } = useAuth();
 
   // Form State
   const [customerId, setCustomerId] = useState('');
@@ -42,9 +69,32 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const [deliveryAddress, setDeliveryAddress] = useState('');
   const [deliveryNotes, setDeliveryNotes] = useState('');
 
+  // Order-intake fields (all optional — see IntakeRow comment above)
+  const [courier, setCourier] = useState('');
+  const [doctorName, setDoctorName] = useState('');
+  const [hospitalName, setHospitalName] = useState('');
+  const [patientName, setPatientName] = useState('');
+  const [mop, setMop] = useState('');
+  const [receiverName, setReceiverName] = useState('');
+  const [receiverContactNo, setReceiverContactNo] = useState('');
+  const [orderSource, setOrderSource] = useState('');
+  const [plsGiveNote, setPlsGiveNote] = useState('');
+
+  // Live clock for the TIMESTAMP header — display only, the real
+  // created_at timestamp is stamped server-side when the order is saved.
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const formattedTimestamp = now.toLocaleString('en-PH', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  });
+
   // Cart State: [{ productId, name, sku, price, unit, quantity }]
   const [items, setItems] = useState([]);
-  
+
   // Post-submission success state
   const [submittedOrder, setSubmittedOrder] = useState(null);
   const [isReviewOpen, setIsReviewOpen] = useState(false);
@@ -53,26 +103,64 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const { data: customers = [], isLoading: loadingCustomers } = useCustomers();
   const { data: products = [], isLoading: loadingProducts } = useProducts();
 
-  // Verification console logs for dev tools inspection
-  if (products && products.length > 0) {
-    console.log('Seeded Products:', products);
-  }
-  if (customers && customers.length > 0) {
-    console.log('Seeded Customers:', customers);
-  }
-
   const selectedCustomer = customers.find(c => String(c.id) === String(customerId));
 
+  // Aug 27, 2026: fetching the live address from Zoho (see below) — shown
+  // as a small inline spinner next to the Address field so a MedRep knows
+  // why it might still be blank for a second right after picking someone.
+  const [isFetchingZohoAddress, setIsFetchingZohoAddress] = useState(false);
+  // Tracks which customer is *currently* selected, read synchronously
+  // inside the async fetch below — a ref rather than reading `customerId`
+  // from closure, so a fast second selection can't have its own result
+  // clobbered by an earlier request that resolves late.
+  const selectedCustomerIdRef = useRef('');
+
   // Customer change handler
-  const handleCustomerChange = (id) => {
-    setCustomerId(id);
-    const c = customers.find(cust => String(cust.id) === String(id));
-    if (c) {
-      setCustomerType(c.type || 'credit');
-      if (c.address) {
-        setDeliveryAddress(c.address);
-      }
-    }
+  const handleCustomerChange = (c) => {
+    if (!c) return;
+    selectedCustomerIdRef.current = String(c.id);
+    setCustomerId(c.id);
+    setCustomerType(c.type || 'credit');
+    // Fill in whatever's already cached locally immediately (instant, no
+    // network wait) — this is what's usually already there from a
+    // previous sync/selection.
+    setDeliveryAddress(c.address || '');
+    setReceiverName(c.contact_person || '');
+    setReceiverContactNo(c.contact_number || '');
+
+    // Aug 27, 2026: Zoho's bulk contact sync (customers.controller.js's
+    // syncFromZoho) never receives billing_address — Zoho's List Contacts
+    // response doesn't carry it, only the single "Get a Contact" detail
+    // call does. So the moment a MedRep actually picks this customer, ask
+    // for that detail once (read-only — GET /api/customers/:id/address-from-zoho)
+    // and fill the Address/Receiver/Contact No. fields in with the real
+    // thing once it comes back. Race-guarded via the ref above: if the
+    // MedRep has already moved on to a different customer by the time this
+    // resolves, its result is discarded rather than overwriting the screen.
+    setIsFetchingZohoAddress(true);
+    fetchCustomerZohoAddress(c.id)
+      .then((res) => {
+        if (selectedCustomerIdRef.current !== String(c.id)) return; // moved on already — discard
+        const d = res?.data;
+        if (d) {
+          if (d.address) setDeliveryAddress(d.address);
+          if (d.contact_person) setReceiverName(d.contact_person);
+          if (d.contact_number) setReceiverContactNo(d.contact_number);
+        }
+      })
+      .catch((err) => {
+        // Non-fatal — the locally-cached values set above still stand.
+        console.warn('Could not fetch live address from Zoho for this customer:', err);
+      })
+      .finally(() => {
+        if (selectedCustomerIdRef.current === String(c.id)) setIsFetchingZohoAddress(false);
+      });
+  };
+
+  const handleCustomerClear = () => {
+    selectedCustomerIdRef.current = '';
+    setCustomerId('');
+    setIsFetchingZohoAddress(false);
   };
 
   // Step 2: Autocomplete item selection
@@ -114,11 +202,17 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // Step 3: Dynamic Grand Total calculation via .reduce()
   const grandTotal = items.reduce((total, item) => total + (item.price * item.quantity), 0);
 
+  // Read-only "ORDER" summary row — mirrors the cart below, single source
+  // of truth (nothing here is separately typed in).
+  const orderSummaryText = items.length
+    ? items.map(i => `${i.name} x${i.quantity}`).join('; ')
+    : '';
+
   // Form Validation
   const isFormValid = Boolean(
-    customerId && 
-    deliveryAddress.trim() && 
-    items.length > 0 && 
+    customerId &&
+    deliveryAddress.trim() &&
+    items.length > 0 &&
     items.every(i => i.productId && Number(i.quantity) > 0)
   );
 
@@ -130,10 +224,13 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     }
 
     const creditCust = customers.find(c => c.type === 'credit') || customers[0];
-    setCustomerId(String(creditCust.id));
-    setCustomerType('credit');
+    handleCustomerChange(creditCust);
     setDeliveryAddress(creditCust.address || "St. Luke's Medical Center - 279 E Rodriguez Sr. Ave, Quezon City");
     setDeliveryNotes('Institutional Credit Order. Deliver to Receiving Bay. Ref: PO-2026-CREDIT.');
+    setCourier('LBC Express');
+    setHospitalName(creditCust.name || '');
+    setMop('Credit Terms');
+    setOrderSource('Repeat Customer');
 
     const sampleItems = [];
     if (products.length >= 1) {
@@ -178,10 +275,13 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     }
 
     const directCust = customers.find(c => c.type === 'direct') || customers[customers.length - 1];
-    setCustomerId(String(directCust.id));
-    setCustomerType('direct');
+    handleCustomerChange(directCust);
     setDeliveryAddress(directCust.address || "Unit 402, Greenhills Tower, San Juan, Metro Manila");
     setDeliveryNotes('Direct Patient Order. Advance payment verification required before dispatch.');
+    setCourier('Grab Express');
+    setPatientName(directCust.name || '');
+    setMop('GCash');
+    setOrderSource('Walk-in');
 
     const sampleItems = [];
     if (products.length >= 1) {
@@ -231,7 +331,18 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         })),
         delivery_address: deliveryAddress,
         delivery_notes: deliveryNotes,
-        customer_type: customerType
+        customer_type: customerType,
+        // Optional intake fields — see IntakeRow comment above. Blank
+        // strings are normalized to NULL server-side.
+        courier,
+        doctor_name: doctorName,
+        hospital_name: hospitalName,
+        patient_name: patientName,
+        mode_of_payment: mop,
+        receiver_name: receiverName,
+        receiver_contact_no: receiverContactNo,
+        order_source: orderSource,
+        pls_give_note: plsGiveNote
       });
       const order = createRes.data.data.order;
       return order;
@@ -277,6 +388,21 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     }
     setIsReviewOpen(true);
   };
+
+  // Any optional intake field the MedRep actually filled in — shown in the
+  // review modal so it's double-checked before submission, same as every
+  // other field on the form.
+  const filledIntakeDetails = [
+    { label: 'Courier', value: courier },
+    { label: 'Doctor', value: doctorName },
+    { label: 'Hospital', value: hospitalName },
+    { label: 'Patient', value: patientName },
+    { label: 'Mode of Payment', value: mop },
+    { label: 'Receiver', value: receiverName },
+    { label: 'Contact No.', value: receiverContactNo },
+    { label: 'Source', value: orderSource },
+    { label: 'Pls Give', value: plsGiveNote }
+  ].filter(f => f.value && f.value.trim());
 
   return (
     <div className="space-y-6">
@@ -329,85 +455,135 @@ const OrderForm = ({ onCancel, onSuccess }) => {
       {/* Main Crisp Card White Container */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-visible">
         <form onSubmit={handleOpenReview} className="divide-y divide-slate-100">
-          
-          {/* SECTION 1: CUSTOMER DETAILS */}
-          <div className="p-6 sm:p-8 space-y-5">
+
+          {/* SECTION 1: ORDER INTAKE DETAILS (spreadsheet-style form) */}
+          <div className="p-6 sm:p-8 space-y-4">
             <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100">
               <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
-                <Building2 size={16} />
+                <ClipboardList size={16} />
               </div>
-              <h2 className="text-base font-bold text-ink-primary">1. Customer Details</h2>
+              <h2 className="text-base font-bold text-ink-primary">1. Order Intake Details</h2>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Customer Selector */}
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-ink-primary mb-2">
-                  Select Customer Account <span className="text-state-error">*</span>
-                </label>
-                <select
-                  value={customerId}
-                  onChange={e => handleCustomerChange(e.target.value)}
-                  className="w-full bg-white border border-slate-300 rounded-md px-3.5 py-2.5 text-sm text-ink-primary font-medium focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs transition-colors"
-                  required
-                >
-                  <option value="">-- Choose registered customer --</option>
-                  {customers.map(c => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} ({c.type === 'credit' ? 'Credit Account' : 'Direct Patient'})
-                    </option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-ink-secondary mt-1.5">
-                  Pulls active credit institutional clients and direct patient profiles.
-                </p>
+            <div className="rounded-xl border border-emerald-900/15 overflow-hidden shadow-2xs">
+              {/* Timestamp header bar */}
+              <div className="bg-pharmacy-green text-white flex items-center justify-between px-4 py-2.5">
+                <span className="font-bold text-[11px] sm:text-xs uppercase tracking-wider">Timestamp</span>
+                <span className="font-mono text-xs sm:text-sm font-semibold">{formattedTimestamp}</span>
               </div>
 
-              {/* Dynamic Account Badge */}
-              <div className="flex flex-col justify-start">
-                <label className="block text-xs font-bold uppercase tracking-wider text-ink-primary mb-2">
-                  Account Classification & Workflow Path
-                </label>
-                
-                {selectedCustomer ? (
-                  <div className={`p-3.5 rounded-xl border transition-all ${
-                    customerType === 'credit' 
-                      ? 'bg-pharmacy-green/10 border-pharmacy-green/30 text-pharmacy-green-dark' 
-                      : 'bg-state-warning-light border-state-warning/30 text-amber-950'
-                  }`}>
-                    <div className="flex items-center gap-2">
-                      {customerType === 'credit' ? (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-pharmacy-green text-white shadow-2xs">
-                          <CheckCircle size={12} /> Credit Customer
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-state-warning text-white shadow-2xs">
-                          <AlertCircle size={12} /> Direct Patient
-                        </span>
-                      )}
-                      <span className="text-xs font-semibold text-ink-primary">
-                        {customerType === 'credit' ? 'Institutional Terms' : 'Advance Payment'}
-                      </span>
-                    </div>
-
-                    <p className="text-xs mt-2 leading-relaxed">
-                      {customerType === 'credit' ? (
-                        <>
-                          <strong className="font-semibold">Bypasses upfront payment.</strong> Auto-creates Zoho Sales Order with 30-day terms and routes directly to the <span className="font-bold underline">Dispatch Queue</span>.
-                        </>
-                      ) : (
-                        <>
-                          <strong className="font-semibold">Requires payment verification.</strong> Routes to <span className="font-bold underline">Finance Queue</span> for 100% advance clearance before picking.
-                        </>
-                      )}
+              <IntakeRow label="Customer" required>
+                <div className="w-full space-y-1">
+                  <CustomerAutocomplete
+                    customers={customers}
+                    value={customerId}
+                    onSelect={handleCustomerChange}
+                    onClear={handleCustomerClear}
+                    disabled={loadingCustomers}
+                  />
+                  {selectedCustomer && (
+                    <p className="text-[11px] text-ink-secondary">
+                      {customerType === 'credit'
+                        ? 'Institutional terms — bypasses upfront payment, routes to Dispatch.'
+                        : 'Direct patient — requires Finance payment verification before picking.'}
                     </p>
-                  </div>
-                ) : (
-                  <div className="p-3.5 rounded-xl border border-dashed border-slate-200 bg-surface text-ink-secondary text-xs flex items-center justify-center h-[88px]">
-                    Select a customer above to view their workflow routing
-                  </div>
-                )}
-              </div>
+                  )}
+                </div>
+              </IntakeRow>
+
+              <IntakeRow label="Courier" alt>
+                <input type="text" value={courier} onChange={e => setCourier(e.target.value)} placeholder="e.g. LBC, Grab Express, J&T" className={textInputClass} />
+              </IntakeRow>
+
+              <IntakeRow label="Doctor">
+                <input type="text" value={doctorName} onChange={e => setDoctorName(e.target.value)} placeholder="Referring / prescribing doctor" className={textInputClass} />
+              </IntakeRow>
+
+              <IntakeRow label="Hospital" alt>
+                <input type="text" value={hospitalName} onChange={e => setHospitalName(e.target.value)} placeholder="Hospital / clinic name" className={textInputClass} />
+              </IntakeRow>
+
+              <IntakeRow label="Patient">
+                <input type="text" value={patientName} onChange={e => setPatientName(e.target.value)} placeholder="Patient name" className={textInputClass} />
+              </IntakeRow>
+
+              <IntakeRow label="MOP" alt>
+                <select value={mop} onChange={e => setMop(e.target.value)} className={textInputClass}>
+                  <option value="">-- Select mode of payment --</option>
+                  <option value="Cash">Cash</option>
+                  <option value="Check">Check</option>
+                  <option value="Bank Transfer">Bank Transfer</option>
+                  <option value="GCash">GCash</option>
+                  <option value="Credit Terms">Credit Terms</option>
+                  <option value="Other">Other</option>
+                </select>
+              </IntakeRow>
+
+              <IntakeRow label="Receiver">
+                <input type="text" value={receiverName} onChange={e => setReceiverName(e.target.value)} placeholder="Who will receive the delivery" className={textInputClass} />
+              </IntakeRow>
+
+              <IntakeRow label="Contact No." alt>
+                <input type="tel" value={receiverContactNo} onChange={e => setReceiverContactNo(e.target.value)} placeholder="09XXXXXXXXX" className={textInputClass} />
+              </IntakeRow>
+
+              <IntakeRow label="Address" required>
+                <div className="w-full space-y-1">
+                  <textarea
+                    value={deliveryAddress}
+                    onChange={e => setDeliveryAddress(e.target.value)}
+                    placeholder="Complete hospital, clinic, or residential shipping address..."
+                    rows={2}
+                    className={`${textInputClass} resize-y`}
+                    required
+                  />
+                  {isFetchingZohoAddress && (
+                    <p className="text-[11px] text-ink-secondary flex items-center gap-1">
+                      <Loader2 size={11} className="animate-spin" /> Fetching this customer's address from Zoho...
+                    </p>
+                  )}
+                </div>
+              </IntakeRow>
+
+              <IntakeRow label="Pls Give" alt>
+                <textarea
+                  value={plsGiveNote}
+                  onChange={e => setPlsGiveNote(e.target.value)}
+                  placeholder="Anything to note about what to give, beyond the item list below..."
+                  rows={2}
+                  className={`${textInputClass} resize-y`}
+                />
+              </IntakeRow>
+
+              <IntakeRow label="Remarks">
+                <textarea
+                  value={deliveryNotes}
+                  onChange={e => setDeliveryNotes(e.target.value)}
+                  placeholder="e.g. Attn: Dr. Santos, Room 302. Handle with cold chain packaging..."
+                  rows={2}
+                  className={`${textInputClass} resize-y`}
+                />
+              </IntakeRow>
+
+              <IntakeRow label="Salesperson" alt>
+                <span className="text-sm font-semibold text-ink-primary">{user?.name || '—'}</span>
+              </IntakeRow>
+
+              <IntakeRow label="Source">
+                <input type="text" value={orderSource} onChange={e => setOrderSource(e.target.value)} placeholder="e.g. Referral, Repeat Customer, Walk-in" className={textInputClass} />
+              </IntakeRow>
+
+              <IntakeRow label="Order" alt>
+                <span className="text-sm text-ink-primary">
+                  {orderSummaryText || <span className="text-ink-secondary italic">Add items in section 2 below...</span>}
+                </span>
+              </IntakeRow>
+
+              <IntakeRow label="Amount">
+                <span className="text-base font-extrabold text-getmeds-blue font-mono">
+                  ₱{grandTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </IntakeRow>
             </div>
           </div>
 
@@ -418,7 +594,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
                   <Package size={16} />
                 </div>
-                <h2 className="text-base font-bold text-ink-primary">2. Order Items</h2>
+                <h2 className="text-base font-bold text-ink-primary">2. Order Items <span className="text-state-error">*</span></h2>
               </div>
               <span className="text-xs font-semibold text-ink-secondary">
                 {items.length} {items.length === 1 ? 'item' : 'items'} in requisition
@@ -428,7 +604,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             {/* Standalone ProductAutocomplete Component */}
             <div className="bg-surface p-4 rounded-xl border border-slate-200/80">
               <label className="block text-xs font-bold uppercase tracking-wider text-ink-primary mb-2">
-                Quick Product Search & Add <span className="text-state-error">*</span>
+                Quick Product Search & Add
               </label>
               <ProductAutocomplete
                 products={products}
@@ -436,7 +612,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 placeholder="Type to search medicine name, SKU, or category (e.g. Paracetamol, Amoxicillin)..."
               />
               <p className="text-[11px] text-ink-secondary mt-1.5">
-                Click any product in the floating dropdown to append it to the requisition table below.
+                Click any product in the floating dropdown to append it to the requisition table below — this is what fills in the "Order" and "Amount" rows above.
               </p>
             </div>
 
@@ -511,45 +687,6 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             )}
           </div>
 
-          {/* SECTION 3: DELIVERY INFORMATION */}
-          <div className="p-6 sm:p-8 space-y-5">
-            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100">
-              <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
-                <Truck size={16} />
-              </div>
-              <h2 className="text-base font-bold text-ink-primary">3. Delivery Information</h2>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-ink-primary mb-2">
-                  Destination Delivery Address <span className="text-state-error">*</span>
-                </label>
-                <textarea
-                  value={deliveryAddress}
-                  onChange={e => setDeliveryAddress(e.target.value)}
-                  placeholder="Complete hospital, clinic, or residential shipping address..."
-                  rows={3}
-                  className="w-full bg-white border border-slate-300 rounded-md p-3 text-sm text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-ink-primary mb-2">
-                  Special Dispatch & Routing Notes
-                </label>
-                <textarea
-                  value={deliveryNotes}
-                  onChange={e => setDeliveryNotes(e.target.value)}
-                  placeholder="e.g. Attn: Dr. Santos, Room 302. Handle with cold chain packaging..."
-                  rows={3}
-                  className="w-full bg-white border border-slate-300 rounded-md p-3 text-sm text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs"
-                />
-              </div>
-            </div>
-          </div>
-
           {/* SUBMISSION CONTROLS */}
           <div className="p-6 sm:p-8 bg-surface/40 flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="text-xs text-ink-secondary">
@@ -620,11 +757,25 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             </div>
             {deliveryNotes && (
               <div className="flex justify-between items-start">
-                <span className="text-xs text-ink-secondary font-medium">Notes:</span>
+                <span className="text-xs text-ink-secondary font-medium">Remarks:</span>
                 <span className="text-ink-secondary text-right max-w-[240px] italic">{deliveryNotes}</span>
               </div>
             )}
           </div>
+
+          {filledIntakeDetails.length > 0 && (
+            <div>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Additional Intake Details</h4>
+              <div className="bg-surface rounded-xl p-4 space-y-2 border border-slate-200">
+                {filledIntakeDetails.map((f) => (
+                  <div key={f.label} className="flex justify-between items-start gap-4">
+                    <span className="text-xs text-ink-secondary font-medium shrink-0">{f.label}:</span>
+                    <span className="text-ink-primary text-right break-words">{f.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div>
             <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Order Line Items</h4>

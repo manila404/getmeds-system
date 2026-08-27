@@ -73,13 +73,6 @@ describe('MockZohoAdapter', () => {
     expect(result.code).not.toBe(0);
   });
 
-  it('findOrCreateContact is idempotent for the same customer name', async () => {
-    const adapter = new MockZohoAdapter();
-    const first = await adapter.findOrCreateContact({ customer_name: 'New Clinic', customer_type: 'direct' });
-    const second = await adapter.findOrCreateContact({ customer_name: 'New Clinic', customer_type: 'direct' });
-    expect(second.contact.contact_id).toBe(first.contact.contact_id);
-  });
-
   it('setSimulatedOutage(true) makes createSalesOrder reject; disabling it restores normal behavior', async () => {
     const adapter = new MockZohoAdapter();
     expect(adapter.isSimulatedOutage()).toBe(false);
@@ -94,22 +87,30 @@ describe('MockZohoAdapter', () => {
     expect(result.code).toBe(0);
   });
 
-  it('recordPaymentForSalesOrder updates mock sales order to invoiced and paid', async () => {
+  it('createSalesOrder requires a REAL Zoho contact when given an explicit zoho_customer_id, and links line items via zoho_item_id only when present', async () => {
     const adapter = new MockZohoAdapter();
-    const created = await adapter.createSalesOrder(sampleOrderData);
-    const soId = created.salesorder.salesorder_id;
-
-    const payResult = await adapter.recordPaymentForSalesOrder({
-      salesorderId: soId,
-      amount: 100,
-      paymentReference: 'TEST-REF-999'
+    const knownContactId = [...adapter._contacts.keys()][0];
+    const result = await adapter.createSalesOrder({
+      ...sampleOrderData,
+      zoho_customer_id: knownContactId,
+      items: [{ ...sampleOrderData.items[0], zoho_item_id: 'MOCK-ITEM-KNOWN' }]
     });
+    expect(result.salesorder.customer_id).toBe(knownContactId);
+    expect(result.salesorder.line_items[0].item_id).toBe('MOCK-ITEM-KNOWN');
+  });
+});
 
-    expect(payResult.code).toBe(0);
-    const updated = await adapter.getSalesOrder(soId);
-    expect(updated.salesorder.status).toBe('confirmed');
-    expect(updated.salesorder.payment_status).toBe('paid');
-    expect(updated.salesorder.invoice_status).toBe('invoiced');
+describe('ZohoAdapter contract — create-only, no confirm/pack/ship/payment/contact-write/item-write', () => {
+  it('the trimmed contract no longer declares findOrCreateContact, adjustStock, confirmSalesOrder, packSalesOrder, shipSalesOrder, addOrderComment, recordPaymentForSalesOrder, createItem, findOrCreateItem, or activateItem', () => {
+    const methodNames = Object.getOwnPropertyNames(ZohoAdapter.prototype);
+    const removedMethods = [
+      'findOrCreateContact', 'adjustStock', 'confirmSalesOrder', 'packSalesOrder',
+      'shipSalesOrder', 'addOrderComment', 'recordPaymentForSalesOrder', 'createItem',
+      'findOrCreateItem', 'activateItem'
+    ];
+    for (const m of removedMethods) {
+      expect(methodNames).not.toContain(m);
+    }
   });
 });
 

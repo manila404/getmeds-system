@@ -175,21 +175,20 @@ function _resetForTest() {
 
 // Facade: every call delegates lazily to getZohoAdapter(), so construction
 // (and any fail-closed throw) happens on first real use, not on require().
+//
+// Aug 27, 2026: trimmed to match the tightened ZohoAdapter contract —
+// createSalesOrder is the ONLY write left (and it creates a plain Draft,
+// never auto-confirmed); everything else here is a read. Methods that used
+// to confirm/pack/ship a Sales Order, record a payment, add a comment, or
+// create/edit/activate a Zoho Item or Contact have been removed from every
+// layer (base contract, Live, Mock) — see ZohoAdapter.js for the rationale.
 const facadeMethods = [
   'createSalesOrder',
   'getSalesOrder',
   'listSalesOrders',
-  'findOrCreateContact',
   'listContacts',
   'listItems',
-  'createItem',
-  'findOrCreateItem',
-  'adjustStock',
-  'confirmSalesOrder',
-  'packSalesOrder',
-  'shipSalesOrder',
-  'addOrderComment',
-  'recordPaymentForSalesOrder',
+  'getContact',
   'setSimulatedOutage',
   'isSimulatedOutage'
 ];

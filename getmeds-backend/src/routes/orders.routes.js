@@ -16,6 +16,10 @@ router.post('/', requireRole('medrep'), c.create);
 router.get('/:id', c.getById);
 router.get('/:id/events', c.getEvents);
 router.post('/:id/submit', requireRole('medrep'), c.submit);
+// Manual fallback: pull this order's current Sales Order status straight
+// from Zoho and backfill the audit trail if a webhook was missed (backend
+// or ngrok not running at the moment Finance confirmed it in Zoho).
+router.post('/:id/sync-from-zoho', c.syncFromZoho);
 router.patch('/:id/exception', requireRole('management', 'admin'), c.setException);
 
 module.exports = router;

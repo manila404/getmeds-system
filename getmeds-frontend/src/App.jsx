@@ -17,6 +17,7 @@ import DispatchQueuePage from './pages/dispatch/DispatchQueuePage';
 import DispatchHistoryPage from './pages/dispatch/DispatchHistoryPage';
 import ManagementDashboardPage from './pages/management/ManagementDashboardPage';
 import ExceptionHubPage from './pages/management/ExceptionHubPage';
+import ClientsPage from './pages/management/ClientsPage';
 import UsersPage from './pages/admin/UsersPage';
 import InventoryPage from './pages/admin/InventoryPage';
 import TestModePage from './pages/TestModePage';
@@ -123,15 +124,23 @@ function App() {
               </ProtectedRoute>
             } 
           />
-          <Route 
-            path="/management/exceptions" 
+          <Route
+            path="/management/exceptions"
             element={
               <ProtectedRoute allowedRoles={['management', 'admin']}>
                 <ExceptionHubPage />
               </ProtectedRoute>
-            } 
+            }
           />
-          
+          <Route
+            path="/management/clients"
+            element={
+              <ProtectedRoute allowedRoles={['management', 'admin']}>
+                <ClientsPage />
+              </ProtectedRoute>
+            }
+          />
+
           {/* Admin Routes */}
           <Route 
             path="/admin/users" 

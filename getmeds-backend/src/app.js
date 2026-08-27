@@ -12,6 +12,8 @@ const notificationsRoutes = require('./routes/notifications.routes');
 const adminRoutes = require('./routes/admin.routes');
 const inventoryRoutes = require('./routes/inventory.routes');
 const testRoutes = require('./routes/test.routes');
+const webhookRoutes = require('./routes/webhook.routes');
+const customersRoutes = require('./routes/customers.routes');
 
 const app = express();
 
@@ -29,6 +31,10 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
+// Zoho's older Workflow Rule webhook action posts x-www-form-urlencoded
+// (key "payload", value a JSON string) instead of raw JSON — parse that too
+// so the receiver at /api/webhooks/zoho gets a populated req.body either way.
+app.use(express.urlencoded({ extended: true }));
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ success: true, message: 'Getmeds API is running', timestamp: new Date().toISOString() }));
@@ -36,7 +42,9 @@ app.get('/api/health', (req, res) => res.json({ success: true, message: 'Getmeds
 const { requireAuth } = require('./middleware/auth');
 const ordersController = require('./controllers/orders.controller');
 app.get('/api/products', requireAuth, ordersController.getProducts);
-app.get('/api/customers', requireAuth, ordersController.getCustomers);
+// Full customers admin view (with Zoho-origin tagging + sync-from-zoho) now
+// lives at /api/customers via customersRoutes below, replacing the old
+// direct route here.
 
 app.use('/api/auth', authRoutes);
 app.use('/api/orders', ordersRoutes);
@@ -46,7 +54,9 @@ app.use('/api/management', managementRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/inventory', inventoryRoutes);
+app.use('/api/webhooks', webhookRoutes);
 app.use('/api/test', testRoutes);
+app.use('/api/customers', customersRoutes);
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } }));

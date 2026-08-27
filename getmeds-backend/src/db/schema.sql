@@ -27,6 +27,19 @@ CREATE TABLE IF NOT EXISTS customers (
   contact_number TEXT,
   address TEXT,
   is_active INTEGER DEFAULT 1,
+  -- Populated only by a READ from Zoho (customers.controller.js's
+  -- syncFromZoho, which calls zoho.listContacts()) — never written back to
+  -- Zoho. A Sales Order can only be created for a customer that has this
+  -- set, since LiveZohoAdapter.createSalesOrder requires an existing Zoho
+  -- contact id and never looks one up or creates one itself.
+  zoho_contact_id TEXT,
+  source TEXT DEFAULT 'local' CHECK(source IN ('local','zoho')),
+  last_synced_at TEXT,
+  -- Purely local classification tag (Aug 27, 2026) — separate from `type`
+  -- (credit/direct), which keeps driving payment-workflow routing exactly
+  -- as before. This is never read from or written to Zoho; it's just how
+  -- Management tags a client for the Clients Directory view.
+  category TEXT CHECK(category IS NULL OR category IN ('doctor','hospital','distributor','pwd')),
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -38,6 +51,14 @@ CREATE TABLE IF NOT EXISTS products (
   unit TEXT DEFAULT 'pc',
   stock INTEGER DEFAULT 0 CHECK(stock >= 0),
   zoho_item_id TEXT,
+  -- Aug 27, 2026: a snapshot of what Zoho reported the last time
+  -- syncPullStock actually ran (a real GET) — NOT re-fetched from Zoho on
+  -- every page view. getInventoryStatus compares current `stock` against
+  -- this stored snapshot entirely locally, so opening/refreshing the
+  -- Inventory page never blocks on a live multi-page Zoho call. NULL means
+  -- this product has never been matched to a Zoho item.
+  zoho_stock REAL,
+  zoho_price REAL,
   last_synced_at TEXT,
   is_active INTEGER DEFAULT 1
 );
@@ -49,7 +70,7 @@ CREATE TABLE IF NOT EXISTS orders (
   medrep_id INTEGER NOT NULL REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN (
     'draft', 'submitted', 'validating', 'so_pending', 'so_created',
-    'waiting_for_payment', 'payment_verified', 'ready_for_dispatch',
+    'waiting_for_payment', 'invoice_drafted', 'payment_verified', 'ready_for_dispatch',
     'picking_packing', 'dispatched', 'tracking_shared', 'completed',
     'on_hold', 'exception', 'cancelled'
   )),
@@ -57,8 +78,29 @@ CREATE TABLE IF NOT EXISTS orders (
   total_amount REAL DEFAULT 0 CHECK(total_amount >= 0),
   delivery_address TEXT NOT NULL,
   delivery_notes TEXT,
+  -- Aug 27, 2026: optional order-intake fields, added so the MedRep order
+  -- form can capture the same information the team's old paper/spreadsheet
+  -- intake sheet did (Courier, Doctor, Hospital, Patient, MOP, Receiver,
+  -- Contact No., Source, "Pls Give" notes). Purely informational — never
+  -- required, never read by the Zoho Sales Order payload builder
+  -- (orders.controller.js only ever sends customer/items/address/total to
+  -- Zoho), so leaving all of these blank changes nothing about how an
+  -- order is created or synced.
+  intake_courier TEXT,
+  intake_doctor TEXT,
+  intake_hospital TEXT,
+  intake_patient TEXT,
+  intake_mop TEXT,
+  intake_receiver TEXT,
+  intake_contact_no TEXT,
+  intake_source TEXT,
+  intake_pls_give TEXT,
   zoho_so_id TEXT,
   zoho_so_number TEXT,
+  -- Populated when Finance converts the Sales Order to an Invoice in Zoho
+  -- (webhook: invoice.created) — see 'invoice_drafted' status above.
+  zoho_invoice_id TEXT,
+  zoho_invoice_number TEXT,
   zoho_sync_status TEXT DEFAULT 'pending' CHECK(zoho_sync_status IN ('pending','synced','failed','skipped')),
   exception_reason TEXT,
   created_at TEXT DEFAULT (datetime('now')),
@@ -157,6 +199,7 @@ CREATE INDEX IF NOT EXISTS idx_notifications_recipient_unread ON notifications(r
 
 CREATE INDEX IF NOT EXISTS idx_products_active_name ON products(is_active, name);
 CREATE INDEX IF NOT EXISTS idx_customers_active_name ON customers(is_active, name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_zoho_contact_id ON customers(zoho_contact_id) WHERE zoho_contact_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_zoho_sync_queue_pending ON zoho_sync_queue(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_zoho_sync_queue_order ON zoho_sync_queue(order_id);

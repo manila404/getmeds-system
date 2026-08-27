@@ -1,57 +1,58 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { formatDistanceToNow } from 'date-fns';
 import {
   fetchInventoryStatus,
-  syncPushCatalog,
-  syncPullStock,
-  adjustProductStock
+  syncPullStock
 } from '../../api/queries';
 import toast from 'react-hot-toast';
 import {
   Package,
   RefreshCw,
-  UploadCloud,
   DownloadCloud,
   CheckCircle2,
   AlertCircle,
-  Clock,
-  ArrowUpDown,
-  ExternalLink,
-  Plus,
-  Minus,
-  Sparkles,
   Search,
-  Building2
+  ChevronLeft,
+  ChevronRight,
+  Clock
 } from 'lucide-react';
+
+const PAGE_SIZE = 25;
 
 const InventoryPage = () => {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
-  const [selectedProduct, setSelectedProduct] = useState(null);
-  const [adjustDelta, setAdjustDelta] = useState(10);
-  const [adjustReason, setAdjustReason] = useState('Physical Stock Audit / Restock');
+  const [page, setPage] = useState(1);
 
   // Fetch Inventory Status
+  // Aug 27, 2026 (2): this now reads a purely local snapshot — the
+  // backend no longer calls Zoho on every request (see
+  // inventory.controller.js's getInventoryStatus) — so a 30s auto-refresh
+  // costs nothing and just keeps the "Diff (Δ...)" flags current if
+  // someone adjusts stock locally elsewhere. "Zoho Stock" below is only
+  // ever as fresh as the last time "Pull from Zoho" ran — see the
+  // last-synced note next to that button.
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['inventoryStatus'],
     queryFn: fetchInventoryStatus,
-    refetchInterval: 30000 // auto-refresh every 30s
+    refetchInterval: 30000 // auto-refresh every 30s — cheap now, local-only
   });
 
   // Mutations
-  const pushMutation = useMutation({
-    mutationFn: syncPushCatalog,
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['inventoryStatus'] });
-      qc.invalidateQueries({ queryKey: ['products'] });
-      toast.success(res.message || 'Catalog pushed to Zoho successfully', { icon: '🚀' });
-    },
-    onError: (err) => {
-      const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-      toast.error(`Push failed: ${msg}`);
-    }
-  });
-
+  // Aug 27, 2026: the old "push catalog to Zoho" mutation was removed —
+  // the backend route it called (POST /api/inventory/sync-push) no longer
+  // exists (see inventory.controller.js / inventory.routes.js). This app
+  // is read-only towards Zoho Inventory now: it only ever pulls stock in,
+  // never pushes the local catalog out.
+  //
+  // Aug 27, 2026 (2): the per-row "Adjust Stock" action was also removed
+  // from this page at the user's request, so this screen is now a pure,
+  // read-only mirror of Zoho with no way to change any stock number from
+  // here — even though that action only ever touched GetMeds' own local
+  // count and never wrote to Zoho. The backend endpoint it called
+  // (POST /api/inventory/adjust) is untouched and still covered by tests;
+  // it's just no longer reachable from this UI.
   const pullMutation = useMutation({
     mutationFn: syncPullStock,
     onSuccess: (res) => {
@@ -65,30 +66,6 @@ const InventoryPage = () => {
     }
   });
 
-  const adjustMutation = useMutation({
-    mutationFn: adjustProductStock,
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['inventoryStatus'] });
-      qc.invalidateQueries({ queryKey: ['products'] });
-      toast.success(res.message || 'Stock adjusted successfully', { icon: '⚡' });
-      setSelectedProduct(null);
-    },
-    onError: (err) => {
-      const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-      toast.error(`Adjustment failed: ${msg}`);
-    }
-  });
-
-  const handleAdjustSubmit = (e) => {
-    e.preventDefault();
-    if (!selectedProduct) return;
-    adjustMutation.mutate({
-      product_id: selectedProduct.id,
-      delta: Number(adjustDelta),
-      reason: adjustReason
-    });
-  };
-
   const inventoryData = data?.data || {};
   const products = inventoryData.products || [];
   const summary = inventoryData.summary || {};
@@ -100,6 +77,16 @@ const InventoryPage = () => {
       p.name.toLowerCase().includes(search.toLowerCase()) ||
       p.sku.toLowerCase().includes(search.toLowerCase())
   );
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageStartIdx = (safePage - 1) * PAGE_SIZE;
+  const pagedProducts = filteredProducts.slice(pageStartIdx, pageStartIdx + PAGE_SIZE);
+
+  const handleSearchChange = (e) => {
+    setSearch(e.target.value);
+    setPage(1); // reset to page 1 whenever the filter changes
+  };
 
   return (
     <div className="space-y-6 pb-12">
@@ -115,8 +102,8 @@ const InventoryPage = () => {
                 <h1 className="text-xl font-bold text-ink-primary flex items-center gap-2">
                   Inventory & Zoho Live Synchronization
                   <span className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border ${
-                    mode === 'live' 
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-300' 
+                    mode === 'live'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
                       : 'bg-amber-50 text-amber-800 border-amber-300'
                   }`}>
                     {mode === 'live' ? '⚡ Zoho Live API Connected' : `Mode: ${mode}`}
@@ -132,35 +119,34 @@ const InventoryPage = () => {
           </div>
 
           {/* Action Buttons */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-all shadow-2xs cursor-pointer disabled:opacity-50"
-            >
-              <RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />
-              Refresh Status
-            </button>
+          <div className="flex flex-col items-end gap-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => refetch()}
+                disabled={isFetching}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+                title="Re-read the local database — instant, does not contact Zoho"
+              >
+                <RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />
+                Refresh Status
+              </button>
 
-            <button
-              onClick={() => pullMutation.mutate()}
-              disabled={pullMutation.isPending}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
-              title="Fetch live stock_on_hand from Zoho and update GetMeds DB"
-            >
-              <DownloadCloud size={15} className={pullMutation.isPending ? 'animate-bounce' : ''} />
-              {pullMutation.isPending ? 'Pulling from Zoho...' : 'Pull from Zoho'}
-            </button>
-
-            <button
-              onClick={() => pushMutation.mutate()}
-              disabled={pushMutation.isPending}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
-              title="Push all products and quantities to Zoho Inventory"
-            >
-              <UploadCloud size={15} className={pushMutation.isPending ? 'animate-bounce' : ''} />
-              {pushMutation.isPending ? 'Pushing to Zoho...' : 'Push Catalog to Zoho'}
-            </button>
+              <button
+                onClick={() => pullMutation.mutate()}
+                disabled={pullMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                title="Fetch live stock_on_hand from Zoho and update GetMeds DB — this is the only action that actually contacts Zoho"
+              >
+                <DownloadCloud size={15} className={pullMutation.isPending ? 'animate-bounce' : ''} />
+                {pullMutation.isPending ? 'Pulling from Zoho...' : 'Pull from Zoho'}
+              </button>
+            </div>
+            <span className="text-[11px] text-ink-secondary flex items-center gap-1">
+              <Clock size={11} />
+              {summary.last_synced_at
+                ? <>Zoho data as of {formatDistanceToNow(new Date(summary.last_synced_at + 'Z'), { addSuffix: true })} — click "Pull from Zoho" for the latest</>
+                : <>Never pulled from Zoho yet — click "Pull from Zoho" to fetch stock</>}
+            </span>
           </div>
         </div>
       </div>
@@ -202,7 +188,7 @@ const InventoryPage = () => {
         </div>
       </div>
 
-      {/* Product Comparison & Sync Table */}
+      {/* Product Comparison & Sync Table (read-only — no per-row actions) */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/50">
           <div className="relative flex-1 max-w-md">
@@ -211,12 +197,18 @@ const InventoryPage = () => {
               type="text"
               placeholder="Search by SKU or medicine name..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={handleSearchChange}
               className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
             />
           </div>
           <div className="text-xs text-slate-500">
-            Showing <strong>{filteredProducts.length}</strong> items
+            {filteredProducts.length > 0 ? (
+              <>
+                Showing <strong>{pageStartIdx + 1}–{Math.min(pageStartIdx + PAGE_SIZE, filteredProducts.length)}</strong> of <strong>{filteredProducts.length}</strong> items
+              </>
+            ) : (
+              <>Showing <strong>0</strong> items</>
+            )}
           </div>
         </div>
 
@@ -227,28 +219,27 @@ const InventoryPage = () => {
                 <th className="py-3 px-4">Medicine / SKU</th>
                 <th className="py-3 px-4">Unit Price</th>
                 <th className="py-3 px-4 text-center">GetMeds Stock</th>
-                <th className="py-3 px-4 text-center">Zoho Live Stock</th>
+                <th className="py-3 px-4 text-center">Zoho Stock (last sync)</th>
                 <th className="py-3 px-4">Zoho Item ID</th>
                 <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium">
               {isLoading ? (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-400">
+                  <td colSpan={6} className="py-8 text-center text-slate-400">
                     <RefreshCw size={20} className="animate-spin mx-auto mb-2 text-getmeds-blue" />
-                    Connecting to Zoho Inventory Sandbox and fetching live stocks...
+                    Loading inventory...
                   </td>
                 </tr>
-              ) : filteredProducts.length === 0 ? (
+              ) : pagedProducts.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-400">
+                  <td colSpan={6} className="py-8 text-center text-slate-400">
                     No products found matching "{search}"
                   </td>
                 </tr>
               ) : (
-                filteredProducts.map((p) => {
+                pagedProducts.map((p) => {
                   const isSync = p.sync_status === 'in_sync';
                   const isMismatch = p.sync_status === 'mismatch';
 
@@ -307,18 +298,6 @@ const InventoryPage = () => {
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right">
-                        <button
-                          onClick={() => {
-                            setSelectedProduct(p);
-                            setAdjustDelta(10);
-                          }}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-md border border-slate-200 text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition-all cursor-pointer shadow-2xs"
-                          title="Simulate a live stock adjustment pushed to Zoho"
-                        >
-                          <ArrowUpDown size={12} /> Adjust Stock
-                        </button>
-                      </td>
                     </tr>
                   );
                 })
@@ -326,125 +305,32 @@ const InventoryPage = () => {
             </tbody>
           </table>
         </div>
-      </div>
 
-      {/* Adjust Stock Modal */}
-      {selectedProduct && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className="p-2 rounded-lg bg-blue-50 text-getmeds-blue">
-                  <ArrowUpDown size={18} />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">Adjust Inventory Level</h3>
-                  <p className="text-xs text-slate-500 font-mono">{selectedProduct.name} ({selectedProduct.sku})</p>
-                </div>
-              </div>
+        {/* Pagination */}
+        {filteredProducts.length > PAGE_SIZE && (
+          <div className="p-3 border-t border-slate-100 flex items-center justify-between gap-3 bg-slate-50/50">
+            <span className="text-xs text-slate-500">
+              Page <strong>{safePage}</strong> of <strong>{totalPages}</strong>
+            </span>
+            <div className="flex items-center gap-2">
               <button
-                onClick={() => setSelectedProduct(null)}
-                className="text-slate-400 hover:text-slate-600 text-sm font-bold p-1 cursor-pointer"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={safePage <= 1}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                ✕
+                <ChevronLeft size={14} /> Prev
+              </button>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={safePage >= totalPages}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Next <ChevronRight size={14} />
               </button>
             </div>
-
-            <form onSubmit={handleAdjustSubmit} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-xl border border-slate-100 text-xs">
-                <div>
-                  <span className="text-slate-500 block">Current GetMeds Stock:</span>
-                  <span className="font-bold text-slate-900 text-sm">{selectedProduct.local_stock} {selectedProduct.unit}</span>
-                </div>
-                <div>
-                  <span className="text-slate-500 block">Current Zoho Stock:</span>
-                  <span className="font-bold text-emerald-700 text-sm">{selectedProduct.zoho_stock ?? '—'} {selectedProduct.unit}</span>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">
-                  Quantity Delta (+ to Add, - to Deduct)
-                </label>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setAdjustDelta((prev) => Number(prev) - 10)}
-                    className="p-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700 cursor-pointer"
-                  >
-                    -10
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAdjustDelta((prev) => Number(prev) - 1)}
-                    className="p-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700 cursor-pointer"
-                  >
-                    -1
-                  </button>
-                  <input
-                    type="number"
-                    value={adjustDelta}
-                    onChange={(e) => setAdjustDelta(e.target.value)}
-                    className="w-full text-center py-2 text-sm font-black border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setAdjustDelta((prev) => Number(prev) + 1)}
-                    className="p-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700 cursor-pointer"
-                  >
-                    +1
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAdjustDelta((prev) => Number(prev) + 10)}
-                    className="p-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700 cursor-pointer"
-                  >
-                    +10
-                  </button>
-                </div>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  New calculated stock: <strong className="text-slate-800">{selectedProduct.local_stock + Number(adjustDelta || 0)} {selectedProduct.unit}</strong>
-                </p>
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">
-                  Adjustment Reason (Logged in Zoho Audit Trail)
-                </label>
-                <select
-                  value={adjustReason}
-                  onChange={(e) => setAdjustReason(e.target.value)}
-                  className="w-full p-2 text-xs border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
-                >
-                  <option value="Physical Stock Audit / Restock">Physical Stock Audit / Restock</option>
-                  <option value="Supplier Delivery Batch Received">Supplier Delivery Batch Received</option>
-                  <option value="Damaged / Expired Medication Write-off">Damaged / Expired Medication Write-off</option>
-                  <option value="Emergency Hospital Re-allocation">Emergency Hospital Re-allocation</option>
-                  <option value="Stakeholder Live Integration Demo">Stakeholder Live Integration Demo</option>
-                </select>
-              </div>
-
-              <div className="pt-2 flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedProduct(null)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={adjustMutation.isPending}
-                  className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
-                >
-                  {adjustMutation.isPending ? 'Syncing with Zoho...' : 'Apply & Sync Live'}
-                </button>
-              </div>
-            </form>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 };

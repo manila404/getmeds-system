@@ -12,6 +12,9 @@ const statusStyles = {
   waiting_for_payment: 'bg-state-warning-light text-amber-950 border border-state-warning font-semibold',
   PENDING: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
 
+  // Invoice drafted in Zoho, payment not yet recorded (Indigo)
+  invoice_drafted: 'bg-indigo-50 text-indigo-700 border border-indigo-300 font-semibold',
+
   // Brand Blue & Pharmacy Green
   so_created: 'bg-getmeds-blue/10 text-getmeds-blue-dark border border-getmeds-blue/30',
   payment_verified: 'bg-pharmacy-green/15 text-pharmacy-green-dark border border-pharmacy-green/30 font-semibold',

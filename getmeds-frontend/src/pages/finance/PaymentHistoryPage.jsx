@@ -1,42 +1,30 @@
 import React, { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import toast from 'react-hot-toast';
-import { 
-  CreditCard, 
-  CheckCircle, 
-  XCircle, 
-  RefreshCw, 
-  Eye, 
-  Search, 
-  Calendar, 
-  Clock, 
-  Building2, 
-  User, 
-  DollarSign, 
+import {
+  CreditCard,
+  CheckCircle,
+  XCircle,
+  RefreshCw,
+  Eye,
+  Search,
+  Calendar,
+  Clock,
+  Building2,
+  User,
+  DollarSign,
   ChevronRight,
-  Filter,
-  Zap
+  Filter
 } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import OrderStatusBadge from '../../components/ui/OrderStatusBadge';
 
+// Read-only, same as FinanceQueuePage — payment verification happens in
+// Zoho and flows back here via webhook. No action buttons here anymore.
 const PaymentHistoryPage = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all'); // all | verified | rejected
-  const queryClient = useQueryClient();
-
-  const syncPaymentMutation = useMutation({
-    mutationFn: (orderId) => client.post(`/api/finance/orders/${orderId}/sync-payment`),
-    onSuccess: (res) => {
-      toast.success(res?.data?.data?.message || 'Zoho payment registered as Paid!');
-      queryClient.invalidateQueries({ queryKey: ['finance-orders-all'] });
-    },
-    onError: (err) => {
-      toast.error(err.response?.data?.error?.message || 'Failed to sync payment to Zoho');
-    }
-  });
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['finance-orders-all'],
@@ -90,7 +78,7 @@ const PaymentHistoryPage = () => {
             to="/finance"
             className="flex items-center gap-1.5 px-4 py-2 bg-getmeds-blue text-white rounded-md text-sm font-semibold hover:bg-getmeds-blue-hover transition-colors shadow-sm"
           >
-            <CreditCard className="w-4 h-4" /> Go to Payment Queue
+            <CreditCard className="w-4 h-4" /> Go to Zoho Finance Status
           </Link>
         </div>
       </div>
@@ -199,7 +187,7 @@ const PaymentHistoryPage = () => {
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-state-warning-light text-amber-950 border border-state-warning/30">
-                          Pending Clearance
+                          {order.status === 'invoice_drafted' ? 'Awaiting Payment in Zoho' : 'Awaiting Zoho'}
                         </span>
                       )}
                     </td>
@@ -208,18 +196,6 @@ const PaymentHistoryPage = () => {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        {import.meta.env.VITE_TEST_MODE === 'true' && (
-                          <button
-                            type="button"
-                            disabled={syncPaymentMutation.isPending}
-                            onClick={() => syncPaymentMutation.mutate(order.id)}
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-300 px-2 py-1 rounded transition-colors disabled:opacity-50"
-                            title="Test Mode: Force Zoho Payment Sync"
-                          >
-                            <Zap className="w-3 h-3 text-amber-600" />
-                            {syncPaymentMutation.isPending ? 'Syncing...' : 'Force Zoho Sync'}
-                          </button>
-                        )}
                         <Link
                           to={`/orders/${order.id}`}
                           className="inline-flex items-center gap-1 text-xs text-getmeds-blue hover:text-getmeds-blue-dark font-semibold"

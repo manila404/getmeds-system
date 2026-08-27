@@ -54,7 +54,14 @@ const contacts = [
     company_name: 'St. Luke Medical Center (Fixture)',
     contact_type: 'customer',
     customer_sub_type: 'business',
-    getmeds_customer_type: 'credit'
+    getmeds_customer_type: 'credit',
+    phone: '028-8555-1234',
+    // Aug 27, 2026: Zoho's List Contacts response never includes
+    // billing_address (only the single "Get a Contact" detail call does —
+    // see LiveZohoAdapter.getContact) — this fixture carries it so the
+    // mock/http-mock path can exercise the same detail-fetch-on-select flow
+    // a real org needs.
+    billing_address: { address: '279 E Rodriguez Sr. Ave', city: 'Quezon City', state: 'Metro Manila', zip: '1102', country: 'Philippines' }
   },
   {
     contact_id: 'CONTACT-FIX-1002',
@@ -62,7 +69,9 @@ const contacts = [
     company_name: '',
     contact_type: 'customer',
     customer_sub_type: 'individual',
-    getmeds_customer_type: 'direct'
+    getmeds_customer_type: 'direct',
+    mobile: '09171234567',
+    billing_address: { address: 'Unit 402, Greenhills Tower', city: 'San Juan', state: 'Metro Manila', zip: '1500', country: 'Philippines' }
   }
 ];
 

@@ -21,6 +21,14 @@ const ZohoAdapter = require('./ZohoAdapter');
  *  - No delete/void/write-off methods exist here at all (see ZohoAdapter.js
  *    for why) — there is no code path in this class that can issue a
  *    destructive Zoho call.
+ *  - As of Aug 27, 2026, this class ALSO has no confirm/pack/ship/payment/
+ *    comment/item-write/contact-write method — `createSalesOrder` is the
+ *    only request this class ever POSTs to Zoho. It requires the caller to
+ *    already know the Zoho contact id (`zoho_customer_id`) and, per line
+ *    item, the Zoho item id if one exists (`zoho_item_id`) — this class
+ *    never searches for or creates either. An order for a customer that
+ *    isn't already mapped to a Zoho contact fails loudly instead of
+ *    silently creating one.
  *  - Every outbound request is logged (method, path, org id) before it is
  *    sent, satisfying the project's audit-trail requirement independently
  *    of whatever the caller logs.
@@ -96,82 +104,63 @@ class LiveZohoAdapter extends ZohoAdapter {
     return json;
   }
 
-  async findOrCreateContact(customerData) {
-    const existing = await this._request('GET', '/contacts', {
-      query: { contact_name_contains: customerData.customer_name }
-    });
-    if (existing.contacts && existing.contacts.length > 0) {
-      return { code: 0, message: 'success', contact: existing.contacts[0] };
-    }
-    const created = await this._request('POST', '/contacts', {
-      body: {
-        contact_name: customerData.customer_name,
-        contact_type: 'customer',
-        customer_sub_type: customerData.customer_master_type === 'credit' ? 'business' : 'individual'
-      }
-    });
-    return { code: 0, message: 'success', contact: created.contact };
-  }
-
+  /**
+   * Create a Sales Order in Zoho — the only write this class ever performs.
+   * Requires an already-known Zoho contact id (`orderData.zoho_customer_id`)
+   * — this class never calls GET/POST /contacts to look one up or create
+   * one. Line items that already carry a `zoho_item_id` (populated only by
+   * a prior read via listItems, never by a write) are linked to that Zoho
+   * item; an unmapped line item is still sent (name/rate/quantity), just
+   * without an `item_id`, rather than silently creating a Zoho item for it.
+   * No confirm/submit call follows — the SO is left exactly as Zoho's API
+   * creates it, which is Draft status.
+   */
   async createSalesOrder(orderData) {
-    const contactResult = await this.findOrCreateContact(orderData);
+    const contactId = orderData.zoho_customer_id;
+    if (!contactId) {
+      throw new Error(
+        'createSalesOrder requires an existing Zoho contact id (zoho_customer_id) — this adapter never ' +
+          'creates or searches for Zoho contacts. Sync customers from Zoho first (customers.controller.js) ' +
+          'and only submit orders for a customer that is already mapped to a Zoho contact.'
+      );
+    }
 
-    const lineItems = [];
-    for (const item of (orderData.items || [])) {
-      let zohoItemId = item.zoho_item_id;
-      try {
-        const itemRes = await this.findOrCreateItem({
-          name: item.name,
-          sku: item.sku,
-          unit_price: item.unit_price ?? item.rate ?? item.price ?? 0,
-          stock: item.stock ?? 100,
-          unit: item.unit || 'pc'
-        });
-        if (itemRes.item?.item_id) {
-          zohoItemId = itemRes.item.item_id;
-          if (itemRes.item.status === 'inactive') {
-            await this.activateItem(zohoItemId).catch(() => {});
-          }
-        }
-      } catch (err) {
-        this._log(`[ZOHO_ITEM_RESOLVE_WARN] Could not resolve Zoho item ${item.name}:`, err.message);
-      }
-
+    const lineItems = (orderData.items || []).map((item) => {
       const li = {
         name: item.name,
         quantity: item.quantity,
         rate: item.unit_price ?? item.rate ?? item.price ?? 0
       };
-      if (zohoItemId) {
-        li.item_id = zohoItemId;
-      }
-      lineItems.push(li);
-    }
+      // item_id is included ONLY when the local product is already mapped
+      // to a Zoho item (populated exclusively by the read-only inventory
+      // pull — see inventory.controller.js's syncPullStock). This class
+      // never creates, edits, or activates a Zoho item, so an unmapped
+      // product is sent as a plain named line rather than auto-created.
+      if (item.zoho_item_id) li.item_id = item.zoho_item_id;
+      return li;
+    });
+
+    // A TestGM- prefixed id (see orderIdService.js) means this order was
+    // created while the single-TEST-customer safety gate was on — i.e. a
+    // deliberate live test against the real company Zoho org. Flag it as
+    // unmistakably as possible in the one place every Finance/Dispatch
+    // person looks: the Sales Order's own notes, not just its reference
+    // number, so nobody confirms/packs/ships it thinking it's real.
+    const isTestOrder = /^TestGM-/i.test(orderData.getmeds_order_id || '');
+    const notes = isTestOrder
+      ? `TEST — DO NOT FULFILL. Getmeds Order: ${orderData.getmeds_order_id}`
+      : `Getmeds Order: ${orderData.getmeds_order_id}`;
 
     const body = {
-      customer_id: contactResult.contact.contact_id,
+      customer_id: contactId,
       date: new Date().toISOString().slice(0, 10),
       reference_number: orderData.getmeds_order_id,
-      notes: `Getmeds Order: ${orderData.getmeds_order_id}`,
+      notes,
       line_items: lineItems
     };
 
-    try {
-      const result = await this._request('POST', '/salesorders', { body });
-      return { code: 0, message: 'Sales order created successfully', salesorder: result.salesorder };
-    } catch (err) {
-      if (err.message && err.message.toLowerCase().includes('inactive item')) {
-        this._log('[ZOHO_RETRY] Inactive item error detected. Reactivating order items in Zoho and retrying...');
-        for (const li of lineItems) {
-          if (li.item_id) {
-            await this.activateItem(li.item_id).catch(() => {});
-          }
-        }
-        const retryResult = await this._request('POST', '/salesorders', { body });
-        return { code: 0, message: 'Sales order created successfully after item reactivation', salesorder: retryResult.salesorder };
-      }
-      throw err;
-    }
+    const result = await this._request('POST', '/salesorders', { body });
+    return { code: 0, message: 'Sales order created successfully', salesorder: result.salesorder };
   }
 
   async getSalesOrder(salesorderId) {
@@ -184,306 +173,84 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorders: result.salesorders || [] };
   }
 
+  /**
+   * Zoho's list endpoints (Items, Contacts, ...) page results — capped at
+   * 200 records per page by default, with a `page_context.has_more_page`
+   * flag on the response telling you whether to fetch another page. Aug 27,
+   * 2026: listItems/listContacts previously only ever fetched page 1, so a
+   * real org with more than ~200 items or contacts had everything past that
+   * cutoff silently missing from every sync — this is why a 200-count would
+   * show up looking suspiciously exact. This helper loops until Zoho says
+   * there's nothing more, for any list-shaped GET. Tolerant of a response
+   * with no page_context at all (the local mock-server/ never includes
+   * one) — that's treated as "one page, done," so mock/http-mock mode
+   * behaves exactly as before.
+   *
+   * Aug 27, 2026 (2): a real org's contacts/items are being actively edited
+   * by staff while a sync is in flight (confirmed — Subir reported a
+   * specific customer just merged/updated in Zoho moments before a sync,
+   * missing from the result). If Zoho's default list order is driven by a
+   * mutable field (most "recently active first" views sort by
+   * last-modified), a record edited mid-fetch can jump between pages and
+   * end up skipped by a page-by-page walk. Sorting explicitly by
+   * `created_time` ascending — a field that never changes on an edit or a
+   * contact merge — makes the page boundaries stable for the whole walk
+   * regardless of what happens in Zoho while it's running. A caller-passed
+   * `sort_column`/`sort_order` in `params` still wins (spread after the
+   * default), so this is purely a safer default, not a forced behavior.
+   * Records are also de-duplicated by their id field on the way out, as a
+   * second line of defense against any residual page drift.
+   */
+  async _paginatedList(path, resultKey, params = {}) {
+    const perPage = 200;
+    let page = 1;
+    let all = [];
+    // Safety cap, not a real expected ceiling (200 * 100 = 20,000 records)
+    // — just a backstop against looping forever if a future API response
+    // shape reports has_more_page=true without ever actually terminating.
+    for (let guard = 0; guard < 100; guard++) {
+      const result = await this._request('GET', path, {
+        query: { sort_column: 'created_time', sort_order: 'A', ...params, page, per_page: perPage }
+      });
+      const pageRecords = result[resultKey] || [];
+      all = all.concat(pageRecords);
+
+      const hasMore = result.page_context?.has_more_page ?? result.has_more_page ?? false;
+      if (!hasMore) break;
+      page += 1;
+    }
+
+    const seen = new Set();
+    const deduped = [];
+    for (const record of all) {
+      const id = record.contact_id || record.item_id || record.id;
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      deduped.push(record);
+    }
+    return deduped;
+  }
+
   async listContacts(params = {}) {
-    const result = await this._request('GET', '/contacts', { query: params });
-    return { code: 0, message: 'success', contacts: result.contacts || [] };
+    const contacts = await this._paginatedList('/contacts', 'contacts', params);
+    return { code: 0, message: 'success', contacts };
   }
 
   async listItems(params = {}) {
-    const result = await this._request('GET', '/items', { query: params });
-    return { code: 0, message: 'success', items: result.items || [] };
+    const items = await this._paginatedList('/items', 'items', params);
+    return { code: 0, message: 'success', items };
   }
 
-  async activateItem(itemId) {
-    if (!itemId) return { code: 0, message: 'No itemId provided' };
-    try {
-      const result = await this._request('POST', `/items/${itemId}/active`);
-      this._log(`[ZOHO] Activated item in Zoho: ${itemId}`);
-      return { code: 0, message: result.message || 'Item activated', item: result.item };
-    } catch (err) {
-      this._log(`[ZOHO_ACTIVATE_WARN] Could not mark item ${itemId} active:`, err.message);
-      return { code: 0, message: err.message };
-    }
-  }
-
-  async createItem(itemData) {
-    const body = {
-      name: itemData.name,
-      sku: itemData.sku,
-      rate: itemData.rate ?? itemData.unit_price ?? 0,
-      item_type: 'inventory',
-      product_type: 'goods',
-      status: 'active',
-      initial_stock: itemData.initial_stock ?? itemData.stock ?? 0,
-      initial_stock_rate: itemData.rate ?? itemData.unit_price ?? 0,
-      unit: itemData.unit || 'pc',
-      description: itemData.description || `GetMeds Pharmaceutical SKU: ${itemData.sku}`
-    };
-    const result = await this._request('POST', '/items', { body });
-    return { code: 0, message: 'Item created successfully', item: result.item };
-  }
-
-  async findOrCreateItem(productData) {
-    const searchRes = await this._request('GET', '/items', {
-      query: { search_text: productData.sku || productData.name }
-    });
-    const found = (searchRes.items || []).find(
-      (i) => (productData.sku && i.sku === productData.sku) || i.name === productData.name
-    );
-    if (found) {
-      let itemObj = found;
-      try {
-        const fullItemRes = await this._request('GET', `/items/${found.item_id}`);
-        itemObj = fullItemRes.item || found;
-      } catch {
-        itemObj = found;
-      }
-      if (itemObj.status === 'inactive') {
-        await this.activateItem(found.item_id).catch(() => {});
-        itemObj.status = 'active';
-      }
-      return { code: 0, message: 'success', item: itemObj };
-    }
-    return this.createItem(productData);
-  }
-
-  async adjustStock({ itemId, sku, quantityAdjusted, reason = 'Stock adjustment from GetMeds' }) {
-    let resolvedItemId = itemId;
-    if (!resolvedItemId && sku) {
-      const itemRes = await this.findOrCreateItem({ sku });
-      resolvedItemId = itemRes.item?.item_id;
-    }
-    if (!resolvedItemId) {
-      throw new Error('adjustStock requires either itemId or sku to resolve the Zoho item');
-    }
-
-    const today = new Date().toISOString().slice(0, 10);
-    const body = {
-      mode: 'quantity',
-      date: today,
-      reason,
-      line_items: [
-        {
-          item_id: resolvedItemId,
-          quantity_adjusted: quantityAdjusted
-        }
-      ]
-    };
-    const result = await this._request('POST', '/inventoryadjustments', { body });
-    return { code: 0, message: 'Inventory adjusted successfully', inventory_adjustment: result.inventory_adjustment };
-  }
-
-  async confirmSalesOrder(salesorderId) {
-    if (!salesorderId) return { code: 0, message: 'no salesorderId provided' };
-    try {
-      const result = await this._request('POST', `/salesorders/${salesorderId}/status/confirmed`);
-      return { code: 0, message: result.message || 'Sales order confirmed' };
-    } catch (err) {
-      this._log(`[ZOHO_CONFIRM_WARN] Could not mark SO ${salesorderId} confirmed:`, err.message);
-      return { code: 1, message: err.message };
-    }
-  }
-
-  async packSalesOrder(salesorderId) {
-    if (!salesorderId) return { code: 0, message: 'no salesorderId provided' };
-    try {
-      const soRes = await this._request('GET', `/salesorders/${salesorderId}`);
-      const lineItems = (soRes.salesorder?.line_items || []).map((l) => ({
-        so_line_item_id: l.line_item_id,
-        quantity: l.quantity
-      }));
-      if (lineItems.length === 0) return { code: 0, message: 'no line items to pack' };
-
-      const body = {
-        package_number: `PKG-${Date.now().toString().slice(-6)}`,
-        date: new Date().toISOString().slice(0, 10),
-        line_items: lineItems
-      };
-      const result = await this._request('POST', '/packages', {
-        query: { salesorder_id: salesorderId },
-        body
-      });
-      return { code: 0, message: 'Package created successfully', package: result.package };
-    } catch (err) {
-      this._log(`[ZOHO_PACK_WARN] Could not create package for SO ${salesorderId}:`, err.message);
-      return { code: 1, message: err.message };
-    }
-  }
-
-  async shipSalesOrder({ salesorderId, trackingNumber, courier = 'Standard Delivery' }) {
-    if (!salesorderId) return { code: 0, message: 'no salesorderId provided' };
-    try {
-      let packageId = null;
-      const pkgsRes = await this._request('GET', '/packages', {
-        query: { salesorder_id: salesorderId }
-      }).catch(() => ({ packages: [] }));
-
-      if (pkgsRes.packages && pkgsRes.packages.length > 0) {
-        packageId = pkgsRes.packages[0].package_id;
-      } else {
-        const packRes = await this.packSalesOrder(salesorderId);
-        packageId = packRes.package?.package_id;
-      }
-
-      if (packageId) {
-        const body = {
-          shipment_number: `SHP-${Date.now().toString().slice(-6)}`,
-          date: new Date().toISOString().slice(0, 10),
-          tracking_number: trackingNumber,
-          delivery_method: courier,
-          package_ids: String(packageId)
-        };
-        await this._request('POST', '/shipmentorders', {
-          query: { salesorder_id: salesorderId, package_ids: String(packageId) },
-          body
-        });
-      }
-
-      await this.addOrderComment(
-        salesorderId,
-        `Dispatched via ${courier} | Tracking #: ${trackingNumber}`
-      );
-
-      return { code: 0, message: 'Sales order marked as shipped' };
-    } catch (err) {
-      this._log(`[ZOHO_SHIP_WARN] Could not ship SO ${salesorderId}:`, err.message);
-      await this.addOrderComment(salesorderId, `Tracking: ${courier} ${trackingNumber}`).catch(() => {});
-      return { code: 1, message: err.message };
-    }
-  }
-
-  async addOrderComment(salesorderId, commentText) {
-    if (!salesorderId || !commentText) return { code: 0, message: 'skipped' };
-    try {
-      const result = await this._request('POST', `/salesorders/${salesorderId}/comments`, {
-        body: { description: commentText }
-      });
-      return { code: 0, message: 'Comment added', comment: result.comment };
-    } catch (err) {
-      this._log(`[ZOHO_COMMENT_WARN] Could not add comment to SO ${salesorderId}:`, err.message);
-      return { code: 1, message: err.message };
-    }
-  }
-
-  async recordPaymentForSalesOrder({ salesorderId, amount, paymentReference, paymentDate, paymentMethod = 'Bank Transfer', notes }) {
-    if (!salesorderId) return { code: 0, message: 'no salesorderId provided' };
-    try {
-      // 1. Ensure sales order is confirmed
-      await this.confirmSalesOrder(salesorderId).catch(() => {});
-
-      // 2. Fetch the sales order to retrieve customer_id, line items, and total
-      const soRes = await this._request('GET', `/salesorders/${salesorderId}`);
-      const so = soRes.salesorder;
-      if (!so) throw new Error(`Sales order ${salesorderId} not found in Zoho`);
-
-      const customerId = so.customer_id;
-      const today = paymentDate || new Date().toISOString().slice(0, 10);
-      const paymentAmount = Number(amount) || Number(so.total) || 0;
-
-      // 3. Check if an invoice already exists for this salesorder
-      let invoiceId = null;
-      try {
-        const invListRes = await this._request('GET', '/invoices', {
-          query: { salesorder_id: salesorderId }
-        });
-        if (invListRes.invoices && invListRes.invoices.length > 0) {
-          invoiceId = invListRes.invoices[0].invoice_id;
-        }
-      } catch (_) {}
-
-      // 4. If no invoice exists, create one from the sales order
-      if (!invoiceId) {
-        try {
-          const fromSoRes = await this._request('POST', '/invoices/fromsalesorder', {
-            query: { salesorder_id: salesorderId },
-            body: {
-              customer_id: customerId,
-              date: today,
-              due_date: today,
-              reference_number: paymentReference || so.reference_number || undefined
-            }
-          });
-          invoiceId = fromSoRes.invoice?.invoice_id;
-        } catch (fromSoErr) {
-          this._log(`[ZOHO_INV_FROM_SO_WARN] fromsalesorder error: ${fromSoErr.message}, falling back to /invoices POST...`);
-          const lineItems = (so.line_items || []).map((l) => ({
-            item_id: l.item_id,
-            salesorder_item_id: l.line_item_id,
-            quantity: l.quantity,
-            rate: l.rate,
-            name: l.name
-          }));
-
-          const invBody = {
-            customer_id: customerId,
-            salesorder_id: salesorderId,
-            date: today,
-            due_date: today,
-            reference_number: paymentReference || so.reference_number || undefined,
-            line_items: lineItems.length > 0 ? lineItems : undefined,
-            notes: notes || `Payment Verified for GetMeds Order ${so.reference_number || ''}`
-          };
-
-          const createInvRes = await this._request('POST', '/invoices', {
-            query: { salesorder_id: salesorderId },
-            body: invBody
-          });
-          invoiceId = createInvRes.invoice?.invoice_id;
-        }
-      }
-
-      // 5. Record customer payment against the invoice
-      let paymentRes = null;
-      if (invoiceId) {
-        const payBody = {
-          customer_id: customerId,
-          payment_mode: paymentMethod || 'Bank Transfer',
-          amount: paymentAmount,
-          date: today,
-          reference_number: paymentReference || `REF-${Date.now()}`,
-          description: notes || `Payment Verified | Ref: ${paymentReference || 'N/A'}`,
-          invoices: [
-            {
-              invoice_id: invoiceId,
-              amount_applied: paymentAmount
-            }
-          ]
-        };
-        try {
-          paymentRes = await this._request('POST', '/customerpayments', { body: payBody });
-        } catch (payErr) {
-          this._log(`[ZOHO_PAYMENT_WARN] customerpayments failed, attempting direct invoice payment:`, payErr.message);
-          paymentRes = await this._request('POST', `/invoices/${invoiceId}/payments`, {
-            body: {
-              payment_mode: paymentMethod || 'Bank Transfer',
-              amount: paymentAmount,
-              date: today,
-              reference_number: paymentReference || `REF-${Date.now()}`
-            }
-          });
-        }
-      }
-
-      // 6. Add milestone audit comment to Zoho sales order timeline
-      await this.addOrderComment(
-        salesorderId,
-        `Payment Verified by Finance | Ref: ${paymentReference || 'N/A'} | Invoiced & Paid in Zoho (PHP ${paymentAmount})`
-      );
-
-      return {
-        code: 0,
-        message: 'Payment recorded and invoice marked as paid',
-        invoice_id: invoiceId,
-        payment: paymentRes?.payment
-      };
-    } catch (err) {
-      this._log(`[ZOHO_PAYMENT_WARN] Could not record payment for SO ${salesorderId}:`, err.message);
-      await this.addOrderComment(
-        salesorderId,
-        `Payment Verified | Ref: ${paymentReference || 'N/A'} (Invoice note: ${err.message})`
-      ).catch(() => {});
-      return { code: 1, message: err.message };
-    }
+  /**
+   * Read-only: GET /contacts/{contact_id} — Zoho's "Get a Contact" detail
+   * call, which (unlike List Contacts) includes billing_address. See
+   * customers.controller.js's getZohoAddress for why this is fetched
+   * per-customer on selection rather than for every contact during the
+   * bulk sync-from-zoho pull.
+   */
+  async getContact(contactId) {
+    const result = await this._request('GET', `/contacts/${contactId}`);
+    return { code: 0, message: 'success', contact: result.contact };
   }
 }
 

@@ -59,7 +59,7 @@ const Sidebar = ({ isOpen = false, onClose }) => {
       badge: 'Finance',
       badgeClass: 'bg-pharmacy-green/15 text-pharmacy-green-dark',
       links: [
-        { to: '/finance', icon: <CreditCard size={18} />, label: 'Payment Queue', exact: true },
+        { to: '/finance', icon: <CreditCard size={18} />, label: 'Zoho Finance Status', exact: true },
         { to: '/finance/history', icon: <History size={18} />, label: 'Payment History' }
       ]
     },
@@ -68,7 +68,7 @@ const Sidebar = ({ isOpen = false, onClose }) => {
       badge: 'Dispatch',
       badgeClass: 'bg-indigo-100 text-indigo-800',
       links: [
-        { to: '/dispatch', icon: <Truck size={18} />, label: 'Fulfillment Queue', exact: true },
+        { to: '/dispatch', icon: <Truck size={18} />, label: 'Zoho Dispatch Status', exact: true },
         { to: '/dispatch/history', icon: <MapPin size={18} />, label: 'Tracking Log' }
       ]
     },
@@ -79,7 +79,8 @@ const Sidebar = ({ isOpen = false, onClose }) => {
       links: [
         { to: '/management', icon: <BarChart3 size={18} />, label: 'Global Dashboard', exact: true },
         { to: '/management/exceptions', icon: <AlertTriangle size={18} />, label: 'Exception Hub' },
-        { to: '/inventory', icon: <Package size={18} />, label: 'Inventory & Stock Sync' }
+        { to: '/inventory', icon: <Package size={18} />, label: 'Inventory & Stock Sync' },
+        { to: '/management/clients', icon: <Users size={18} />, label: 'Clients Directory' }
       ]
     },
     {
@@ -105,7 +106,7 @@ const Sidebar = ({ isOpen = false, onClose }) => {
     );
   } else if (role === 'finance') {
     mainLinks.push(
-      { to: '/finance', icon: <CreditCard size={19} />, label: 'Payment Queue' },
+      { to: '/finance', icon: <CreditCard size={19} />, label: 'Zoho Finance Status' },
       { to: '/finance/history', icon: <History size={19} />, label: 'Payment History' }
     );
     secondaryLinks.push(
@@ -113,7 +114,7 @@ const Sidebar = ({ isOpen = false, onClose }) => {
     );
   } else if (role === 'dispatch') {
     mainLinks.push(
-      { to: '/dispatch', icon: <Truck size={19} />, label: 'Fulfillment Queue' },
+      { to: '/dispatch', icon: <Truck size={19} />, label: 'Zoho Dispatch Status' },
       { to: '/dispatch/history', icon: <MapPin size={19} />, label: 'Dispatched / Tracking Log' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' }
     );
@@ -124,7 +125,8 @@ const Sidebar = ({ isOpen = false, onClose }) => {
     mainLinks.push(
       { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
       { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
-      { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' }
+      { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
+      { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' }
     );
     secondaryLinks.push(
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
@@ -134,6 +136,7 @@ const Sidebar = ({ isOpen = false, onClose }) => {
       { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
       { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
+      { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' },
       { to: '/admin/users', icon: <Users size={19} />, label: 'User Management' }
     );
     secondaryLinks.push(

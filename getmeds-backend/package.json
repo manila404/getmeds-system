@@ -11,7 +11,8 @@
     "seed": "node src/db/seed.js",
     "setup": "npm run migrate && npm run seed",
     "test": "jest",
-    "mock-server": "node mock-server/server.js"
+    "mock-server": "node mock-server/server.js",
+    "simulate:webhook": "node scripts/simulate-zoho-webhook.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
