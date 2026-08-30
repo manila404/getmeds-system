@@ -10,7 +10,9 @@ import {
   Package, 
   Clock, 
   AlertTriangle, 
-  Menu
+  Menu,
+  PanelLeftClose,
+  PanelLeftOpen
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { formatPHT } from '../../utils/dateUtils';
@@ -23,7 +25,7 @@ const roleBadgeStyles = {
   admin: 'bg-slate-900 text-white border-slate-900',
 };
 
-const Topbar = ({ onToggleSidebar }) => {
+const Topbar = ({ onToggleSidebar, onToggleCollapse, isSidebarCollapsed = false }) => {
   const { user, logout } = useAuth();
   const { notifications, unreadCount, markAsRead, markAllAsRead } = useNotifications();
   const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
@@ -63,7 +65,7 @@ const Topbar = ({ onToggleSidebar }) => {
   const hasExceptionAlert = notifications?.some(n => !n.is_read && (n.message?.toLowerCase().includes('exception') || n.message?.toLowerCase().includes('hold')));
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 sm:px-6 shadow-2xs z-20 flex-shrink-0">
+    <header className="relative h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 sm:px-6 shadow-2xs z-20 flex-shrink-0">
       {/* Left Area: Mobile Hamburger Button */}
       <div className="flex items-center space-x-2 sm:space-x-3">
         {/* Hamburger Menu Button (visible on mobile / tablet < lg) */}
@@ -76,12 +78,24 @@ const Topbar = ({ onToggleSidebar }) => {
         >
           <Menu size={22} />
         </button>
+
+        {/* Sidebar Collapse Toggle (desktop only) */}
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          className="hidden lg:inline-flex p-2 rounded-lg text-ink-secondary hover:text-ink-primary hover:bg-surface focus:outline-none focus:ring-2 focus:ring-getmeds-blue transition-colors"
+          aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-expanded={!isSidebarCollapsed}
+          title={isSidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+        >
+          {isSidebarCollapsed ? <PanelLeftOpen size={22} /> : <PanelLeftClose size={22} />}
+        </button>
       </div>
 
       {/* Right Area: Notification Bell & User Identity */}
       <div className="flex items-center space-x-2 sm:space-x-4">
         {/* Notification Bell & Dropdown */}
-        <div className="relative" ref={dropdownRef}>
+        <div ref={dropdownRef}>
           <NotificationBell
             count={unreadCount}
             hasException={hasExceptionAlert}
@@ -89,10 +103,10 @@ const Topbar = ({ onToggleSidebar }) => {
           />
 
           {isNotificationsOpen && (
-            <div className="absolute right-0 mt-2 w-72 sm:w-96 bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
+            <div className="absolute top-full right-4 sm:right-6 w-72 sm:w-96 bg-white rounded-b-xl shadow-xl border border-t-0 border-slate-200 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
               <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <h4 className="text-sm font-bold text-ink-primary">Alerts & Notifications</h4>
+                  <h4 className="text-sm font-semibold text-ink-primary">Alerts & Notifications</h4>
                   {unreadCount > 0 && (
                     <span className="bg-getmeds-blue/15 text-getmeds-blue-dark text-xs px-2 py-0.5 rounded-full font-semibold">
                       {unreadCount} new
@@ -159,7 +173,7 @@ const Topbar = ({ onToggleSidebar }) => {
             <User size={16} />
           </div>
           <div className="flex flex-col">
-            <span className="text-xs sm:text-sm font-bold text-ink-primary leading-tight truncate max-w-[100px] sm:max-w-[160px]">
+            <span className="text-xs sm:text-sm font-medium text-ink-primary leading-tight truncate max-w-[100px] sm:max-w-[160px]">
               {user?.name}
             </span>
             <div className="flex items-center gap-1.5 mt-0.5">
