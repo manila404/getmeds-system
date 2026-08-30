@@ -324,7 +324,7 @@ const TestModePage = () => {
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h1 className="text-2xl font-bold text-gray-900">Developer Test Mode</h1>
+                <h1 className="text-2xl font-semibold text-gray-900">Developer Test Mode</h1>
                 <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold uppercase tracking-wider ${
                   testModeEnabled ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
                 }`}>

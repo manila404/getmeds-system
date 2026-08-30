@@ -265,7 +265,7 @@ const ClientsPage = () => {
               <Users size={24} />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-ink-primary">Clients Directory</h1>
+              <h1 className="text-xl font-semibold text-ink-primary">Clients Directory</h1>
               <p className="text-xs text-ink-secondary mt-0.5">
                 Every registered client, its Credit/Direct payment type, and its local classification.
                 Category tags are local-only and never sent to Zoho.
@@ -473,9 +473,9 @@ const ClientsPage = () => {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 text-slate-600 uppercase text-[10.5px] font-bold tracking-wider border-b border-slate-200">
+        <div className="thin-scroll overflow-x-auto">
+          <table className="w-full text-left text-[13px]">
+            <thead className="bg-getmeds-blue text-white text-[13px] font-semibold border-b border-slate-200">
               <tr>
                 <th className="py-3 px-4">Client</th>
                 <th className="py-3 px-4">Type</th>
@@ -509,7 +509,7 @@ const ClientsPage = () => {
                   return (
                     <tr key={cl.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900">{cl.name}</div>
+                        <div className="font-semibold text-slate-900">{cl.name}</div>
                         {cl.is_test_customer ? (
                           <div className="text-[10px] font-bold text-amber-700 bg-amber-50 inline-block px-1.5 py-0.5 rounded mt-0.5">
                             TEST customer

@@ -11,8 +11,7 @@ import {
   Clock, 
   AlertTriangle, 
   Menu,
-  PanelLeftClose,
-  PanelLeftOpen
+  Search
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { formatPHT } from '../../utils/dateUtils';
@@ -25,7 +24,7 @@ const roleBadgeStyles = {
   admin: 'bg-slate-900 text-white border-slate-900',
 };
 
-const Topbar = ({ onToggleSidebar, onToggleCollapse, isSidebarCollapsed = false }) => {
+const Topbar = ({ onToggleSidebar }) => {
   const { user, logout } = useAuth();
   const { notifications, unreadCount, markAsRead, markAllAsRead } = useNotifications();
   const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
@@ -79,21 +78,24 @@ const Topbar = ({ onToggleSidebar, onToggleCollapse, isSidebarCollapsed = false 
           <Menu size={22} />
         </button>
 
-        {/* Sidebar Collapse Toggle (desktop only) */}
-        <button
-          type="button"
-          onClick={onToggleCollapse}
-          className="hidden lg:inline-flex p-2 rounded-lg text-ink-secondary hover:text-ink-primary hover:bg-surface focus:outline-none focus:ring-2 focus:ring-getmeds-blue transition-colors"
-          aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          aria-expanded={!isSidebarCollapsed}
-          title={isSidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
-        >
-          {isSidebarCollapsed ? <PanelLeftOpen size={22} /> : <PanelLeftClose size={22} />}
-        </button>
       </div>
 
       {/* Right Area: Notification Bell & User Identity */}
       <div className="flex items-center space-x-2 sm:space-x-4">
+        {/* Global Search */}
+        <div className="relative hidden md:block">
+          <Search
+            size={16}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+          />
+          <input
+            type="search"
+            placeholder="Search orders, clients, products..."
+            aria-label="Search"
+            className="w-48 lg:w-72 pl-9 pr-4 py-2 rounded-full border border-slate-100 bg-slate-50 text-xs text-ink-primary placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-getmeds-blue/40 focus:border-getmeds-blue/40 focus:bg-white transition-colors"
+          />
+        </div>
+
         {/* Notification Bell & Dropdown */}
         <div ref={dropdownRef}>
           <NotificationBell

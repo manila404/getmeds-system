@@ -35,16 +35,15 @@ const Layout = () => {
         isOpen={isMobileSidebarOpen}
         onClose={() => setIsMobileSidebarOpen(false)}
         isCollapsed={isSidebarCollapsed}
+        onToggleCollapse={() => setIsSidebarCollapsed(prev => !prev)}
       />
 
       {/* Fluid Workspace Layout */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <Topbar
           onToggleSidebar={() => setIsMobileSidebarOpen(prev => !prev)}
-          onToggleCollapse={() => setIsSidebarCollapsed(prev => !prev)}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
-        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-surface p-4 sm:p-6 lg:p-8">
+        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-white p-4 sm:p-6 lg:p-8">
           <Outlet />
         </main>
       </div>

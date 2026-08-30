@@ -148,7 +148,7 @@ const InventoryPage = () => {
                 <Package size={24} />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-ink-primary flex items-center gap-2">
+                <h1 className="text-xl font-semibold text-ink-primary flex items-center gap-2">
                   Inventory & Zoho Live Synchronization
                   <span className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border ${
                     mode === 'live'

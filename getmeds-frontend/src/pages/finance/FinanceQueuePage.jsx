@@ -33,7 +33,7 @@ const FinanceQueuePage = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-ink-primary">Zoho Finance Status</h1>
+          <h1 className="text-2xl font-semibold text-ink-primary">Zoho Finance Status</h1>
           <p className="text-sm text-ink-secondary mt-1">
             Direct patient orders waiting on Finance in Zoho. This list is read-only — confirm the Sales Order,
             convert it to an Invoice, and record the Customer Payment in Zoho itself; this page updates

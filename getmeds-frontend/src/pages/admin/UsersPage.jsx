@@ -3,7 +3,7 @@ import client from '../../api/client';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import ErrorMessage from '../../components/ui/ErrorMessage';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
-import { Users, UserX, RefreshCw, Shield } from 'lucide-react';
+import { Users, UserX, RefreshCw, Shield, Check } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const roleBadgeColors = {
@@ -105,7 +105,7 @@ const UsersPage = () => {
         <div>
           <div className="flex items-center gap-2">
             <Users className="w-7 h-7 text-getmeds-blue" />
-            <h1 className="text-2xl font-bold text-ink-primary">User Management</h1>
+            <h1 className="text-2xl font-semibold text-ink-primary">User Management</h1>
           </div>
           <p className="text-sm text-ink-secondary mt-1">
             View, audit, and manage system user accounts and role permissions.
@@ -132,29 +132,29 @@ const UsersPage = () => {
       ) : (
         /* Users Table */
         <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-200">
-              <thead className="bg-surface">
+          <div className="thin-scroll overflow-x-auto">
+            <table className="w-full min-w-[900px] divide-y divide-slate-200">
+              <thead className="bg-getmeds-blue">
                 <tr>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-ink-secondary uppercase tracking-wider">
+                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     ID
                   </th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-ink-secondary uppercase tracking-wider">
+                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     Name
                   </th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-ink-secondary uppercase tracking-wider">
+                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     Username
                   </th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-ink-secondary uppercase tracking-wider">
+                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     Email
                   </th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-ink-secondary uppercase tracking-wider">
+                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     Role
                   </th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-semibold text-ink-secondary uppercase tracking-wider">
+                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     Status
                   </th>
-                  <th scope="col" className="px-6 py-3 text-right text-xs font-semibold text-ink-secondary uppercase tracking-wider">
+                  <th scope="col" className="px-6 py-3 text-center text-[13px] font-semibold text-white">
                     Actions
                   </th>
                 </tr>
@@ -174,18 +174,18 @@ const UsersPage = () => {
 
                     return (
                       <tr key={user.id} className="hover:bg-surface transition-colors">
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-mono font-medium text-ink-secondary">
+                        <td className="px-6 py-4 whitespace-nowrap text-[13px] font-mono font-medium text-ink-secondary">
                           #{user.id}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="text-sm font-semibold text-ink-primary">
+                          <div className="text-[13px] font-semibold text-ink-primary">
                             {getUserDisplayName(user)}
                           </div>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-ink-secondary font-mono">
+                        <td className="px-6 py-4 whitespace-nowrap text-[13px] text-ink-secondary font-mono">
                           {getUsername(user)}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-ink-secondary">
+                        <td className="px-6 py-4 whitespace-nowrap text-[13px] text-ink-secondary">
                           {user.email}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
@@ -196,7 +196,10 @@ const UsersPage = () => {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {isActive ? (
-                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-pharmacy-green/15 text-pharmacy-green-dark border border-pharmacy-green/30">
+                            <span className="inline-flex items-center gap-1.5 pl-1 pr-3 py-1 rounded-full text-xs font-semibold bg-pharmacy-green/10 text-pharmacy-green">
+                              <span className="flex items-center justify-center w-4 h-4 rounded-full bg-pharmacy-green text-white flex-shrink-0">
+                                <Check className="w-2.5 h-2.5" strokeWidth={4} />
+                              </span>
                               Active
                             </span>
                           ) : (
@@ -205,12 +208,12 @@ const UsersPage = () => {
                             </span>
                           )}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-[13px] font-medium">
                           {isActive ? (
                             <button
                               type="button"
                               onClick={() => handleDeactivateClick(user)}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-md text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-1"
+                              className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-1"
                             >
                               <UserX className="w-3.5 h-3.5" />
                               Deactivate
@@ -219,7 +222,7 @@ const UsersPage = () => {
                             <button
                               type="button"
                               disabled
-                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md text-gray-400 bg-gray-50 border border-gray-200 cursor-not-allowed opacity-60"
+                              className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-medium rounded-full text-gray-400 bg-gray-50 border border-gray-200 cursor-not-allowed opacity-60"
                             >
                               Deactivated
                             </button>
