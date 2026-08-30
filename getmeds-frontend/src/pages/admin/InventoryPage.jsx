@@ -1,15 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
 import {
   fetchInventoryStatus,
-  syncPullStock
+  startInventorySyncJob,
+  fetchSyncJobStatus
 } from '../../api/queries';
+import SyncProgressIndicator from '../../components/SyncProgressIndicator';
 import toast from 'react-hot-toast';
 import {
   Package,
   RefreshCw,
   DownloadCloud,
+  Zap,
   CheckCircle2,
   AlertCircle,
   Search,
@@ -53,18 +56,64 @@ const InventoryPage = () => {
   // count and never wrote to Zoho. The backend endpoint it called
   // (POST /api/inventory/adjust) is untouched and still covered by tests;
   // it's just no longer reachable from this UI.
-  const pullMutation = useMutation({
-    mutationFn: syncPullStock,
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['inventoryStatus'] });
-      qc.invalidateQueries({ queryKey: ['products'] });
-      toast.success(res.message || 'Stock pulled from Zoho successfully', { icon: '🔄' });
-    },
+  // Aug 28, 2026: replaced the old single blocking "Pull from Zoho" button
+  // with two background jobs — Quick Sync (only items changed since the
+  // last run — fast) and Full Resync (every item, guaranteed complete) —
+  // plus a live progress indicator. Same design as the Clients Directory
+  // page's sync (see ClientsPage.jsx and components/SyncProgressIndicator).
+  // Both still ONLY read from Zoho (POST .../sync-pull/start) — nothing
+  // here writes anything to Zoho.
+  const [syncJobId, setSyncJobId] = useState(null);
+
+  const startSyncMutation = useMutation({
+    mutationFn: (mode) => startInventorySyncJob(mode),
+    onSuccess: (res) => setSyncJobId(res.data.job_id),
     onError: (err) => {
       const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-      toast.error(`Pull failed: ${msg}`);
+      toast.error(`Could not start sync: ${msg}`);
     }
   });
+
+  const { data: syncJobData } = useQuery({
+    queryKey: ['inventory-sync-job', syncJobId],
+    queryFn: () => fetchSyncJobStatus(syncJobId),
+    enabled: !!syncJobId,
+    refetchInterval: (query) => (query.state.data?.data?.status === 'running' ? 1200 : false)
+  });
+
+  const syncJob = syncJobData?.data || null;
+
+  useEffect(() => {
+    if (!syncJob) return;
+    if (syncJob.status === 'running') return;
+
+    const modeLabel = syncJob.mode === 'full' ? 'Full Resync' : 'Quick Sync';
+
+    if (syncJob.status === 'done') {
+      qc.invalidateQueries({ queryKey: ['inventoryStatus'] });
+      qc.invalidateQueries({ queryKey: ['products'] });
+      const r = syncJob.result || {};
+      if (r.truncated) {
+        toast.error(
+          `⚠️ ${modeLabel} pulled ${r.total_from_zoho ?? 0} item(s), but Zoho reported even more beyond this ` +
+            `pull's safety limit — incomplete (${r.created ?? 0} new, ${r.updated ?? 0} updated). Nothing was ` +
+            'written to Zoho.',
+          { icon: '⚠️', duration: 15000 }
+        );
+      } else {
+        toast.success(
+          `${modeLabel} complete — ${r.created ?? 0} new product(s), ${r.updated ?? 0} updated` +
+            (r.skipped ? `, ${r.skipped} skipped` : '') + '.',
+          { icon: '🔄' }
+        );
+      }
+    } else if (syncJob.status === 'error') {
+      toast.error(`${modeLabel} failed: ${syncJob.error || 'unknown error'}`);
+    }
+
+    setSyncJobId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncJob?.status]);
 
   const inventoryData = data?.data || {};
   const products = inventoryData.products || [];
@@ -132,20 +181,31 @@ const InventoryPage = () => {
               </button>
 
               <button
-                onClick={() => pullMutation.mutate()}
-                disabled={pullMutation.isPending}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
-                title="Fetch live stock_on_hand from Zoho and update GetMeds DB — this is the only action that actually contacts Zoho"
+                onClick={() => startSyncMutation.mutate('quick')}
+                disabled={!!syncJobId || startSyncMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                title="Fast — pulls only items created or changed in Zoho since the last sync (read-only)"
               >
-                <DownloadCloud size={15} className={pullMutation.isPending ? 'animate-bounce' : ''} />
-                {pullMutation.isPending ? 'Pulling from Zoho...' : 'Pull from Zoho'}
+                <Zap size={15} />
+                Quick Sync
+              </button>
+
+              <button
+                onClick={() => startSyncMutation.mutate('full')}
+                disabled={!!syncJobId || startSyncMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                title="Slower, but guaranteed — pulls every item in Zoho Inventory (read-only)"
+              >
+                <DownloadCloud size={15} />
+                Full Resync
               </button>
             </div>
+            <SyncProgressIndicator job={syncJob} />
             <span className="text-[11px] text-ink-secondary flex items-center gap-1">
               <Clock size={11} />
               {summary.last_synced_at
-                ? <>Zoho data as of {formatDistanceToNow(new Date(summary.last_synced_at + 'Z'), { addSuffix: true })} — click "Pull from Zoho" for the latest</>
-                : <>Never pulled from Zoho yet — click "Pull from Zoho" to fetch stock</>}
+                ? <>Zoho data as of {formatDistanceToNow(new Date(summary.last_synced_at + 'Z'), { addSuffix: true })} — click Quick Sync or Full Resync for the latest</>
+                : <>Never pulled from Zoho yet — click Quick Sync or Full Resync to fetch stock</>}
             </span>
           </div>
         </div>

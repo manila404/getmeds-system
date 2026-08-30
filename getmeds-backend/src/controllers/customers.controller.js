@@ -1,6 +1,8 @@
 const db = require('../db/database');
 const zoho = require('../integrations/zoho');
 const { isDryRunMode, getTestCustomerZohoId } = require('../services/zohoTestFlags');
+const syncJobs = require('../services/syncJobs');
+const { getSyncState, setSyncState } = require('../services/syncState');
 
 // Purely local classification tag for the Clients Directory (Aug 27, 2026).
 // Kept strictly separate from `type` (credit/direct), which continues to
@@ -173,59 +175,173 @@ function updateCustomerCategory(req, res, next) {
  * matter for the single-TEST-customer safety gate itself, which keys off
  * zoho_contact_id, not type.
  */
+/**
+ * Shared reconciliation logic — INSERT new / UPDATE existing local
+ * `customers` rows from a list of Zoho contacts. Pure local DB writes; the
+ * Zoho read that produced `contacts` already happened before this is
+ * called. Used by both the original synchronous sync-from-zoho endpoint
+ * below (unchanged behavior/contract — tests/customersSync.test.js asserts
+ * against it directly) and the new background Quick Sync / Full Resync
+ * jobs (startSyncJob), so the two can never quietly drift apart.
+ */
+function reconcileContacts(contacts) {
+  const findByZohoId = db.prepare('SELECT id FROM customers WHERE zoho_contact_id = ?');
+  const insert = db.prepare(`
+    INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active)
+    VALUES (?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), 1)
+  `);
+  const update = db.prepare(`
+    UPDATE customers SET name = ?, contact_person = ?, contact_number = ?, address = ?, last_synced_at = datetime('now')
+    WHERE zoho_contact_id = ?
+  `);
+
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  const txn = db.transaction(() => {
+    for (const contact of contacts) {
+      if (!contact.contact_id) { skipped++; continue; }
+
+      const name = contact.contact_name || contact.company_name || 'Unnamed Zoho Contact';
+      const type = contact.customer_sub_type === 'business' ? 'credit' : 'direct';
+      const contactPerson = contact.first_name
+        ? `${contact.first_name} ${contact.last_name || ''}`.trim()
+        : null;
+      const phone = contact.phone || contact.mobile || null;
+      const address = contact.billing_address
+        ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ')
+        : null;
+
+      const existing = findByZohoId.get(contact.contact_id);
+      if (existing) {
+        update.run(name, contactPerson, phone, address, contact.contact_id);
+        updated++;
+      } else {
+        insert.run(name, type, contact.contact_id, contactPerson, phone, address);
+        created++;
+      }
+    }
+  });
+  txn();
+
+  return { created, updated, skipped };
+}
+
 async function syncFromZoho(req, res, next) {
   try {
     const result = await zoho.listContacts();
     const contacts = result.contacts || [];
 
-    const findByZohoId = db.prepare('SELECT id FROM customers WHERE zoho_contact_id = ?');
-    const insert = db.prepare(`
-      INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active)
-      VALUES (?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), 1)
-    `);
-    const update = db.prepare(`
-      UPDATE customers SET name = ?, contact_person = ?, contact_number = ?, address = ?, last_synced_at = datetime('now')
-      WHERE zoho_contact_id = ?
-    `);
+    const { created, updated, skipped } = reconcileContacts(contacts);
 
-    let created = 0;
-    let updated = 0;
-    let skipped = 0;
-
-    const txn = db.transaction(() => {
-      for (const contact of contacts) {
-        if (!contact.contact_id) { skipped++; continue; }
-
-        const name = contact.contact_name || contact.company_name || 'Unnamed Zoho Contact';
-        const type = contact.customer_sub_type === 'business' ? 'credit' : 'direct';
-        const contactPerson = contact.first_name
-          ? `${contact.first_name} ${contact.last_name || ''}`.trim()
-          : null;
-        const phone = contact.phone || contact.mobile || null;
-        const address = contact.billing_address
-          ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ')
-          : null;
-
-        const existing = findByZohoId.get(contact.contact_id);
-        if (existing) {
-          update.run(name, contactPerson, phone, address, contact.contact_id);
-          updated++;
-        } else {
-          insert.run(name, type, contact.contact_id, contactPerson, phone, address);
-          created++;
-        }
-      }
-    });
-    txn();
+    // Aug 28, 2026: listContacts' pagination loop now reports whether it
+    // stopped because of its own internal safety cap rather than because
+    // Zoho actually ran out of pages (see LiveZohoAdapter.js's
+    // _paginatedList) — surface that here instead of silently reporting a
+    // count that looks complete but isn't. This is what was happening
+    // when specific real customers (e.g. "Ma. Isabel Mahinay") were
+    // visible in Zoho but never showed up here no matter how many times
+    // this sync ran.
+    const message = result.truncated
+      ? `⚠️ Pulled ${contacts.length} contact(s) from Zoho, but Zoho reported even MORE contacts exist beyond ` +
+        `this pull's safety limit — this sync is INCOMPLETE (${created} new, ${updated} refreshed` +
+        (skipped ? `, ${skipped} skipped` : '') + `). Nothing was written to Zoho. Contact whoever maintains ` +
+        'this app so the safety cap can be raised further.'
+      : `Pulled ${contacts.length} contact(s) from Zoho — ${created} new, ${updated} refreshed` +
+        (skipped ? `, ${skipped} skipped (no contact_id)` : '') +
+        '. Nothing was written to Zoho.';
 
     res.json({
       success: true,
-      message: `Pulled ${contacts.length} contact(s) from Zoho — ${created} new, ${updated} refreshed` +
-        (skipped ? `, ${skipped} skipped (no contact_id)` : '') +
-        '. Nothing was written to Zoho.',
-      data: { total_from_zoho: contacts.length, created, updated, skipped }
+      message,
+      data: { total_from_zoho: contacts.length, created, updated, skipped, truncated: !!result.truncated }
     });
   } catch (err) { next(err); }
+}
+
+/**
+ * POST /api/customers/sync-from-zoho/start?mode=quick|full
+ *
+ * Aug 28, 2026: added ALONGSIDE the plain POST /sync-from-zoho above —
+ * that endpoint is untouched (tests/customersSync.test.js asserts its
+ * synchronous, same-request contract directly), so this is purely
+ * additive, never a replacement.
+ *
+ * Kicks the pull off in the background and returns a job id right away
+ * (202) instead of making the request wait however long a full pull of a
+ * large Zoho org takes — poll progress at GET /api/sync-jobs/:jobId.
+ *
+ *  - mode=quick: only contacts modified since the last recorded watermark
+ *    (see services/syncState.js) — fast, and this also naturally catches
+ *    edits/merges to EXISTING contacts (e.g. the Aug 27 "Ma. Isabel
+ *    Mahinay" merge), not just brand-new ones, since an edit bumps Zoho's
+ *    last_modified_time. The very first run ever has no watermark yet, so
+ *    it behaves like a one-time full pull to establish one.
+ *  - mode=full: every contact, guaranteed complete — the same
+ *    created_time-ascending walk the plain endpoint above already uses —
+ *    for "make sure literally everyone, registered here or not, is in the
+ *    system."
+ *
+ * Still a pure READ (zoho.listContacts()) — nothing here is ever written
+ * back to Zoho, same as everything else in this file.
+ */
+async function startSyncJob(req, res) {
+  const mode = String(req.query.mode || '').toLowerCase();
+  if (mode !== 'quick' && mode !== 'full') {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_MODE', message: 'Query param "mode" must be "quick" or "full".' }
+    });
+  }
+
+  const job = syncJobs.createJob({ type: 'customers', mode });
+
+  if (mode === 'full') {
+    const priorTotal = parseInt(getSyncState('customers_last_full_total'), 10);
+    if (priorTotal > 0) syncJobs.updateProgress(job.id, { total: priorTotal });
+  }
+
+  res.status(202).json({ success: true, data: { job_id: job.id, mode } });
+
+  // Fire-and-forget from here — the HTTP response above has already gone
+  // out. Everything below only ever updates the in-memory job (polled
+  // separately via GET /api/sync-jobs/:jobId) and the local database —
+  // never anything back to Zoho.
+  (async () => {
+    try {
+      const opts = {
+        onPage: ({ processed }) => syncJobs.updateProgress(job.id, { processed })
+      };
+      if (mode === 'quick') {
+        const watermark = getSyncState('customers_last_modified_watermark');
+        if (watermark) opts.sinceWatermark = watermark;
+      }
+
+      const result = await zoho.listContacts({}, opts);
+      const contacts = result.contacts || [];
+      const { created, updated, skipped } = reconcileContacts(contacts);
+
+      if (result.newWatermark) setSyncState('customers_last_modified_watermark', result.newWatermark);
+      if (mode === 'full') {
+        setSyncState('customers_last_full_sync_at', new Date().toISOString());
+        setSyncState('customers_last_full_total', contacts.length);
+      }
+
+      syncJobs.finishJob(job.id, {
+        mode,
+        total_from_zoho: contacts.length,
+        created,
+        updated,
+        skipped,
+        truncated: !!result.truncated,
+        stopped_early: !!result.stoppedEarly
+      });
+    } catch (err) {
+      console.error('[CUSTOMERS] background sync job failed:', err);
+      syncJobs.failJob(job.id, err);
+    }
+  })();
 }
 
 /**
@@ -301,6 +417,7 @@ async function getZohoAddress(req, res, next) {
 module.exports = {
   getCustomersOverview,
   syncFromZoho,
+  startSyncJob,
   getZohoAddress,
   updateCustomerCategory,
   getCustomerStats,

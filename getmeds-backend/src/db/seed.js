@@ -2,7 +2,48 @@ require('dotenv').config();
 const db = require('./database');
 const bcrypt = require('bcryptjs');
 
+// Aug 28, 2026: this script wipes and reseeds customers/products/orders with
+// fixed demo data on every run — safe on a brand-new dev DB, but this app's
+// database now also holds REAL customers/inventory pulled in from the live
+// Zoho org (see customers.controller.js's sync-from-zoho / inventory.controller.js's
+// sync-pull). Running `npm run seed` (or `npm run setup`, which chains
+// migrate + seed) against that same database would silently delete all of
+// that real synced data and replace it with the 5 demo customers / 10 demo
+// products below. Nothing here ever calls the Zoho API — this is a
+// local-only wipe, not a push to Zoho — but it's exactly the kind of
+// "missing customer" bug this project already spent a session chasing, so
+// this refuses to run against a database carrying real Zoho-synced rows
+// unless explicitly forced.
+function hasRealZohoData(db) {
+  try {
+    const customers = db
+      .prepare("SELECT COUNT(*) as c FROM customers WHERE source = 'zoho' OR zoho_contact_id IS NOT NULL")
+      .get().c;
+    const products = db
+      .prepare('SELECT COUNT(*) as c FROM products WHERE zoho_item_id IS NOT NULL OR zoho_stock IS NOT NULL')
+      .get().c;
+    return { customers, products };
+  } catch (e) {
+    // Tables don't exist yet (fresh install, before migrate has ever run) — nothing to protect.
+    return { customers: 0, products: 0 };
+  }
+}
+
 function run() {
+  const forced = process.argv.includes('--force') || process.env.SEED_FORCE === 'true';
+  const { customers: realCustomers, products: realProducts } = hasRealZohoData(db);
+
+  if (!forced && (realCustomers > 0 || realProducts > 0)) {
+    console.error('\n🛑 Refusing to run: this database holds REAL data synced from Zoho, not just demo data.');
+    console.error(`   Found ${realCustomers} customer(s) and ${realProducts} product(s) carrying Zoho sync fields (zoho_contact_id / zoho_item_id / zoho_stock).`);
+    console.error('   npm run seed deletes and replaces customers/products/orders (and everything under them) with fixed');
+    console.error('   demo data — running it now would locally erase what was pulled in from the real Zoho org.');
+    console.error('   (This never touches Zoho itself either way — Zoho\'s own data is completely unaffected.)');
+    console.error('\n   If you really want to reset this database to demo data anyway, run: npm run seed -- --force\n');
+    process.exitCode = 1;
+    return false;
+  }
+
   const hash = (pw) => bcrypt.hashSync(pw, 10);
 
   // Clean wipe in reverse-relational order to prevent foreign key errors and guarantee idempotency
@@ -76,8 +117,10 @@ function run() {
   });
 
   seedTransaction();
+  return true;
 }
 
-run();
-console.log('🎉 Seeding complete.');
+if (run()) {
+  console.log('🎉 Seeding complete.');
+}
 

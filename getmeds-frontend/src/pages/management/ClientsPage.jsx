@@ -1,12 +1,21 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchClients, fetchClientStats, syncCustomersFromZoho, updateCustomerCategory } from '../../api/queries';
+import {
+  fetchClients,
+  fetchClientStats,
+  startCustomersSyncJob,
+  fetchSyncJobStatus,
+  updateCustomerCategory
+} from '../../api/queries';
+import SyncProgressIndicator from '../../components/SyncProgressIndicator';
 import toast from 'react-hot-toast';
 import {
   Users,
   DownloadCloud,
+  Zap,
   RefreshCw,
   Search,
+  X,
   ChevronLeft,
   ChevronRight,
   Stethoscope,
@@ -17,6 +26,15 @@ import {
 } from 'lucide-react';
 
 const PAGE_SIZE = 25;
+
+// Aug 28, 2026: how many live suggestions to show under the search box while
+// typing. Kept small and server-side on purpose — this directory now holds
+// 35,000+ real synced clients, so suggestions are their own small (`limit`-
+// bounded) query, never a client-side filter over the full list.
+const SUGGESTION_LIMIT = 8;
+// One debounce feeds both the suggestion dropdown and the table filter below
+// it, so neither fires on every keystroke.
+const SEARCH_DEBOUNCE_MS = 300;
 
 const CATEGORY_META = {
   doctor: { label: 'Doctor', icon: Stethoscope, className: 'bg-sky-50 text-sky-700 border-sky-200' },
@@ -33,11 +51,36 @@ const CATEGORY_META = {
 // verification) — that behavior is untouched by this page.
 const ClientsPage = () => {
   const qc = useQueryClient();
-  const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  const [isSuggestOpen, setIsSuggestOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [categoryFilter, setCategoryFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const searchContainerRef = useRef(null);
+
+  // Aug 28, 2026: debounce the raw input into `search` instead of requiring
+  // a form submit — this is what actually makes both the suggestion
+  // dropdown and the table below "live" as you type.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(1);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+  }, [searchInput]);
+
+  // Close the suggestion dropdown on an outside click, same pattern as
+  // CustomerAutocomplete.jsx.
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target)) {
+        setIsSuggestOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['clients', page, search, categoryFilter, typeFilter],
@@ -52,6 +95,25 @@ const ClientsPage = () => {
     keepPreviousData: true
   });
 
+  // Aug 28, 2026: the live suggestion dropdown — a separate, small query
+  // (LIMIT 8) keyed off the same debounced `search`, so it never re-fetches
+  // on every keystroke and never pulls the full client list into the
+  // browser just to suggest a few names.
+  const showSuggestions = isSuggestOpen && search.length >= 2;
+  const { data: suggestData, isFetching: isSuggestFetching } = useQuery({
+    queryKey: ['clients-suggest', search, categoryFilter, typeFilter],
+    queryFn: () =>
+      fetchClients({
+        page: 1,
+        limit: SUGGESTION_LIMIT,
+        search,
+        category: categoryFilter || undefined,
+        type: typeFilter || undefined
+      }),
+    enabled: showSuggestions,
+    keepPreviousData: true
+  });
+
   // Aug 27, 2026 (2): one grouped-count request instead of four separate
   // `?limit=1` round trips — same numbers, a quarter of the network calls.
   const { data: statsData } = useQuery({
@@ -59,18 +121,73 @@ const ClientsPage = () => {
     queryFn: fetchClientStats
   });
 
-  const syncMutation = useMutation({
-    mutationFn: syncCustomersFromZoho,
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['clients'] });
-      qc.invalidateQueries({ queryKey: ['clients-stats'] });
-      toast.success(res.message || 'Clients synced from Zoho', { icon: '🔄' });
-    },
+  // Aug 28, 2026: replaced the old single blocking "Sync All Clients from
+  // Zoho" button with two background jobs — Quick Sync (only contacts
+  // changed since the last run — fast) and Full Resync (everyone,
+  // registered here or not, guaranteed complete) — plus a live progress
+  // indicator, since a full pull of Getmeds' real (35,000+ contact) Zoho
+  // org was reported as taking a long time with no feedback in between.
+  // Both still ONLY read from Zoho (POST .../sync-from-zoho/start) —
+  // nothing here writes anything to Zoho.
+  const [syncJobId, setSyncJobId] = useState(null);
+
+  const startSyncMutation = useMutation({
+    mutationFn: (mode) => startCustomersSyncJob(mode),
+    onSuccess: (res) => setSyncJobId(res.data.job_id),
     onError: (err) => {
       const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-      toast.error(`Sync failed: ${msg}`);
+      toast.error(`Could not start sync: ${msg}`);
     }
   });
+
+  const { data: syncJobData } = useQuery({
+    queryKey: ['customers-sync-job', syncJobId],
+    queryFn: () => fetchSyncJobStatus(syncJobId),
+    enabled: !!syncJobId,
+    // Keep polling every 1.2s while the job is still running; stop the
+    // moment it's done/errored (or if it 404s because the server restarted
+    // mid-job — no `data` to read a status off of, so this just stops).
+    refetchInterval: (query) => (query.state.data?.data?.status === 'running' ? 1200 : false)
+  });
+
+  const syncJob = syncJobData?.data || null;
+
+  // Fires exactly once per job, the moment its status flips away from
+  // "running" — invalidates the table/stats so the new/updated contacts
+  // show up, surfaces a toast (persistent + ⚠️ if the pull hit its own
+  // safety cap or Zoho errored), and clears syncJobId so the progress bar
+  // disappears and the buttons re-enable.
+  useEffect(() => {
+    if (!syncJob) return;
+    if (syncJob.status === 'running') return;
+
+    const modeLabel = syncJob.mode === 'full' ? 'Full Resync' : 'Quick Sync';
+
+    if (syncJob.status === 'done') {
+      qc.invalidateQueries({ queryKey: ['clients'] });
+      qc.invalidateQueries({ queryKey: ['clients-stats'] });
+      const r = syncJob.result || {};
+      if (r.truncated) {
+        toast.error(
+          `⚠️ ${modeLabel} pulled ${r.total_from_zoho ?? 0} contact(s), but Zoho reported even more beyond this ` +
+            `pull's safety limit — incomplete (${r.created ?? 0} new, ${r.updated ?? 0} refreshed). Nothing was ` +
+            'written to Zoho.',
+          { icon: '⚠️', duration: 15000 }
+        );
+      } else {
+        toast.success(
+          `${modeLabel} complete — ${r.created ?? 0} new, ${r.updated ?? 0} refreshed` +
+            (r.skipped ? `, ${r.skipped} skipped` : '') + '.',
+          { icon: '🔄' }
+        );
+      }
+    } else if (syncJob.status === 'error') {
+      toast.error(`${modeLabel} failed: ${syncJob.error || 'unknown error'}`);
+    }
+
+    setSyncJobId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncJob?.status]);
 
   const categoryMutation = useMutation({
     mutationFn: ({ id, category }) => updateCustomerCategory(id, category),
@@ -85,10 +202,32 @@ const ClientsPage = () => {
     }
   });
 
-  const handleSearchSubmit = (e) => {
-    e.preventDefault();
-    setSearch(searchInput.trim());
+  // Enter commits immediately instead of waiting out the debounce, and
+  // always closes the dropdown — same "pick or press enter" feel as
+  // CustomerAutocomplete.
+  const handleSearchKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      setSearch(searchInput.trim());
+      setPage(1);
+      setIsSuggestOpen(false);
+    } else if (e.key === 'Escape') {
+      setIsSuggestOpen(false);
+    }
+  };
+
+  const handleSuggestionClick = (client) => {
+    setSearchInput(client.name);
+    setSearch(client.name);
     setPage(1);
+    setIsSuggestOpen(false);
+  };
+
+  const handleClearSearch = () => {
+    setSearchInput('');
+    setSearch('');
+    setPage(1);
+    setIsSuggestOpen(false);
   };
 
   const handleCategoryFilterChange = (e) => {
@@ -104,6 +243,9 @@ const ClientsPage = () => {
   const clientsData = data?.data || {};
   const clients = clientsData.customers || [];
   const pagination = clientsData.pagination || { total: 0, page: 1, limit: PAGE_SIZE, pages: 1 };
+
+  const suggestions = suggestData?.data?.customers || [];
+  const suggestTotal = suggestData?.data?.pagination?.total ?? suggestions.length;
 
   const stats = statsData?.data || {};
   const total = stats.total ?? 0;
@@ -131,25 +273,38 @@ const ClientsPage = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-all shadow-2xs cursor-pointer disabled:opacity-50"
-            >
-              <RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />
-              Refresh
-            </button>
+          <div className="flex flex-col items-end gap-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => refetch()}
+                disabled={isFetching}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />
+                Refresh
+              </button>
 
-            <button
-              onClick={() => syncMutation.mutate()}
-              disabled={syncMutation.isPending}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
-              title="Pull all clients from Zoho (read-only — never writes to Zoho)"
-            >
-              <DownloadCloud size={15} className={syncMutation.isPending ? 'animate-bounce' : ''} />
-              {syncMutation.isPending ? 'Syncing from Zoho...' : 'Sync All Clients from Zoho'}
-            </button>
+              <button
+                onClick={() => startSyncMutation.mutate('quick')}
+                disabled={!!syncJobId || startSyncMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                title="Fast — pulls only contacts created or changed in Zoho since the last sync (read-only)"
+              >
+                <Zap size={15} />
+                Quick Sync
+              </button>
+
+              <button
+                onClick={() => startSyncMutation.mutate('full')}
+                disabled={!!syncJobId || startSyncMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                title="Slower, but guaranteed — pulls every contact in Zoho, registered here or not (read-only)"
+              >
+                <DownloadCloud size={15} />
+                Full Resync
+              </button>
+            </div>
+            <SyncProgressIndicator job={syncJob} />
           </div>
         </div>
       </div>
@@ -192,16 +347,94 @@ const ClientsPage = () => {
       {/* Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-slate-50/50">
-          <form onSubmit={handleSearchSubmit} className="relative flex-1 max-w-md">
+          <div className="relative flex-1 max-w-md" ref={searchContainerRef}>
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               placeholder="Search by name, contact person, or number..."
               value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
+              onChange={(e) => {
+                setSearchInput(e.target.value);
+                setIsSuggestOpen(true);
+              }}
+              onFocus={() => setIsSuggestOpen(true)}
+              onKeyDown={handleSearchKeyDown}
+              className="w-full pl-9 pr-8 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
             />
-          </form>
+            {searchInput && (
+              <button
+                type="button"
+                onClick={handleClearSearch}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-700 rounded-full transition-colors"
+                title="Clear search"
+              >
+                <X size={13} />
+              </button>
+            )}
+
+            {showSuggestions && (
+              <ul className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 shadow-lg rounded-lg z-20 max-h-72 overflow-y-auto divide-y divide-slate-100">
+                {isSuggestFetching && suggestions.length === 0 ? (
+                  <li className="px-4 py-3 text-center text-xs text-slate-400">
+                    <RefreshCw size={13} className="animate-spin inline-block mr-1.5 align-[-2px]" />
+                    Searching...
+                  </li>
+                ) : suggestions.length === 0 ? (
+                  <li className="px-4 py-3 text-center text-xs text-slate-400">
+                    No client matches <span className="font-semibold text-slate-600">"{search}"</span>.
+                  </li>
+                ) : (
+                  <>
+                    {suggestions.map((cl) => {
+                      const isCredit = cl.type === 'credit';
+                      const meta = cl.category ? CATEGORY_META[cl.category] : null;
+                      return (
+                        <li key={cl.id}>
+                          <button
+                            type="button"
+                            onClick={() => handleSuggestionClick(cl)}
+                            className="w-full text-left px-3.5 py-2.5 hover:bg-slate-50 flex items-center justify-between gap-3 transition-colors focus:bg-slate-50 focus:outline-none"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <p className="text-xs font-bold text-slate-900 truncate">{cl.name}</p>
+                                {meta && (
+                                  <span
+                                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full font-bold text-[9.5px] border shrink-0 ${meta.className}`}
+                                  >
+                                    {meta.label}
+                                  </span>
+                                )}
+                              </div>
+                              {(cl.contact_person || cl.contact_number) && (
+                                <p className="text-[10.5px] text-slate-400 truncate">
+                                  {[cl.contact_person, cl.contact_number].filter(Boolean).join(' · ')}
+                                </p>
+                              )}
+                            </div>
+                            <span
+                              className={`inline-block px-2 py-0.5 rounded-md font-bold text-[10px] border shrink-0 ${
+                                isCredit
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : 'bg-blue-50 text-blue-700 border-blue-200'
+                              }`}
+                            >
+                              {isCredit ? 'Credit' : 'Direct'}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                    {suggestTotal > suggestions.length && (
+                      <li className="px-3.5 py-2 text-center text-[10.5px] text-slate-400 bg-slate-50/60">
+                        +{suggestTotal - suggestions.length} more match{suggestTotal - suggestions.length === 1 ? '' : 'es'} — showing the table below
+                      </li>
+                    )}
+                  </>
+                )}
+              </ul>
+            )}
+          </div>
 
           <div className="flex items-center gap-2 flex-wrap">
             <select
@@ -264,7 +497,7 @@ const ClientsPage = () => {
               ) : clients.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-8 text-center text-slate-400">
-                    No clients found. Try "Sync All Clients from Zoho" or adjust your filters.
+                    No clients found. Try a Quick Sync or Full Resync above, or adjust your filters.
                   </td>
                 </tr>
               ) : (

@@ -203,3 +203,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_zoho_contact_id ON customers(zoh
 
 CREATE INDEX IF NOT EXISTS idx_zoho_sync_queue_pending ON zoho_sync_queue(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_zoho_sync_queue_order ON zoho_sync_queue(order_id);
+
+-- Aug 28, 2026: per-entity sync bookkeeping for the new Quick Sync (only
+-- contacts/items changed since the last run) vs Full Resync (everyone,
+-- guaranteed complete) feature — see services/syncJobs.js and
+-- LiveZohoAdapter._paginatedList's `sinceWatermark` mode. Plain key/value so
+-- another tracked entity can be added later without a schema change. Keys in
+-- use: customers_last_modified_watermark, customers_last_full_sync_at,
+-- customers_last_full_total, and the same three with an inventory_ prefix.
+-- A brand-new table, so `CREATE TABLE IF NOT EXISTS` here (picked up by
+-- migrate() automatically) is enough — no ensureColumn() needed.
+CREATE TABLE IF NOT EXISTS sync_state (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);

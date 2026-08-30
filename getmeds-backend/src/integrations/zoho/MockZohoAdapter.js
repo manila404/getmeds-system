@@ -143,12 +143,28 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorders: [...this._salesOrders.values()] };
   }
 
-  async listContacts() {
-    return { code: 0, message: 'success', contacts: [...this._contacts.values()] };
+  // Aug 28, 2026: accepts (and mostly ignores) the same `(params, opts)`
+  // shape LiveZohoAdapter's Quick Sync / progress-callback support added —
+  // this fixture set is tiny and carries no `last_modified_time` field, so
+  // there's no meaningful "since watermark" filtering to do here; mock/dev
+  // mode always behaves like a (trivially fast) full pull regardless of
+  // requested mode. Still calls `opts.onPage` once so a job started against
+  // mock mode reports SOME progress instead of jumping straight from 0% to
+  // done with nothing in between.
+  async listContacts(params = {}, opts = {}) {
+    const contacts = [...this._contacts.values()];
+    if (opts.onPage) {
+      try { opts.onPage({ processed: contacts.length, page: 1, hasMorePages: false }); } catch (_) {}
+    }
+    return { code: 0, message: 'success', contacts, truncated: false, newWatermark: null, stoppedEarly: false };
   }
 
-  async listItems() {
-    return { code: 0, message: 'success', items: [...this._items.values()] };
+  async listItems(params = {}, opts = {}) {
+    const items = [...this._items.values()];
+    if (opts.onPage) {
+      try { opts.onPage({ processed: items.length, page: 1, hasMorePages: false }); } catch (_) {}
+    }
+    return { code: 0, message: 'success', items, truncated: false, newWatermark: null, stoppedEarly: false };
   }
 
   /** Mirrors LiveZohoAdapter.getContact's shape — returns the full seeded contact (including billing_address, if the fixture has one). */

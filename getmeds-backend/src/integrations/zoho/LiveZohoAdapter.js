@@ -200,23 +200,118 @@ class LiveZohoAdapter extends ZohoAdapter {
    * default), so this is purely a safer default, not a forced behavior.
    * Records are also de-duplicated by their id field on the way out, as a
    * second line of defense against any residual page drift.
+   *
+   * Aug 28, 2026: the guard below used to stop at 100 iterations (200 *
+   * 100 = 20,000 records), written as "just a backstop, not a real
+   * ceiling" — but Getmeds' real Zoho org now has more contacts than that,
+   * so the "backstop" was silently firing for real on every sync, capping
+   * the pull at exactly 20,000 with no warning anywhere (the same
+   * "suspiciously round number" symptom this file's Aug 27 fix was written
+   * to catch, just one order of magnitude bigger). Confirmed directly:
+   * `customers.zoho_contact_id`-tagged rows in the local DB cluster into
+   * exactly two `last_synced_at` groups, 15,885 and 20,000 — real
+   * customers Subir could see in Zoho (e.g. "Ma. Isabel Mahinay" and
+   * several other real "Isabel"-named clients) simply sort past position
+   * 20,000 in created_time order and were never fetched by either run.
+   * Raised the cap by 10x (2,000,000 records) so it's a true backstop
+   * again relative to this org's actual size, and this now also reports
+   * whether the cap was hit — `truncated: true` — so a sync that
+   * genuinely runs out of guard iterations tells the caller instead of
+   * quietly handing back a partial list that looks complete.
+   *
+   * Aug 28, 2026 (2): added two purely additive, opt-in things behind a new
+   * `opts` argument (default `{}`) so every existing call — including the
+   * two above with no third argument at all — keeps its exact current
+   * behavior (full walk, created_time ascending, no callback):
+   *
+   *  - `opts.onPage({ processed, page, hasMorePages })`, invoked once per
+   *    page fetched, purely for progress reporting (see services/
+   *    syncJobs.js). A throwing callback is swallowed — a bug in progress
+   *    reporting must never break the underlying sync.
+   *  - `opts.sinceWatermark` (a string, e.g. a prior `last_modified_time`)
+   *    switches this into "Quick Sync" mode: pages are fetched sorted by
+   *    `opts.watermarkField` (default `last_modified_time`) DESCENDING
+   *    instead of `created_time` ascending, and the walk stops the moment
+   *    it reaches a record at or before that watermark — everything newer
+   *    is by definition on earlier pages already collected. This also
+   *    naturally catches edits/merges to EXISTING contacts (e.g. the Aug 27
+   *    "Ma. Isabel Mahinay" merge), not just brand-new ones, since an edit
+   *    bumps last_modified_time.
+   *
+   * Regardless of mode, this now also tracks and returns `newWatermark` —
+   * the maximum `watermarkField` value seen across every record actually
+   * returned — so the caller can persist it (services/syncState.js) as the
+   * starting point for the NEXT Quick Sync. A caller-passed
+   * `sort_column`/`sort_order` in `params` still wins over either default
+   * (spread after it), same as before.
    */
-  async _paginatedList(path, resultKey, params = {}) {
+  async _paginatedList(path, resultKey, params = {}, opts = {}) {
     const perPage = 200;
     let page = 1;
     let all = [];
-    // Safety cap, not a real expected ceiling (200 * 100 = 20,000 records)
-    // — just a backstop against looping forever if a future API response
-    // shape reports has_more_page=true without ever actually terminating.
-    for (let guard = 0; guard < 100; guard++) {
+    let truncated = false;
+    let stoppedEarly = false;
+    let newWatermark = null;
+    const watermarkField = opts.watermarkField || 'last_modified_time';
+    const sinceWatermark = opts.sinceWatermark || null;
+
+    const defaultSort = sinceWatermark
+      ? { sort_column: watermarkField, sort_order: 'D' }
+      : { sort_column: 'created_time', sort_order: 'A' };
+
+    // Safety cap, not a real expected ceiling (200 * 10,000 = 2,000,000
+    // records) — just a backstop against looping forever if a future API
+    // response shape reports has_more_page=true without ever actually
+    // terminating. See the note above for why this was raised from 100.
+    const MAX_ITERATIONS = 10000;
+    for (let guard = 0; guard < MAX_ITERATIONS; guard++) {
       const result = await this._request('GET', path, {
-        query: { sort_column: 'created_time', sort_order: 'A', ...params, page, per_page: perPage }
+        query: { ...defaultSort, ...params, page, per_page: perPage }
       });
       const pageRecords = result[resultKey] || [];
-      all = all.concat(pageRecords);
+
+      for (const record of pageRecords) {
+        const wm = record[watermarkField];
+        if (wm && (!newWatermark || wm > newWatermark)) newWatermark = wm;
+
+        if (sinceWatermark && wm && wm <= sinceWatermark) {
+          // Sorted descending by watermarkField, so everything from this
+          // record on (rest of this page, and every later page) is already
+          // reflected locally — stop collecting here (the inner loop only;
+          // onPage below still fires once for this final, partial page so
+          // a quick sync that stops on page 1 still reports its progress
+          // instead of jumping straight from 0% to done).
+          stoppedEarly = true;
+          break;
+        }
+        all.push(record);
+      }
+
+      if (opts.onPage) {
+        try {
+          opts.onPage({
+            processed: all.length,
+            page,
+            hasMorePages: result.page_context?.has_more_page ?? result.has_more_page ?? false
+          });
+        } catch (_) {
+          // Progress reporting must never take down the actual sync.
+        }
+      }
+
+      if (stoppedEarly) break;
 
       const hasMore = result.page_context?.has_more_page ?? result.has_more_page ?? false;
       if (!hasMore) break;
+      if (guard === MAX_ITERATIONS - 1) {
+        truncated = true;
+        this._log(
+          `[ZOHO_${this._modeLabel.toUpperCase()}] _paginatedList(${path}) hit its ${MAX_ITERATIONS}-page safety ` +
+            `cap (${MAX_ITERATIONS * perPage} records) while Zoho still reports more pages — stopping early. ` +
+            'This should only ever happen if Zoho is stuck reporting has_more_page=true forever; if this is a ' +
+            'real, growing org, raise MAX_ITERATIONS again.'
+        );
+      }
       page += 1;
     }
 
@@ -228,17 +323,27 @@ class LiveZohoAdapter extends ZohoAdapter {
       if (id) seen.add(id);
       deduped.push(record);
     }
-    return deduped;
+    return { records: deduped, truncated, newWatermark, stoppedEarly };
   }
 
-  async listContacts(params = {}) {
-    const contacts = await this._paginatedList('/contacts', 'contacts', params);
-    return { code: 0, message: 'success', contacts };
+  async listContacts(params = {}, opts = {}) {
+    const { records: contacts, truncated, newWatermark, stoppedEarly } = await this._paginatedList(
+      '/contacts',
+      'contacts',
+      params,
+      opts
+    );
+    return { code: 0, message: 'success', contacts, truncated, newWatermark, stoppedEarly };
   }
 
-  async listItems(params = {}) {
-    const items = await this._paginatedList('/items', 'items', params);
-    return { code: 0, message: 'success', items };
+  async listItems(params = {}, opts = {}) {
+    const { records: items, truncated, newWatermark, stoppedEarly } = await this._paginatedList(
+      '/items',
+      'items',
+      params,
+      opts
+    );
+    return { code: 0, message: 'success', items, truncated, newWatermark, stoppedEarly };
   }
 
   /**

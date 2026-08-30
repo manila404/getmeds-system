@@ -82,9 +82,17 @@ class ZohoAdapter {
    * into the local `customers` table (see customers.controller.js) so an
    * order can carry an existing `zoho_customer_id` — this adapter never
    * creates a contact itself.
-   * @returns {Promise<{code:number, message:string, contacts:object[]}>}
+   *
+   * Aug 28, 2026: `opts` is optional and purely additive (default `{}`) —
+   * `opts.onPage(progress)` for live progress reporting, and
+   * `opts.sinceWatermark` (+ optional `opts.watermarkField`) to request an
+   * incremental "Quick Sync" pull (only records modified after that
+   * watermark) instead of the full walk. See LiveZohoAdapter._paginatedList
+   * for the concrete behavior; MockZohoAdapter accepts and mostly ignores
+   * these given its tiny, static fixture set.
+   * @returns {Promise<{code:number, message:string, contacts:object[], truncated?:boolean, newWatermark?:string, stoppedEarly?:boolean}>}
    */
-  async listContacts(params = {}) {
+  async listContacts(params = {}, opts = {}) {
     throw new Error('Not implemented');
   }
 
@@ -93,9 +101,12 @@ class ZohoAdapter {
    * stock into the local `products` table (see inventory.controller.js's
    * syncPullStock) — this adapter never creates, edits, or adjusts a Zoho
    * item or its stock.
-   * @returns {Promise<{code:number, message:string, items:object[]}>}
+   *
+   * Aug 28, 2026: see listContacts above — same optional, additive `opts`
+   * (onPage / sinceWatermark / watermarkField) for Quick Sync + progress.
+   * @returns {Promise<{code:number, message:string, items:object[], truncated?:boolean, newWatermark?:string, stoppedEarly?:boolean}>}
    */
-  async listItems(params = {}) {
+  async listItems(params = {}, opts = {}) {
     throw new Error('Not implemented');
   }
 

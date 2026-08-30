@@ -21,6 +21,13 @@ router.get('/stats', requireAuth, requireRole('admin', 'management'), c.getCusto
 // Never writes anything to Zoho.
 router.post('/sync-from-zoho', requireAuth, requireRole('admin', 'management'), c.syncFromZoho);
 
+// Aug 28, 2026: additive background version of the same pull — starts a
+// job (202 + job_id) instead of blocking the request, so the frontend can
+// show a live percentage. ?mode=quick (only contacts changed since the
+// last run) or ?mode=full (everyone, guaranteed complete). Poll progress
+// at GET /api/sync-jobs/:jobId. Still read-only towards Zoho.
+router.post('/sync-from-zoho/start', requireAuth, requireRole('admin', 'management'), c.startSyncJob);
+
 // Read-only per-customer detail fetch (zoho.getContact()) — fills in
 // billing_address, which the bulk list-based sync above never receives from
 // Zoho. Any authenticated role (not just admin/management) since a MedRep

@@ -14,6 +14,7 @@ const inventoryRoutes = require('./routes/inventory.routes');
 const testRoutes = require('./routes/test.routes');
 const webhookRoutes = require('./routes/webhook.routes');
 const customersRoutes = require('./routes/customers.routes');
+const syncJobsRoutes = require('./routes/syncJobs.routes');
 
 const app = express();
 
@@ -57,6 +58,9 @@ app.use('/api/inventory', inventoryRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/test', testRoutes);
 app.use('/api/customers', customersRoutes);
+// Aug 28, 2026: shared polling endpoint for the customers/inventory
+// background Quick Sync / Full Resync jobs (see services/syncJobs.js).
+app.use('/api/sync-jobs', syncJobsRoutes);
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } }));

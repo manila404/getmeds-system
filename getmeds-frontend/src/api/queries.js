@@ -123,3 +123,33 @@ export const updateCustomerCategory = async (customerId, category) => {
   const res = await client.patch(`/api/customers/${customerId}/category`, { category });
   return res.data;
 };
+
+/**
+ * Aug 28, 2026: background Quick Sync ("only contacts changed since last
+ * time" — fast) / Full Resync ("everyone, registered here or not,
+ * guaranteed") for the Clients Directory. Starts a job and returns
+ * immediately (202 + job_id) instead of blocking on however long a full
+ * pull of a large Zoho org takes — poll progress with
+ * fetchSyncJobStatus(jobId). Still read-only towards Zoho.
+ * @param {'quick'|'full'} mode
+ */
+export const startCustomersSyncJob = async (mode) => {
+  const res = await client.post(`/api/customers/sync-from-zoho/start?mode=${mode}`);
+  return res.data;
+};
+
+/** Same as startCustomersSyncJob, for the Inventory page's stock pull. */
+export const startInventorySyncJob = async (mode) => {
+  const res = await client.post(`/api/inventory/sync-pull/start?mode=${mode}`);
+  return res.data;
+};
+
+/**
+ * Poll a background sync job's status/progress. Shared by both the
+ * Clients Directory and Inventory pages — one job registry on the backend
+ * (services/syncJobs.js), one status shape.
+ */
+export const fetchSyncJobStatus = async (jobId) => {
+  const res = await client.get(`/api/sync-jobs/${jobId}`);
+  return res.data;
+};
