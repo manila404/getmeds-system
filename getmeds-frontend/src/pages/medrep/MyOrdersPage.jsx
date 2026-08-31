@@ -46,7 +46,7 @@ const MyOrdersPage = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-ink-primary">My Orders</h1>
+          <h1 className="text-2xl font-semibold text-ink-primary">My Orders</h1>
           <p className="text-sm text-ink-secondary mt-1">Track status of orders you have submitted.</p>
         </div>
         <div className="flex gap-2">

@@ -88,7 +88,7 @@ const ManagementDashboardPage = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-ink-primary">Management Dashboard</h1>
+          <h1 className="text-2xl font-semibold text-ink-primary">Management Dashboard</h1>
           <p className="text-sm text-ink-secondary mt-1">Real-time overview of all orders and KPIs.</p>
         </div>
         <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary">
@@ -105,8 +105,8 @@ const ManagementDashboardPage = () => {
             const Icon = card.icon;
             return (
               <div key={i} className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-                <div className={`inline-flex p-2 rounded-full ${colorMap[card.color]} mb-3`}>
-                  <Icon className={`w-5 h-5 ${iconColorMap[card.color]}`} />
+                <div className="inline-flex mb-3">
+                  <Icon className={`w-7 h-7 ${iconColorMap[card.color]}`} />
                 </div>
                 <p className="text-2xl font-bold text-ink-primary">{card.value}</p>
                 <p className="text-xs font-semibold text-ink-primary mt-0.5">{card.title}</p>

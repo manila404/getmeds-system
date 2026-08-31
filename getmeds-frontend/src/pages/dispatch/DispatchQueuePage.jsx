@@ -56,7 +56,7 @@ const DispatchQueuePage = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-ink-primary">Zoho Dispatch Status</h1>
+          <h1 className="text-2xl font-semibold text-ink-primary">Zoho Dispatch Status</h1>
           <p className="text-sm text-ink-secondary mt-1">
             Orders waiting on Pharmacy/Dispatch in Zoho. This list is read-only — create the Package and Shipment
             in Zoho Inventory itself; this page updates automatically once that happens.

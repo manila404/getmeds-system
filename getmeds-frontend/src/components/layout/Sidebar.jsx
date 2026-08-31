@@ -16,11 +16,13 @@ import {
   X,
   FlaskConical,
   BarChart3,
-  Layers
+  Layers,
+  PanelLeftClose,
+  PanelLeftOpen
 } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 
-const Sidebar = ({ isOpen = false, onClose, isCollapsed = false }) => {
+const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollapse }) => {
   const { user } = useAuth();
   const { isDebug } = useDebug();
 
@@ -188,11 +190,23 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false }) => {
           </div>
 
           {/* Active Workspace Header */}
-          <div className={`px-4 py-2.5 bg-white border-b border-slate-100 flex-shrink-0 ${centerWhenCollapsed}`}>
-            <span className={`text-[11px] font-semibold text-ink-primary flex items-center gap-1.5 ${isCollapsed ? 'lg:justify-center lg:gap-0' : ''}`}>
+          <div className={`px-4 py-2.5 bg-white border-b border-slate-100 flex-shrink-0 flex items-center justify-between gap-2 ${isCollapsed ? 'lg:px-2 lg:justify-center' : ''}`}>
+            <span className={`text-[11px] font-semibold text-ink-primary flex items-center gap-1.5 ${hideWhenCollapsed}`}>
               <Layers size={13} className="text-ink-primary" />
-              <span className={hideWhenCollapsed}>Active Workspace</span>
+              Active Workspace
             </span>
+
+            {/* Collapse / Expand Rail (desktop only) */}
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              className="hidden lg:inline-flex p-1 rounded-md text-ink-secondary hover:text-ink-primary hover:bg-slate-100 transition-colors flex-shrink-0"
+              aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-expanded={!isCollapsed}
+              title={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+            >
+              {isCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            </button>
           </div>
 
           {/* Navigation Menu */}
@@ -202,7 +216,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false }) => {
               testModeSections.map((section, idx) => (
                 <div key={idx} className="space-y-1">
                   <div className={`px-2 pb-1.5 flex items-center justify-between ${hideWhenCollapsed}`}>
-                    <span className="text-[11px] font-medium text-ink-primary">
+                    <span className="text-xs font-medium text-ink-primary">
                       {section.title}
                     </span>
                     <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${section.badgeClass}`}>
@@ -218,11 +232,11 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false }) => {
                           onClick={handleLinkClick}
                           end={link.exact}
                           className={({ isActive }) =>
-                            `flex items-center px-2.5 py-2 rounded-lg text-xs font-medium transition-all ${centerWhenCollapsed} ${
+                            `flex items-center px-2.5 py-2 rounded-lg text-[13px] font-medium transition-all ${centerWhenCollapsed} ${
                               isActive
-                                ? 'bg-getmeds-blue/10 text-ink-primary font-bold border-r-3 border-getmeds-blue'
+                                ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-3 border-getmeds-blue'
                                 : link.primaryAction
-                                ? 'text-ink-primary bg-getmeds-blue/5 hover:bg-getmeds-blue/10 font-bold'
+                                ? 'text-ink-primary bg-getmeds-blue/5 hover:bg-getmeds-blue/10 font-medium'
                                 : 'text-ink-primary hover:bg-surface'
                             }`
                           }
@@ -241,7 +255,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false }) => {
               /* STANDARD MODE: Role-restricted links */
               <>
                 <div>
-                  <div className={`px-3 pb-2 text-[11px] font-medium text-ink-primary ${hideWhenCollapsed}`}>
+                  <div className={`px-3 pb-2 text-xs font-medium text-ink-primary ${hideWhenCollapsed}`}>
                     Navigation Menu
                   </div>
                   <ul className="space-y-1">
@@ -255,9 +269,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false }) => {
                           className={({ isActive }) =>
                             `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
                               isActive
-                                ? 'bg-getmeds-blue/10 text-ink-primary font-semibold border-r-4 border-getmeds-blue'
+                                ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-4 border-getmeds-blue'
                                 : link.primaryAction
-                                ? 'text-ink-primary bg-getmeds-blue/5 hover:bg-getmeds-blue/10 font-semibold'
+                                ? 'text-ink-primary bg-getmeds-blue/5 hover:bg-getmeds-blue/10 font-medium'
                                 : 'text-ink-primary hover:bg-surface'
                             }`
                           }
@@ -272,7 +286,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false }) => {
 
                 {secondaryLinks.length > 0 && (
                   <div className="pt-2 border-t border-slate-100">
-                    <div className={`px-3 pb-2 text-[11px] font-medium text-ink-primary ${hideWhenCollapsed}`}>
+                    <div className={`px-3 pb-2 text-xs font-medium text-ink-primary ${hideWhenCollapsed}`}>
                       System Records
                     </div>
                     <ul className="space-y-1">
@@ -285,7 +299,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false }) => {
                             className={({ isActive }) =>
                               `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
                                 isActive
-                                  ? 'bg-getmeds-blue/10 text-ink-primary font-semibold'
+                                  ? 'bg-getmeds-blue/10 text-ink-primary font-medium'
                                   : 'text-ink-primary hover:bg-surface'
                               }`
                             }
