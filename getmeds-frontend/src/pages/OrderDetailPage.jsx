@@ -32,7 +32,8 @@ const EVENT_ICONS = {
   ORDER_COMPLETED: '🎉', EXCEPTION_SET: '⚠️', DISPATCH_STATUS_UPDATE: '📦',
   ZOHO_PAYMENT_SYNCED: '⚡', ZOHO_SO_CONFIRMED: '📄', ZOHO_INVOICE_DRAFTED: '🧾',
   ZOHO_PAYMENT_VERIFIED: '✅', ZOHO_PACKAGE_CREATED: '📦', ZOHO_DISPATCHED: '🚚',
-  ZOHO_DISPATCH_UPDATED: '🚚', ZOHO_SO_CANCELLED: '🚫', ZOHO_EVENT_RECEIVED: '🔔'
+  ZOHO_DISPATCH_UPDATED: '🚚', ZOHO_SO_CANCELLED: '🚫', ZOHO_EVENT_RECEIVED: '🔔',
+  ZOHO_SO_STATUS_CHANGED: '📄'
 };
 
 const OrderDetailPage = () => {
@@ -70,6 +71,21 @@ const OrderDetailPage = () => {
       qc.invalidateQueries({ queryKey: ['order', id] });
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not reach Zoho')
+  });
+
+  // Manual, on-demand PUSH of a failed Zoho sync. Added Aug 30, 2026 when
+  // the automatic 30s background retry loop was switched off by default
+  // (see server.js) — a failed sync no longer retries itself; this button
+  // is how it gets retried instead, one click at a time.
+  const retryZohoSyncMutation = useMutation({
+    mutationFn: () => client.post(`/api/orders/${id}/retry-zoho-sync`).then(r => r.data),
+    onSuccess: (res) => {
+      const outcome = res?.data?.result?.outcome;
+      if (outcome === 'succeeded') toast.success('Zoho Sales Order created — sync succeeded.');
+      else toast.error(`Still failing: ${res?.data?.result?.error || 'unknown error'}`);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Retry failed')
   });
 
   if (isLoading) return <div className="flex justify-center py-20"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-getmeds-blue" /></div>;
@@ -131,7 +147,25 @@ const OrderDetailPage = () => {
                   )}
                 </>
               ) : <span className="text-ink-secondary">Not yet synced</span>}
-              {order.zoho_so_id && !['completed', 'cancelled'].includes(order.status) && (
+              {order.zoho_sync_status === 'failed' && (
+                <button
+                  type="button"
+                  disabled={retryZohoSyncMutation.isPending}
+                  onClick={() => retryZohoSyncMutation.mutate()}
+                  title="Push this order to Zoho again now — automatic background retry is off, so this is the only way to retry a failed sync"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-state-warning text-amber-900 hover:bg-state-warning-light disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${retryZohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
+                  {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
+                </button>
+              )}
+              {/* Aug 31, 2026: only 'cancelled' hides this now — 'completed'
+                  used to as well, but that stopped being safe once
+                  syncFromZoho gained an invoice backfill: an order can
+                  legitimately still be sitting at 'completed' (e.g. from
+                  before the premature-auto-complete bug in the dispatch
+                  webhook was fixed) and still need that invoice pulled in. */}
+              {order.zoho_so_id && order.status !== 'cancelled' && (
                 <button
                   type="button"
                   disabled={zohoSyncMutation.isPending}

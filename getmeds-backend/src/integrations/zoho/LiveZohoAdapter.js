@@ -159,6 +159,56 @@ class LiveZohoAdapter extends ZohoAdapter {
       line_items: lineItems
     };
 
+    // Aug 30, 2026: this Zoho org has "Salesperson" configured as a
+    // mandatory field on every Sales Order — Zoho rejects creation with
+    // "Salesperson cannot be empty" otherwise (confirmed live, see the
+    // ZOHO_SYNC_FAILED audit entries on TestGM-20260830-0001). Proper
+    // MedRep -> Zoho Salesperson mapping is deliberately deferred (see
+    // ZOHO_SALES_ORDER_FIELD_MAPPING.md's "Sales Person" row); as a
+    // stand-in that unblocks the TEST-customer-gated flow today without
+    // pretending to solve that mapping, every TestGM- order is stamped
+    // with a single dedicated Salesperson ("TEST | MEDREP") created in
+    // Zoho specifically for this purpose. Real (non-test) orders
+    // intentionally do NOT get a salesperson here yet — wiring an actual
+    // per-MedRep mapping is still future work.
+    if (isTestOrder) {
+      body.salesperson_name = 'TEST | MEDREP';
+    }
+
+    // Aug 30, 2026 (3): "Doctor Name" and "Source" — confirmed live (via
+    // ZohoInventory_get_sales_order on an existing real Sales Order in this
+    // exact org) that both are already configured as custom fields here,
+    // with these exact customfield_ids:
+    //   cf_doctor_name (string)   -> 2254168001890600053
+    //   cf_source      (dropdown) -> 2254168001929089177, whose existing
+    //     option labels already match this app's Source dropdown 1:1 (e.g.
+    //     "Patient order referred by doctor"), so sending the plain label
+    //     as `value` resolves to the matching option rather than needing
+    //     its `selected_option_id`.
+    // Aug 30, 2026 (4): "Invoicing From" — same discovery, same org: this is
+    // NOT a second Zoho organization (as ZOHO_SALES_ORDER_FIELD_MAPPING.md
+    // originally assumed) — it's just another already-configured custom
+    // field here:
+    //   cf_invoicing_from (dropdown) -> 2254168001900812580, options
+    //     "2mg Incorporated" / "Getmeds Philippines Inc." matching this
+    //     app's own Invoicing From dropdown 1:1.
+    // Only sent when the order actually has a value — an empty/omitted
+    // custom field is simply left blank in Zoho rather than overwritten
+    // with an empty string.
+    const customFields = [];
+    if (orderData.doctor_name) {
+      customFields.push({ customfield_id: '2254168001890600053', value: orderData.doctor_name });
+    }
+    if (orderData.order_source) {
+      customFields.push({ customfield_id: '2254168001929089177', value: orderData.order_source });
+    }
+    if (orderData.invoicing_from) {
+      customFields.push({ customfield_id: '2254168001900812580', value: orderData.invoicing_from });
+    }
+    if (customFields.length) {
+      body.custom_fields = customFields;
+    }
+
     const result = await this._request('POST', '/salesorders', { body });
     return { code: 0, message: 'Sales order created successfully', salesorder: result.salesorder };
   }

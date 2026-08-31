@@ -52,6 +52,38 @@ function migrate() {
   ensureColumn('products', 'zoho_stock', 'REAL');
   ensureColumn('products', 'zoho_price', 'REAL');
 
+  // Aug 30, 2026: "Create New Order" form redesign — new order-level fields
+  // (see schema.sql's `orders` table comment and
+  // ZOHO_SALES_ORDER_FIELD_MAPPING.md for what each maps to in Zoho).
+  ensureColumn('orders', 'sales_order_date', 'TEXT');
+  ensureColumn('orders', 'intake_delivery_method', 'TEXT');
+  ensureColumn('orders', 'intake_terms', 'TEXT');
+  ensureColumn(
+    'orders',
+    'invoicing_from',
+    "TEXT CHECK(invoicing_from IS NULL OR invoicing_from IN ('2mg Incorporated', 'Getmeds Philippines Inc.'))"
+  );
+
+  // Aug 30, 2026 (2): Payment Terms — mirrors the same-named field on
+  // Zoho's own Sales Order screen (Net 15 / 30 days / 45 Day / BPO WALLET /
+  // 60 Day / DSWD/PCSO, or a custom typed value). Free text, not an enum —
+  // Zoho's own field accepts a custom value too.
+  ensureColumn('orders', 'intake_payment_terms', 'TEXT');
+
+  // Same redesign — per-line Discount/Tax on order_items (see schema.sql's
+  // `order_items` table comment). Defaulted so existing rows read as
+  // line_total = subtotal (zero discount, zero tax), unchanged from before.
+  ensureColumn('order_items', 'discount_amount', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn('order_items', 'tax_percent', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn('order_items', 'tax_label', 'TEXT');
+  ensureColumn('order_items', 'line_total', 'REAL NOT NULL DEFAULT 0');
+
+  // Aug 31, 2026: last-known Zoho-side Sales Order status, so the "edited in
+  // Zoho" webhook handler can detect a real status transition (e.g. someone
+  // clicked "Confirm" in Zoho) and log it distinctly from a field edit — see
+  // schema.sql's `orders` table comment.
+  ensureColumn('orders', 'zoho_so_status', 'TEXT');
+
   console.log('✅ Migration completed successfully.');
 }
 

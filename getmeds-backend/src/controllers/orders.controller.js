@@ -355,6 +355,11 @@ exports.syncFromZoho = async (req, res, next) => {
             `).run(order.id, trackingNumber, courier, now, now);
           }
 
+          // Aug 31, 2026 (3): stop at tracking_shared — same fix as the live
+          // webhook handler (webhook.controller.js). Dispatch is not the end
+          // of the order; Finance still has to invoice it (see the
+          // ZOHO_INVOICE_DRAFTED backfill branch below), so this no longer
+          // auto-jumps all the way to completed.
           let cascadeStatus = order.status;
           if (['ready_for_dispatch', 'picking_packing'].includes(order.status)) {
             cascadeStatus = 'dispatched';
@@ -372,18 +377,13 @@ exports.syncFromZoho = async (req, res, next) => {
           db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(cascadeStatus, now, order.id);
           logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus: cascadeStatus, actorId: req.user?.id || null, actorName: `${req.user?.name || 'User'} (manual Zoho sync)`, notes: `${courier || 'Courier'}: ${trackingNumber}` });
 
-          const trackingSharedStatus = cascadeStatus;
-          cascadeStatus = 'completed';
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(cascadeStatus, now, order.id);
-          logEvent({ orderId: order.id, eventType: 'ORDER_COMPLETED', oldStatus: trackingSharedStatus, newStatus: cascadeStatus, actorId: req.user?.id || null, actorName: `${req.user?.name || 'User'} (manual Zoho sync)` });
-
           newStatus = cascadeStatus;
 
           notify({
             orderId: order.id,
             recipientIds: [order.medrep_user_id],
             message: `Order ${order.getmeds_order_id} shipped via Zoho. Courier: ${courier || 'TBD'}, Tracking: ${trackingNumber}.`,
-            eventType: 'ORDER_COMPLETED',
+            eventType: 'ORDER_DISPATCHED',
             orderData: { ...order, status: newStatus, tracking_number: trackingNumber, courier }
           });
         })();
@@ -416,6 +416,58 @@ exports.syncFromZoho = async (req, res, next) => {
         })();
 
         action = 'PACKAGE_BACKFILLED';
+      } else if (Array.isArray(salesorder.invoices) && salesorder.invoices.length && !alreadyLogged('ZOHO_INVOICE_DRAFTED') && order.status !== 'cancelled') {
+        // Aug 31, 2026 (3): Invoice backfill — this endpoint previously had
+        // no way to catch up a missed "invoice.created" webhook at all (only
+        // SO confirm/cancel and dispatch/package had a fallback here). Reads
+        // straight from the Sales Order's own `invoices` array (confirmed
+        // live via ZohoInventory_get_sales_order — Zoho nests an array of
+        // {invoice_id, invoice_number, ...} there once one exists), same
+        // pattern as the packages/shipment reads just above. Deliberately NOT
+        // excluded for order.status === 'completed' (only 'cancelled') —
+        // unlike the dispatch backfill above, an order can legitimately reach
+        // this branch already sitting at 'completed' from before the
+        // premature-auto-complete bug was fixed, and it should still be
+        // possible to backfill the real invoice record onto it.
+        const latestInvoice = salesorder.invoices[salesorder.invoices.length - 1];
+        const zohoInvoiceId = latestInvoice.invoice_id;
+        const zohoInvoiceNumber = latestInvoice.invoice_number;
+
+        newStatus = order.status;
+        if (['so_created', 'waiting_for_payment', 'tracking_shared'].includes(order.status)) {
+          newStatus = 'invoice_drafted';
+        }
+
+        db.transaction(() => {
+          db.prepare(`
+            UPDATE orders
+            SET status = ?, zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number),
+                updated_at = ?
+            WHERE id = ?
+          `).run(newStatus, zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
+
+          logEvent({
+            orderId: order.id,
+            eventType: 'ZOHO_INVOICE_DRAFTED',
+            oldStatus: order.status,
+            newStatus,
+            actorId: req.user?.id || null,
+            actorName: `${req.user?.name || 'User'} (manual Zoho sync)`,
+            notes: `Invoice found in Zoho (${zohoInvoiceNumber || zohoInvoiceId}) — backfilled by manual sync; the live webhook did not reach this app when it actually happened`,
+            metadata: { zohoInvoiceId, zohoInvoiceNumber, source: 'manual_reconcile' }
+          });
+
+          const financeIds = getUserIdsByRole('finance');
+          notify({
+            orderId: order.id,
+            recipientIds: Array.from(new Set([order.medrep_user_id, ...financeIds].filter(Boolean))),
+            message: `Zoho Invoice ${zohoInvoiceNumber || ''} drafted for ${order.getmeds_order_id}.`,
+            eventType: 'INVOICE_DRAFTED',
+            orderData: { ...order, status: newStatus }
+          });
+        })();
+
+        action = 'INVOICE_BACKFILLED';
       }
     }
 
@@ -431,6 +483,62 @@ exports.syncFromZoho = async (req, res, next) => {
         events
       }
     });
+  } catch (err) { next(err); }
+};
+
+// Manual, on-demand PUSH of a failed Zoho Sales Order sync — the opposite
+// direction from syncFromZoho above (which pulls). Added Aug 30, 2026 when
+// the automatic 30s background retry loop (zohoRetryService.start(), see
+// server.js) was switched off by default: a failed sync used to keep
+// retrying itself forever, filling the audit timeline with repeats while a
+// real problem was being diagnosed. This is the replacement — a single
+// explicit retry per click, with no backoff window to wait out (unlike the
+// background loop, it ignores zoho_sync_queue.next_attempt_at and
+// zoho_sync_queue.status entirely, so it works even on a row already
+// marked 'failed_permanent' after exhausting its automatic attempts).
+exports.retryZohoSync = async (req, res, next) => {
+  try {
+    const order = db.prepare(`
+      SELECT o.*, c.name as customer_name, u.name as medrep_name, u.email as medrep_email, u.id as medrep_user_id
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN users u ON o.medrep_id = u.id
+      WHERE o.id = ?
+    `).get(req.params.id);
+
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    }
+    if (order.zoho_sync_status !== 'failed') {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'NOTHING_TO_RETRY',
+          message: `This order's Zoho sync status is '${order.zoho_sync_status}', not 'failed' — there is nothing queued to retry.`
+        }
+      });
+    }
+
+    // Most recent queue row for this order, regardless of its own status —
+    // deliberately not filtered to status='pending' so a row that already
+    // hit 'failed_permanent' (5 automatic attempts exhausted) can still be
+    // retried manually here.
+    const row = db.prepare(`
+      SELECT * FROM zoho_sync_queue WHERE order_id = ? ORDER BY created_at DESC LIMIT 1
+    `).get(order.id);
+
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_QUEUED', message: 'No Zoho sync record was found queued for this order.' }
+      });
+    }
+
+    const result = await zohoRetryService.processOne(row);
+    const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+
+    res.json({ success: true, data: { order: updatedOrder, result } });
   } catch (err) { next(err); }
 };
 
@@ -453,17 +561,46 @@ exports.create = async (req, res, next) => {
       // paper/spreadsheet order form (see schema.sql's `orders` table
       // comment). Purely informational — never required, and never part of
       // the Zoho payload built below (zohoPayload only ever carries
-      // customer/items/address/total).
+      // customer/items/address/total). courier/hospital_name/patient_name/
+      // mode_of_payment/pls_give_note are kept accepted here for backward
+      // compatibility (tests/orderIntakeFields.test.js, and any older
+      // client) even though the Aug 30, 2026 order form redesign no longer
+      // collects them.
       courier, doctor_name, hospital_name, patient_name, mode_of_payment,
-      receiver_name, receiver_contact_no, order_source, pls_give_note
+      receiver_name, receiver_contact_no, order_source, pls_give_note,
+      // Aug 30, 2026: "Create New Order" form redesign — see schema.sql's
+      // `orders`/`order_items` comments and ZOHO_SALES_ORDER_FIELD_MAPPING.md.
+      // All optional server-side (so older clients / the tests above keep
+      // working unchanged) even though the new form marks Source and
+      // Invoicing From as required — that's a client-side UX guarantee, not
+      // a data-integrity one this endpoint should enforce by rejecting
+      // requests from anything else that talks to this API.
+      delivery_method, terms, invoicing_from,
+      // Aug 30, 2026 (2): Payment Terms — mirrors the same-named field on
+      // Zoho's own Sales Order screen (Net 15 / 30 days / 45 Day /
+      // BPO WALLET / 60 Day / DSWD/PCSO, or a custom typed value). Same
+      // "optional, free text, not wired into the Zoho payload yet" pattern
+      // as delivery_method/terms above.
+      payment_terms
     } = req.body;
     const clean = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
     const effectiveActor = resolveActor(req.user, 'medrep');
+
+    const ALLOWED_INVOICING_FROM = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 
     // Validation
     if (!customer_id) return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'customer_id is required' } });
     if (!items || !Array.isArray(items) || items.length === 0) return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'At least one order item is required' } });
     if (!delivery_address) return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'delivery_address is required' } });
+    if (invoicing_from != null && clean(invoicing_from) && !ALLOWED_INVOICING_FROM.includes(clean(invoicing_from))) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: `invoicing_from must be one of: ${ALLOWED_INVOICING_FROM.join(', ')}`
+        }
+      });
+    }
 
     // Verify customer exists
     const customer = db.prepare('SELECT * FROM customers WHERE id = ? AND is_active = 1').get(customer_id);
@@ -483,14 +620,38 @@ exports.create = async (req, res, next) => {
       }
       const product = db.prepare('SELECT * FROM products WHERE id = ? AND is_active = 1').get(item.product_id);
       if (!product) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Product ${item.product_id} not found` } });
-      const subtotal = product.unit_price * item.quantity;
-      total_amount += subtotal;
-      resolvedItems.push({ 
-        product_id: item.product_id, 
-        quantity: item.quantity, 
-        unit_price: product.unit_price, 
-        subtotal, 
-        sku: product.sku, 
+
+      // Aug 30, 2026: Rate is now an editable line-item field on the order
+      // form (matching a Zoho Sales Order line item, which always allows
+      // overriding the catalog rate) — falls back to the product's catalog
+      // price when not sent, so every existing caller that never sent a
+      // rate (older frontend, the tests above) behaves exactly as before.
+      const rate = (item.rate !== undefined && item.rate !== null && item.rate !== '')
+        ? Math.max(0, Number(item.rate))
+        : product.unit_price;
+      const subtotal = rate * item.quantity;
+
+      // Per-line Discount (flat currency amount) and Tax (simple flat-rate
+      // preset, e.g. "VAT 12%") — both default to zero/none, so an item
+      // that doesn't send them produces line_total === subtotal, unchanged
+      // from before this field existed.
+      const discountAmount = Math.min(subtotal, Math.max(0, Number(item.discount) || 0));
+      const taxPercent = Math.max(0, Number(item.tax_percent) || 0);
+      const taxableBase = subtotal - discountAmount;
+      const taxAmount = taxableBase * (taxPercent / 100);
+      const lineTotal = taxableBase + taxAmount;
+
+      total_amount += lineTotal;
+      resolvedItems.push({
+        product_id: item.product_id,
+        quantity: item.quantity,
+        unit_price: rate,
+        subtotal,
+        discount_amount: discountAmount,
+        tax_percent: taxPercent,
+        tax_label: clean(item.tax_label),
+        line_total: lineTotal,
+        sku: product.sku,
         name: product.name,
         zoho_item_id: product.zoho_item_id,
         unit: product.unit
@@ -503,6 +664,11 @@ exports.create = async (req, res, next) => {
     const isCredit = resolvedCustomerType === 'credit';
     const finalStatus = isDraft ? 'draft' : (isCredit ? 'ready_for_dispatch' : 'waiting_for_payment');
     const now = new Date().toISOString();
+    // "Sales Order Date (Automatic Today)" on the form — always set here,
+    // server-side, to today's date. There is no client override; a
+    // sales_order_date sent in the request body (there isn't one — the
+    // frontend never sends it) would be ignored regardless.
+    const salesOrderDate = now.slice(0, 10);
 
     // 2. Create Zoho SO *before* opening the DB transaction below.
     let zohoResult = null;
@@ -516,8 +682,29 @@ exports.create = async (req, res, next) => {
       zoho_customer_id: customer.zoho_contact_id || null,
       total_amount,
       delivery_address,
-      items: resolvedItems
+      items: resolvedItems,
+      // Aug 30, 2026 (3): wired to Zoho's "Doctor Name" / "Source" custom
+      // fields on the Sales Order (see LiveZohoAdapter.createSalesOrder —
+      // confirmed live via ZohoInventory_get_sales_order that this org
+      // already has both configured, with matching customfield_ids).
+      doctor_name: clean(doctor_name),
+      order_source: clean(order_source),
+      // Aug 30, 2026 (4): wired to Zoho's "Invoicing From" custom field —
+      // same discovery as Doctor Name/Source: this org already has
+      // cf_invoicing_from configured (not a separate Zoho organization, as
+      // ZOHO_SALES_ORDER_FIELD_MAPPING.md previously assumed before this
+      // was checked live).
+      invoicing_from: clean(invoicing_from)
     };
+    // Aug 30, 2026: delivery_method, terms, and each line's discount/tax are
+    // all captured and stored below (in the orders/order_items tables) but
+    // are still NOT added to this payload — wiring each into an actual Zoho
+    // call is a deliberately separate, later piece of work (Doctor
+    // Name/Source/Invoicing From are the first fields off that list to
+    // actually get wired — see above). See
+    // ZOHO_SALES_ORDER_FIELD_MAPPING.md for exactly which Zoho Sales Order
+    // field each remaining one is meant to land on.
+    //
     // Only ever creates the Zoho Sales Order (as a plain Draft — nothing
     // here confirms it). Confirming, invoicing, and recording payment all
     // happen directly in Zoho by Finance now, never through this app.
@@ -545,10 +732,11 @@ exports.create = async (req, res, next) => {
           delivery_address, delivery_notes,
           intake_courier, intake_doctor, intake_hospital, intake_patient, intake_mop,
           intake_receiver, intake_contact_no, intake_source, intake_pls_give,
+          sales_order_date, intake_delivery_method, intake_terms, intake_payment_terms, invoicing_from,
           zoho_so_id, zoho_so_number, zoho_sync_status,
           created_at, submitted_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         getmedsOrderId,
         customer_id,
@@ -567,6 +755,11 @@ exports.create = async (req, res, next) => {
         clean(receiver_contact_no),
         clean(order_source),
         clean(pls_give_note),
+        salesOrderDate,
+        clean(delivery_method),
+        clean(terms),
+        clean(payment_terms),
+        clean(invoicing_from),
         zohoResult ? zohoResult.salesorder.salesorder_id : null,
         zohoResult ? zohoResult.salesorder.salesorder_number : null,
         zohoSyncStatus,
@@ -578,9 +771,17 @@ exports.create = async (req, res, next) => {
       const orderId = result.lastInsertRowid;
 
       // Insert line items
-      const insItem = db.prepare('INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal) VALUES (?, ?, ?, ?, ?)');
+      const insItem = db.prepare(`
+        INSERT INTO order_items (
+          order_id, product_id, quantity, unit_price, subtotal,
+          discount_amount, tax_percent, tax_label, line_total
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
       for (const ri of resolvedItems) {
-        insItem.run(orderId, ri.product_id, ri.quantity, ri.unit_price, ri.subtotal);
+        insItem.run(
+          orderId, ri.product_id, ri.quantity, ri.unit_price, ri.subtotal,
+          ri.discount_amount, ri.tax_percent, ri.tax_label, ri.line_total
+        );
       }
 
       // 2. Evaluate Workflow Gate & Create Child Records
@@ -708,7 +909,13 @@ exports.submit = async (req, res, next) => {
       zoho_customer_id: order.customer_zoho_contact_id || null,
       total_amount: order.total_amount,
       delivery_address: order.delivery_address,
-      items
+      items,
+      // Same wiring as `create` above — pulled from the draft row this
+      // order was created from rather than req.body, since submit() acts
+      // on an already-stored draft.
+      doctor_name: order.intake_doctor,
+      order_source: order.intake_source,
+      invoicing_from: order.invoicing_from
     };
     let zohoResult = null;
     let zohoSyncStatus = 'pending';

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -15,7 +15,12 @@ import {
   Sparkles,
   Package,
   ClipboardList,
-  Loader2
+  FileText,
+  Paperclip,
+  Loader2,
+  X,
+  CalendarDays,
+  UserRound
 } from 'lucide-react';
 import { useDebug } from '../../context/DebugContext';
 import { useAuth } from '../../hooks/useAuth';
@@ -23,31 +28,105 @@ import { useAuth } from '../../hooks/useAuth';
 import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress } from '../../api/queries';
 
-// Aug 27, 2026: "Order Intake Details" — a single label-left, spreadsheet
-// styled block (matching the team's old paper/Google-Forms order sheet)
-// that sits above the product cart. Every field here is OPTIONAL and
-// purely informational: none of it is required to submit, and none of it
-// is ever sent to Zoho (orders.controller.js's zohoPayload only ever
-// carries customer/items/address/total — see schema.sql's `orders` table
-// comment for the full list of new intake_* columns). "Order" and
-// "Amount" are read-only — they mirror the product cart below rather than
-// being typed in separately, so there's only ever one source of truth for
-// what's actually being ordered and what it costs.
-const IntakeRow = ({ label, children, alt, required }) => (
-  <div
-    className={`grid grid-cols-1 sm:grid-cols-[168px_1fr] border-t border-emerald-900/10 ${
-      alt ? 'bg-emerald-50/80' : 'bg-white'
-    }`}
-  >
-    <div className="px-4 py-2.5 flex items-start sm:items-center font-bold text-[11px] sm:text-xs text-slate-800 sm:border-r border-emerald-900/10 uppercase tracking-wide">
-      {label} {required && <span className="text-state-error ml-0.5">*</span>} :
-    </div>
-    <div className="px-4 py-2 flex items-center min-w-0">{children}</div>
+// Aug 30, 2026: "Create New Order" form redesign. Replaces the old
+// paper/spreadsheet-styled "Order Intake Details" block (label-left rows,
+// alternating green/white bars, a live-ticking Timestamp header) with a
+// cleaner, card-based layout, and swaps the old free-form intake fields
+// (Courier, Hospital, Patient, MOP, "Pls Give") for a set that lines up
+// with an actual Zoho Inventory Sales Order — see
+// getmeds-backend/ZOHO_SALES_ORDER_FIELD_MAPPING.md for exactly which
+// field here is meant to land on which Zoho field once the real Zoho push
+// (deliberately NOT done yet — see that doc) is wired up.
+//
+// Delivery Address / Receiver Name / Contact No. are kept (not in the
+// field list this was redesigned from) because Dispatch still depends on
+// delivery_address being present to actually ship an order — dropping it
+// would strand every credit order with nowhere to deliver to.
+
+// Source options — exactly the dropdown Zoho already shows on its own
+// Sales Order "Source" field (matched 1:1 so the value picked here is
+// already valid the day this gets wired into a real Zoho payload).
+const SOURCE_OPTIONS = [
+  'Doctor order',
+  'Patient order referred by doctor',
+  'Patient order referred by patient',
+  'Emergency purchase',
+  'Hospital PO',
+  'Distributor order'
+];
+
+// Exactly the two legal entities orders may be invoiced under — enforced
+// here AND server-side (orders.controller.js create()).
+const INVOICING_FROM_OPTIONS = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
+
+// Common delivery methods — offered as suggestions via a native <datalist>,
+// not a locked dropdown, since Zoho's own delivery_method field is free
+// text (see the mapping doc).
+const DELIVERY_METHOD_SUGGESTIONS = [
+  'Own Rider / Company Vehicle',
+  'LBC Express',
+  'Grab Express',
+  'J&T Express',
+  'Lalamove',
+  'Customer Pick-up',
+  'Distributor Delivery'
+];
+
+// Payment Terms — mirrors the exact list configured on Zoho's own Sales
+// Order screen (pulled directly from Zoho's Payment Terms dropdown, Aug 30,
+// 2026). Same pattern as Delivery Method above: suggestions via a native
+// <datalist>, not a locked dropdown, since Zoho's own field accepts a
+// custom typed value too (not just one of these presets).
+const PAYMENT_TERMS_SUGGESTIONS = [
+  'Net 15',
+  '30 days',
+  '45 Day',
+  'BPO WALLET',
+  '60 Day',
+  'DSWD/PCSO'
+];
+
+// Simple flat-rate tax presets for the per-line Tax column. Zero-Rated and
+// VAT-Exempt both compute to ₱0 tax but are kept as distinct choices since
+// they mean different things for Finance's own records — which one applies
+// isn't something this form should guess, so nothing is pre-selected.
+const TAX_OPTIONS = [
+  { value: 'none', label: 'No Tax', percent: 0 },
+  { value: 'vat12', label: 'VAT 12%', percent: 12 },
+  { value: 'zero_rated', label: 'Zero-Rated (0%)', percent: 0 },
+  { value: 'vat_exempt', label: 'VAT-Exempt', percent: 0 }
+];
+const getTaxOption = (value) => TAX_OPTIONS.find((t) => t.value === value) || TAX_OPTIONS[0];
+
+const computeLineAmounts = (item) => {
+  const qty = Number(item.quantity) || 0;
+  const rate = Number(item.rate) || 0;
+  const discount = Math.min(qty * rate, Math.max(0, Number(item.discount) || 0));
+  const subtotal = qty * rate;
+  const taxableBase = subtotal - discount;
+  const taxPercent = getTaxOption(item.taxOption).percent;
+  const taxAmount = taxableBase * (taxPercent / 100);
+  const amount = taxableBase + taxAmount;
+  return { subtotal, discount, taxAmount, amount };
+};
+
+// Shared field wrapper — label on top, optional required marker and helper
+// text underneath. Used throughout the redesigned "Order Details" card so
+// every field reads the same way instead of the old spreadsheet grid.
+const Field = ({ label, required, help, className = '', children }) => (
+  <div className={className}>
+    <label className="block text-xs font-bold uppercase tracking-wide text-ink-secondary mb-1.5">
+      {label} {required && <span className="text-state-error">*</span>}
+    </label>
+    {children}
+    {help && <p className="text-[11px] text-ink-secondary mt-1">{help}</p>}
   </div>
 );
 
-const textInputClass =
-  'w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs transition-colors';
+const inputClass =
+  'w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs transition-colors disabled:bg-surface disabled:text-ink-secondary';
+const readOnlyPillClass =
+  'w-full bg-surface border border-slate-200 rounded-lg px-3 py-2 text-sm font-semibold text-ink-primary flex items-center gap-2';
 
 /**
  * OrderForm Component
@@ -55,7 +134,7 @@ const textInputClass =
  * Implements:
  * - Step 1: React Query cached master data from useOrderData
  * - Step 2: Autocomplete integration via <CustomerAutocomplete /> and <ProductAutocomplete />
- * - Step 3: Cart state, .reduce() totals, useMutation to /api/orders, and fast-track debug button.
+ * - Step 3: Cart state, per-line discount/tax, .reduce() totals, useMutation to /api/orders, and fast-track debug button.
  */
 const OrderForm = ({ onCancel, onSuccess }) => {
   const navigate = useNavigate();
@@ -67,32 +146,31 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const [customerId, setCustomerId] = useState('');
   const [customerType, setCustomerType] = useState('credit');
   const [deliveryAddress, setDeliveryAddress] = useState('');
-  const [deliveryNotes, setDeliveryNotes] = useState('');
-
-  // Order-intake fields (all optional — see IntakeRow comment above)
-  const [courier, setCourier] = useState('');
-  const [doctorName, setDoctorName] = useState('');
-  const [hospitalName, setHospitalName] = useState('');
-  const [patientName, setPatientName] = useState('');
-  const [mop, setMop] = useState('');
+  const [deliveryNotes, setDeliveryNotes] = useState(''); // "Remarks"
   const [receiverName, setReceiverName] = useState('');
   const [receiverContactNo, setReceiverContactNo] = useState('');
-  const [orderSource, setOrderSource] = useState('');
-  const [plsGiveNote, setPlsGiveNote] = useState('');
 
-  // Live clock for the TIMESTAMP header — display only, the real
-  // created_at timestamp is stamped server-side when the order is saved.
-  const [now, setNow] = useState(new Date());
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
-  const formattedTimestamp = now.toLocaleString('en-PH', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  // New, Zoho-aligned order-level fields (Aug 30, 2026 redesign)
+  const [deliveryMethod, setDeliveryMethod] = useState('');
+  const [doctorName, setDoctorName] = useState('');
+  const [orderSource, setOrderSource] = useState('');
+  const [invoicingFrom, setInvoicingFrom] = useState('');
+  const [termsAndConditions, setTermsAndConditions] = useState('');
+  const [paymentTerms, setPaymentTerms] = useState('');
+  // UI-only for now — files are listed here but never uploaded anywhere
+  // (see the mapping doc: Zoho's `documents` field needs each file already
+  // uploaded to Zoho first, which isn't built yet). Kept purely so the form
+  // matches the field list and the UX is ready for that later.
+  const [attachedFiles, setAttachedFiles] = useState([]);
+
+  // "Sales Order Date (Automatic Today)" — fixed to today, never editable.
+  // The server independently stamps this the same way on save, so this is
+  // display-only and never sent with the request.
+  const todayLabel = new Date().toLocaleDateString('en-PH', {
+    year: 'numeric', month: 'long', day: 'numeric'
   });
 
-  // Cart State: [{ productId, name, sku, price, unit, quantity }]
+  // Cart State: [{ productId, name, sku, quantity, rate, discount, taxOption }]
   const [items, setItems] = useState([]);
 
   // Post-submission success state
@@ -104,6 +182,29 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const { data: products = [], isLoading: loadingProducts } = useProducts();
 
   const selectedCustomer = customers.find(c => String(c.id) === String(customerId));
+
+  // Aug 30, 2026: the backend stamps every live Zoho Sales Order for
+  // TEST-CUSTOMER_1 with a fixed "TEST | MEDREP" Salesperson (see
+  // LiveZohoAdapter.createSalesOrder — this Zoho org requires a Salesperson
+  // on every Sales Order, and the real per-MedRep mapping is still deferred
+  // work). Show that same value here instead of the logged-in user's name
+  // whenever TEST-CUSTOMER_1 is selected, so what's on screen matches what
+  // actually reaches Zoho. Any other customer still shows the real MedRep
+  // name, unaffected — this only ever displays; it isn't submitted to the
+  // backend at all today.
+  const TEST_CUSTOMER_ZOHO_ID = '2254168002003111004'; // mirrors ZOHO_TEST_CUSTOMER_ID in the backend .env
+  const isTestCustomerSelected = !!selectedCustomer && (
+    selectedCustomer.zoho_contact_id === TEST_CUSTOMER_ZOHO_ID || selectedCustomer.name === 'TEST-CUSTOMER_1'
+  );
+  const displaySalesPerson = isTestCustomerSelected ? 'TEST | MEDREP' : (user?.name || '—');
+
+  // Doctor Name is manual free text, but pre-filled with suggestions drawn
+  // from customers already tagged category='doctor' (populated by
+  // Management in the Clients Directory, itself sourced from the Zoho
+  // contacts sync) — "manual, but if there's a doctor from Zoho, get it."
+  const doctorSuggestions = Array.from(
+    new Set(customers.filter(c => c.category === 'doctor').map(c => c.name).filter(Boolean))
+  );
 
   // Aug 27, 2026: fetching the live address from Zoho (see below) — shown
   // as a small inline spinner next to the Address field so a MedRep knows
@@ -178,20 +279,32 @@ const OrderForm = ({ onCancel, onSuccess }) => {
           productId: product.id,
           name: product.name,
           sku: product.sku,
-          price: Number(product.unit_price || 0),
+          rate: Number(product.unit_price || 0),
           unit: product.unit || 'unit',
           quantity: 1,
+          discount: 0,
+          taxOption: 'none'
         }
       ]);
       toast.success(`Added ${product.name} to order`);
     }
   };
 
-  const handleUpdateQuantity = (index, newQty) => {
-    const qty = parseInt(newQty, 10);
-    if (isNaN(qty) || qty < 1) return;
+  // Generic per-line field updater — used by Quantity, Rate, Discount, and
+  // Tax so all four share the exact same update/validation path.
+  const handleUpdateItemField = (index, field, value) => {
     const updated = [...items];
-    updated[index].quantity = qty;
+    if (field === 'quantity') {
+      const qty = parseInt(value, 10);
+      if (isNaN(qty) || qty < 1) return;
+      updated[index].quantity = qty;
+    } else if (field === 'rate' || field === 'discount') {
+      const num = value === '' ? 0 : Number(value);
+      if (isNaN(num) || num < 0) return;
+      updated[index][field] = num;
+    } else if (field === 'taxOption') {
+      updated[index].taxOption = value;
+    }
     setItems(updated);
   };
 
@@ -199,24 +312,59 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     setItems(items.filter((_, idx) => idx !== index));
   };
 
-  // Step 3: Dynamic Grand Total calculation via .reduce()
-  const grandTotal = items.reduce((total, item) => total + (item.price * item.quantity), 0);
+  const handleFilesSelected = (e) => {
+    const newFiles = Array.from(e.target.files || []);
+    if (newFiles.length) setAttachedFiles([...attachedFiles, ...newFiles]);
+    e.target.value = ''; // allow re-selecting the same file name later
+  };
+  const handleRemoveFile = (index) => {
+    setAttachedFiles(attachedFiles.filter((_, idx) => idx !== index));
+  };
 
-  // Read-only "ORDER" summary row — mirrors the cart below, single source
-  // of truth (nothing here is separately typed in).
-  const orderSummaryText = items.length
-    ? items.map(i => `${i.name} x${i.quantity}`).join('; ')
-    : '';
+  // Step 3: Dynamic totals — Subtotal / Discount / Tax / Grand Total, each
+  // summed from the per-line computation so the breakdown footer and the
+  // Grand Total always agree with what each line actually shows.
+  const lineAmounts = items.map(computeLineAmounts);
+  const totals = lineAmounts.reduce(
+    (acc, l) => ({
+      subtotal: acc.subtotal + l.subtotal,
+      discount: acc.discount + l.discount,
+      tax: acc.tax + l.taxAmount,
+      grandTotal: acc.grandTotal + l.amount
+    }),
+    { subtotal: 0, discount: 0, tax: 0, grandTotal: 0 }
+  );
+  const grandTotal = totals.grandTotal;
 
-  // Form Validation
+  const peso = (n) => `₱${Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  // Form Validation — Source and Invoicing From are required on this form
+  // (matching Zoho's own "Source *" field and the two-entity requirement)
+  // but deliberately NOT enforced server-side beyond "must be a valid
+  // value if present", so this stays a client-side UX guarantee rather
+  // than breaking any other caller of POST /api/orders.
   const isFormValid = Boolean(
     customerId &&
     deliveryAddress.trim() &&
+    orderSource &&
+    invoicingFrom &&
     items.length > 0 &&
-    items.every(i => i.productId && Number(i.quantity) > 0)
+    items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0)
   );
 
   // Step 3: [TEST MODE: Auto-Fill] Logic
+  //
+  // Aug 30, 2026: with the dropdown (and the server-side gate) currently
+  // restricted to TEST-CUSTOMER_1 only, `customers.find(c => c.type ===
+  // 'credit')` always resolves to that one customer — so this button now
+  // reproduces the exact configuration that's been verified end-to-end to
+  // reach Zoho as a real Draft Sales Order (see LiveZohoAdapter's
+  // TEST | MEDREP salesperson stamp): Lalamove delivery, Dr. Test,
+  // "Patient order referred by doctor" source, invoiced from 2mg
+  // Incorporated, one line of HydroxyGet 500 at the same qty/rate used in
+  // that verified test. Receiver Name/Contact No. are left to
+  // handleCustomerChange below, which already pulls them from the
+  // customer's own Zoho contact person — no need to hardcode those here.
   const handleAutoFillCredit = () => {
     if (!customers.length || !products.length) {
       toast.error('Master data is still loading from server...');
@@ -226,43 +374,22 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     const creditCust = customers.find(c => c.type === 'credit') || customers[0];
     handleCustomerChange(creditCust);
     setDeliveryAddress(creditCust.address || "St. Luke's Medical Center - 279 E Rodriguez Sr. Ave, Quezon City");
-    setDeliveryNotes('Institutional Credit Order. Deliver to Receiving Bay. Ref: PO-2026-CREDIT.');
-    setCourier('LBC Express');
-    setHospitalName(creditCust.name || '');
-    setMop('Credit Terms');
-    setOrderSource('Repeat Customer');
+    setDeliveryNotes('');
+    setDeliveryMethod('Lalamove');
+    setDoctorName('Dr. Test');
+    setOrderSource('Patient order referred by doctor');
+    setInvoicingFrom('2mg Incorporated');
+    setTermsAndConditions('');
 
-    const sampleItems = [];
-    if (products.length >= 1) {
-      sampleItems.push({
-        productId: products[0].id,
-        name: products[0].name,
-        sku: products[0].sku,
-        price: Number(products[0].unit_price || 0),
-        unit: products[0].unit || 'box',
-        quantity: 20
-      });
-    }
-    if (products.length >= 2) {
-      sampleItems.push({
-        productId: products[1].id,
-        name: products[1].name,
-        sku: products[1].sku,
-        price: Number(products[1].unit_price || 0),
-        unit: products[1].unit || 'box',
-        quantity: 10
-      });
-    }
-    if (products.length >= 3) {
-      sampleItems.push({
-        productId: products[2].id,
-        name: products[2].name,
-        sku: products[2].sku,
-        price: Number(products[2].unit_price || 0),
-        unit: products[2].unit || 'bottle',
-        quantity: 5
-      });
-    }
+    const testProduct = products.find(p => p.sku === 'GM-4533')
+      || products.find(p => /hydroxyget/i.test(p.name || ''))
+      || products[0];
+
+    const sampleItems = testProduct ? [{
+      productId: testProduct.id, name: testProduct.name, sku: testProduct.sku,
+      rate: 31.25, unit: testProduct.unit || 'pcs',
+      quantity: 100, discount: 0, taxOption: 'none'
+    }] : [];
 
     setItems(sampleItems);
     toast.success(`⚡ Auto-filled Credit Order (${creditCust.name})`, { icon: '🚀', duration: 3000 });
@@ -278,30 +405,25 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     handleCustomerChange(directCust);
     setDeliveryAddress(directCust.address || "Unit 402, Greenhills Tower, San Juan, Metro Manila");
     setDeliveryNotes('Direct Patient Order. Advance payment verification required before dispatch.');
-    setCourier('Grab Express');
-    setPatientName(directCust.name || '');
-    setMop('GCash');
-    setOrderSource('Walk-in');
+    setDeliveryMethod('Grab Express');
+    setDoctorName('');
+    setOrderSource('Patient order referred by patient');
+    setInvoicingFrom('2mg Incorporated');
+    setTermsAndConditions('Full payment required prior to dispatch.');
 
     const sampleItems = [];
     if (products.length >= 1) {
       sampleItems.push({
-        productId: products[0].id,
-        name: products[0].name,
-        sku: products[0].sku,
-        price: Number(products[0].unit_price || 0),
-        unit: products[0].unit || 'box',
-        quantity: 5
+        productId: products[0].id, name: products[0].name, sku: products[0].sku,
+        rate: Number(products[0].unit_price || 0), unit: products[0].unit || 'box',
+        quantity: 5, discount: 0, taxOption: 'none'
       });
     }
     if (products.length >= 2) {
       sampleItems.push({
-        productId: products[1].id,
-        name: products[1].name,
-        sku: products[1].sku,
-        price: Number(products[1].unit_price || 0),
-        unit: products[1].unit || 'box',
-        quantity: 2
+        productId: products[1].id, name: products[1].name, sku: products[1].sku,
+        rate: Number(products[1].unit_price || 0), unit: products[1].unit || 'box',
+        quantity: 2, discount: 0, taxOption: 'none'
       });
     }
 
@@ -327,22 +449,26 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         customer_id: parseInt(customerId),
         items: items.map(i => ({
           product_id: parseInt(i.productId),
-          quantity: parseInt(i.quantity)
+          quantity: parseInt(i.quantity),
+          rate: Number(i.rate),
+          discount: Number(i.discount || 0),
+          tax_percent: getTaxOption(i.taxOption).percent,
+          tax_label: getTaxOption(i.taxOption).label
         })),
         delivery_address: deliveryAddress,
         delivery_notes: deliveryNotes,
         customer_type: customerType,
-        // Optional intake fields — see IntakeRow comment above. Blank
-        // strings are normalized to NULL server-side.
-        courier,
+        // Optional intake fields — see IntakeRow-era comment history in
+        // orders.controller.js. Blank strings are normalized to NULL
+        // server-side.
         doctor_name: doctorName,
-        hospital_name: hospitalName,
-        patient_name: patientName,
-        mode_of_payment: mop,
         receiver_name: receiverName,
         receiver_contact_no: receiverContactNo,
         order_source: orderSource,
-        pls_give_note: plsGiveNote
+        delivery_method: deliveryMethod,
+        terms: termsAndConditions,
+        payment_terms: paymentTerms,
+        invoicing_from: invoicingFrom
       });
       const order = createRes.data.data.order;
       return order;
@@ -383,25 +509,21 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const handleOpenReview = (e) => {
     e.preventDefault();
     if (!isFormValid) {
-      toast.error('Please fill in all mandatory fields');
+      toast.error('Please fill in all mandatory fields (marked *)');
       return;
     }
     setIsReviewOpen(true);
   };
 
-  // Any optional intake field the MedRep actually filled in — shown in the
-  // review modal so it's double-checked before submission, same as every
-  // other field on the form.
+  // Any optional field the MedRep actually filled in — shown in the review
+  // modal so it's double-checked before submission, same as every other
+  // field on the form.
   const filledIntakeDetails = [
-    { label: 'Courier', value: courier },
+    { label: 'Delivery Method', value: deliveryMethod },
     { label: 'Doctor', value: doctorName },
-    { label: 'Hospital', value: hospitalName },
-    { label: 'Patient', value: patientName },
-    { label: 'Mode of Payment', value: mop },
     { label: 'Receiver', value: receiverName },
     { label: 'Contact No.', value: receiverContactNo },
-    { label: 'Source', value: orderSource },
-    { label: 'Pls Give', value: plsGiveNote }
+    { label: 'Terms & Conditions', value: termsAndConditions }
   ].filter(f => f.value && f.value.trim());
 
   return (
@@ -456,135 +578,142 @@ const OrderForm = ({ onCancel, onSuccess }) => {
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-visible">
         <form onSubmit={handleOpenReview} className="divide-y divide-slate-100">
 
-          {/* SECTION 1: ORDER INTAKE DETAILS (spreadsheet-style form) */}
-          <div className="p-6 sm:p-8 space-y-4">
+          {/* SECTION 1: ORDER DETAILS */}
+          <div className="p-6 sm:p-8 space-y-5">
             <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100">
               <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
                 <ClipboardList size={16} />
               </div>
-              <h2 className="text-base font-bold text-ink-primary">1. Order Intake Details</h2>
+              <h2 className="text-base font-bold text-ink-primary">1. Order Details</h2>
             </div>
 
-            <div className="rounded-xl border border-emerald-900/15 overflow-hidden shadow-2xs">
-              {/* Timestamp header bar */}
-              <div className="bg-pharmacy-green text-white flex items-center justify-between px-4 py-2.5">
-                <span className="font-bold text-[11px] sm:text-xs uppercase tracking-wider">Timestamp</span>
-                <span className="font-mono text-xs sm:text-sm font-semibold">{formattedTimestamp}</span>
-              </div>
+            <Field label="Customer Name" required>
+              <CustomerAutocomplete
+                customers={customers}
+                value={customerId}
+                onSelect={handleCustomerChange}
+                onClear={handleCustomerClear}
+                disabled={loadingCustomers}
+              />
+              {selectedCustomer && (
+                <p className="text-[11px] text-ink-secondary mt-1">
+                  {customerType === 'credit'
+                    ? 'Institutional terms — bypasses upfront payment, routes to Dispatch.'
+                    : 'Direct patient — requires Finance payment verification before picking.'}
+                </p>
+              )}
+            </Field>
 
-              <IntakeRow label="Customer" required>
-                <div className="w-full space-y-1">
-                  <CustomerAutocomplete
-                    customers={customers}
-                    value={customerId}
-                    onSelect={handleCustomerChange}
-                    onClear={handleCustomerClear}
-                    disabled={loadingCustomers}
-                  />
-                  {selectedCustomer && (
-                    <p className="text-[11px] text-ink-secondary">
-                      {customerType === 'credit'
-                        ? 'Institutional terms — bypasses upfront payment, routes to Dispatch.'
-                        : 'Direct patient — requires Finance payment verification before picking.'}
-                    </p>
-                  )}
-                </div>
-              </IntakeRow>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <Field label="Sales Order Date">
+                <span className={readOnlyPillClass}>
+                  <CalendarDays size={14} className="text-ink-secondary shrink-0" />
+                  {todayLabel}
+                </span>
+              </Field>
 
-              <IntakeRow label="Courier" alt>
-                <input type="text" value={courier} onChange={e => setCourier(e.target.value)} placeholder="e.g. LBC, Grab Express, J&T" className={textInputClass} />
-              </IntakeRow>
+              <Field label="Sales Person">
+                <span className={readOnlyPillClass}>
+                  <UserRound size={14} className="text-ink-secondary shrink-0" />
+                  {displaySalesPerson}
+                </span>
+              </Field>
 
-              <IntakeRow label="Doctor">
-                <input type="text" value={doctorName} onChange={e => setDoctorName(e.target.value)} placeholder="Referring / prescribing doctor" className={textInputClass} />
-              </IntakeRow>
+              <Field label="Delivery Method" help="Type to see suggestions, or enter your own.">
+                <input
+                  type="text"
+                  list="delivery-method-suggestions"
+                  value={deliveryMethod}
+                  onChange={e => setDeliveryMethod(e.target.value)}
+                  placeholder="e.g. LBC, Grab Express, Own Rider"
+                  className={inputClass}
+                />
+                <datalist id="delivery-method-suggestions">
+                  {DELIVERY_METHOD_SUGGESTIONS.map(opt => <option key={opt} value={opt} />)}
+                </datalist>
+              </Field>
 
-              <IntakeRow label="Hospital" alt>
-                <input type="text" value={hospitalName} onChange={e => setHospitalName(e.target.value)} placeholder="Hospital / clinic name" className={textInputClass} />
-              </IntakeRow>
+              <Field label="Payment Terms" help="Type to see suggestions (matches Zoho's list), or enter your own.">
+                <input
+                  type="text"
+                  list="payment-terms-suggestions"
+                  value={paymentTerms}
+                  onChange={e => setPaymentTerms(e.target.value)}
+                  placeholder="e.g. Net 15, 30 days"
+                  className={inputClass}
+                />
+                <datalist id="payment-terms-suggestions">
+                  {PAYMENT_TERMS_SUGGESTIONS.map(opt => <option key={opt} value={opt} />)}
+                </datalist>
+              </Field>
 
-              <IntakeRow label="Patient">
-                <input type="text" value={patientName} onChange={e => setPatientName(e.target.value)} placeholder="Patient name" className={textInputClass} />
-              </IntakeRow>
+              <Field label="Doctor Name" help="Manual entry — suggestions pulled from customers tagged as doctors.">
+                <input
+                  type="text"
+                  list="doctor-suggestions"
+                  value={doctorName}
+                  onChange={e => setDoctorName(e.target.value)}
+                  placeholder="Referring / prescribing doctor"
+                  className={inputClass}
+                />
+                <datalist id="doctor-suggestions">
+                  {doctorSuggestions.map(name => <option key={name} value={name} />)}
+                </datalist>
+              </Field>
 
-              <IntakeRow label="MOP" alt>
-                <select value={mop} onChange={e => setMop(e.target.value)} className={textInputClass}>
-                  <option value="">-- Select mode of payment --</option>
-                  <option value="Cash">Cash</option>
-                  <option value="Check">Check</option>
-                  <option value="Bank Transfer">Bank Transfer</option>
-                  <option value="GCash">GCash</option>
-                  <option value="Credit Terms">Credit Terms</option>
-                  <option value="Other">Other</option>
+              <Field label="Source" required>
+                <select value={orderSource} onChange={e => setOrderSource(e.target.value)} className={inputClass} required>
+                  <option value="">-- Select source --</option>
+                  {SOURCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                 </select>
-              </IntakeRow>
+              </Field>
 
-              <IntakeRow label="Receiver">
-                <input type="text" value={receiverName} onChange={e => setReceiverName(e.target.value)} placeholder="Who will receive the delivery" className={textInputClass} />
-              </IntakeRow>
-
-              <IntakeRow label="Contact No." alt>
-                <input type="tel" value={receiverContactNo} onChange={e => setReceiverContactNo(e.target.value)} placeholder="09XXXXXXXXX" className={textInputClass} />
-              </IntakeRow>
-
-              <IntakeRow label="Address" required>
-                <div className="w-full space-y-1">
-                  <textarea
-                    value={deliveryAddress}
-                    onChange={e => setDeliveryAddress(e.target.value)}
-                    placeholder="Complete hospital, clinic, or residential shipping address..."
-                    rows={2}
-                    className={`${textInputClass} resize-y`}
-                    required
-                  />
-                  {isFetchingZohoAddress && (
-                    <p className="text-[11px] text-ink-secondary flex items-center gap-1">
-                      <Loader2 size={11} className="animate-spin" /> Fetching this customer's address from Zoho...
-                    </p>
-                  )}
-                </div>
-              </IntakeRow>
-
-              <IntakeRow label="Pls Give" alt>
-                <textarea
-                  value={plsGiveNote}
-                  onChange={e => setPlsGiveNote(e.target.value)}
-                  placeholder="Anything to note about what to give, beyond the item list below..."
-                  rows={2}
-                  className={`${textInputClass} resize-y`}
-                />
-              </IntakeRow>
-
-              <IntakeRow label="Remarks">
-                <textarea
-                  value={deliveryNotes}
-                  onChange={e => setDeliveryNotes(e.target.value)}
-                  placeholder="e.g. Attn: Dr. Santos, Room 302. Handle with cold chain packaging..."
-                  rows={2}
-                  className={`${textInputClass} resize-y`}
-                />
-              </IntakeRow>
-
-              <IntakeRow label="Salesperson" alt>
-                <span className="text-sm font-semibold text-ink-primary">{user?.name || '—'}</span>
-              </IntakeRow>
-
-              <IntakeRow label="Source">
-                <input type="text" value={orderSource} onChange={e => setOrderSource(e.target.value)} placeholder="e.g. Referral, Repeat Customer, Walk-in" className={textInputClass} />
-              </IntakeRow>
-
-              <IntakeRow label="Order" alt>
-                <span className="text-sm text-ink-primary">
-                  {orderSummaryText || <span className="text-ink-secondary italic">Add items in section 2 below...</span>}
-                </span>
-              </IntakeRow>
-
-              <IntakeRow label="Amount">
-                <span className="text-base font-extrabold text-getmeds-blue font-mono">
-                  ₱{grandTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              </IntakeRow>
+              <Field label="Invoicing From" required help="Determines which entity this order is invoiced under.">
+                <select value={invoicingFrom} onChange={e => setInvoicingFrom(e.target.value)} className={inputClass} required>
+                  <option value="">-- Select invoicing entity --</option>
+                  {INVOICING_FROM_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </select>
+              </Field>
             </div>
+
+            {/* Delivery mini-section — kept alongside the fields above since
+                Dispatch depends on an actual address to ship credit orders to. */}
+            <div className="rounded-xl border border-slate-200 bg-surface/40 p-4 space-y-4">
+              <h3 className="text-xs font-bold uppercase tracking-wide text-ink-secondary">Delivery</h3>
+              <Field label="Delivery Address" required>
+                <textarea
+                  value={deliveryAddress}
+                  onChange={e => setDeliveryAddress(e.target.value)}
+                  placeholder="Complete hospital, clinic, or residential shipping address..."
+                  rows={2}
+                  className={`${inputClass} resize-y`}
+                  required
+                />
+                {isFetchingZohoAddress && (
+                  <p className="text-[11px] text-ink-secondary flex items-center gap-1 mt-1">
+                    <Loader2 size={11} className="animate-spin" /> Fetching this customer's address from Zoho...
+                  </p>
+                )}
+              </Field>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Receiver Name">
+                  <input type="text" value={receiverName} onChange={e => setReceiverName(e.target.value)} placeholder="Who will receive the delivery" className={inputClass} />
+                </Field>
+                <Field label="Receiver Contact No.">
+                  <input type="tel" value={receiverContactNo} onChange={e => setReceiverContactNo(e.target.value)} placeholder="09XXXXXXXXX" className={inputClass} />
+                </Field>
+              </div>
+            </div>
+
+            <Field label="Remarks">
+              <textarea
+                value={deliveryNotes}
+                onChange={e => setDeliveryNotes(e.target.value)}
+                placeholder="e.g. Attn: Dr. Santos, Room 302. Handle with cold chain packaging..."
+                rows={2}
+                className={`${inputClass} resize-y`}
+              />
+            </Field>
           </div>
 
           {/* SECTION 2: ORDER ITEMS (PRODUCT AUTOCOMPLETE + CART) */}
@@ -612,7 +741,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 placeholder="Type to search medicine name, SKU, or category (e.g. Paracetamol, Amoxicillin)..."
               />
               <p className="text-[11px] text-ink-secondary mt-1.5">
-                Click any product in the floating dropdown to append it to the requisition table below — this is what fills in the "Order" and "Amount" rows above.
+                Click any product in the floating dropdown to add it to the requisition table below.
               </p>
             </div>
 
@@ -624,62 +753,108 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 <p className="text-xs text-ink-secondary mt-0.5">Use the search box above to add pharmaceutical line items.</p>
               </div>
             ) : (
-              <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+              <div className="border border-slate-200 rounded-xl overflow-x-auto shadow-2xs">
                 <table className="min-w-full divide-y divide-slate-200 text-xs sm:text-sm">
                   <thead className="bg-surface">
                     <tr>
-                      <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Product Name & SKU</th>
-                      <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Unit Price</th>
-                      <th className="px-4 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Quantity</th>
-                      <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Subtotal</th>
-                      <th className="px-4 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider w-16"></th>
+                      <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Item Details</th>
+                      <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Qty</th>
+                      <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Rate</th>
+                      <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Discount</th>
+                      <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Tax</th>
+                      <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Amount</th>
+                      <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider w-12"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
-                    {items.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-surface/50 transition-colors">
-                        <td className="px-4 py-3">
-                          <p className="font-semibold text-ink-primary">{item.name}</p>
-                          <span className="text-[11px] font-mono text-ink-secondary">{item.sku}</span>
-                        </td>
-                        <td className="px-4 py-3 text-right text-ink-secondary font-mono">
-                          ₱{item.price.toFixed(2)}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <input
-                            type="number"
-                            min="1"
-                            value={item.quantity}
-                            onChange={e => handleUpdateQuantity(idx, e.target.value)}
-                            className="w-16 text-center border border-slate-300 rounded py-1 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
-                          />
-                        </td>
-                        <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono">
-                          ₱{(item.price * item.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveItem(idx)}
-                            className="p-1.5 text-slate-400 hover:text-state-error hover:bg-state-error-light rounded transition-colors"
-                            title="Remove item"
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {items.map((item, idx) => {
+                      const line = lineAmounts[idx];
+                      return (
+                        <tr key={idx} className="hover:bg-surface/50 transition-colors">
+                          <td className="px-4 py-3">
+                            <p className="font-semibold text-ink-primary whitespace-nowrap">{item.name}</p>
+                            <span className="text-[11px] font-mono text-ink-secondary">{item.sku}</span>
+                          </td>
+                          <td className="px-3 py-3 text-center">
+                            <input
+                              type="number"
+                              min="1"
+                              value={item.quantity}
+                              onChange={e => handleUpdateItemField(idx, 'quantity', e.target.value)}
+                              className="w-16 text-center border border-slate-300 rounded py-1 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                            />
+                          </td>
+                          <td className="px-3 py-3 text-right">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.rate}
+                              onChange={e => handleUpdateItemField(idx, 'rate', e.target.value)}
+                              className="w-20 text-right border border-slate-300 rounded py-1 px-1.5 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                            />
+                          </td>
+                          <td className="px-3 py-3 text-right">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.discount}
+                              onChange={e => handleUpdateItemField(idx, 'discount', e.target.value)}
+                              className="w-20 text-right border border-slate-300 rounded py-1 px-1.5 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                            />
+                          </td>
+                          <td className="px-3 py-3 text-center">
+                            <select
+                              value={item.taxOption}
+                              onChange={e => handleUpdateItemField(idx, 'taxOption', e.target.value)}
+                              className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                            >
+                              {TAX_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                            </select>
+                          </td>
+                          <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">
+                            {peso(line.amount)}
+                          </td>
+                          <td className="px-3 py-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveItem(idx)}
+                              className="p-1.5 text-slate-400 hover:text-state-error hover:bg-state-error-light rounded transition-colors"
+                              title="Remove item"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
-                  {/* Dynamic Grand Total Footer */}
+                  {/* Dynamic totals breakdown footer */}
                   <tfoot className="bg-surface/80 border-t-2 border-slate-200">
                     <tr>
-                      <td colSpan={3} className="px-4 py-3.5 text-right font-bold text-ink-primary uppercase tracking-wider text-xs">
+                      <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Subtotal</td>
+                      <td colSpan={2} className="px-4 py-2 text-right font-semibold text-ink-primary font-mono text-xs">{peso(totals.subtotal)}</td>
+                    </tr>
+                    {totals.discount > 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Total Discount</td>
+                        <td colSpan={2} className="px-4 py-2 text-right font-semibold text-state-error font-mono text-xs">-{peso(totals.discount)}</td>
+                      </tr>
+                    )}
+                    {totals.tax > 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Total Tax</td>
+                        <td colSpan={2} className="px-4 py-2 text-right font-semibold text-ink-primary font-mono text-xs">+{peso(totals.tax)}</td>
+                      </tr>
+                    )}
+                    <tr>
+                      <td colSpan={5} className="px-4 py-3.5 text-right font-bold text-ink-primary uppercase tracking-wider text-xs">
                         Grand Total:
                       </td>
-                      <td className="px-4 py-3.5 text-right font-extrabold text-getmeds-blue text-base font-mono">
-                        ₱{grandTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      <td colSpan={2} className="px-4 py-3.5 text-right font-extrabold text-getmeds-blue text-base font-mono">
+                        {peso(grandTotal)}
                       </td>
-                      <td></td>
                     </tr>
                   </tfoot>
                 </table>
@@ -687,12 +862,57 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             )}
           </div>
 
+          {/* SECTION 3: TERMS & ATTACHMENTS */}
+          <div className="p-6 sm:p-8 space-y-5">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100">
+              <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
+                <FileText size={16} />
+              </div>
+              <h2 className="text-base font-bold text-ink-primary">3. Terms & Attachments</h2>
+            </div>
+
+            <Field label="Terms and Conditions">
+              <textarea
+                value={termsAndConditions}
+                onChange={e => setTermsAndConditions(e.target.value)}
+                placeholder="Payment terms, return policy, or any conditions attached to this order..."
+                rows={3}
+                className={`${inputClass} resize-y`}
+              />
+            </Field>
+
+            <Field
+              label="Attach File(s) to Sales Order"
+              help="Prescriptions, purchase orders, or other supporting documents. Not yet sent anywhere — attachments are staged here for review until Zoho document upload is wired up."
+            >
+              <label className="flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-xl py-6 cursor-pointer hover:border-getmeds-blue hover:bg-getmeds-blue/5 transition-colors text-sm text-ink-secondary">
+                <Paperclip size={16} />
+                Click to attach file(s), or drag and drop
+                <input type="file" multiple onChange={handleFilesSelected} className="hidden" />
+              </label>
+              {attachedFiles.length > 0 && (
+                <ul className="mt-3 space-y-1.5">
+                  {attachedFiles.map((f, idx) => (
+                    <li key={idx} className="flex items-center justify-between gap-2 bg-surface border border-slate-200 rounded-lg px-3 py-1.5 text-xs">
+                      <span className="flex items-center gap-1.5 min-w-0 text-ink-primary font-medium truncate">
+                        <Paperclip size={12} className="shrink-0 text-ink-secondary" /> {f.name}
+                      </span>
+                      <button type="button" onClick={() => handleRemoveFile(idx)} className="p-0.5 text-slate-400 hover:text-state-error rounded-full shrink-0">
+                        <X size={13} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Field>
+          </div>
+
           {/* SUBMISSION CONTROLS */}
           <div className="p-6 sm:p-8 bg-surface/40 flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="text-xs text-ink-secondary">
               {!isFormValid ? (
                 <span className="text-state-warning font-medium flex items-center gap-1.5">
-                  <AlertCircle size={14} /> Mandatory fields required (Customer, 1+ Items, Address) to unlock submission.
+                  <AlertCircle size={14} /> Mandatory fields required (Customer, Source, Invoicing From, 1+ Items, Address) to unlock submission.
                 </span>
               ) : (
                 <span className="text-pharmacy-green-dark font-medium flex items-center gap-1.5">
@@ -751,6 +971,28 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 {customerType === 'credit' ? '🏦 Credit Customer' : '💳 Direct Patient'}
               </span>
             </div>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-ink-secondary font-medium">Sales Order Date:</span>
+              <span className="font-medium text-ink-primary">{todayLabel}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-ink-secondary font-medium">Sales Person:</span>
+              <span className="font-medium text-ink-primary">{displaySalesPerson}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-ink-secondary font-medium">Source:</span>
+              <span className="font-medium text-ink-primary">{orderSource}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-ink-secondary font-medium">Invoicing From:</span>
+              <span className="font-medium text-ink-primary">{invoicingFrom}</span>
+            </div>
+            {paymentTerms && (
+              <div className="flex justify-between items-center">
+                <span className="text-xs text-ink-secondary font-medium">Payment Terms:</span>
+                <span className="font-medium text-ink-primary">{paymentTerms}</span>
+              </div>
+            )}
             <div className="flex justify-between items-start pt-2 border-t border-slate-200">
               <span className="text-xs text-ink-secondary font-medium">Delivery Address:</span>
               <span className="font-medium text-ink-primary text-right max-w-[240px] truncate">{deliveryAddress}</span>
@@ -765,7 +1007,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
 
           {filledIntakeDetails.length > 0 && (
             <div>
-              <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Additional Intake Details</h4>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Additional Details</h4>
               <div className="bg-surface rounded-xl p-4 space-y-2 border border-slate-200">
                 {filledIntakeDetails.map((f) => (
                   <div key={f.label} className="flex justify-between items-start gap-4">
@@ -777,16 +1019,31 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             </div>
           )}
 
+          {attachedFiles.length > 0 && (
+            <div>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Attached Files</h4>
+              <div className="bg-surface rounded-xl p-3 border border-slate-200 space-y-1">
+                {attachedFiles.map((f, idx) => (
+                  <div key={idx} className="flex items-center gap-1.5 text-xs text-ink-primary">
+                    <Paperclip size={11} className="text-ink-secondary" /> {f.name}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div>
             <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Order Line Items</h4>
-            <div className="border border-slate-200 rounded-xl overflow-hidden">
+            <div className="border border-slate-200 rounded-xl overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-200 text-xs">
                 <thead className="bg-surface">
                   <tr>
                     <th className="px-3 py-2 text-left font-bold text-ink-secondary">Item</th>
                     <th className="px-2 py-2 text-center font-bold text-ink-secondary">Qty</th>
-                    <th className="px-3 py-2 text-right font-bold text-ink-secondary">Price</th>
-                    <th className="px-3 py-2 text-right font-bold text-ink-secondary">Subtotal</th>
+                    <th className="px-3 py-2 text-right font-bold text-ink-secondary">Rate</th>
+                    <th className="px-3 py-2 text-right font-bold text-ink-secondary">Discount</th>
+                    <th className="px-3 py-2 text-center font-bold text-ink-secondary">Tax</th>
+                    <th className="px-3 py-2 text-right font-bold text-ink-secondary">Amount</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 bg-white">
@@ -796,17 +1053,19 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                         {item.name} <span className="text-ink-secondary">({item.sku})</span>
                       </td>
                       <td className="px-2 py-2 text-center text-ink-primary font-bold">{item.quantity}</td>
-                      <td className="px-3 py-2 text-right text-ink-secondary">₱{item.price.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-right text-ink-secondary">{peso(item.rate)}</td>
+                      <td className="px-3 py-2 text-right text-ink-secondary">{item.discount > 0 ? `-${peso(item.discount)}` : '—'}</td>
+                      <td className="px-3 py-2 text-center text-ink-secondary">{getTaxOption(item.taxOption).label}</td>
                       <td className="px-3 py-2 text-right font-bold text-ink-primary">
-                        ₱{(item.price * item.quantity).toFixed(2)}
+                        {peso(lineAmounts[idx].amount)}
                       </td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot className="bg-surface">
                   <tr>
-                    <td colSpan={3} className="px-3 py-2 text-right font-bold text-ink-primary">Grand Total:</td>
-                    <td className="px-3 py-2 text-right font-extrabold text-getmeds-blue text-sm">₱{grandTotal.toFixed(2)}</td>
+                    <td colSpan={5} className="px-3 py-2 text-right font-bold text-ink-primary">Grand Total:</td>
+                    <td className="px-3 py-2 text-right font-extrabold text-getmeds-blue text-sm">{peso(grandTotal)}</td>
                   </tr>
                 </tfoot>
               </table>

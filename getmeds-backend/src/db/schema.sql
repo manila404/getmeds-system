@@ -95,8 +95,45 @@ CREATE TABLE IF NOT EXISTS orders (
   intake_contact_no TEXT,
   intake_source TEXT,
   intake_pls_give TEXT,
+  -- Aug 30, 2026: "Create New Order" form redesign — new fields chosen to
+  -- line up 1:1 (where Zoho has an equivalent) with a Zoho Inventory Sales
+  -- Order, so the data is already sitting here, correctly shaped, the day
+  -- the real Zoho push is wired up. See
+  -- getmeds-backend/ZOHO_SALES_ORDER_FIELD_MAPPING.md for the full
+  -- field-by-field mapping and what's still needed to actually send them.
+  -- sales_order_date is ALWAYS set server-side to today (see orders.controller.js
+  -- create()) — there is no user override, matching "Sales Order Date
+  -- (Automatic Today)" on the form.
+  sales_order_date TEXT,
+  intake_delivery_method TEXT,
+  intake_terms TEXT,
+  -- Aug 30, 2026: Payment Terms — a typeahead field mirroring the same
+  -- named field on Zoho's own Sales Order screen (Net 15, 30 days, 45 Day,
+  -- BPO WALLET, 60 Day, DSWD/PCSO, or a custom value typed in, exactly like
+  -- Zoho's own field allows). Free text here too — not a strict enum,
+  -- since Zoho's own version accepts an arbitrary typed value alongside
+  -- its suggested list. Not yet wired into the Zoho Sales Order payload
+  -- itself (see ZOHO_SALES_ORDER_FIELD_MAPPING.md) — captured here first.
+  intake_payment_terms TEXT,
+  -- Which legal entity this order is invoiced under. Exactly two allowed
+  -- values, enforced in orders.controller.js create() — NOT a Zoho payload
+  -- field itself; it's expected to eventually pick which of two separate
+  -- Zoho organizations (2mg Incorporated vs Getmeds Philippines Inc.) the
+  -- Sales Order gets created in, since this app currently only ever talks
+  -- to the single org configured via ZOHO_ORG_ID.
+  invoicing_from TEXT CHECK(invoicing_from IS NULL OR invoicing_from IN ('2mg Incorporated', 'Getmeds Philippines Inc.')),
   zoho_so_id TEXT,
   zoho_so_number TEXT,
+  -- Aug 31, 2026: last-known Zoho-side Sales Order status ("draft",
+  -- "confirmed", "void", "closed", etc. — Zoho's own `status` field, seen
+  -- live via ZohoInventory_get_sales_order). Deliberately separate from this
+  -- table's own `status` column above, which is this app's OWN dispatch
+  -- pipeline stage and has nothing to do with Zoho's SO lifecycle. Kept so
+  -- the "edited in Zoho" webhook handler (webhook.controller.js) can tell a
+  -- real status transition (e.g. someone clicked "Confirm" in Zoho) apart
+  -- from every other kind of edit, and put a clear "Sales Order confirmed in
+  -- Zoho" line in the audit trail instead of a generic one.
+  zoho_so_status TEXT,
   -- Populated when Finance converts the Sales Order to an Invoice in Zoho
   -- (webhook: invoice.created) — see 'invoice_drafted' status above.
   zoho_invoice_id TEXT,
@@ -113,8 +150,26 @@ CREATE TABLE IF NOT EXISTS order_items (
   order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
   product_id INTEGER NOT NULL REFERENCES products(id),
   quantity INTEGER NOT NULL CHECK(quantity > 0),
+  -- unit_price is the RATE actually used for this line — the order form now
+  -- lets a MedRep override the product's catalog price per line (matching
+  -- Zoho Sales Order line items, which always allow this), so this is no
+  -- longer guaranteed to equal products.unit_price at the time of order.
   unit_price REAL NOT NULL CHECK(unit_price >= 0),
-  subtotal REAL NOT NULL CHECK(subtotal >= 0)
+  -- subtotal = quantity * unit_price, BEFORE discount/tax (unchanged meaning).
+  subtotal REAL NOT NULL CHECK(subtotal >= 0),
+  -- Aug 30, 2026: per-line Discount/Tax columns from the order form redesign
+  -- — see ZOHO_SALES_ORDER_FIELD_MAPPING.md. discount_amount is a flat
+  -- currency amount (not a percentage); tax_percent/tax_label describe a
+  -- simple flat-rate tax preset picked per line (e.g. "VAT 12%"). All
+  -- default to zero/blank so existing rows and any caller that omits them
+  -- behave exactly as before (line_total == subtotal).
+  discount_amount REAL NOT NULL DEFAULT 0 CHECK(discount_amount >= 0),
+  tax_percent REAL NOT NULL DEFAULT 0 CHECK(tax_percent >= 0),
+  tax_label TEXT,
+  -- line_total = (subtotal - discount_amount) + tax_amount — this is the
+  -- "Amount" column shown on the order form and what order.total_amount is
+  -- summed from.
+  line_total REAL NOT NULL DEFAULT 0 CHECK(line_total >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS payments (

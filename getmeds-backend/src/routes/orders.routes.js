@@ -20,6 +20,12 @@ router.post('/:id/submit', requireRole('medrep'), c.submit);
 // from Zoho and backfill the audit trail if a webhook was missed (backend
 // or ngrok not running at the moment Finance confirmed it in Zoho).
 router.post('/:id/sync-from-zoho', c.syncFromZoho);
+// Aug 30, 2026: manual PUSH of a failed Zoho Sales Order sync, on demand.
+// The automatic 30s background retry loop is off by default now (see
+// server.js) — this is how a failed sync gets retried instead, one click
+// at a time, so failures don't spam the audit timeline while an issue is
+// being diagnosed.
+router.post('/:id/retry-zoho-sync', c.retryZohoSync);
 router.patch('/:id/exception', requireRole('management', 'admin'), c.setException);
 
 module.exports = router;

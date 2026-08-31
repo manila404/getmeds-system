@@ -1,6 +1,8 @@
 ﻿const db = require('../db/database');
 const { logEvent } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
+const zoho = require('../integrations/zoho');
+const { diffSalesOrderFields, summarizeChanges } = require('../services/zohoEditDiffService');
 
 /**
  * Validates optional Zoho Webhook secret / token.
@@ -47,11 +49,17 @@ function parseWebhookPayload(req) {
     } catch (e) {}
   }
 
+  // Aug 30, 2026: confirmed live that Zoho's Workflow Rule webhook action
+  // appends "Add Parameters" entries to the URL as a query string (e.g.
+  // "?event_type=salesorder.edited&..."), not into the JSON body — so
+  // req.query.event_type has to be checked here too, not just req.body's
+  // equivalent keys and the older req.query.event fallback.
   const rawEvent =
     req.body.event_type ||
     req.body.event ||
     req.body.type ||
     req.headers['x-zoho-event'] ||
+    req.query.event_type ||
     req.query.event ||
     '';
 
@@ -260,7 +268,15 @@ exports.handleZohoWebhook = async (req, res, next) => {
       const zohoInvoiceId = invoice?.invoice_id || order.zoho_invoice_id;
 
       db.transaction(() => {
-        if (['so_created', 'waiting_for_payment'].includes(order.status)) {
+        // Aug 31, 2026 (3): 'tracking_shared' added — in Getmeds' actual
+        // fulfillment order (dispatch happens BEFORE invoicing, confirmed
+        // live), an order sits at 'tracking_shared' once shipped (see the
+        // isShipmentEvent branch below, which no longer auto-completes it),
+        // and this is the very next real step from there. Kept alongside
+        // the original 'so_created'/'waiting_for_payment' pair rather than
+        // replacing them, since those cover a different (invoice-before-
+        // dispatch/prepaid) ordering this app also supports.
+        if (['so_created', 'waiting_for_payment', 'tracking_shared'].includes(order.status)) {
           newStatus = 'invoice_drafted';
         }
 
@@ -385,18 +401,22 @@ exports.handleZohoWebhook = async (req, res, next) => {
           metadata: { trackingNumber, courier }
         });
 
-        // Auto-advance dispatched -> tracking_shared -> completed once
-        // tracking details are present, mirroring the old local cascade.
+        // Aug 31, 2026 (3): stop at tracking_shared — do NOT auto-advance to
+        // completed. Per Getmeds' actual fulfillment process, dispatch is
+        // not the end of the order: Finance still has to convert the Sales
+        // Order into an Invoice in Zoho (see isInvoiceDrafted, above) before
+        // the order is genuinely finished. The old "tracking_shared ->
+        // completed" auto-jump this replaced was inherited from a
+        // now-removed local "Enter Tracking" button that used to do both
+        // steps in one click — fine for that old flow, wrong here, since it
+        // was silently skipping the entire invoice/payment stage and
+        // closing orders out early. Advance dispatched -> tracking_shared
+        // once tracking details are present, and leave it there.
         if (trackingNumber && newStatus === 'dispatched') {
           const dispatchedStatus = newStatus;
           newStatus = 'tracking_shared';
           db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
           logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus, actorId: null, actorName: 'Zoho Webhook', notes: `${courier || 'Courier'}: ${trackingNumber}` });
-
-          const trackingSharedStatus = newStatus;
-          newStatus = 'completed';
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
-          logEvent({ orderId: order.id, eventType: 'ORDER_COMPLETED', oldStatus: trackingSharedStatus, newStatus, actorId: null, actorName: 'Zoho Webhook' });
         }
 
         notify({
@@ -405,7 +425,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
           message: trackingNumber
             ? `Order ${order.getmeds_order_id} shipped via Zoho. Courier: ${courier || 'TBD'}, Tracking: ${trackingNumber}.`
             : `Order ${order.getmeds_order_id} has been dispatched in Zoho. Tracking details pending.`,
-          eventType: trackingNumber ? 'ORDER_COMPLETED' : 'ORDER_DISPATCHED',
+          eventType: 'ORDER_DISPATCHED',
           orderData: { ...order, status: newStatus, tracking_number: trackingNumber, courier }
         });
       })();
@@ -482,6 +502,121 @@ exports.handleZohoWebhook = async (req, res, next) => {
           });
         })();
         actionTaken = 'SO_CANCELLED';
+      }
+    }
+    // Aug 30, 2026: "Sales Order edited directly in Zoho" — set up in Zoho
+    // as its own Workflow Rule (trigger: Sales Order > Edit, NOT
+    // Create-or-Edit, so this never fires from the app's own creation call)
+    // sending a static event_type of exactly "salesorder.edited" plus the
+    // record's Sales Order ID — see ZOHO_SALES_ORDER_FIELD_MAPPING.md for
+    // the exact setup steps. Deliberately matched on that literal
+    // event_type string rather than a loose "contains 'edit'" check, so a
+    // future/unrelated Zoho event type is never mistaken for this one.
+    //
+    // Whatever fields the Workflow Rule's webhook body does or doesn't
+    // include, this always re-fetches the authoritative current record via
+    // the API (zoho.getSalesOrder) rather than trusting the webhook
+    // payload's shape — Zoho's own webhook body templates are easy to
+    // misconfigure/under-populate, and a stale/partial payload would
+    // otherwise show a false or incomplete diff.
+    //
+    // Aug 31, 2026: use the LOCAL order's own zoho_so_id (set back when this
+    // order was first created in Zoho) for the re-fetch, not whatever
+    // identifier the webhook body carried. findOrder() above already
+    // resolved `order` successfully via zoho_so_number/reference/id — so by
+    // this point we HAVE the order, and order.zoho_so_id is guaranteed to be
+    // Zoho's real internal record ID, unlike a webhook body param that might
+    // hold the human-readable Sales Order Number (e.g. "SO-66824") depending
+    // on which merge field got picked when the Workflow Rule was set up.
+    // Calling the API with a Sales Order Number instead of the real ID would
+    // fail outright, so this sidesteps that misconfiguration entirely.
+    else if (rawEvent === 'salesorder.edited' && (order.zoho_so_id || zohoSoId)) {
+      const idToFetch = order.zoho_so_id || zohoSoId;
+      let liveSalesOrder = null;
+      try {
+        const result = await zoho.getSalesOrder(idToFetch);
+        liveSalesOrder = result?.salesorder;
+      } catch (fetchErr) {
+        console.warn(`[ZOHO_WEBHOOK] Could not re-fetch Sales Order ${idToFetch} for edit diff: ${fetchErr.message}`);
+      }
+
+      if (!liveSalesOrder) {
+        logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_SO_EDITED',
+          oldStatus: previousStatus,
+          newStatus: previousStatus,
+          actorId: null,
+          actorName: 'Zoho Webhook',
+          notes: 'Sales Order was edited in Zoho, but this app could not re-fetch it to show what changed — check Zoho directly.',
+          metadata: { rawEvent, zohoSoId: idToFetch }
+        });
+        actionTaken = 'EDIT_LOGGED_NO_DIFF';
+      } else {
+        const changes = diffSalesOrderFields(liveSalesOrder, order);
+
+        // Aug 31, 2026 (2): also catch a Zoho-side Sales Order STATUS change
+        // (e.g. clicking "Confirm" in Zoho's own UI moves status
+        // "draft" -> "confirmed") — this rides the exact same Workflow Rule
+        // as every other edit (it's "any field is updated", and status is a
+        // field), so no separate Zoho automation is needed for this.
+        // Zoho's `status` isn't one of zohoEditDiffService's 6 tracked
+        // fields (those all have a matching MedRep-facing local column;
+        // this app's own `orders.status` is a completely different thing —
+        // its own dispatch pipeline stage, not Zoho's SO lifecycle) so it's
+        // compared against its own dedicated `zoho_so_status` column here.
+        // A null previous value (first time this runs after the column was
+        // added, or for an order created before this feature existed) is
+        // treated as "just learning the baseline" rather than a real
+        // transition, so it doesn't produce a false "status changed" note.
+        const liveZohoStatus = liveSalesOrder.status ? String(liveSalesOrder.status).trim().toLowerCase() : null;
+        const previousZohoStatus = order.zoho_so_status ? String(order.zoho_so_status).trim().toLowerCase() : null;
+        const zohoStatusChanged = Boolean(previousZohoStatus) && Boolean(liveZohoStatus) && liveZohoStatus !== previousZohoStatus;
+        const statusNote = zohoStatusChanged
+          ? `Sales Order ${liveZohoStatus === 'confirmed' ? 'confirmed' : 'status changed'} in Zoho (${previousZohoStatus} → ${liveZohoStatus})`
+          : null;
+
+        db.transaction(() => {
+          if (changes.length) {
+            const setClause = changes.map((c) => `${c.localColumn} = ?`).join(', ');
+            const values = changes.map((c) => c.newValue);
+            db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`).run(...values, now, order.id);
+          }
+          if (liveZohoStatus && liveZohoStatus !== previousZohoStatus) {
+            db.prepare('UPDATE orders SET zoho_so_status = ?, updated_at = ? WHERE id = ?').run(liveZohoStatus, now, order.id);
+          }
+
+          const fieldNote = changes.length ? `Sales Order edited in Zoho — ${summarizeChanges(changes)}` : null;
+          const notes = [statusNote, fieldNote].filter(Boolean).join('; ') ||
+            'Sales Order edited in Zoho (no change detected in the fields this app tracks — e.g. an item, address, or tax edit; check Zoho for details)';
+
+          logEvent({
+            orderId: order.id,
+            eventType: zohoStatusChanged ? 'ZOHO_SO_STATUS_CHANGED' : 'ZOHO_SO_EDITED',
+            oldStatus: previousStatus,
+            newStatus: previousStatus,
+            actorId: null,
+            actorName: 'Zoho Webhook',
+            notes,
+            metadata: { rawEvent, zohoSoId, changes, zohoStatus: { from: previousZohoStatus, to: liveZohoStatus } }
+          });
+        })();
+
+        if (changes.length || zohoStatusChanged) {
+          const financeIds = getUserIdsByRole('finance');
+          const message = [statusNote, changes.length ? summarizeChanges(changes) : null].filter(Boolean).join(' — ');
+          notify({
+            orderId: order.id,
+            recipientIds: Array.from(new Set([order.medrep_user_id, ...financeIds].filter(Boolean))),
+            message: `Order ${order.getmeds_order_id} — ${message}`,
+            eventType: zohoStatusChanged ? 'ZOHO_SO_STATUS_CHANGED' : 'ZOHO_SO_EDITED',
+            orderData: { ...order }
+          });
+        }
+
+        actionTaken = zohoStatusChanged
+          ? 'STATUS_CHANGE_LOGGED'
+          : changes.length ? 'EDIT_LOGGED' : 'EDIT_LOGGED_NO_TRACKED_CHANGE';
       }
     } else {
       // General Zoho event / sync update
