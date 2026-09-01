@@ -5,15 +5,36 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const zoho = require('../integrations/zoho');
 const zohoRetryService = require('../services/zohoRetryService');
-const { isDryRunMode, getTestCustomerZohoId } = require('../services/zohoTestFlags');
+const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
+// Sep 1, 2026: syncFromZoho below is the manual mirror of every webhook
+// branch, so it uses the same two services the live handler does — status
+// writes through the state machine, and one shared shipped-AND-paid rule.
+// These used to be two hand-copied blocks that drifted apart.
+const { setOrderStatus, advanceTo } = require('../services/orderStatusService');
+const { evaluateCompletion } = require('../services/orderCompletionService');
+// Sep 1, 2026 (3): the Zoho reconcile moved to its own service so the manual
+// button, the refresh-on-open below, and the background poller all run one
+// implementation instead of three copies. See zohoReconcileService.js.
+const { reconcileOrder, reconcileOrderFully } = require('../services/zohoReconcileService');
+const { shouldRefreshOnOpen, markRefreshed } = require('../services/zohoAutoSyncService');
+
+// How long GET /api/orders/:id will wait on Zoho before giving up and serving
+// the order as it stands. Deliberately short — this is a page load, and the
+// background poller will catch anything this misses.
+const OPEN_REFRESH_TIMEOUT_MS = parseInt(process.env.ZOHO_OPEN_REFRESH_TIMEOUT_MS, 10) || 4000;
 
 // ─── ZOHO TEST-CUSTOMER SAFETY GATE (Aug 27, 2026) ────────────────────────────
 //
-// While ZOHO_TEST_CUSTOMER_ID is set (a Zoho contact id), this app refuses
-// to create a Zoho Sales Order for any customer other than the one local
-// row mapped to that contact id — server-side, not just a filtered
-// dropdown, so a direct API call can't bypass it either. Leave the env var
-// unset to disable the gate entirely (all customers usable, as before).
+// While ZOHO_TEST_CUSTOMER_IDS is set (one or more Zoho contact ids), this
+// app refuses to create a Zoho Sales Order for any customer other than one
+// of those local rows — server-side, not just a filtered dropdown, so a
+// direct API call can't bypass it either. Leave the env var unset to
+// disable the gate entirely (all customers usable, as before).
+//
+// Aug 31, 2026 (6): widened from one customer to a list (TEST-CUSTOMER_1/
+// 2/3) — testing needed more than one, e.g. to exercise both 'credit' and
+// 'direct' customer_type paths side by side, without loosening the gate to
+// "everyone" (see zohoTestFlags.js).
 //
 // Bypassed entirely while ZOHO_DRY_RUN is on: dry run mode never calls
 // Zoho for ANY customer (see buildDryRunSalesOrder below), so there is
@@ -22,13 +43,13 @@ const { isDryRunMode, getTestCustomerZohoId } = require('../services/zohoTestFla
 // sync-from-zoho.
 function checkTestCustomerGate(customer) {
   if (isDryRunMode()) return null; // dry run: no Zoho call happens for anyone, gate is moot
-  const testZohoId = getTestCustomerZohoId();
-  if (!testZohoId) return null; // gate disabled
-  if (customer.zoho_contact_id === testZohoId) return null; // it's the one allowed customer
+  const testZohoIds = getTestCustomerZohoIds();
+  if (!testZohoIds.length) return null; // gate disabled
+  if (testZohoIds.includes(customer.zoho_contact_id)) return null; // one of the allowed customers
   return {
     code: 'TEST_CUSTOMER_ONLY',
-    message: `Order creation is currently restricted to the designated TEST customer only ` +
-      `(safety gate while testing against the real company Zoho). "${customer.name}" is not it.`
+    message: `Order creation is currently restricted to the designated TEST customers only ` +
+      `(safety gate while testing against the real company Zoho). "${customer.name}" is not one of them.`
   };
 }
 
@@ -75,34 +96,44 @@ function buildDryRunSalesOrder(payload) {
 
 // ─── META ──────────────────────────────────────────────────────────────────────
 
-// Aug 27, 2026: while ZOHO_TEST_CUSTOMER_ID is set, this app is restricted
-// to a single designated TEST customer for creating live Zoho Sales Orders
+// Aug 27, 2026: while ZOHO_TEST_CUSTOMER_IDS is set, this app is restricted
+// to the designated TEST customer(s) for creating live Zoho Sales Orders
 // (safety gate for testing against the real company Zoho — see
 // customers.controller.js and the hard server-side check in create/submit
-// below). The order-creation dropdown only ever shows that one customer
+// below). The order-creation dropdown only ever shows those customers
 // while the gate is on, so a MedRep never picks one that will be rejected.
-// Leave ZOHO_TEST_CUSTOMER_ID unset to see/select every local customer, as
+// Leave ZOHO_TEST_CUSTOMER_IDS unset to see/select every local customer, as
 // before.
+//
+// Aug 31, 2026 (6): widened from one id to a list — see checkTestCustomerGate.
 exports.getCustomers = (req, res, next) => {
   try {
     const dryRun = isDryRunMode();
     // Dry run bypasses the gate everywhere (see checkTestCustomerGate), so
     // the dropdown shows every customer too — no point filtering it down
-    // to one when no order created here can ever reach Zoho anyway.
-    const testZohoId = dryRun ? null : (getTestCustomerZohoId() || null);
-    const customers = testZohoId
-      ? db.prepare('SELECT * FROM customers WHERE is_active = 1 AND zoho_contact_id = ? ORDER BY name').all(testZohoId)
+    // when no order created here can ever reach Zoho anyway.
+    const testZohoIds = dryRun ? [] : getTestCustomerZohoIds();
+    const customers = testZohoIds.length
+      ? db.prepare(
+          `SELECT * FROM customers WHERE is_active = 1 AND zoho_contact_id IN (${testZohoIds.map(() => '?').join(',')}) ORDER BY name`
+        ).all(...testZohoIds)
       : db.prepare('SELECT * FROM customers WHERE is_active = 1 ORDER BY name').all();
     res.json({
       success: true,
-      data: { customers, test_customer_gate_enabled: !!testZohoId, zoho_dry_run_enabled: dryRun }
+      data: { customers, test_customer_gate_enabled: testZohoIds.length > 0, zoho_dry_run_enabled: dryRun }
     });
   } catch (err) { next(err); }
 };
 
 exports.getProducts = (req, res, next) => {
   try {
-    const products = db.prepare('SELECT * FROM products WHERE is_active = 1 ORDER BY name').all();
+    // Sep 1, 2026 (7): inactive products are returned too, so the order form
+    // can LABEL them rather than silently omitting them. They are not
+    // selectable there (Zoho rejects an inactive item on a Sales Order — see
+    // the validation in create/submit), but "this medicine exists and is
+    // deactivated in Zoho" is far more useful to a MedRep than the product
+    // not appearing at all and them assuming they mistyped the name.
+    const products = db.prepare('SELECT * FROM products ORDER BY is_active DESC, name').all();
     res.json({ success: true, data: { products } });
   } catch (err) { next(err); }
 };
@@ -161,9 +192,9 @@ exports.getAll = (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.getById = (req, res, next) => {
+exports.getById = async (req, res, next) => {
   try {
-    const order = db.prepare(`
+    const loadOrder = () => db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_person, c.contact_number,
              u.name as medrep_name, u.email as medrep_email
       FROM orders o
@@ -172,11 +203,64 @@ exports.getById = (req, res, next) => {
       WHERE o.id = ?
     `).get(req.params.id);
 
+    let order = loadOrder();
+
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
 
     // MedRep can only see their own orders
     if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    }
+
+    // Sep 1, 2026 (3): pull this order's current state from Zoho before
+    // answering, so the trail a human is looking at is up to date without
+    // them clicking "Sync from Zoho" first. Throttled by
+    // orders.last_reconciled_at (see zohoAutoSyncService) — the frontend
+    // re-fetches on a timer, and without a cooldown one open Order Detail
+    // page would produce a continuous stream of Zoho reads for one order.
+    //
+    // Deliberately best-effort: reconcileOrder never throws, and a failure is
+    // ignored here. Zoho being unreachable must not turn viewing an order
+    // into an error page — the poller will catch it up shortly, and the
+    // reason is in the server log either way.
+    //
+    // Sep 1, 2026 (4): the whole block is wrapped, and bounded by a timeout.
+    // The first version was neither, and it broke this page the same day: the
+    // stamp write threw "no such column: last_reconciled_at" on a database
+    // that hadn't been migrated yet, the exception escaped, and Order Detail
+    // showed "Failed to load order" — a convenience feature taking down the
+    // page whose entire job is displaying the order.
+    //
+    // The rule now: showing the order is the contract, refreshing it is a
+    // bonus. NOTHING in here — a missing column, a Zoho outage, a slow
+    // response — may prevent the order from being returned. The timeout
+    // matters as much as the catch: a Zoho call that hangs for 30 seconds
+    // would otherwise leave the user staring at a spinner. If we stop waiting,
+    // the reconcile still finishes in the background and its results show up
+    // on the next load; the poller is the backstop either way.
+    try {
+      if (shouldRefreshOnOpen(order)) {
+        const reconcile = reconcileOrderFully({
+          orderId: order.id,
+          actorId: req.user?.id || null,
+          actorName: `${req.user?.name || 'User'} (opened the order)`,
+          source: 'page_open'
+        });
+        const timeout = new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), OPEN_REFRESH_TIMEOUT_MS));
+        const outcome = await Promise.race([reconcile, timeout]);
+
+        if (outcome?.timedOut) {
+          console.warn(`[ORDER_OPEN] Zoho refresh for order ${order.id} exceeded ${OPEN_REFRESH_TIMEOUT_MS}ms — serving what we have.`);
+          // Stamp anyway once it eventually lands, so a permanently slow Zoho
+          // doesn't make every page load start another overlapping call.
+          reconcile.then(() => markRefreshed(order.id)).catch(() => {});
+        } else {
+          markRefreshed(order.id);
+        }
+        order = loadOrder() || order;
+      }
+    } catch (err) {
+      console.warn(`[ORDER_OPEN] Zoho refresh for order ${order.id} failed (order still served): ${err.message}`);
     }
 
     const items = db.prepare(`
@@ -228,259 +312,36 @@ exports.getById = (req, res, next) => {
 // timestamp). Idempotent — safe to call repeatedly.
 exports.syncFromZoho = async (req, res, next) => {
   try {
-    const order = db.prepare(`
-      SELECT o.*, c.name as customer_name, u.name as medrep_name, u.email as medrep_email, u.id as medrep_user_id
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      LEFT JOIN users u ON o.medrep_id = u.id
-      WHERE o.id = ?
-    `).get(req.params.id);
-
-    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
-    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+    // Sep 1, 2026 (3): the reconcile logic that used to live here now lives in
+    // services/zohoReconcileService.js, so the background poller and the
+    // refresh-on-open path run the exact same code as this button rather than
+    // a second copy that would drift. All that is left here is what is
+    // genuinely HTTP: who is allowed to ask, and what the response looks like.
+    const owner = db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(req.params.id);
+    if (!owner) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    if (req.user.role === 'medrep' && owner.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
-    if (!order.zoho_so_id) {
-      return res.status(400).json({ success: false, error: { code: 'NO_ZOHO_SO', message: 'This order does not have a Zoho Sales Order yet.' } });
+
+    const result = await reconcileOrder({
+      orderId: req.params.id,
+      actorId: req.user?.id || null,
+      actorName: `${req.user?.name || 'User'} (manual Zoho sync)`,
+      source: 'manual_reconcile'
+    });
+
+    if (!result.ok) {
+      const status = result.code === 'NOT_FOUND' ? 404 : result.code === 'NO_ZOHO_SO' ? 400 : 502;
+      return res.status(status).json({ success: false, error: { code: result.code, message: result.message } });
     }
-
-    let salesorder;
-    try {
-      const result = await zoho.getSalesOrder(order.zoho_so_id);
-      salesorder = result?.salesorder;
-    } catch (zohoErr) {
-      return res.status(502).json({ success: false, error: { code: 'ZOHO_FETCH_FAILED', message: `Could not reach Zoho: ${zohoErr.message}` } });
-    }
-    if (!salesorder) {
-      return res.status(502).json({ success: false, error: { code: 'ZOHO_FETCH_FAILED', message: 'Zoho returned no Sales Order data' } });
-    }
-
-    const soStatus = typeof salesorder.status === 'string' ? salesorder.status.toLowerCase() : null;
-    const isConfirmed = soStatus === 'confirmed' || soStatus === 'open';
-    const isCancelled = soStatus === 'void' || soStatus === 'cancelled' || soStatus === 'voided';
-
-    const alreadyLogged = (eventType) =>
-      !!db.prepare('SELECT id FROM order_events WHERE order_id = ? AND event_type = ?').get(order.id, eventType);
-
-    const now = new Date().toISOString();
-    let action = 'NOTHING_NEW';
-    let newStatus = order.status;
-
-    if (isConfirmed && !alreadyLogged('ZOHO_SO_CONFIRMED')) {
-      const zohoSoNumber = salesorder.salesorder_number || order.zoho_so_number;
-      if (['submitted', 'validating', 'so_pending'].includes(order.status)) {
-        newStatus = order.customer_type === 'direct' ? 'waiting_for_payment' : 'ready_for_dispatch';
-      }
-
-      db.transaction(() => {
-        db.prepare(`
-          UPDATE orders SET status = ?, zoho_so_number = COALESCE(?, zoho_so_number), zoho_sync_status = 'synced', updated_at = ?
-          WHERE id = ?
-        `).run(newStatus, zohoSoNumber || null, now, order.id);
-
-        logEvent({
-          orderId: order.id,
-          eventType: 'ZOHO_SO_CONFIRMED',
-          oldStatus: order.status,
-          newStatus,
-          actorId: req.user?.id || null,
-          actorName: `${req.user?.name || 'User'} (manual Zoho sync)`,
-          notes: `Sales Order confirmed in Zoho (${zohoSoNumber || order.zoho_so_id}) — backfilled by manual sync; the live webhook did not reach this app when it actually happened`,
-          metadata: { zohoSoId: order.zoho_so_id, zohoSoNumber, source: 'manual_reconcile' }
-        });
-
-        notify({
-          orderId: order.id,
-          recipientIds: [order.medrep_user_id],
-          message: `Zoho Sales Order ${zohoSoNumber || ''} confirmed for ${order.getmeds_order_id}.`,
-          eventType: 'ORDER_CONFIRMED',
-          orderData: { ...order, status: newStatus }
-        });
-      })();
-
-      action = 'SO_CONFIRMED_BACKFILLED';
-    } else if (isCancelled && !alreadyLogged('ZOHO_SO_CANCELLED') && !['completed', 'cancelled'].includes(order.status)) {
-      newStatus = 'cancelled';
-
-      db.transaction(() => {
-        db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
-
-        logEvent({
-          orderId: order.id,
-          eventType: 'ZOHO_SO_CANCELLED',
-          oldStatus: order.status,
-          newStatus,
-          actorId: req.user?.id || null,
-          actorName: `${req.user?.name || 'User'} (manual Zoho sync)`,
-          notes: 'Sales Order cancelled or voided in Zoho — backfilled by manual sync',
-          metadata: { source: 'manual_reconcile' }
-        });
-
-        const adminIds = getUserIdsByRole('admin', 'management');
-        notify({
-          orderId: order.id,
-          recipientIds: Array.from(new Set([order.medrep_user_id, ...adminIds].filter(Boolean))),
-          message: `Order ${order.getmeds_order_id} was cancelled in Zoho.`,
-          eventType: 'ORDER_CANCELLED',
-          orderData: { ...order, status: newStatus }
-        });
-      })();
-
-      action = 'SO_CANCELLED_BACKFILLED';
-    } else {
-      // SO confirm/cancel are already up to date (or don't apply this call)
-      // — check Zoho Inventory's packages/shipment data for a dispatch-side
-      // checkpoint that was missed. Same idempotent backfill pattern as
-      // above, mirroring the Package Created / Shipment Created webhook
-      // branches in webhook.controller.js.
-      const packages = Array.isArray(salesorder.packages) ? salesorder.packages : [];
-      const latestPackage = packages[packages.length - 1];
-      const shipmentInfo = latestPackage?.shipment_order;
-      const trackingNumber = shipmentInfo?.tracking_number || latestPackage?.tracking_number || null;
-      const courier = shipmentInfo?.carrier || latestPackage?.carrier || latestPackage?.delivery_method || null;
-
-      if (trackingNumber && !alreadyLogged('ZOHO_DISPATCHED') && !['completed', 'cancelled'].includes(order.status)) {
-        db.transaction(() => {
-          const existingDispatch = db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
-          if (existingDispatch) {
-            db.prepare(`
-              UPDATE dispatch_records
-              SET status = 'dispatched', courier = COALESCE(?, courier), tracking_number = COALESCE(?, tracking_number), dispatched_at = COALESCE(dispatched_at, ?)
-              WHERE order_id = ?
-            `).run(courier, trackingNumber, now, order.id);
-          } else {
-            db.prepare(`
-              INSERT INTO dispatch_records (order_id, status, tracking_number, courier, dispatched_at, created_at)
-              VALUES (?, 'dispatched', ?, ?, ?, ?)
-            `).run(order.id, trackingNumber, courier, now, now);
-          }
-
-          // Aug 31, 2026 (3): stop at tracking_shared — same fix as the live
-          // webhook handler (webhook.controller.js). Dispatch is not the end
-          // of the order; Finance still has to invoice it (see the
-          // ZOHO_INVOICE_DRAFTED backfill branch below), so this no longer
-          // auto-jumps all the way to completed.
-          let cascadeStatus = order.status;
-          if (['ready_for_dispatch', 'picking_packing'].includes(order.status)) {
-            cascadeStatus = 'dispatched';
-            db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(cascadeStatus, now, order.id);
-          }
-          logEvent({
-            orderId: order.id, eventType: 'ZOHO_DISPATCHED', oldStatus: order.status, newStatus: cascadeStatus,
-            actorId: req.user?.id || null, actorName: `${req.user?.name || 'User'} (manual Zoho sync)`,
-            notes: `Shipment found in Zoho — Tracking: ${trackingNumber} (${courier || 'courier TBD'}) — backfilled by manual sync`,
-            metadata: { trackingNumber, courier, source: 'manual_reconcile' }
-          });
-
-          const dispatchedStatus = cascadeStatus;
-          cascadeStatus = 'tracking_shared';
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(cascadeStatus, now, order.id);
-          logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus: cascadeStatus, actorId: req.user?.id || null, actorName: `${req.user?.name || 'User'} (manual Zoho sync)`, notes: `${courier || 'Courier'}: ${trackingNumber}` });
-
-          newStatus = cascadeStatus;
-
-          notify({
-            orderId: order.id,
-            recipientIds: [order.medrep_user_id],
-            message: `Order ${order.getmeds_order_id} shipped via Zoho. Courier: ${courier || 'TBD'}, Tracking: ${trackingNumber}.`,
-            eventType: 'ORDER_DISPATCHED',
-            orderData: { ...order, status: newStatus, tracking_number: trackingNumber, courier }
-          });
-        })();
-
-        action = 'DISPATCHED_BACKFILLED';
-      } else if (packages.length > 0 && !alreadyLogged('ZOHO_PACKAGE_CREATED') && order.status === 'ready_for_dispatch') {
-        newStatus = 'picking_packing';
-        db.transaction(() => {
-          const existingDispatch = db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
-          if (existingDispatch) {
-            db.prepare(`UPDATE dispatch_records SET status = 'packing' WHERE order_id = ?`).run(order.id);
-          } else {
-            db.prepare(`INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'packing', ?)`).run(order.id, now);
-          }
-
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
-          logEvent({
-            orderId: order.id, eventType: 'ZOHO_PACKAGE_CREATED', oldStatus: order.status, newStatus,
-            actorId: req.user?.id || null, actorName: `${req.user?.name || 'User'} (manual Zoho sync)`,
-            notes: `Package ${latestPackage.package_number || latestPackage.package_id || ''} found in Zoho — backfilled by manual sync`,
-            metadata: { source: 'manual_reconcile' }
-          });
-          notify({
-            orderId: order.id,
-            recipientIds: [order.medrep_user_id],
-            message: `Order ${order.getmeds_order_id} is being picked & packed (Package found in Zoho).`,
-            eventType: 'DISPATCH_STATUS_UPDATE',
-            orderData: { ...order, status: newStatus }
-          });
-        })();
-
-        action = 'PACKAGE_BACKFILLED';
-      } else if (Array.isArray(salesorder.invoices) && salesorder.invoices.length && !alreadyLogged('ZOHO_INVOICE_DRAFTED') && order.status !== 'cancelled') {
-        // Aug 31, 2026 (3): Invoice backfill — this endpoint previously had
-        // no way to catch up a missed "invoice.created" webhook at all (only
-        // SO confirm/cancel and dispatch/package had a fallback here). Reads
-        // straight from the Sales Order's own `invoices` array (confirmed
-        // live via ZohoInventory_get_sales_order — Zoho nests an array of
-        // {invoice_id, invoice_number, ...} there once one exists), same
-        // pattern as the packages/shipment reads just above. Deliberately NOT
-        // excluded for order.status === 'completed' (only 'cancelled') —
-        // unlike the dispatch backfill above, an order can legitimately reach
-        // this branch already sitting at 'completed' from before the
-        // premature-auto-complete bug was fixed, and it should still be
-        // possible to backfill the real invoice record onto it.
-        const latestInvoice = salesorder.invoices[salesorder.invoices.length - 1];
-        const zohoInvoiceId = latestInvoice.invoice_id;
-        const zohoInvoiceNumber = latestInvoice.invoice_number;
-
-        newStatus = order.status;
-        if (['so_created', 'waiting_for_payment', 'tracking_shared'].includes(order.status)) {
-          newStatus = 'invoice_drafted';
-        }
-
-        db.transaction(() => {
-          db.prepare(`
-            UPDATE orders
-            SET status = ?, zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number),
-                updated_at = ?
-            WHERE id = ?
-          `).run(newStatus, zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
-
-          logEvent({
-            orderId: order.id,
-            eventType: 'ZOHO_INVOICE_DRAFTED',
-            oldStatus: order.status,
-            newStatus,
-            actorId: req.user?.id || null,
-            actorName: `${req.user?.name || 'User'} (manual Zoho sync)`,
-            notes: `Invoice found in Zoho (${zohoInvoiceNumber || zohoInvoiceId}) — backfilled by manual sync; the live webhook did not reach this app when it actually happened`,
-            metadata: { zohoInvoiceId, zohoInvoiceNumber, source: 'manual_reconcile' }
-          });
-
-          const financeIds = getUserIdsByRole('finance');
-          notify({
-            orderId: order.id,
-            recipientIds: Array.from(new Set([order.medrep_user_id, ...financeIds].filter(Boolean))),
-            message: `Zoho Invoice ${zohoInvoiceNumber || ''} drafted for ${order.getmeds_order_id}.`,
-            eventType: 'INVOICE_DRAFTED',
-            orderData: { ...order, status: newStatus }
-          });
-        })();
-
-        action = 'INVOICE_BACKFILLED';
-      }
-    }
-
-    const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
-    const events = db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(order.id);
 
     res.json({
       success: true,
       data: {
-        action,
-        zoho_status: soStatus,
-        order: updatedOrder,
-        events
+        action: result.action,
+        zoho_status: result.zohoStatus,
+        order: result.order,
+        events: result.events
       }
     });
   } catch (err) { next(err); }
@@ -618,8 +479,24 @@ exports.create = async (req, res, next) => {
       if (!item.product_id || !item.quantity || item.quantity <= 0) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Each item needs product_id and quantity > 0' } });
       }
-      const product = db.prepare('SELECT * FROM products WHERE id = ? AND is_active = 1').get(item.product_id);
+      // Sep 1, 2026 (7): tell the difference between "no such product" and
+      // "that product is deactivated in Zoho". Both used to answer NOT_FOUND,
+      // which was actively misleading now that the order form lists inactive
+      // items — a MedRep would see the medicine on screen and be told it does
+      // not exist. Zoho rejects an inactive item on a Sales Order
+      // ("Inactive items cannot be added to the sales order"), so this is the
+      // same refusal, just made early and in words that explain it.
+      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
       if (!product) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Product ${item.product_id} not found` } });
+      if (!product.is_active) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'PRODUCT_INACTIVE',
+            message: `"${product.name}" is marked Inactive in Zoho and cannot be added to a Sales Order. Reactivate it in Zoho, run an inventory sync, then try again.`
+          }
+        });
+      }
 
       // Aug 30, 2026: Rate is now an editable line-item field on the order
       // form (matching a Zoho Sales Order line item, which always allows
@@ -662,7 +539,13 @@ exports.create = async (req, res, next) => {
     const getmedsOrderId = generateOrderId();
     const isDraft = requestedStatus === 'draft';
     const isCredit = resolvedCustomerType === 'credit';
-    const finalStatus = isDraft ? 'draft' : (isCredit ? 'ready_for_dispatch' : 'waiting_for_payment');
+    // Sep 1, 2026: same change as submit() below — a credit order stops at
+    // 'so_created' until Zoho confirms the Sales Order, instead of landing
+    // in the Dispatch queue while the SO is still an unconfirmed Draft. This
+    // path (create-and-submit in one call) had its own copy of the rule, so
+    // it had to be fixed in both places or the two entry points would
+    // disagree about where a credit order starts.
+    const finalStatus = isDraft ? 'draft' : (isCredit ? 'so_created' : 'ready_for_draft_invoice');
     const now = new Date().toISOString();
     // "Sales Order Date (Automatic Today)" on the form — always set here,
     // server-side, to today's date. There is no client override; a
@@ -733,10 +616,10 @@ exports.create = async (req, res, next) => {
           intake_courier, intake_doctor, intake_hospital, intake_patient, intake_mop,
           intake_receiver, intake_contact_no, intake_source, intake_pls_give,
           sales_order_date, intake_delivery_method, intake_terms, intake_payment_terms, invoicing_from,
-          zoho_so_id, zoho_so_number, zoho_sync_status,
+          zoho_so_id, zoho_so_number, zoho_so_status, zoho_sync_status,
           created_at, submitted_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         getmedsOrderId,
         customer_id,
@@ -762,6 +645,11 @@ exports.create = async (req, res, next) => {
         clean(invoicing_from),
         zohoResult ? zohoResult.salesorder.salesorder_id : null,
         zohoResult ? zohoResult.salesorder.salesorder_number : null,
+        // Sep 1, 2026: seed the Zoho-side status ('draft' as Zoho creates
+        // it). Without this baseline the first "Confirm" in Zoho had nothing
+        // to diff against and logged "no change detected in the fields this
+        // app tracks" instead of "confirmed" — see submit() below.
+        zohoResult ? (zohoResult.salesorder.status || 'draft') : null,
         zohoSyncStatus,
         now,
         isDraft ? null : now,
@@ -842,7 +730,7 @@ exports.create = async (req, res, next) => {
       notify({
         orderId,
         recipientIds: [req.user.id],
-        message: `Your order ${getmedsOrderId} for ${customer.name} has been submitted (${isCredit ? 'Ready for Dispatch' : 'Waiting for Finance Payment Verification'}).`,
+        message: `Your order ${getmedsOrderId} for ${customer.name} has been submitted (${isCredit ? 'Sales Order drafted in Zoho — awaiting confirmation' : 'Waiting for Finance Payment Verification'}).`,
         eventType: 'ORDER_SUBMITTED',
         orderData: orderDataForNotif
       });
@@ -939,20 +827,41 @@ exports.submit = async (req, res, next) => {
     }
 
     const submitTxn = db.transaction(() => {
-      // Step 3: Determine next status based on customer type
-      // credit → ready_for_dispatch (bypasses finance payment check)
-      // direct → waiting_for_payment (routes to finance queue)
+      // Step 3: Determine next status based on customer type.
+      //
+      // Sep 1, 2026: a CREDIT order now stops at 'so_created' instead of
+      // running straight through to a dispatch-ready state. All this app has
+      // done at this point is create a DRAFT Sales Order in Zoho — nobody
+      // has confirmed it, and Finance may still void or edit it. Sending it
+      // to ready_for_dispatch here put orders in the Dispatch queue that no
+      // one had approved, and it also meant the later salesorder.confirmed
+      // webhook found the order already past every status it knows how to
+      // advance, so confirming in Zoho changed nothing. Credit orders are
+      // now released by that webhook (see webhook.controller.js).
+      //
+      // A DIRECT order still goes to 'ready_for_draft_invoice' — unchanged, so
+      // the Finance queue behaves exactly as before.
       const isCredit = (order.customer_type === 'credit' || order.customer_master_type === 'credit');
-      const finalStatus = isCredit ? 'ready_for_dispatch' : 'waiting_for_payment';
+      const finalStatus = isCredit ? 'so_created' : 'ready_for_draft_invoice';
+
+      // Seed the Zoho-side status as 'draft'. Sep 1, 2026: without this
+      // baseline, the first time anyone confirmed the SO in Zoho the
+      // "edited in Zoho" handler had a null previous value to compare
+      // against, treated it as "just learning the baseline", and logged a
+      // bland "no change detected in the fields this app tracks" instead of
+      // "Sales Order confirmed in Zoho (draft → confirmed)". It only started
+      // reading correctly from the SECOND status change onward.
+      const initialZohoStatus = zohoResult ? (zohoResult.salesorder.status || 'draft') : null;
 
       db.prepare(`
         UPDATE orders SET
           getmeds_order_id = ?, customer_type = ?, status = ?, submitted_at = ?, updated_at = ?,
-          zoho_so_id = ?, zoho_so_number = ?, zoho_sync_status = ?
+          zoho_so_id = ?, zoho_so_number = ?, zoho_so_status = ?, zoho_sync_status = ?
         WHERE id = ?
       `).run(getmedsOrderId, isCredit ? 'credit' : 'direct', finalStatus, now, now,
         zohoResult ? zohoResult.salesorder.salesorder_id : null,
         zohoResult ? zohoResult.salesorder.salesorder_number : null,
+        initialZohoStatus,
         zohoSyncStatus,
         order.id);
 
@@ -976,10 +885,12 @@ exports.submit = async (req, res, next) => {
         `).run(order.id);
       }
 
-      // Audit trail — log all status hops
+      // Audit trail — log all status hops. Sep 1, 2026: the credit path now
+      // ends at so_created; ready_for_dispatch is logged later, by the
+      // salesorder.confirmed webhook that actually earns it.
       const statusPath = isCredit
-        ? ['submitted', 'validating', 'so_pending', 'so_created', 'ready_for_dispatch']
-        : ['submitted', 'validating', 'so_pending', 'so_created', 'waiting_for_payment'];
+        ? ['submitted', 'validating', 'so_pending', 'so_created']
+        : ['submitted', 'validating', 'so_pending', 'so_created', 'ready_for_draft_invoice'];
 
       const effectiveActor = resolveActor(req.user, 'medrep');
 
@@ -999,7 +910,7 @@ exports.submit = async (req, res, next) => {
       notify({
         orderId: order.id,
         recipientIds: [effectiveActor.id],
-        message: `Your order ${getmedsOrderId} for ${order.customer_name} has been submitted (${order.customer_type === 'credit' ? 'Ready for Dispatch' : 'Waiting for Finance Payment Verification'}).`,
+        message: `Your order ${getmedsOrderId} for ${order.customer_name} has been submitted (${isCredit ? 'Sales Order drafted in Zoho — awaiting confirmation' : 'Waiting for Finance Payment Verification'}).`,
         eventType: 'ORDER_SUBMITTED',
         orderData: orderDataForNotif
       });
@@ -1009,8 +920,12 @@ exports.submit = async (req, res, next) => {
         const financeIds = getUserIdsByRole('finance');
         notify({ orderId: order.id, recipientIds: financeIds, message: `New direct patient order ${getmedsOrderId} requires payment verification.`, eventType: 'PAYMENT_VERIFICATION_REQUIRED', orderData: orderDataForNotif });
       } else {
+        // Sep 1, 2026: Dispatch is told the order exists, not that it's
+        // ready — it isn't until Zoho confirms the Sales Order. The
+        // ORDER_READY_FOR_DISPATCH notification now fires from the
+        // salesorder.confirmed webhook instead.
         const dispatchIds = getUserIdsByRole('dispatch');
-        notify({ orderId: order.id, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} is ready for dispatch.`, eventType: 'ORDER_READY_FOR_DISPATCH', orderData: orderDataForNotif });
+        notify({ orderId: order.id, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} drafted in Zoho — will reach dispatch once Finance confirms the Sales Order.`, eventType: 'ORDER_SUBMITTED', orderData: orderDataForNotif });
       }
 
       return { getmedsOrderId, finalStatus, zohoResult, zohoSyncStatus };
@@ -1056,5 +971,150 @@ exports.setException = (req, res, next) => {
     notify({ orderId: order.id, recipientIds: [...medrepIds, ...mgmtIds], message: `Order ${order.getmeds_order_id} is now ${targetStatus}. Reason: ${reason || 'None provided'}`, eventType: 'ORDER_EXCEPTION', orderData: order });
 
     res.json({ success: true, data: { status: targetStatus } });
+  } catch (err) { next(err); }
+};
+
+// ─── EDIT ORDER ITEMS (Aug 31, 2026) ──────────────────────────────────────────
+//
+// Added after TestGM-20260831-0001 failed its Zoho sync with "Inactive
+// items cannot be added to the sales order" — the order had already been
+// created locally with a product that Zoho had since discontinued, and
+// there was no way to fix it short of abandoning the order entirely.
+// "Retry Zoho Sync" just resends the exact same (broken) line items, so it
+// can never recover on its own from a bad item — only replacing the item
+// does.
+//
+// Deliberately scoped to ONLY before a real Zoho Sales Order exists
+// (order.zoho_so_id is still null). Once zoho_so_id is set, the Sales
+// Order is a real record in Zoho — changing order_items here without also
+// updating that Zoho record would silently desync the two, which is a
+// different (harder, unsolved) problem than this endpoint is for. In
+// practice that means this only ever helps while zoho_sync_status is
+// 'failed' or 'pending' — exactly the case that motivated it.
+//
+// PATCH /api/orders/:id/items — body: { items: [{ product_id, quantity,
+// rate?, discount?, tax_percent?, tax_label? }, ...] }. Re-validates and
+// re-prices every line exactly like `create` above (same active-product
+// check, same rate/discount/tax math), replaces order_items wholesale, and
+// recomputes total_amount. Logs one ORDER_ITEMS_EDITED audit entry with a
+// before/after summary so it's obvious from the trail alone what changed
+// and why, without needing to diff raw item rows.
+exports.updateItems = (req, res, next) => {
+  try {
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
+    }
+    if (order.zoho_so_id) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'ALREADY_SYNCED',
+          message: 'This order already has a Zoho Sales Order (' + (order.zoho_so_number || order.zoho_so_id) +
+            ') — items can no longer be edited here, since Zoho\'s own record would then be out of date.'
+        }
+      });
+    }
+    if (order.status === 'cancelled') {
+      return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'Order is cancelled.' } });
+    }
+
+    const { items } = req.body;
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'At least one order item is required' } });
+    }
+
+    // Same per-line validation/pricing as `create` above, kept in lockstep
+    // deliberately (see that function's comments for why each piece exists)
+    // — a product must still be active *right now*, so re-picking the exact
+    // same now-inactive item is rejected here too, not just at Zoho's end.
+    let total_amount = 0;
+    const resolvedItems = [];
+    for (const item of items) {
+      if (!item.product_id || !item.quantity || item.quantity <= 0) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Each item needs product_id and quantity > 0' } });
+      }
+      // Sep 1, 2026 (7): tell the difference between "no such product" and
+      // "that product is deactivated in Zoho". Both used to answer NOT_FOUND,
+      // which was actively misleading now that the order form lists inactive
+      // items — a MedRep would see the medicine on screen and be told it does
+      // not exist. Zoho rejects an inactive item on a Sales Order
+      // ("Inactive items cannot be added to the sales order"), so this is the
+      // same refusal, just made early and in words that explain it.
+      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
+      if (!product) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Product ${item.product_id} not found` } });
+      if (!product.is_active) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'PRODUCT_INACTIVE',
+            message: `"${product.name}" is marked Inactive in Zoho and cannot be added to a Sales Order. Reactivate it in Zoho, run an inventory sync, then try again.`
+          }
+        });
+      }
+
+      const rate = (item.rate !== undefined && item.rate !== null && item.rate !== '')
+        ? Math.max(0, Number(item.rate))
+        : product.unit_price;
+      const subtotal = rate * item.quantity;
+
+      const discountAmount = Math.min(subtotal, Math.max(0, Number(item.discount) || 0));
+      const taxPercent = Math.max(0, Number(item.tax_percent) || 0);
+      const taxableBase = subtotal - discountAmount;
+      const taxAmount = taxableBase * (taxPercent / 100);
+      const lineTotal = taxableBase + taxAmount;
+
+      total_amount += lineTotal;
+      resolvedItems.push({
+        product_id: item.product_id,
+        quantity: item.quantity,
+        unit_price: rate,
+        subtotal,
+        discount_amount: discountAmount,
+        tax_percent: taxPercent,
+        tax_label: (typeof item.tax_label === 'string' && item.tax_label.trim()) ? item.tax_label.trim() : null,
+        line_total: lineTotal,
+        name: product.name
+      });
+    }
+
+    const oldItemsSummary = db.prepare(`
+      SELECT oi.quantity, p.name FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
+    `).all(order.id).map((r) => `${r.quantity}x ${r.name || 'Unknown product'}`).join(', ') || 'none';
+    const newItemsSummary = resolvedItems.map((it) => `${it.quantity}x ${it.name}`).join(', ');
+
+    const now = new Date().toISOString();
+    const txn = db.transaction(() => {
+      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(order.id);
+      const insertItem = db.prepare(`
+        INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal, discount_amount, tax_percent, tax_label, line_total)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const it of resolvedItems) {
+        insertItem.run(order.id, it.product_id, it.quantity, it.unit_price, it.subtotal, it.discount_amount, it.tax_percent, it.tax_label, it.line_total);
+      }
+      db.prepare('UPDATE orders SET total_amount = ?, updated_at = ? WHERE id = ?').run(total_amount, now, order.id);
+
+      logEvent({
+        orderId: order.id,
+        eventType: 'ORDER_ITEMS_EDITED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: req.user?.id || null,
+        actorName: req.user?.name || 'User',
+        notes: `Order items changed before this order was sent to Zoho — was: ${oldItemsSummary}; now: ${newItemsSummary}. New total: ₱${total_amount.toFixed(2)}.`,
+        metadata: { oldItemsSummary, newItemsSummary, total_amount }
+      });
+    });
+    txn();
+
+    const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const updatedItems = db.prepare(`
+      SELECT oi.*, p.name as product_name, p.sku, p.unit
+      FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
+    `).all(order.id);
+
+    res.json({ success: true, data: { order: updatedOrder, items: updatedItems } });
   } catch (err) { next(err); }
 };

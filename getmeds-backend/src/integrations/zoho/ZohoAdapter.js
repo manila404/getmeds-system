@@ -78,6 +78,20 @@ class ZohoAdapter {
   }
 
   /**
+   * Read-only: ONE page of Sales Orders, newest first.
+   *
+   * Sep 1, 2026 (6). listSalesOrders above walks every page until Zoho says
+   * there are no more — right for a full mirror, badly wrong for "show me the
+   * five most recent", which would otherwise pull the org's entire Sales Order
+   * history to then discard all but five. This is the bounded read.
+   *
+   * @returns {Promise<{code:number, message:string, salesorders:object[]}>}
+   */
+  async listRecentSalesOrders(limit = 5) {
+    throw new Error('Not implemented');
+  }
+
+  /**
    * Read-only: list contacts already in Zoho. Used to mirror customers
    * into the local `customers` table (see customers.controller.js) so an
    * order can carry an existing `zoho_customer_id` — this adapter never

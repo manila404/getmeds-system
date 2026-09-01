@@ -186,6 +186,7 @@ const facadeMethods = [
   'createSalesOrder',
   'getSalesOrder',
   'listSalesOrders',
+  'listRecentSalesOrders',
   'listContacts',
   'listItems',
   'getContact',

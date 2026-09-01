@@ -15,4 +15,11 @@ router.use(requireRole('finance', 'admin', 'management'));
 router.get('/queue', c.getQueue);
 router.get('/orders/:id/payment', c.getPayment);
 
+// Sep 1, 2026 (8): the exception to the read-only rule above. Finance
+// verification — checking the customer's account before an invoice is raised —
+// is the one stage Zoho has no record of, because it is a judgement about the
+// account rather than a document. So it is recorded here, by the person who
+// made it, and it writes only to this app; nothing is pushed to Zoho.
+router.post('/orders/:id/verify', c.verifyAccount);
+
 module.exports = router;

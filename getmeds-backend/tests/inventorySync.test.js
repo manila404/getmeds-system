@@ -177,3 +177,100 @@ describe('Inventory & Stock Synchronization API', () => {
     });
   });
 });
+
+/**
+ * Sep 1, 2026 (7): Active/Inactive must be visible, which means inactive
+ * products have to be RETURNED, not filtered away.
+ *
+ * Both the Inventory page and the order form's product search used to run
+ * `WHERE is_active = 1`. A product deactivated in Zoho therefore vanished from
+ * both, and the only way to find out was a Sales Order failing at submit with
+ * "Inactive items cannot be added to the sales order". You cannot label what
+ * you cannot see.
+ */
+describe('inactive products are listed and labelled', () => {
+  const db = require('../src/db/database');
+  const ordersController = require('../src/controllers/orders.controller');
+  const inventoryController = require('../src/controllers/inventory.controller');
+
+  let activeId;
+  let inactiveId;
+
+  const res = () => ({
+    statusCode: 200,
+    body: null,
+    status(c) { this.statusCode = c; return this; },
+    json(b) { this.body = b; return this; }
+  });
+
+  beforeAll(() => {
+    db.prepare("DELETE FROM products WHERE sku IN ('LBL-ACTIVE', 'LBL-INACTIVE')").run();
+    activeId = db.prepare(
+      "INSERT INTO products (name, sku, unit_price, unit, stock, is_active) VALUES ('Label Active Med', 'LBL-ACTIVE', 10, 'tab', 5, 1)"
+    ).run().lastInsertRowid;
+    inactiveId = db.prepare(
+      "INSERT INTO products (name, sku, unit_price, unit, stock, is_active) VALUES ('Label Inactive Med', 'LBL-INACTIVE', 10, 'tab', 5, 0)"
+    ).run().lastInsertRowid;
+  });
+
+  afterAll(() => {
+    db.prepare("DELETE FROM products WHERE sku IN ('LBL-ACTIVE', 'LBL-INACTIVE')").run();
+  });
+
+  test('the order form product list includes inactive items, with the flag', () => {
+    const r = res();
+    ordersController.getProducts({}, r, jest.fn());
+    const products = r.body.data.products;
+    const active = products.find((p) => p.id === activeId);
+    const inactive = products.find((p) => p.id === inactiveId);
+
+    expect(active).toBeDefined();
+    expect(inactive).toBeDefined();
+    expect(active.is_active).toBe(1);
+    expect(inactive.is_active).toBe(0);
+  });
+
+  test('the inventory list includes inactive items, with the flag', async () => {
+    const r = res();
+    await inventoryController.getInventoryStatus({}, r);
+    const products = r.body.data.products;
+
+    expect(products.find((p) => p.id === activeId).is_active).toBe(1);
+    expect(products.find((p) => p.id === inactiveId).is_active).toBe(0);
+  });
+
+  test('active products sort ahead of inactive ones', () => {
+    const r = res();
+    ordersController.getProducts({}, r, jest.fn());
+    const ids = r.body.data.products.map((p) => p.id);
+    expect(ids.indexOf(activeId)).toBeLessThan(ids.indexOf(inactiveId));
+  });
+
+  test('submitting an inactive product is refused by name, not as "not found"', async () => {
+    const medrep = db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
+    const customer = db.prepare('SELECT id FROM customers LIMIT 1').get();
+    const r = res();
+
+    await ordersController.create(
+      {
+        user: { id: medrep.id, name: 'T', role: 'medrep' },
+        params: {},
+        body: {
+          customer_id: customer.id,
+          items: [{ product_id: inactiveId, quantity: 1 }],
+          delivery_address: '1 Test St',
+          status: 'draft'
+        }
+      },
+      r,
+      jest.fn()
+    );
+
+    expect(r.statusCode).toBe(400);
+    expect(r.body.error.code).toBe('PRODUCT_INACTIVE');
+    // The message has to name the medicine and say what to do — the MedRep can
+    // see it listed on screen, so "not found" would read as a system fault.
+    expect(r.body.error.message).toContain('Label Inactive Med');
+    expect(r.body.error.message).toMatch(/Inactive in Zoho/i);
+  });
+});

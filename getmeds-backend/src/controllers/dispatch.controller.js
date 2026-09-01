@@ -22,6 +22,12 @@ exports.getQueue = (req, res, next) => {
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
       LEFT JOIN dispatch_records d ON o.id = d.order_id
+      -- Sep 1, 2026 (5): 'ready_for_dispatch' now MEANS "the invoice has been
+      -- issued, this is yours to pack" — it used to mean "the Sales Order is
+      -- confirmed". That rename is exactly what this queue wanted: the
+      -- warehouse sees an order at the point Finance is done with it, and the
+      -- two finance stages ahead of it (ready_for_draft_invoice,
+      -- ready_for_invoice_sent) correctly stay out of this list.
       WHERE o.status IN ('ready_for_dispatch', 'picking_packing', 'dispatched')
       ORDER BY o.updated_at ASC
     `).all();

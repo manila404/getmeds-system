@@ -218,6 +218,19 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorder: result.salesorder };
   }
 
+  /**
+   * One page, newest first. Sorted by created_time descending and capped by
+   * per_page, so exactly one HTTP GET leaves this process however large the
+   * org's Sales Order history is.
+   */
+  async listRecentSalesOrders(limit = 5) {
+    const perPage = Math.max(1, Math.min(200, Number(limit) || 5));
+    const result = await this._request('GET', '/salesorders', {
+      query: { sort_column: 'created_time', sort_order: 'D', page: 1, per_page: perPage }
+    });
+    return { code: 0, message: 'success', salesorders: (result.salesorders || []).slice(0, perPage) };
+  }
+
   async listSalesOrders(params = {}) {
     const result = await this._request('GET', '/salesorders', { query: params });
     return { code: 0, message: 'success', salesorders: result.salesorders || [] };

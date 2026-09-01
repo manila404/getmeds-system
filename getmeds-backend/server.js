@@ -1,6 +1,7 @@
 require('dotenv').config();
 const app = require('./src/app');
 const zohoRetryService = require('./src/services/zohoRetryService');
+const zohoAutoSyncService = require('./src/services/zohoAutoSyncService');
 
 const { isTestModeEnabled } = require('./src/middleware/testMode');
 
@@ -31,8 +32,24 @@ app.listen(PORT, () => {
   if (process.env.ZOHO_AUTO_RETRY_ENABLED === 'true') {
     const intervalMs = parseInt(process.env.ZOHO_RETRY_INTERVAL_MS, 10) || 30000;
     zohoRetryService.start(intervalMs);
-    console.log(`   Zoho Retry: polling every ${intervalMs / 1000}s for failed syncs to retry\n`);
+    console.log(`   Zoho Retry: polling every ${intervalMs / 1000}s for failed syncs to retry`);
   } else {
-    console.log('   Zoho Retry: automatic background retry is OFF — use the "Retry Zoho Sync" button on an order instead.\n');
+    console.log('   Zoho Retry: automatic background retry is OFF — use the "Retry Zoho Sync" button on an order instead.');
+  }
+
+  // Sep 1, 2026 (3): the PULL half — reconcile open orders against Zoho on a
+  // schedule so the audit trail fills itself in when a webhook is missed
+  // (a Workflow Rule that isn't built yet, or the tunnel to this machine
+  // being down). Distinct from the retry loop above, which PUSHES failed
+  // Sales Order creations. On by default; ZOHO_AUTO_SYNC_ENABLED=false stops
+  // it. Opening an order still refreshes it either way.
+  if (zohoAutoSyncService.isEnabled()) {
+    zohoAutoSyncService.start();
+    console.log(
+      `   Zoho Auto-Sync: reconciling up to ${zohoAutoSyncService.BATCH_SIZE} open orders every ` +
+        `${zohoAutoSyncService.INTERVAL_MS / 1000}s, plus on order open.\n`
+    );
+  } else {
+    console.log('   Zoho Auto-Sync: background reconcile is OFF (ZOHO_AUTO_SYNC_ENABLED=false) — orders still refresh when opened.\n');
   }
 });

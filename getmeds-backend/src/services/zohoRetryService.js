@@ -2,6 +2,7 @@ const db = require('../db/database');
 const zoho = require('../integrations/zoho');
 const { logEvent } = require('./auditService');
 const { notify, getUserIdsByRole } = require('./notificationService');
+const { buildZohoSalesOrderPayload } = require('./zohoPayloadBuilder');
 
 /**
  * Zoho sync retry/outbox service.
@@ -57,7 +58,19 @@ function listQueue() {
 
 async function processOne(row) {
   try {
-    const payload = JSON.parse(row.payload);
+    // Aug 31, 2026: rebuilt fresh from the order's CURRENT state (customer +
+    // live order_items) on every attempt — not JSON.parse(row.payload), the
+    // one-time snapshot frozen at the moment of the original failure. That
+    // frozen snapshot is what made PATCH /api/orders/:id/items ("Edit
+    // Items", added the same day to fix a bad line item) invisible to
+    // retries: an order could be edited any number of times and every retry
+    // would still resend the original, already-corrected-away item. See
+    // zohoPayloadBuilder.js for the full story. row.payload is left in the
+    // table only as a historical record of what the very first attempt sent.
+    const payload = buildZohoSalesOrderPayload(row.order_id);
+    if (!payload) {
+      throw new Error(`Order ${row.order_id} no longer exists — cannot retry Zoho sync.`);
+    }
     const zohoResult = await zoho.createSalesOrder(payload);
     const now = new Date().toISOString();
 

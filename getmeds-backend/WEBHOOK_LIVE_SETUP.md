@@ -196,9 +196,11 @@ Same recipe, new rule each time — Action Type **Edited** (or **Created** for t
 |---|---|---|---|---|
 | `Getmeds — SO Confirmed` | **Inventory** | Sales Order | Edited each time; Status is `Open` | `salesorder.confirmed` ✅ verified live |
 | `Getmeds — SO Cancelled` | **Inventory** | Sales Order | Edited each time; Status is `Void` (check picklist — may also be `Cancelled`) | `salesorder.cancelled` |
+| `Getmeds — SO Deleted` | **Inventory** | Sales Order | Action Type **Deleted** (no status criteria) | `salesorder.deleted` — see §3b-iv |
 | `Getmeds — Package Created` | **Inventory** | Package | **Created** (picking & packing done) | `package.created` — see §3b-ii |
 | `Getmeds — Shipment Created` | **Inventory** | Shipment | **Created** (courier + tracking assigned) | `shipment.created` — see §3b-ii |
 | `Getmeds — Invoice Drafted` | **Books** | Invoice | **Created** (fires the moment Finance clicks Convert to Invoice) | `invoice.created` — see §3b-i |
+| `Getmeds — Invoice Sent` | **Books** | Invoice | Edited each time; Status is `Sent` | `invoice.sent` — see §3b-iii |
 | `Getmeds — Invoice Paid` | **Books** | Invoice | Edited each time; Status is `Paid` | `invoice.paid` |
 | `Getmeds — Payment Received` | **Books** | Customer Payment | on record creation (no status criteria needed) | `payment.created` |
 
@@ -240,6 +242,71 @@ specifics:
 6. Test it by confirming a Sales Order (§3a's flow) and then clicking **Convert to Invoice** on it in Zoho
    Books. Check the ngrok inspector for the new request, and confirm the order's status becomes
    `invoice_drafted` in the app (Order Detail page / Zoho Finance Status page).
+
+### 3b-iv. `Getmeds — SO Deleted` in detail (added Sep 1, 2026)
+
+Deleting a Sales Order and voiding one are **not the same event** and no longer produce the same result
+here. Voiding leaves the Zoho record in place with a changed status; deleting removes it entirely, and
+there is no way back short of recreating it. Since Sep 1, 2026 a deletion puts the order at its own
+`deleted` status, so the badge and every status filter tell the two apart — previously both read
+`cancelled` and only the audit trail knew the difference.
+
+1. **Zoho Inventory** → Settings → Automation → Workflow Rules → **+ New Workflow Rule**.
+2. Name: `Getmeds — SO Deleted`, Module: **Sales Order** → **Next**.
+3. Action Type: **Deleted**. No status criteria — a deletion is a deletion.
+4. **+ Immediate Actions** → Webhooks → reuse `Getmeds Order Receiver`. **Body**: x-www-form-urlencoded:
+
+   | Key | Value |
+   |---|---|
+   | `event_type` | typed literally: `salesorder.deleted` |
+   | `salesorder_id` | Insert Placeholder → Sales Order ID |
+   | `reference_number` | Insert Placeholder → Reference# (the GM/TestGM order id) |
+
+5. Save → Associate → **confirm it shows Active**.
+
+> **Send both identifiers if the placeholder list allows it.** This is the one rule where the record is
+> gone by the time you might go looking for it, so if the webhook arrives without an identifier the app
+> can match, there is nothing to reconcile against later — `Sync from Zoho` can still detect it (the API
+> fetch fails with "does not exist" and the same `deleted` status is backfilled), but only for an order
+> you already know to go and check.
+
+**An order that had already completed is not reopened.** If the Sales Order is deleted long after the
+order shipped and was paid, the status stays `completed` and the deletion is recorded on the timeline
+with wording that says so. Removing the Zoho record does not un-ship or un-pay a real order.
+
+### 3b-iii. `Getmeds — Invoice Sent` in detail (added Sep 1, 2026)
+
+This is the rule behind the `invoice_sent` order status — "Finance has actually issued this invoice to
+the customer," as distinct from "an invoice exists as a draft." Until Sep 1, 2026 the app had no way to
+tell those apart: an invoice whose status was `Sent` was matched by the same check as a draft one, so
+marking it as Sent produced a second, duplicate *"Invoice drafted in Zoho"* entry and no status change.
+Both the code branch and this rule were added together; **building this rule against an older build of
+the app will reproduce that duplicate entry**, so make sure the backend is on the Sep 1 changes first.
+
+1. **Zoho Books** → Settings → Automation → Workflow Rules → **+ New Workflow Rule**.
+2. Name: `Getmeds — Invoice Sent`, Module: **Invoice** → **Next**.
+3. Action Type: **Edited each time**, with criteria **Status is `Sent`**. Check the picklist for the real
+   stored value rather than assuming the display label, same caution as every other rule here.
+4. **+ Immediate Actions** → Webhooks → reuse the Books webhook built in §3b-i. **Body**:
+   x-www-form-urlencoded, with:
+
+   | Key | Value |
+   |---|---|
+   | `event_type` | typed literally: `invoice.sent` |
+   | `salesorder_id` | Insert Placeholder → the Invoice's linked Sales Order ID |
+   | `reference_number` | Insert Placeholder → whichever Invoice field carries the SO's Ref#/GM order id |
+   | `invoice_id` | Insert Placeholder → Invoice ID |
+   | `invoice_number` | Insert Placeholder → Invoice# |
+
+5. Save → Associate → **confirm it shows Active in the rules list**.
+6. Test: convert a Sales Order to an Invoice, then click **Mark as Sent**. The order should move
+   `invoice_drafted` → `invoice_sent` and the timeline should show one `ZOHO_INVOICE_SENT` entry — *not*
+   a second "Invoice drafted".
+
+> The app also accepts `invoice_sent`, `invoice.mark_sent` and `invoice.marked_sent` as the event type, and
+> falls back to reading the invoice's own `status` field if the event type is missing entirely. Prefer the
+> literal `invoice.sent` — the event type always wins over the status field, so an `invoice.created` webhook
+> for an auto-sent invoice is still correctly recorded as the creation.
 
 ### 3b-ii. `Getmeds — Package Created` / `Getmeds — Shipment Created` in detail
 

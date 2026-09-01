@@ -8,11 +8,18 @@ exports.getSummary = (req, res, next) => {
     for (const row of statusRows) orders_by_status[row.status] = row.count;
 
     const total_orders = db.prepare('SELECT COUNT(*) as c FROM orders').get().c;
-    const pending_payment_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status = 'waiting_for_payment'").get().c;
+    // Sep 1, 2026: invoice_drafted/invoice_sent counted here too. Both are
+    // orders Finance is still carrying — invoiced in Zoho but not yet paid —
+    // and they are already in the Finance queue, so leaving them out made
+    // this KPI disagree with the queue it is meant to summarise.
+    const pending_payment_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('ready_for_draft_invoice','ready_for_invoice_sent','ready_for_dispatch')").get().c;
     const ready_dispatch_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('ready_for_dispatch','picking_packing')").get().c;
     const dispatched_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('dispatched','tracking_shared')").get().c;
     const completed_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status = 'completed'").get().c;
-    const exception_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('on_hold','exception','cancelled')").get().c;
+    // 'deleted' counted alongside 'cancelled' (Sep 1, 2026) so an order whose
+    // Sales Order was removed in Zoho still shows up somewhere on the
+    // dashboard rather than dropping out of every KPI.
+    const exception_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('on_hold','exception','cancelled','deleted')").get().c;
 
     const today = new Date().toISOString().slice(0, 10);
     const orders_today = db.prepare("SELECT COUNT(*) as c FROM orders WHERE DATE(created_at) = ?").get(today).c;

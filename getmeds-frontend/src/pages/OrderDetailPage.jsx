@@ -2,10 +2,12 @@ import React, { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw, Pencil, Trash2 } from 'lucide-react';
 import client from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPHT } from '../utils/dateUtils';
+import { useProducts } from '../hooks/useOrderData';
+import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 
 const STATUS_COLORS = {
   draft: 'bg-slate-100 text-slate-700 border border-slate-300',
@@ -13,9 +15,14 @@ const STATUS_COLORS = {
   validating: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
   so_pending: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
   so_created: 'bg-getmeds-blue/10 text-getmeds-blue-dark border border-getmeds-blue/30',
-  waiting_for_payment: 'bg-state-warning-light text-amber-950 border border-state-warning font-semibold',
-  invoice_drafted: 'bg-indigo-50 text-indigo-700 border border-indigo-300 font-semibold',
-  payment_verified: 'bg-pharmacy-green/15 text-pharmacy-green-dark border border-pharmacy-green/30',
+  // Sep 1, 2026 (5): the renamed finance stages. This map is a second copy of
+  // the one in ui/OrderStatusBadge.jsx and had drifted — it still listed
+  // waiting_for_payment, invoice_drafted and payment_verified, all retired.
+  // Sep 1, 2026 (8): the pre-invoice account check — see ui/OrderStatusBadge.jsx
+  // for why this one is purple and nothing else is.
+  ready_for_finance_verified: 'bg-purple-50 text-purple-800 border border-purple-300 font-semibold',
+  ready_for_draft_invoice: 'bg-state-warning-light text-amber-950 border border-state-warning font-semibold',
+  ready_for_invoice_sent: 'bg-indigo-50 text-indigo-700 border border-indigo-300 font-semibold',
   ready_for_dispatch: 'bg-getmeds-blue/10 text-getmeds-blue-dark border border-getmeds-blue/30',
   picking_packing: 'bg-indigo-50 text-indigo-700 border border-indigo-200',
   dispatched: 'bg-getmeds-blue/15 text-getmeds-blue-dark border border-getmeds-blue/40',
@@ -24,7 +31,51 @@ const STATUS_COLORS = {
   on_hold: 'bg-state-error-light text-red-800 border border-state-error/30',
   exception: 'bg-state-error-light text-red-950 border border-state-error font-bold',
   cancelled: 'bg-state-error-light text-red-700 border border-state-error/30',
+  deleted: 'bg-slate-200 text-slate-600 border border-slate-400 line-through',
 };
+
+// Sep 1, 2026 (5): timeline entries are titled with the Zoho Sales Order they
+// belong to, and with a short human label instead of the raw event_type.
+//
+// The event_type values themselves are deliberately left alone — they are the
+// machine key that audit queries, the "already logged?" guards and the tests
+// all match on, and renaming them to prettify a heading would be trading a
+// stable contract for a display detail. So the mapping lives here, at the one
+// place a person actually reads.
+const EVENT_LABELS = {
+  ORDER_SUBMITTED: 'ORDER SUBMITTED',
+  STATUS_CHANGE: 'STATUS CHANGE',
+  ZOHO_SO_CONFIRMED: 'CONFIRMED',
+  ZOHO_SO_STATUS_CHANGED: 'SO STATUS CHANGED',
+  ZOHO_SO_EDITED: 'EDITED IN ZOHO',
+  ZOHO_SO_CANCELLED: 'CANCELLED',
+  ZOHO_SO_DELETED: 'SO DELETED',
+  // The only two events in this map that come from a person clicking in this
+  // app rather than from Zoho reporting something.
+  FINANCE_VERIFIED: 'FINANCE VERIFIED',
+  FINANCE_REJECTED: 'FINANCE REJECTED',
+  ZOHO_INVOICE_DRAFTED: 'INVOICE DRAFTED',
+  ZOHO_INVOICE_SENT: 'INVOICE SENT',
+  ZOHO_PAYMENT_VERIFIED: 'PAYMENT RECEIVED',
+  ZOHO_PACKAGE_CREATED: 'PACKED',
+  ZOHO_DISPATCHED: 'DISPATCHED',
+  TRACKING_ENTERED: 'TRACKING ENTERED',
+  ORDER_COMPLETED: 'COMPLETED',
+  ORDER_COMPLETION_BLOCKED: 'COMPLETION BLOCKED',
+  ZOHO_SYNC_FAILED: 'ZOHO SYNC FAILED',
+  ZOHO_EVENT_RECEIVED: 'ZOHO EVENT RECEIVED',
+  EXCEPTION_SET: 'EXCEPTION SET'
+};
+
+// "[SO-66881] INVOICE SENT". The Sales Order number comes from the order
+// rather than the event, because every event on an order shares it — and an
+// order whose Zoho push failed has none yet, in which case the prefix is
+// simply omitted rather than rendering an empty bracket.
+function eventTitle(event, order) {
+  const label = EVENT_LABELS[event.event_type] || String(event.event_type || '').replace(/_/g, ' ');
+  const so = order?.zoho_so_number;
+  return so ? `[${so}] ${label}` : label;
+}
 
 const EVENT_ICONS = {
   ORDER_CREATED: '📝', STATUS_CHANGE: '🔄', PAYMENT_VERIFIED: '✅',
@@ -33,7 +84,8 @@ const EVENT_ICONS = {
   ZOHO_PAYMENT_SYNCED: '⚡', ZOHO_SO_CONFIRMED: '📄', ZOHO_INVOICE_DRAFTED: '🧾',
   ZOHO_PAYMENT_VERIFIED: '✅', ZOHO_PACKAGE_CREATED: '📦', ZOHO_DISPATCHED: '🚚',
   ZOHO_DISPATCH_UPDATED: '🚚', ZOHO_SO_CANCELLED: '🚫', ZOHO_EVENT_RECEIVED: '🔔',
-  ZOHO_SO_STATUS_CHANGED: '📄'
+  ZOHO_SO_STATUS_CHANGED: '📄', ORDER_ITEMS_EDITED: '✏️', ZOHO_SO_DELETED: '🗑️',
+  FINANCE_VERIFIED: '🔍', FINANCE_REJECTED: '🛑'
 };
 
 const OrderDetailPage = () => {
@@ -42,6 +94,15 @@ const OrderDetailPage = () => {
   const { user } = useAuth();
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState('items');
+  // Aug 31, 2026: lets a MedRep/Admin fix an order's line items in place —
+  // added after TestGM-20260831-0001 failed Zoho sync with "Inactive items
+  // cannot be added to the sales order" and there was no way to swap the
+  // bad item out short of abandoning the order. See the gating on
+  // order.zoho_so_id below for why this only shows up before a real Zoho
+  // Sales Order exists yet.
+  const [isEditingItems, setIsEditingItems] = useState(false);
+  const [draftItems, setDraftItems] = useState([]);
+  const { data: products = [] } = useProducts();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['order', id],
@@ -65,6 +126,11 @@ const OrderDetailPage = () => {
       const action = res?.data?.action;
       if (action === 'SO_CONFIRMED_BACKFILLED') toast.success('Zoho confirmation added to the timeline.');
       else if (action === 'SO_CANCELLED_BACKFILLED') toast.success('Zoho cancellation added to the timeline.');
+      // Aug 31, 2026: a Sales Order deleted directly in Zoho (not
+      // voided/cancelled) used to just show the raw "Sales Order does not
+      // exist" error from Zoho with nothing added to the trail — see
+      // orders.controller.js's syncFromZoho.
+      else if (action === 'SO_DELETED_BACKFILLED') toast.success('Zoho deletion added to the timeline.');
       else if (action === 'PACKAGE_BACKFILLED') toast.success('Zoho package (picking/packing) added to the timeline.');
       else if (action === 'DISPATCHED_BACKFILLED') toast.success('Zoho shipment & tracking added to the timeline.');
       else toast('Already up to date with Zoho.', { icon: 'ℹ️' });
@@ -87,6 +153,73 @@ const OrderDetailPage = () => {
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Retry failed')
   });
+
+  // Aug 31, 2026: saves a corrected line-item list (see isEditingItems
+  // above). Only ever reachable while order.zoho_so_id is still null —
+  // the backend rejects this outright once a real Zoho Sales Order exists,
+  // so there's no risk of silently desyncing this app from Zoho.
+  const updateItemsMutation = useMutation({
+    mutationFn: (payloadItems) => client.patch(`/api/orders/${id}/items`, { items: payloadItems }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Order items updated.');
+      setIsEditingItems(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not update items')
+  });
+
+  const startEditingItems = (currentItems) => {
+    setDraftItems(currentItems.map((it) => ({
+      product_id: it.product_id,
+      name: it.product_name,
+      sku: it.sku,
+      unit: it.unit,
+      quantity: it.quantity,
+      rate: it.unit_price,
+      discount: it.discount_amount || 0,
+      tax_percent: it.tax_percent || 0,
+      tax_label: it.tax_label || null
+    })));
+    setIsEditingItems(true);
+  };
+
+  const replaceDraftProduct = (index, product) => {
+    setDraftItems((rows) => rows.map((row, i) => i === index
+      ? { ...row, product_id: product.id, name: product.name, sku: product.sku, unit: product.unit, rate: product.unit_price }
+      : row));
+  };
+
+  const updateDraftQuantity = (index, value) => {
+    const qty = Math.max(1, Number(value) || 1);
+    setDraftItems((rows) => rows.map((row, i) => i === index ? { ...row, quantity: qty } : row));
+  };
+
+  const removeDraftRow = (index) => {
+    setDraftItems((rows) => rows.filter((_, i) => i !== index));
+  };
+
+  const addDraftProduct = (product) => {
+    setDraftItems((rows) => [...rows, {
+      product_id: product.id, name: product.name, sku: product.sku, unit: product.unit,
+      quantity: 1, rate: product.unit_price, discount: 0, tax_percent: 0, tax_label: null
+    }]);
+  };
+
+  const activeProductIds = new Set(products.map((p) => String(p.id)));
+  const hasInactiveDraftRow = draftItems.some((row) => !activeProductIds.has(String(row.product_id)));
+
+  const saveDraftItems = () => {
+    if (draftItems.length === 0) { toast.error('Add at least one item.'); return; }
+    if (hasInactiveDraftRow) { toast.error('Replace the flagged item(s) before saving — they are no longer active in Zoho.'); return; }
+    updateItemsMutation.mutate(draftItems.map((row) => ({
+      product_id: row.product_id,
+      quantity: row.quantity,
+      rate: row.rate,
+      discount: row.discount,
+      tax_percent: row.tax_percent,
+      tax_label: row.tax_label
+    })));
+  };
 
   if (isLoading) return <div className="flex justify-center py-20"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-getmeds-blue" /></div>;
   if (error) return <div className="text-center py-20 text-red-600">Failed to load order. <button onClick={() => navigate(-1)} className="underline">Go back</button></div>;
@@ -112,7 +245,7 @@ const OrderDetailPage = () => {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <p className="text-xs font-mono text-ink-secondary mb-1">Getmeds Order ID</p>
-            <h1 className="text-2xl font-semibold font-mono text-getmeds-blue">{order.getmeds_order_id}</h1>
+            <h1 className="text-2xl font-bold font-mono text-getmeds-blue">{order.getmeds_order_id}</h1>
             <p className="text-sm text-ink-secondary mt-1">
               {order.customer_name} · <span className={`capitalize px-2 py-0.5 rounded text-xs font-medium ${order.customer_type === 'credit' ? 'bg-getmeds-blue/10 text-getmeds-blue-dark' : 'bg-state-warning-light text-amber-900 border border-state-warning/30'}`}>{order.customer_type}</span>
             </p>
@@ -220,35 +353,142 @@ const OrderDetailPage = () => {
           {/* Items Tab */}
           {activeTab === 'items' && (
             <div>
-              <table className="min-w-full">
-                <thead>
-                  <tr className="text-left text-xs font-medium text-ink-secondary uppercase border-b border-slate-200">
-                    <th className="pb-3">Product</th>
-                    <th className="pb-3 text-center">Qty</th>
-                    <th className="pb-3 text-right">Unit Price</th>
-                    <th className="pb-3 text-right">Subtotal</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {items.map(item => (
-                    <tr key={item.id}>
-                      <td className="py-3">
-                        <p className="text-sm font-semibold text-ink-primary">{item.product_name}</p>
-                        <p className="text-xs text-ink-secondary">SKU: {item.sku} · Unit: {item.unit}</p>
-                      </td>
-                      <td className="py-3 text-center text-sm text-ink-primary">{item.quantity}</td>
-                      <td className="py-3 text-right text-sm text-ink-secondary">₱{(item.unit_price || 0).toFixed(2)}</td>
-                      <td className="py-3 text-right text-sm font-semibold text-ink-primary">₱{(item.subtotal || 0).toFixed(2)}</td>
+              {!isEditingItems && (
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-xs text-ink-secondary">
+                    {order.zoho_so_id
+                      ? 'Items can no longer be edited — a Zoho Sales Order already exists for this order.'
+                      : ''}
+                  </p>
+                  {!order.zoho_so_id && order.status !== 'cancelled' && (
+                    <button
+                      type="button"
+                      onClick={() => startEditingItems(items)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-getmeds-blue/40 text-getmeds-blue-dark rounded hover:bg-getmeds-blue/10"
+                      title="Fix a bad line item (e.g. a product that's since gone inactive in Zoho) before this order syncs"
+                    >
+                      <Pencil className="w-3.5 h-3.5" /> Edit Items
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {!isEditingItems ? (
+                <table className="min-w-full">
+                  <thead>
+                    <tr className="text-left text-xs font-medium text-ink-secondary uppercase border-b border-slate-200">
+                      <th className="pb-3">Product</th>
+                      <th className="pb-3 text-center">Qty</th>
+                      <th className="pb-3 text-right">Unit Price</th>
+                      <th className="pb-3 text-right">Subtotal</th>
                     </tr>
-                  ))}
-                </tbody>
-                <tfoot className="border-t-2 border-slate-200">
-                  <tr>
-                    <td colSpan="3" className="pt-3 text-sm font-semibold text-ink-primary text-right">Total Amount</td>
-                    <td className="pt-3 text-right text-lg font-bold text-getmeds-blue">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
-                  </tr>
-                </tfoot>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {items.map(item => (
+                      <tr key={item.id}>
+                        <td className="py-3">
+                          <p className="text-sm font-semibold text-ink-primary">{item.product_name}</p>
+                          <p className="text-xs text-ink-secondary">SKU: {item.sku} · Unit: {item.unit}</p>
+                        </td>
+                        <td className="py-3 text-center text-sm text-ink-primary">{item.quantity}</td>
+                        <td className="py-3 text-right text-sm text-ink-secondary">₱{(item.unit_price || 0).toFixed(2)}</td>
+                        <td className="py-3 text-right text-sm font-semibold text-ink-primary">₱{(item.subtotal || 0).toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="border-t-2 border-slate-200">
+                    <tr>
+                      <td colSpan="3" className="pt-3 text-sm font-semibold text-ink-primary text-right">Total Amount</td>
+                      <td className="pt-3 text-right text-lg font-bold text-getmeds-blue">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              ) : (
+                <div className="space-y-3">
+                  <div className="bg-getmeds-blue/5 border border-getmeds-blue/20 rounded p-3 text-xs text-ink-secondary">
+                    Editing items locally only — nothing is sent to Zoho until you retry the sync. A row highlighted
+                    in red is no longer an active product in Zoho and must be replaced before saving.
+                  </div>
+
+                  {draftItems.map((row, index) => {
+                    const isInactive = !activeProductIds.has(String(row.product_id));
+                    return (
+                      <div
+                        key={index}
+                        className={`p-3 rounded border ${isInactive ? 'border-state-error/50 bg-state-error-light/30' : 'border-slate-200'}`}
+                      >
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                          <div>
+                            <p className="text-sm font-semibold text-ink-primary">{row.name}</p>
+                            <p className="text-xs text-ink-secondary">SKU: {row.sku} · Unit: {row.unit}</p>
+                            {isInactive && (
+                              <p className="text-xs text-red-700 mt-1 flex items-center gap-1 font-medium">
+                                <AlertCircle className="w-3.5 h-3.5" /> No longer active in Zoho — pick a replacement below.
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeDraftRow(index)}
+                            className="text-red-600 hover:text-red-800 p-1"
+                            title="Remove this line"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-start">
+                          <div className="md:col-span-3">
+                            <ProductAutocomplete
+                              products={products}
+                              placeholder="Search to replace this product..."
+                              onSelect={(p) => replaceDraftProduct(index, p)}
+                            />
+                          </div>
+                          <input
+                            type="number"
+                            min="1"
+                            value={row.quantity}
+                            onChange={(e) => updateDraftQuantity(index, e.target.value)}
+                            className="border border-slate-300 rounded-md px-2 py-2 text-sm w-full"
+                            placeholder="Qty"
+                          />
+                        </div>
+                        <p className="text-xs text-ink-secondary mt-1.5">
+                          {row.quantity} × ₱{Number(row.rate || 0).toFixed(2)} = <span className="font-semibold text-ink-primary">₱{(row.quantity * (row.rate || 0)).toFixed(2)}</span>
+                        </p>
+                      </div>
+                    );
+                  })}
+
+                  <div className="border border-dashed border-slate-300 rounded p-3">
+                    <p className="text-xs font-medium text-ink-secondary uppercase mb-1.5">Add another item</p>
+                    <ProductAutocomplete products={products} placeholder="Search products to add..." onSelect={addDraftProduct} />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-200">
+                    <p className="text-sm font-semibold text-ink-primary">
+                      New Total: ₱{draftItems.reduce((sum, r) => sum + r.quantity * (r.rate || 0), 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingItems(false)}
+                        className="px-3 py-1.5 text-xs border border-slate-300 text-ink-secondary rounded hover:bg-surface"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={updateItemsMutation.isPending}
+                        onClick={saveDraftItems}
+                        className="px-3 py-1.5 text-xs font-semibold bg-getmeds-blue text-white rounded hover:bg-getmeds-blue-dark disabled:opacity-50"
+                      >
+                        {updateItemsMutation.isPending ? 'Saving...' : 'Save Changes'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -336,7 +576,7 @@ const OrderDetailPage = () => {
                       <div className="flex items-start justify-between">
                         <div>
                           <p className="text-sm font-semibold text-ink-primary">
-                            {event.event_type.replace(/_/g, ' ')}
+                            {eventTitle(event, order)}
                             {event.old_status && event.new_status && (
                               <span className="ml-2 text-xs font-normal text-ink-secondary">
                                 {event.old_status} → <span className={`font-semibold ${STATUS_COLORS[event.new_status] ? 'text-ink-primary' : ''}`}>{event.new_status}</span>

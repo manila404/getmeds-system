@@ -27,5 +27,9 @@ router.post('/:id/sync-from-zoho', c.syncFromZoho);
 // being diagnosed.
 router.post('/:id/retry-zoho-sync', c.retryZohoSync);
 router.patch('/:id/exception', requireRole('management', 'admin'), c.setException);
+// Aug 31, 2026: fix a failed Zoho sync caused by a bad line item (e.g. a
+// product Zoho has since marked inactive) — see orders.controller.js's
+// updateItems for why this only works before order.zoho_so_id is set.
+router.patch('/:id/items', c.updateItems);
 
 module.exports = router;

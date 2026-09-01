@@ -68,11 +68,26 @@ CREATE TABLE IF NOT EXISTS orders (
   getmeds_order_id TEXT UNIQUE NOT NULL,
   customer_id INTEGER NOT NULL REFERENCES customers(id),
   medrep_id INTEGER NOT NULL REFERENCES users(id),
+  -- Sep 1, 2026: 'ready_for_dispatch' added — Finance marked the Invoice as Sent in
+  -- Zoho, i.e. it has actually been issued to the customer rather than just
+  -- existing as a draft. Changing this CHECK list does NOT reach a database
+  -- that was already migrated (CREATE TABLE IF NOT EXISTS is a no-op once the
+  -- table exists, and SQLite cannot ALTER a CHECK constraint) — migrate.js
+  -- rebuilds the table when it finds an older constraint. See
+  -- ensureOrderStatusValues() there.
+  -- Sep 1, 2026 (2): 'deleted' added, separate from 'cancelled'. Zoho now
+  -- fires a workflow when a Sales Order is removed, and the two are not the
+  -- same event: cancelling/voiding leaves the Zoho record in place with a
+  -- changed status, deleting removes it entirely and there is no way back
+  -- short of recreating it. Both used to collapse to 'cancelled' here, so
+  -- the badge and every status filter showed them identically and only the
+  -- audit trail knew the difference.
   status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN (
-    'draft', 'submitted', 'validating', 'so_pending', 'so_created',
-    'waiting_for_payment', 'invoice_drafted', 'payment_verified', 'ready_for_dispatch',
-    'picking_packing', 'dispatched', 'tracking_shared', 'completed',
-    'on_hold', 'exception', 'cancelled'
+'draft', 'submitted', 'validating', 'so_pending', 'so_created',
+    'ready_for_finance_verified', 'ready_for_draft_invoice',
+    'ready_for_invoice_sent', 'ready_for_dispatch',
+    'picking_packing', 'dispatched', 'tracking_shared',
+    'completed', 'on_hold', 'exception', 'cancelled', 'deleted'
   )),
   customer_type TEXT NOT NULL CHECK(customer_type IN ('credit','direct')),
   total_amount REAL DEFAULT 0 CHECK(total_amount >= 0),
@@ -135,10 +150,17 @@ CREATE TABLE IF NOT EXISTS orders (
   -- Zoho" line in the audit trail instead of a generic one.
   zoho_so_status TEXT,
   -- Populated when Finance converts the Sales Order to an Invoice in Zoho
-  -- (webhook: invoice.created) — see 'invoice_drafted' status above.
+  -- (webhook: invoice.created) — see 'ready_for_invoice_sent' status above.
   zoho_invoice_id TEXT,
   zoho_invoice_number TEXT,
   zoho_sync_status TEXT DEFAULT 'pending' CHECK(zoho_sync_status IN ('pending','synced','failed','skipped')),
+  -- Sep 1, 2026 (3): when this order was last PULLED from Zoho by the
+  -- reconcile (services/zohoReconcileService.js) — not the same thing as
+  -- zoho_sync_status above, which is about the outbound Sales Order push.
+  -- The background poller works oldest-first through this column and the
+  -- refresh-on-open path checks it as a cooldown, so the two never re-read an
+  -- order the other has just read. NULL = never reconciled, sorts first.
+  last_reconciled_at TEXT,
   exception_reason TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   submitted_at TEXT,

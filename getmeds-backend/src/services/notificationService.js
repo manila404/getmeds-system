@@ -119,9 +119,9 @@ function notify({ orderId, recipientIds, message, eventType, orderData = {} }) {
 
   // Determine next operational step for internal team
   let nextAction = 'None';
-  if (orderData.status === 'waiting_for_payment') {
+  if (orderData.status === 'ready_for_draft_invoice') {
     nextAction = 'Awaiting Finance: Confirm Sales Order & Convert to Invoice in Zoho';
-  } else if (orderData.status === 'invoice_drafted') {
+  } else if (orderData.status === 'ready_for_invoice_sent') {
     nextAction = 'Awaiting Finance: Record Customer Payment in Zoho';
   } else if (orderData.status === 'ready_for_dispatch') {
     nextAction = 'Awaiting Pharmacy: Create Package in Zoho (Picking & Packing)';

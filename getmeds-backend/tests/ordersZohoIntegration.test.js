@@ -138,9 +138,16 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
 
     const order = res.body.data.order;
     createdOrderIds.push(order.id);
-    expect(order.status).toBe('ready_for_dispatch');
+    // Sep 1, 2026: was a dispatch-ready state. A credit order now waits at
+    // so_created until the salesorder.confirmed webhook arrives — creating a
+    // Draft SO in Zoho is not the same as anyone having approved it.
+    expect(order.status).toBe('so_created');
     expect(order.zoho_sync_status).toBe('synced');
     expect(order.zoho_so_id).toMatch(/^MOCK-SO-\d{6}$/);
+    // The Zoho-side status baseline is seeded here, so the first "Confirm"
+    // in Zoho diffs against 'draft' instead of against nothing.
+    const seeded = db.prepare('SELECT zoho_so_status FROM orders WHERE id = ?').get(order.id);
+    expect(seeded.zoho_so_status).toBe('draft');
 
     const dispatch = db.prepare('SELECT * FROM dispatch_records WHERE order_id = ?').get(order.id);
     const payment = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
@@ -158,7 +165,7 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(next).not.toHaveBeenCalled();
     const order = res.body.data.order;
     createdOrderIds.push(order.id);
-    expect(order.status).toBe('waiting_for_payment');
+    expect(order.status).toBe('ready_for_draft_invoice');
     expect(order.zoho_sync_status).toBe('synced');
 
     const payment = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
@@ -181,7 +188,7 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
 
     const order = res.body.data.order;
     createdOrderIds.push(order.id);
-    expect(order.status).toBe('waiting_for_payment'); // internal workflow is not gated on Zoho
+    expect(order.status).toBe('ready_for_draft_invoice'); // internal workflow is not gated on Zoho
     expect(order.zoho_sync_status).toBe('failed');
     expect(order.zoho_so_id).toBeNull();
 
@@ -215,7 +222,10 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(next).not.toHaveBeenCalled();
     expect(spy).toHaveBeenCalledTimes(1);
     expect(submitRes.body.success).toBe(true);
-    expect(submitRes.body.data.order.status).toBe('ready_for_dispatch');
+    // Sep 1, 2026: a credit order now stops at so_created — all this app has
+    // done is create a DRAFT Sales Order in Zoho. It is released to
+    // ready_for_dispatch by the salesorder.confirmed webhook, not by submit.
+    expect(submitRes.body.data.order.status).toBe('so_created');
     expect(submitRes.body.data.zoho.salesorder_id).toMatch(/^MOCK-SO-\d{6}$/);
 
     const reloaded = db.prepare('SELECT * FROM orders WHERE id = ?').get(draftOrder.id);
@@ -242,7 +252,7 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(submitRes.body.data.zoho_sync_status).toBe('failed');
 
     const reloaded = db.prepare('SELECT * FROM orders WHERE id = ?').get(draftOrder.id);
-    expect(reloaded.status).toBe('waiting_for_payment'); // advanced normally, not stuck in draft
+    expect(reloaded.status).toBe('ready_for_draft_invoice'); // advanced normally, not stuck in draft
     expect(reloaded.zoho_sync_status).toBe('failed');
 
     const queued = db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(draftOrder.id);

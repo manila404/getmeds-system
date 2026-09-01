@@ -17,7 +17,15 @@ export const useCustomers = () => {
     queryKey: ['customers'],
     queryFn: async () => {
       const res = await fetchCustomers();
-      return res?.data?.customers || res?.customers || res || [];
+      const payload = res?.data || res || {};
+      // Aug 31, 2026 (7): now also surfaces test_customer_gate_enabled
+      // (orders.controller.js's getCustomers) alongside the customer list
+      // itself — OrderForm.jsx uses it to detect "is a TEST customer
+      // selected?" generically instead of hardcoding one customer's id.
+      return {
+        customers: payload.customers || res?.customers || (Array.isArray(res) ? res : []),
+        testCustomerGateEnabled: !!payload.test_customer_gate_enabled
+      };
     },
     staleTime: 1000 * 60 * 5,
   });

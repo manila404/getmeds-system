@@ -302,11 +302,27 @@ const InventoryPage = () => {
                 pagedProducts.map((p) => {
                   const isSync = p.sync_status === 'in_sync';
                   const isMismatch = p.sync_status === 'mismatch';
+                  // Sep 1, 2026: `is_active` mirrors Zoho's own item status.
+                  // Treated as active unless explicitly 0/false, so a row from
+                  // before the field was tracked is never wrongly greyed out.
+                  const inactive = p.is_active === 0 || p.is_active === false;
 
                   return (
-                    <tr key={p.id} className="hover:bg-slate-50/80 transition-colors">
+                    <tr key={p.id} className={`transition-colors ${inactive ? 'bg-slate-50/70 hover:bg-slate-100/70' : 'hover:bg-slate-50/80'}`}>
                       <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900">{p.name}</div>
+                        <div className="flex items-center gap-2">
+                          <div className={`font-bold ${inactive ? 'text-slate-500' : 'text-slate-900'}`}>{p.name}</div>
+                          <span
+                            title={inactive ? 'Inactive in Zoho — cannot be added to a Sales Order' : 'Active in Zoho'}
+                            className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full border flex-shrink-0 ${
+                              inactive
+                                ? 'bg-slate-200 text-slate-600 border-slate-300'
+                                : 'bg-pharmacy-green/10 text-pharmacy-green-dark border-pharmacy-green/30'
+                            }`}
+                          >
+                            {inactive ? 'Inactive' : 'Active'}
+                          </span>
+                        </div>
                         <div className="text-[11px] text-slate-400 font-mono">{p.sku}</div>
                       </td>
                       <td className="py-3 px-4 text-slate-700 font-mono">

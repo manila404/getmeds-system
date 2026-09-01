@@ -3,6 +3,11 @@ const { logEvent } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const zoho = require('../integrations/zoho');
 const { diffSalesOrderFields, summarizeChanges } = require('../services/zohoEditDiffService');
+// Sep 1, 2026: status writes now go through the state machine rather than
+// raw UPDATEs, and completion is one shared rule instead of a hop bolted to
+// whichever event happened to be last. See both services for the full why.
+const { setOrderStatus, advanceTo } = require('../services/orderStatusService');
+const { evaluateCompletion } = require('../services/orderCompletionService');
 
 /**
  * Validates optional Zoho Webhook secret / token.
@@ -160,27 +165,72 @@ exports.handleZohoWebhook = async (req, res, next) => {
       invStatus === 'paid' ||
       (payment && (payStatus === 'success' || payment.amount > 0));
 
+    // Sep 1, 2026: "Invoice created" and "Invoice marked as Sent" are two
+    // different things and are now told apart.
+    //
+    // They used to collapse into one check — `invStatus === 'sent'` was in
+    // the isInvoiceDrafted list below — so marking an invoice as Sent in
+    // Zoho produced a SECOND "Invoice drafted in Zoho" audit entry and a
+    // duplicate notification, with no status change. Finance had no way to
+    // see, in this app, whether an invoice had actually been issued to the
+    // customer or was still sitting as a draft.
+    //
+    // The event_type wins over the status field where both are present: an
+    // invoice.created webhook for an invoice that Zoho auto-sent on creation
+    // still records as the creation (that's what the event IS), and the
+    // later invoice.sent edit is what moves it on.
+    const invoiceEventSaysCreated =
+      rawEvent.includes('invoice.created') ||
+      rawEvent.includes('invoice.drafted') ||
+      rawEvent.includes('invoice_created');
+
+    const invoiceEventSaysSent =
+      rawEvent.includes('invoice.sent') ||
+      rawEvent.includes('ready_for_dispatch') ||
+      rawEvent.includes('invoice.mark_sent') ||
+      rawEvent.includes('invoice.marked_sent');
+
+    // Finance marked the Invoice as Sent in Zoho — it has been issued to the
+    // customer. Checked before isInvoiceDrafted so a "sent" status can never
+    // be mistaken for a draft again, and after isPaymentEvent so a paid
+    // invoice still resolves to the more advanced state.
+    const isInvoiceSent =
+      !isPaymentEvent &&
+      (invoiceEventSaysSent || (!invoiceEventSaysCreated && invoice && invStatus === 'sent'));
+
     // Finance converted the (confirmed) Sales Order into an Invoice in
     // Zoho, but hasn't recorded a payment against it yet. Checked *after*
     // isPaymentEvent above, so an already-paid invoice never falls through
     // to here — payment always wins when both could match.
     const isInvoiceDrafted =
       !isPaymentEvent &&
-      (rawEvent.includes('invoice.created') ||
-        rawEvent.includes('invoice.drafted') ||
-        rawEvent.includes('invoice_created') ||
-        (invoice && (invStatus === 'draft' || invStatus === 'sent' || invStatus === 'open')));
+      !isInvoiceSent &&
+      (invoiceEventSaysCreated || (invoice && (invStatus === 'draft' || invStatus === 'open')));
 
+    // Sep 1, 2026 (6): same widening as services/zohoReconcileService.js — a
+    // Sales Order reported as shipped/fulfilled/closed/invoiced has by
+    // definition been confirmed, and matching only the literal 'confirmed'
+    // meant such a payload fell through to the generic "event received" log.
     const isSalesOrderConfirmed =
       rawEvent.includes('salesorder.confirmed') ||
       rawEvent.includes('salesorder_confirmed') ||
-      soStatus === 'confirmed' || soStatus === 'open';
+      ['confirmed', 'open', 'partially_shipped', 'shipped', 'fulfilled',
+        'partially_fulfilled', 'closed', 'invoiced', 'partially_invoiced'].includes(soStatus);
+
+    // Aug 31, 2026: "deleted" is kept as its own flag, checked separately
+    // from void/cancel below, so the audit trail can say specifically what
+    // happened in Zoho. Deleting a Sales Order removes the record entirely
+    // (there's no way back short of recreating it); voiding/cancelling
+    // leaves the record in place with a changed status. Finance reading the
+    // trail later shouldn't have to guess which one actually occurred from
+    // a generic "cancelled or voided" note.
+    const isSalesOrderDeleted = rawEvent.includes('salesorder.deleted');
 
     const isSalesOrderCancelled =
-      rawEvent.includes('salesorder.void') ||
-      rawEvent.includes('salesorder.cancelled') ||
-      rawEvent.includes('salesorder.deleted') ||
-      soStatus === 'void' || soStatus === 'cancelled' || soStatus === 'voided';
+      !isSalesOrderDeleted &&
+      (rawEvent.includes('salesorder.void') ||
+        rawEvent.includes('salesorder.cancelled') ||
+        soStatus === 'void' || soStatus === 'cancelled' || soStatus === 'voided');
 
     // Shipment (courier + tracking assigned) — checked ahead of Package so a
     // payload carrying both (Zoho sometimes reports the package that was
@@ -226,11 +276,30 @@ exports.handleZohoWebhook = async (req, res, next) => {
           `).run(order.id, paymentRef, paymentAmount, paymentDate, now, now);
         }
 
-        // If order was waiting for payment, invoiced-but-unpaid, or on_hold, advance to ready_for_dispatch
-        if (['waiting_for_payment', 'invoice_drafted', 'on_hold', 'so_created'].includes(order.status)) {
-          newStatus = 'ready_for_dispatch';
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
-        }
+        // Sep 1, 2026: payment is no longer treated as "the event that moves
+        // the order to ready_for_dispatch, or else nothing".
+        //
+        // Getmeds customers are on payment terms, so payment normally lands
+        // LAST — after the goods have already shipped. The old guard list
+        // here didn't include any post-dispatch status, so a payment
+        // arriving against an order at 'tracking_shared' recorded the money
+        // and then left the status untouched. Combined with nothing else in
+        // the codebase ever assigning 'completed', that meant a fully
+        // shipped, fully paid order sat at 'tracking_shared' permanently.
+        //
+        // Sep 1, 2026 (5): payment now moves NOTHING in the pipeline. It used
+        // to push a pre-dispatch order to ready_for_dispatch, which made
+        // sense while that status meant "the Sales Order is confirmed, go
+        // pack". It no longer does — it means "the invoice has been issued" —
+        // and jumping an un-invoiced order there because money arrived would
+        // skip both Finance stages and tell the warehouse to pack something
+        // that was never invoiced.
+        //
+        // The pipeline is driven by the Sales Order / invoice / shipment
+        // events. Payment's only job is recording the money (above) and
+        // deciding completion (below), which is exactly right for customers
+        // on payment terms: it can land at any point and the order's stage is
+        // unaffected either way.
 
         logEvent({
           orderId: order.id,
@@ -253,9 +322,79 @@ exports.handleZohoWebhook = async (req, res, next) => {
           eventType: 'PAYMENT_VERIFIED',
           orderData: { ...order, status: newStatus }
         });
+
+        // Was payment the last of the two? If the order has already shipped,
+        // this closes it out.
+        const completion = evaluateCompletion({
+          orderId: order.id,
+          currentStatus: newStatus,
+          actorName: 'Zoho Webhook',
+          trigger: 'payment'
+        });
+        if (completion.completed) newStatus = 'completed';
       })();
 
-      actionTaken = 'PAYMENT_VERIFIED';
+      actionTaken = newStatus === 'completed' ? 'PAYMENT_VERIFIED_ORDER_COMPLETED' : 'PAYMENT_VERIFIED';
+    }
+
+    // Process Invoice Marked-as-Sent Event — Finance issued the Invoice to
+    // the customer in Zoho (Draft -> Sent). Sep 1, 2026: new branch, and the
+    // matching Zoho automation is a Books Workflow Rule on Invoice /
+    // Edited / Status is Sent, sending event_type "invoice.sent".
+    //
+    // Like Invoice Drafted below, this is a visibility checkpoint rather
+    // than a payment: an issued invoice is not a paid one, so the order does
+    // NOT jump to ready_for_dispatch here. What it does do is give Finance
+    // and the warehouse a status they can act on — "this has actually gone
+    // to the customer, it's cleared to pack" — which is the point at which
+    // Getmeds' flow says picking can start.
+    else if (isInvoiceSent) {
+      const zohoInvoiceNumber = invoice?.invoice_number || order.zoho_invoice_number;
+      const zohoInvoiceId = invoice?.invoice_id || order.zoho_invoice_id;
+
+      db.transaction(() => {
+        // Only ever moves an order FORWARD into invoice_sent from a state
+        // that precedes it. An order that has already been packed or shipped
+        // (the dispatch-first ordering, where the invoice is raised after the
+        // goods go out) keeps its more advanced status — the state machine
+        // would allow the hop, but going from 'dispatched' back to
+        // 'ready_for_dispatch' would be a downgrade, so it isn't attempted. The
+        // invoice number is still recorded either way.
+        const preInvoice = ['so_created', 'ready_for_draft_invoice', 'ready_for_invoice_sent'];
+        if (preInvoice.includes(order.status)) {
+          const moved = advanceTo(order.id, order.status, 'ready_for_dispatch', now);
+          if (moved.changed) newStatus = moved.status;
+        }
+
+        db.prepare(`
+          UPDATE orders
+          SET zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number),
+              updated_at = ?
+          WHERE id = ?
+        `).run(zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
+
+        logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_INVOICE_SENT',
+          oldStatus: previousStatus,
+          newStatus: newStatus,
+          actorId: null,
+          actorName: 'Zoho Webhook',
+          notes: `Invoice ${zohoInvoiceNumber || zohoInvoiceId || ''} marked as Sent in Zoho — issued to the customer.`,
+          metadata: { zohoInvoiceId, zohoInvoiceNumber, webhook: rawEvent }
+        });
+
+        const recipients = getUserIdsByRole('finance', 'dispatch');
+        notify({
+          orderId: order.id,
+          recipientIds: Array.from(new Set([order.medrep_user_id, ...recipients].filter(Boolean))),
+          message: `Invoice ${zohoInvoiceNumber || ''} for ${order.getmeds_order_id} has been sent to the customer.`,
+          eventType: 'INVOICE_SENT',
+          orderData: { ...order, status: newStatus }
+        });
+      })();
+
+      actionTaken = 'INVOICE_SENT';
     }
 
     // Process Invoice Drafted Event — Finance converted the confirmed
@@ -273,19 +412,41 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // live), an order sits at 'tracking_shared' once shipped (see the
         // isShipmentEvent branch below, which no longer auto-completes it),
         // and this is the very next real step from there. Kept alongside
-        // the original 'so_created'/'waiting_for_payment' pair rather than
+        // the original 'so_created'/'ready_for_draft_invoice' pair rather than
         // replacing them, since those cover a different (invoice-before-
         // dispatch/prepaid) ordering this app also supports.
-        if (['so_created', 'waiting_for_payment', 'tracking_shared'].includes(order.status)) {
-          newStatus = 'invoice_drafted';
+        //
+        // Aug 31, 2026 (4): 'completed' added too, as a self-correction —
+        // mirrors the same fix in orders.controller.js's syncFromZoho. An
+        // order can be sitting at 'completed' only because it hit the
+        // now-fixed dispatch-cascade bug, which used to close orders out
+        // before they were ever invoiced. isInvoiceDrafted is only reached
+        // when isPaymentEvent (checked above) did NOT match, so by
+        // construction this invoice isn't marked paid — meaning a
+        // 'completed' order reaching this branch hasn't actually finished,
+        // and belongs back at invoice_drafted pending real payment.
+        //
+        // Sep 1, 2026: 'completed' is no longer in this list. It was only
+        // ever here to walk back orders that the old dispatch-cascade bug
+        // had closed out before they were invoiced — a self-correction for
+        // damage that build could do. Now that 'completed' means "shipped
+        // AND paid" and is set in exactly one place
+        // (services/orderCompletionService.js), a completed order is a
+        // genuinely finished one, and an invoice webhook must not reopen it.
+        // The state machine would refuse the hop anyway; leaving it out of
+        // the list keeps the intent explicit rather than relying on that.
+        const preInvoice = ['so_created', 'ready_for_finance_verified', 'ready_for_draft_invoice', 'tracking_shared'];
+        if (preInvoice.includes(order.status)) {
+          const moved = advanceTo(order.id, order.status, 'ready_for_invoice_sent', now);
+          if (moved.changed) newStatus = moved.status;
         }
 
         db.prepare(`
           UPDATE orders
-          SET status = ?, zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number),
+          SET zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number),
               updated_at = ?
           WHERE id = ?
-        `).run(newStatus, zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
+        `).run(zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
 
         logEvent({
           orderId: order.id,
@@ -294,8 +455,20 @@ exports.handleZohoWebhook = async (req, res, next) => {
           newStatus: newStatus,
           actorId: null,
           actorName: 'Zoho Webhook',
-          notes: `Invoice drafted in Zoho (${zohoInvoiceNumber || zohoInvoiceId || 'no number yet'})`,
-          metadata: { zohoInvoiceId, zohoInvoiceNumber }
+          // Sep 1, 2026 (8): if the order was still awaiting the finance
+          // account check when this invoice appeared, say so. Raising the
+          // invoice in Zoho IS the approval in practice — this app cannot
+          // stop anyone doing it, and refusing the hop would only strand the
+          // order — but a control step that gets skipped silently is a
+          // control step that isn't there. The same note is written on the
+          // manual-sync path (services/zohoReconcileService.js); this is the
+          // one that fires in live use, so it is the one that matters.
+          notes: `Invoice drafted in Zoho (${zohoInvoiceNumber || zohoInvoiceId || 'no number yet'})${
+            previousStatus === 'ready_for_finance_verified'
+              ? ' — Note: this order had not been marked Finance Verified in this app; raising the invoice in Zoho is treated as the approval.'
+              : ''
+          }`,
+          metadata: { zohoInvoiceId, zohoInvoiceNumber, financeVerificationSkipped: previousStatus === 'ready_for_finance_verified' }
         });
 
         const financeIds = getUserIdsByRole('finance');
@@ -317,21 +490,33 @@ exports.handleZohoWebhook = async (req, res, next) => {
       const soId = salesorder?.salesorder_id || order.zoho_so_id;
 
       db.transaction(() => {
-        // Decide next status if still in preliminary stages
-        if (['submitted', 'validating', 'so_pending'].includes(order.status)) {
-          if (order.customer_type === 'direct') {
-            newStatus = 'waiting_for_payment';
-          } else {
-            newStatus = 'ready_for_dispatch';
-          }
+        // Sep 1, 2026: 'so_created' added to this list, and it matters more
+        // than it looks. Submit used to run an order straight through to
+        // waiting_for_payment (direct) or ready_for_dispatch (credit), so by
+        // the time this webhook arrived the order was ALREADY past every
+        // status named here — meaning confirming a Sales Order in Zoho
+        // logged an audit entry and changed nothing at all. Credit orders
+        // now wait at 'so_created' until Zoho confirms (see
+        // orders.controller.js submit), and this is the hop that releases
+        // them.
+        if (['submitted', 'validating', 'so_pending', 'so_created'].includes(order.status)) {
+          // Sep 1, 2026 (5): one destination for both customer types. Direct
+          // orders used to stop at waiting_for_payment; payment no longer
+          // gates the pipeline (it is on terms and only decides completion),
+          // so credit and direct follow the identical chain from here.
+          // Sep 1, 2026 (8): confirming the Sales Order now hands the order
+          // to Finance for account verification, not straight to invoicing.
+          const target = 'ready_for_finance_verified';
+          const moved = advanceTo(order.id, order.status, target, now);
+          if (moved.changed) newStatus = moved.status;
         }
 
         db.prepare(`
           UPDATE orders
-          SET status = ?, zoho_so_id = COALESCE(?, zoho_so_id), zoho_so_number = COALESCE(?, zoho_so_number),
-              zoho_sync_status = 'synced', updated_at = ?
+          SET zoho_so_id = COALESCE(?, zoho_so_id), zoho_so_number = COALESCE(?, zoho_so_number),
+              zoho_so_status = 'confirmed', zoho_sync_status = 'synced', updated_at = ?
           WHERE id = ?
-        `).run(newStatus, soId || null, zohoSoNumber || null, now, order.id);
+        `).run(soId || null, zohoSoNumber || null, now, order.id);
 
         logEvent({
           orderId: order.id,
@@ -383,9 +568,21 @@ exports.handleZohoWebhook = async (req, res, next) => {
           `).run(order.id, trackingNumber, courier, now, now);
         }
 
-        if (['ready_for_dispatch', 'picking_packing'].includes(order.status)) {
-          newStatus = 'dispatched';
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
+        // Aug 31, 2026 (5): 'ready_for_invoice_sent' added — same reasoning as the
+        // Package Created branch above: if Finance invoiced before packing
+        // ever started (the confirmed ideal order), the order can reach
+        // this webhook already sitting at 'ready_for_invoice_sent' rather than
+        // a pre-shipment stage, and it should still be
+        // recognized as a valid pre-shipment state.
+        //
+        // Sep 1, 2026: 'ready_for_dispatch' added alongside it, for exactly the
+        // same reason — with the Mark-as-Sent step now modelled, an order
+        // that was invoiced AND issued before the warehouse touched it
+        // arrives here sitting at 'ready_for_dispatch', and would otherwise be
+        // unrecognised as a valid pre-shipment state.
+        if (['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'].includes(order.status)) {
+          const moved = advanceTo(order.id, order.status, 'dispatched', now);
+          if (moved.changed) newStatus = moved.status;
         }
 
         logEvent({
@@ -414,10 +611,26 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // once tracking details are present, and leave it there.
         if (trackingNumber && newStatus === 'dispatched') {
           const dispatchedStatus = newStatus;
-          newStatus = 'tracking_shared';
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
-          logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus, actorId: null, actorName: 'Zoho Webhook', notes: `${courier || 'Courier'}: ${trackingNumber}` });
+          const moved = advanceTo(order.id, dispatchedStatus, 'tracking_shared', now);
+          if (moved.changed) {
+            newStatus = moved.status;
+            logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus, actorId: null, actorName: 'Zoho Webhook', notes: `${courier || 'Courier'}: ${trackingNumber}` });
+          }
         }
+
+        // Sep 1, 2026: the other half of the shipped-AND-paid rule. If
+        // Finance already recorded the payment (a prepaid order, or simply
+        // one where the money came in before the warehouse got to it),
+        // shipping is the last of the two and closes the order out here.
+        // Same shared function the payment branch calls, so the two arrival
+        // orders can't diverge.
+        const completion = evaluateCompletion({
+          orderId: order.id,
+          currentStatus: newStatus,
+          actorName: 'Zoho Webhook',
+          trigger: 'shipment'
+        });
+        if (completion.completed) newStatus = 'completed';
 
         notify({
           orderId: order.id,
@@ -430,7 +643,9 @@ exports.handleZohoWebhook = async (req, res, next) => {
         });
       })();
 
-      actionTaken = trackingNumber ? 'DISPATCHED_WITH_TRACKING' : 'DISPATCHED';
+      actionTaken = newStatus === 'completed'
+        ? 'DISPATCHED_ORDER_COMPLETED'
+        : trackingNumber ? 'DISPATCHED_WITH_TRACKING' : 'DISPATCHED';
     }
 
     // Process Package Event — Zoho Inventory recorded a Package against the
@@ -445,9 +660,20 @@ exports.handleZohoWebhook = async (req, res, next) => {
           db.prepare(`INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'packing', ?)`).run(order.id, now);
         }
 
-        if (order.status === 'ready_for_dispatch') {
-          newStatus = 'picking_packing';
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
+        // Aug 31, 2026 (5): 'ready_for_invoice_sent' added — per the confirmed
+        // ideal workflow, Finance can invoice right after SO confirmation,
+        // BEFORE the warehouse packs anything. Without this, an order that
+        // got invoiced early would sit at 'ready_for_invoice_sent' and this branch
+        // would silently fail to recognize it as a valid pre-packing state,
+        // stalling the pipeline the moment Zoho reports packing has started.
+        //
+        // Sep 1, 2026: 'ready_for_dispatch' added — with Mark-as-Sent now
+        // modelled, that is where an invoice-first order actually sits when
+        // the warehouse starts packing it, and it would otherwise stall here
+        // exactly as the note above describes.
+        if (['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch'].includes(order.status)) {
+          const moved = advanceTo(order.id, order.status, 'picking_packing', now);
+          if (moved.changed) newStatus = moved.status;
         }
 
         logEvent({
@@ -473,22 +699,70 @@ exports.handleZohoWebhook = async (req, res, next) => {
       actionTaken = 'PACKAGE_CREATED';
     }
 
-    // Process Cancellation Event
-    else if (isSalesOrderCancelled) {
-      if (!['completed', 'cancelled'].includes(order.status)) {
-        newStatus = 'cancelled';
+    // Process Cancellation / Deletion Event
+    else if (isSalesOrderCancelled || isSalesOrderDeleted) {
+      // Sep 1, 2026 (2): a deletion now lands on its own 'deleted' status
+      // rather than sharing 'cancelled' with a void. Zoho fires a workflow
+      // for each; they are different events and the badge should say so.
+      // Until now the distinction lived only in the audit trail, so on the
+      // Orders list a removed Sales Order and a voided one looked identical.
+      //
+      // 'completed' is deliberately NOT overwritten: deleting the Zoho
+      // record after an order has already shipped and been paid does not
+      // un-finish that order. The deletion is still recorded on the
+      // timeline, with wording that says the status was intentionally left
+      // alone. Same for an order already 'cancelled' — it is closed out
+      // either way, and the trail carries the detail.
+      const isFinished = ['completed', 'cancelled', 'deleted'].includes(order.status);
+      {
+        if (!isFinished) newStatus = isSalesOrderDeleted ? 'deleted' : 'cancelled';
+        // Aug 31, 2026: distinct wording/event type for an actual delete —
+        // see the isSalesOrderDeleted comment above for why this matters to
+        // Finance reading the trail.
+        const eventType = isSalesOrderDeleted ? 'ZOHO_SO_DELETED' : 'ZOHO_SO_CANCELLED';
+        const baseNote = isSalesOrderDeleted
+          ? 'Sales Order deleted in Zoho — the record no longer exists there.'
+          : 'Sales Order cancelled or voided in Zoho';
+        // Sep 1, 2026 (2): when the order is already finished this used to
+        // log nothing at all — the whole branch was skipped — so a Sales
+        // Order deleted after an order shipped left no trace anywhere.
+        // Recording it is the entire point of the Zoho-side workflow, so the
+        // entry is always written now; only the STATUS change is conditional.
+        const notifyVerb = isSalesOrderDeleted ? 'deleted' : 'cancelled';
+        let refused = false;
+
         db.transaction(() => {
-          db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(newStatus, now, order.id);
+          // Cancellation can arrive from almost anywhere in the pipeline, so
+          // it goes through setOrderStatus rather than advanceTo — if the
+          // state machine refuses it, that's a gap in the map worth seeing in
+          // the log, not something to silently skip.
+          const moved = setOrderStatus(order.id, order.status, newStatus, now);
+          if (!moved.changed) {
+            newStatus = moved.status;
+            refused = moved.refused;
+          }
+
+          // Sep 1, 2026 (3): the note is built AFTER the write is attempted,
+          // so a refusal can say so. It used to be computed beforehand, which
+          // meant a refused transition produced an entry claiming the event
+          // had been applied while the status sat unchanged (X -> X) — the
+          // reason existed only as a console warning. Seen for real on
+          // TestGM-20260901-0002.
+          const notes = refused
+            ? `${baseNote} The order could NOT be moved from "${order.status}" to "${isSalesOrderDeleted ? 'deleted' : 'cancelled'}" — the workflow does not allow that transition (see workflow/stateMachine.js). Status left unchanged; this needs a look.`
+            : isFinished
+              ? `${baseNote} Order status kept as "${order.status}" — it had already finished, and removing the Zoho record does not undo that.`
+              : baseNote;
 
           logEvent({
             orderId: order.id,
-            eventType: 'ZOHO_SO_CANCELLED',
+            eventType,
             oldStatus: previousStatus,
             newStatus: newStatus,
             actorId: null,
             actorName: 'Zoho Webhook',
-            notes: 'Sales Order cancelled or voided in Zoho',
-            metadata: { rawEvent }
+            notes,
+            metadata: { rawEvent, refused }
           });
 
           const adminUserIds = getUserIdsByRole('admin', 'management');
@@ -496,12 +770,17 @@ exports.handleZohoWebhook = async (req, res, next) => {
           notify({
             orderId: order.id,
             recipientIds: recipients,
-            message: `Order ${order.getmeds_order_id} was cancelled in Zoho.`,
-            eventType: 'ORDER_CANCELLED',
+            message: refused
+              ? `Order ${order.getmeds_order_id} was ${notifyVerb} in Zoho, but its status could not be updated automatically — please check it.`
+              : isFinished
+                ? `The Zoho Sales Order for ${order.getmeds_order_id} was ${notifyVerb}. The order itself had already finished, so its status is unchanged.`
+                : `Order ${order.getmeds_order_id} was ${notifyVerb} in Zoho.`,
+            eventType: isSalesOrderDeleted ? 'ORDER_DELETED_IN_ZOHO' : 'ORDER_CANCELLED',
             orderData: { ...order, status: newStatus }
           });
         })();
-        actionTaken = 'SO_CANCELLED';
+        const suffix = refused ? '_NOT_APPLIED' : isFinished ? '_LOGGED_ONLY' : '';
+        actionTaken = (isSalesOrderDeleted ? 'SO_DELETED' : 'SO_CANCELLED') + suffix;
       }
     }
     // Aug 30, 2026: "Sales Order edited directly in Zoho" — set up in Zoho

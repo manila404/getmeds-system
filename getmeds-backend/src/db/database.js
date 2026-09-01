@@ -7,7 +7,16 @@ let db;
 
 function getDb() {
   if (!db) {
-    const dbDir = path.join(__dirname, '../../data');
+    // Sep 1, 2026: GETMEDS_DB_DIR lets a throwaway database be pointed at a
+    // temp directory. Added so tests/statusMigration.test.js can exercise the
+    // orders-table rebuild in migrate.js against a realistic OLD-schema
+    // database WITHOUT going anywhere near data/getmeds.db, which on a
+    // working machine holds real synced Zoho customers and live test orders.
+    // Unset — which is always the case for the server itself — behaves
+    // exactly as before.
+    const dbDir = process.env.GETMEDS_DB_DIR
+      ? path.resolve(process.env.GETMEDS_DB_DIR)
+      : path.join(__dirname, '../../data');
     if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
     db = new Database(path.join(dbDir, 'getmeds.db'));
 
@@ -73,7 +82,7 @@ function getDb() {
         db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_zoho_contact_id ON customers(zoho_contact_id) WHERE zoho_contact_id IS NOT NULL');
       }
 
-      migrateOrdersInvoiceDrafted(db);
+      warnIfOrderStatusesBehind(db);
     } catch (e) {
       console.warn('Note on DB migration:', e.message);
     }
@@ -81,98 +90,47 @@ function getDb() {
   return db;
 }
 
-// Adds the 'invoice_drafted' order status (Finance converted the Sales
-// Order to an Invoice in Zoho, payment not yet recorded) plus the
-// zoho_invoice_id / zoho_invoice_number columns that go with it.
-//
-// The two columns are a plain ALTER TABLE ADD COLUMN — safe on an existing
-// table. The status value is a different story: it lives inside a CHECK
-// constraint baked into the table's original CREATE TABLE statement, and
-// SQLite has no ALTER TABLE ... ALTER CHECK. The only way to widen it on a
-// database that was already created with the old constraint is the
-// standard SQLite "rebuild" recipe — create a new table with the wider
-// CHECK, copy every row across, drop the old table, rename the new one into
-// place. Existing `id` values are preserved, so every foreign key in
-// order_items/payments/dispatch_records/order_events/notifications/
-// zoho_sync_queue still points at the right row afterwards.
-function migrateOrdersInvoiceDrafted(db) {
+/**
+ * Read-only check: does `orders`' status CHECK constraint still allow every
+ * status this build can write?
+ *
+ * Sep 1, 2026 (2). This replaces migrateOrdersInvoiceDrafted(), which used to
+ * rebuild the orders table from a CREATE TABLE statement hard-coded in this
+ * file. That was a live hazard: its hard-coded definition had not been
+ * updated since Aug, so it was missing the status values added since AND
+ * eleven real columns (every intake_*, sales_order_date, intake_terms,
+ * intake_payment_terms, invoicing_from, zoho_so_status). It could not fire on
+ * a current database — its guard was "does the DDL mention invoice_drafted",
+ * which every current database does — but had it ever fired, on a restored
+ * backup or an older copy, it would have silently dropped those columns and
+ * their data with no error.
+ *
+ * Schema changes now belong to src/db/migrate.js alone, which rebuilds from
+ * schema.sql (the actual source of truth) and is covered by
+ * tests/statusMigration.test.js. All that is left here is a warning, so a
+ * server started without migrating says so in plain language instead of
+ * failing later with a bare SQLite constraint error on the first webhook.
+ */
+function warnIfOrderStatusesBehind(db) {
   const ordersTable = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='orders'").get();
-  if (!ordersTable) return; // fresh install — schema.sql already has the new definition
+  if (!ordersTable || !ordersTable.sql) return;
 
-  const cols = db.pragma('table_info(orders)').map(c => c.name);
-  const needsColumns = !cols.includes('zoho_invoice_id') || !cols.includes('zoho_invoice_number');
-  const needsCheckRebuild = !ordersTable.sql.includes('invoice_drafted');
+  const ddl = ordersTable.sql.replace(/--[^\n]*/g, ''); // comments quote status names too
+  const required = [
+'draft', 'submitted', 'validating', 'so_pending', 'so_created',
+    'ready_for_finance_verified', 'ready_for_draft_invoice',
+    'ready_for_invoice_sent', 'ready_for_dispatch',
+    'picking_packing', 'dispatched', 'tracking_shared',
+    'completed', 'on_hold', 'exception', 'cancelled', 'deleted'
+  ];
+  const missing = required.filter((s) => !ddl.includes(`'${s}'`));
+  if (!missing.length) return;
 
-  if (needsColumns) {
-    if (!cols.includes('zoho_invoice_id')) db.exec('ALTER TABLE orders ADD COLUMN zoho_invoice_id TEXT');
-    if (!cols.includes('zoho_invoice_number')) db.exec('ALTER TABLE orders ADD COLUMN zoho_invoice_number TEXT');
-  }
-
-  if (!needsCheckRebuild) return;
-
-  console.log('[DB_MIGRATION] Rebuilding orders table to allow the invoice_drafted status...');
-
-  const rebuild = db.transaction(() => {
-    db.exec(`
-      CREATE TABLE orders_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        getmeds_order_id TEXT UNIQUE NOT NULL,
-        customer_id INTEGER NOT NULL REFERENCES customers(id),
-        medrep_id INTEGER NOT NULL REFERENCES users(id),
-        status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN (
-          'draft', 'submitted', 'validating', 'so_pending', 'so_created',
-          'waiting_for_payment', 'invoice_drafted', 'payment_verified', 'ready_for_dispatch',
-          'picking_packing', 'dispatched', 'tracking_shared', 'completed',
-          'on_hold', 'exception', 'cancelled'
-        )),
-        customer_type TEXT NOT NULL CHECK(customer_type IN ('credit','direct')),
-        total_amount REAL DEFAULT 0 CHECK(total_amount >= 0),
-        delivery_address TEXT NOT NULL,
-        delivery_notes TEXT,
-        zoho_so_id TEXT,
-        zoho_so_number TEXT,
-        zoho_invoice_id TEXT,
-        zoho_invoice_number TEXT,
-        zoho_sync_status TEXT DEFAULT 'pending' CHECK(zoho_sync_status IN ('pending','synced','failed','skipped')),
-        exception_reason TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        submitted_at TEXT,
-        updated_at TEXT DEFAULT (datetime('now'))
-      );
-    `);
-
-    db.exec(`
-      INSERT INTO orders_new (
-        id, getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
-        delivery_address, delivery_notes, zoho_so_id, zoho_so_number, zoho_invoice_id, zoho_invoice_number,
-        zoho_sync_status, exception_reason, created_at, submitted_at, updated_at
-      )
-      SELECT
-        id, getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
-        delivery_address, delivery_notes, zoho_so_id, zoho_so_number, zoho_invoice_id, zoho_invoice_number,
-        zoho_sync_status, exception_reason, created_at, submitted_at, updated_at
-      FROM orders;
-    `);
-
-    db.exec('DROP TABLE orders;');
-    db.exec('ALTER TABLE orders_new RENAME TO orders;');
-
-    // Recreate the indexes dropped along with the old table.
-    db.exec('CREATE INDEX IF NOT EXISTS idx_orders_medrep_created ON orders(medrep_id, created_at DESC);');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_orders_status_submitted ON orders(status, submitted_at ASC);');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at DESC);');
-  });
-
-  const fkWasOn = db.pragma('foreign_keys', { simple: true }) === 1;
-  if (fkWasOn) db.pragma('foreign_keys = OFF'); // required while a referenced table is dropped/renamed
-  try {
-    rebuild();
-  } finally {
-    if (fkWasOn) db.pragma('foreign_keys = ON');
-  }
-
-  console.log('[DB_MIGRATION] orders table rebuilt — invoice_drafted status is now allowed.');
+  console.warn(
+    `\n⚠️  This database's orders table does not allow these statuses yet: ${missing.join(', ')}.\n` +
+      '   Zoho events that need them will fail with a CHECK constraint error.\n' +
+      '   Fix: stop the server and run  npm run migrate\n'
+  );
 }
 
 module.exports = getDb();

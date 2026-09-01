@@ -25,7 +25,14 @@ const { getSyncState, setSyncState } = require('../services/syncState');
  */
 async function getInventoryStatus(req, res) {
   try {
-    const localProducts = db.prepare('SELECT * FROM products WHERE is_active = 1 ORDER BY name ASC').all();
+    // Sep 1, 2026 (7): inactive products are LISTED now, not filtered out.
+    // `is_active` mirrors Zoho's own item status (see syncPullStock below),
+    // and Zoho refuses an inactive item on a Sales Order — which is exactly
+    // when you need to see it. Hiding those rows meant a product deactivated
+    // in Zoho simply vanished from Inventory, so the only way to discover it
+    // was a failed sync reading "Inactive items cannot be added to the sales
+    // order". Active first, so the working catalogue still reads top-down.
+    const localProducts = db.prepare('SELECT * FROM products ORDER BY is_active DESC, name ASC').all();
 
     let syncedCount = 0;
     let mismatchCount = 0;
@@ -63,7 +70,9 @@ async function getInventoryStatus(req, res) {
         zoho_stock: p.zoho_stock,
         zoho_item_id: p.zoho_item_id,
         last_synced_at: p.last_synced_at,
-        sync_status: syncStatus
+        sync_status: syncStatus,
+        // Zoho's item status, mirrored locally by syncPullStock. 1 = Active.
+        is_active: p.is_active === 1 || p.is_active === true ? 1 : 0
       };
     });
 
@@ -123,29 +132,47 @@ function reconcileItems(zohoItems) {
   // snapshot getInventoryStatus compares against without ever calling
   // Zoho itself. `stock` (Getmeds' own working count) is still set to
   // match Zoho at the moment of this explicit pull, same as before.
+  //
+  // Aug 31, 2026 (8): now also stamps is_active from Zoho's own item
+  // `status` — this was never tracked before, so a product Zoho later
+  // marked inactive (discontinued, whatever the reason) stayed selectable
+  // in the order form forever, since `is_active` was set to 1 once at
+  // insert and never touched again. Confirmed live: TestGM-20260831-0001
+  // failed Zoho sync with "Inactive items cannot be added to the sales
+  // order" for a product our local table still showed as active — Zoho's
+  // own record for it had status: "inactive". Treat anything other than
+  // the literal "inactive" (including a missing status, e.g. the test
+  // fixtures in fixtures.js, which don't all set one) as active, so this
+  // never flips a product off just because a field was absent.
   const updateStmt = db.prepare(`
-    UPDATE products SET stock = ?, zoho_stock = ?, zoho_price = ?, zoho_item_id = ?, last_synced_at = datetime('now') WHERE id = ?
+    UPDATE products SET stock = ?, zoho_stock = ?, zoho_price = ?, zoho_item_id = ?, is_active = ?, last_synced_at = datetime('now') WHERE id = ?
   `);
   const insertStmt = db.prepare(`
-    INSERT INTO products (name, sku, unit_price, unit, stock, zoho_stock, zoho_price, zoho_item_id, last_synced_at, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 1)
+    INSERT INTO products (name, sku, unit_price, unit, stock, zoho_stock, zoho_price, zoho_item_id, is_active, last_synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   `);
 
   let updatedCount = 0;
   let createdCount = 0;
   let skippedCount = 0;
+  let deactivatedCount = 0;
 
   const syncTx = db.transaction(() => {
     for (const item of zohoItems) {
       const zohoStock = item.stock_on_hand ?? item.actual_available_stock ?? item.initial_stock ?? 0;
       const zohoPrice = item.rate ?? item.price ?? null;
+      const isActiveFromZoho = item.status === 'inactive' ? 0 : 1;
 
       let existing = item.item_id ? findByZohoId.get(item.item_id) : undefined;
       if (!existing && item.sku) existing = findBySku.get(item.sku);
       if (!existing && item.name) existing = findByName.get(item.name);
 
       if (existing) {
-        updateStmt.run(zohoStock, zohoStock, zohoPrice, item.item_id || null, existing.id);
+        if (!isActiveFromZoho) {
+          const wasActive = db.prepare('SELECT is_active FROM products WHERE id = ?').get(existing.id)?.is_active;
+          if (wasActive) deactivatedCount++;
+        }
+        updateStmt.run(zohoStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, existing.id);
         updatedCount++;
         continue;
       }
@@ -161,7 +188,7 @@ function reconcileItems(zohoItems) {
       const unit = item.unit || 'pc';
 
       try {
-        insertStmt.run(name, sku, unitPrice, unit, zohoStock, zohoStock, zohoPrice, item.item_id || null);
+        insertStmt.run(name, sku, unitPrice, unit, zohoStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho);
         createdCount++;
       } catch (e) {
         // Most likely a SKU collision (two Zoho items sharing a SKU, or a
@@ -174,7 +201,7 @@ function reconcileItems(zohoItems) {
 
   syncTx();
 
-  return { createdCount, updatedCount, skippedCount };
+  return { createdCount, updatedCount, skippedCount, deactivatedCount };
 }
 
 async function syncPullStock(req, res) {
@@ -182,7 +209,7 @@ async function syncPullStock(req, res) {
     const zohoRes = await zoho.listItems();
     const zohoItems = zohoRes.items || [];
 
-    const { createdCount, updatedCount, skippedCount } = reconcileItems(zohoItems);
+    const { createdCount, updatedCount, skippedCount, deactivatedCount } = reconcileItems(zohoItems);
 
     // Aug 28, 2026: same safety-cap-truncation reporting added to
     // customers.controller.js's syncFromZoho — listItems shares the exact
@@ -195,7 +222,9 @@ async function syncPullStock(req, res) {
         (skippedCount ? `, ${skippedCount} skipped` : '') + `). Nothing was written to Zoho. Contact whoever ` +
         'maintains this app so the safety cap can be raised further.'
       : `Pulled ${zohoItems.length} item(s) from Zoho — ${createdCount} new product(s), ${updatedCount} updated` +
-        (skippedCount ? `, ${skippedCount} skipped` : '') + '. Nothing was written to Zoho.';
+        (skippedCount ? `, ${skippedCount} skipped` : '') +
+        (deactivatedCount ? `, ${deactivatedCount} newly marked inactive (hidden from the order form)` : '') +
+        '. Nothing was written to Zoho.';
 
     res.json({
       success: true,
@@ -206,6 +235,7 @@ async function syncPullStock(req, res) {
         updated: updatedCount,
         skipped: skippedCount,
         updated_count: updatedCount,
+        deactivated: deactivatedCount,
         truncated: !!zohoRes.truncated
       }
     });

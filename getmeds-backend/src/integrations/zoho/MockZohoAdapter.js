@@ -139,6 +139,11 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorder };
   }
 
+  async listRecentSalesOrders(limit = 5) {
+    const all = [...this._salesOrders.values()].reverse();
+    return { code: 0, message: 'success', salesorders: all.slice(0, limit) };
+  }
+
   async listSalesOrders() {
     return { code: 0, message: 'success', salesorders: [...this._salesOrders.values()] };
   }

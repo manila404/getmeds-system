@@ -178,24 +178,31 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const [isReviewOpen, setIsReviewOpen] = useState(false);
 
   // Step 1: Query hooks
-  const { data: customers = [], isLoading: loadingCustomers } = useCustomers();
+  const { data: customersData, isLoading: loadingCustomers } = useCustomers();
+  const customers = customersData?.customers || [];
+  const testCustomerGateEnabled = !!customersData?.testCustomerGateEnabled;
   const { data: products = [], isLoading: loadingProducts } = useProducts();
 
   const selectedCustomer = customers.find(c => String(c.id) === String(customerId));
 
-  // Aug 30, 2026: the backend stamps every live Zoho Sales Order for
-  // TEST-CUSTOMER_1 with a fixed "TEST | MEDREP" Salesperson (see
-  // LiveZohoAdapter.createSalesOrder — this Zoho org requires a Salesperson
-  // on every Sales Order, and the real per-MedRep mapping is still deferred
-  // work). Show that same value here instead of the logged-in user's name
-  // whenever TEST-CUSTOMER_1 is selected, so what's on screen matches what
-  // actually reaches Zoho. Any other customer still shows the real MedRep
-  // name, unaffected — this only ever displays; it isn't submitted to the
-  // backend at all today.
-  const TEST_CUSTOMER_ZOHO_ID = '2254168002003111004'; // mirrors ZOHO_TEST_CUSTOMER_ID in the backend .env
-  const isTestCustomerSelected = !!selectedCustomer && (
-    selectedCustomer.zoho_contact_id === TEST_CUSTOMER_ZOHO_ID || selectedCustomer.name === 'TEST-CUSTOMER_1'
-  );
+  // Aug 30, 2026: the backend stamps every live Zoho Sales Order created
+  // while the TEST-customer gate is on with a fixed "TEST | MEDREP"
+  // Salesperson (see LiveZohoAdapter.createSalesOrder — this Zoho org
+  // requires a Salesperson on every Sales Order, and the real per-MedRep
+  // mapping is still deferred work). Show that same value here instead of
+  // the logged-in user's name whenever a TEST customer is selected, so
+  // what's on screen matches what actually reaches Zoho. This only ever
+  // displays; it isn't submitted to the backend at all today.
+  //
+  // Aug 31, 2026 (7): generalized from a single hardcoded TEST-CUSTOMER_1
+  // id/name check. The backend's getCustomers already filters this very
+  // dropdown down to only the designated TEST customers whenever the gate
+  // is on (see orders.controller.js's checkTestCustomerGate, now backed by
+  // ZOHO_TEST_CUSTOMER_IDS — a list, not a single id) — so if the gate is
+  // on, ANY customer selectable here already IS a test customer. No need
+  // to hardcode which one(s), and this now stays correct automatically as
+  // TEST-CUSTOMER_2/3/etc. get added.
+  const isTestCustomerSelected = !!selectedCustomer && testCustomerGateEnabled;
   const displaySalesPerson = isTestCustomerSelected ? 'TEST | MEDREP' : (user?.name || '—');
 
   // Doctor Name is manual free text, but pre-filled with suggestions drawn

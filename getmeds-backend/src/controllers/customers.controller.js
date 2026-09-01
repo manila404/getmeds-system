@@ -1,6 +1,6 @@
 const db = require('../db/database');
 const zoho = require('../integrations/zoho');
-const { isDryRunMode, getTestCustomerZohoId } = require('../services/zohoTestFlags');
+const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
 const syncJobs = require('../services/syncJobs');
 const { getSyncState, setSyncState } = require('../services/syncState');
 
@@ -64,16 +64,19 @@ function getCustomersOverview(req, res, next) {
       .prepare(`SELECT * FROM customers ${whereSql} ORDER BY name LIMIT ? OFFSET ?`)
       .all(...params, limit, offset);
 
-    const testZohoId = getTestCustomerZohoId();
+    // Aug 31, 2026 (6): reads the full list now (TEST-CUSTOMER_1/2/3), not
+    // just one id — see zohoTestFlags.js. Every designated test customer
+    // gets the "Test" badge in this Directory, not only the first.
+    const testZohoIds = getTestCustomerZohoIds();
     res.json({
       success: true,
       data: {
         customers: customers.map((c) => ({
           ...c,
-          is_test_customer: !!(testZohoId && c.zoho_contact_id === testZohoId)
+          is_test_customer: testZohoIds.includes(c.zoho_contact_id)
         })),
-        test_customer_gate_enabled: !!testZohoId,
-        configured_test_zoho_contact_id: testZohoId,
+        test_customer_gate_enabled: testZohoIds.length > 0,
+        configured_test_zoho_contact_ids: testZohoIds,
         zoho_dry_run_enabled: isDryRunMode(),
         pagination: {
           total,
