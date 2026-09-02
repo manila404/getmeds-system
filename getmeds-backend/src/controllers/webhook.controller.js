@@ -14,7 +14,28 @@ const { evaluateCompletion } = require('../services/orderCompletionService');
  */
 function verifyWebhookAuth(req) {
   const secret = process.env.ZOHO_WEBHOOK_SECRET;
-  if (!secret) return true; // If secret is not configured, allow request (development mode)
+
+  if (!secret) {
+    // Sep 2, 2026 (2): an unset secret used to mean "accept anything from
+    // anyone". That was survivable while the only way in was a tunnel to a
+    // developer's laptop. On a public URL it means whoever finds
+    // /api/webhooks/zoho can post fabricated Zoho events and walk real orders
+    // through the pipeline — mark them invoiced, shipped, paid, deleted.
+    //
+    // Development keeps the convenience of not needing one. Production fails
+    // closed, and says exactly what to do about it rather than 401-ing
+    // silently, because "the webhook stopped working after deploy" is
+    // otherwise a genuinely hard thing to diagnose.
+    if (process.env.NODE_ENV === 'production') {
+      console.error(
+        '[WEBHOOK] REFUSED: ZOHO_WEBHOOK_SECRET is not set while NODE_ENV=production, so this ' +
+          'endpoint cannot tell Zoho apart from anyone else. Run `npm run secrets:init`, then paste ' +
+          'the same value into Zoho as the X-Zoho-Webhook-Token header on every Workflow Rule.'
+      );
+      return false;
+    }
+    return true;
+  }
 
   const token =
     req.headers['x-zoho-webhook-token'] ||

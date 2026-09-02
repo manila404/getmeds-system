@@ -93,6 +93,28 @@ CREATE TABLE IF NOT EXISTS products (
   is_active INTEGER DEFAULT 1
 );
 
+-- Sep 2, 2026 (2): per-day order-number counters, one row per
+-- "<tier prefix>-<YYYYMMDD>" (e.g. 'GM-20260902', 'TestGM-20260902').
+--
+-- services/orderIdService.js used to derive the next number with
+-- SELECT MAX(...) FROM orders. Its two callers in orders.controller.js sit
+-- an `await zoho.createSalesOrder(...)` between generating the id and
+-- inserting the row -- unavoidably, since a better-sqlite3 transaction
+-- cannot contain an await -- so two MedReps submitting within the same
+-- couple of seconds read the same maximum, both create a REAL Zoho Sales
+-- Order with the same reference_number, and the second INSERT then fails on
+-- getmeds_order_id's UNIQUE constraint. One orphaned Sales Order in the
+-- company's Zoho org per collision.
+--
+-- Reserving the number in its own committed transaction removes the window.
+-- Numbers are consumed rather than reused, so a failed order leaves a gap;
+-- that is intended.
+CREATE TABLE IF NOT EXISTS order_id_sequences (
+  prefix TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   getmeds_order_id TEXT UNIQUE NOT NULL,

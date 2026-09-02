@@ -22,3 +22,17 @@ process.env.NODE_ENV = 'test';
 // whole suite at it. Keep the path in step with tests/globalSetup.js, which
 // is what builds the database this line then opens.
 process.env.GETMEDS_DB_DIR = path.join(__dirname, '..', 'data', 'test-db');
+
+// Sep 2, 2026 (2): the suite must not inherit the developer's real webhook
+// secret from .env. Once `npm run secrets:init` set one, every unauthenticated
+// webhook post in webhook.test.js and api.http.test.js started coming back
+// 401, and orders stopped advancing past so_created — 22 failures that looked
+// like a pipeline bug and were really a config leak.
+//
+// Set to empty rather than deleted: dotenv does not overwrite a key that
+// already exists, but it will happily fill in one that has been removed, so a
+// `delete` here would be undone the moment app.js loads.
+//
+// webhook.test.js sets a real value itself for the test that covers the
+// authenticated path, which is where that behaviour belongs.
+process.env.ZOHO_WEBHOOK_SECRET = '';
