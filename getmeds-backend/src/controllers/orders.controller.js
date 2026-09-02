@@ -17,6 +17,61 @@ const { evaluateCompletion } = require('../services/orderCompletionService');
 // implementation instead of three copies. See zohoReconcileService.js.
 const { reconcileOrder, reconcileOrderFully } = require('../services/zohoReconcileService');
 const { shouldRefreshOnOpen, markRefreshed } = require('../services/zohoAutoSyncService');
+// Sep 2, 2026: the MedRep -> Zoho Salesperson mapping ("<division> | <display
+// name>", from sign-up) and the read-only check that Zoho actually knows that
+// name. Zoho has Salesperson as a mandatory Sales Order field here.
+const salespersonService = require('../services/salespersonService');
+const { isTestModeEnabled } = require('../middleware/testMode');
+
+/**
+ * Which MedRep is this order actually FOR?
+ *
+ * Sep 2, 2026. Normally: whoever is logged in. In TEST_MODE an admin passes
+ * every role gate (see middleware/auth.js's requireRole), and `resolveActor`
+ * has always quietly attributed their order to the one seeded
+ * medrep@getmeds.ph account — fine when there was one MedRep and no
+ * per-MedRep anything, useless now that each carries their own Zoho
+ * Salesperson. Testing "does an order from Aaron reach Zoho as
+ * TEST | Aaron Manila" needs to be possible without logging out.
+ *
+ * So an admin may name the MedRep with `medrep_id` in the body. Four
+ * conditions, all required, none of them skippable:
+ *   - TEST_MODE is on;
+ *   - the caller is an admin;
+ *   - the id names a real, active user;
+ *   - whose role is medrep.
+ *
+ * Outside TEST_MODE, or for anyone who is not an admin, `medrep_id` is
+ * IGNORED rather than refused — it is a test affordance, and a stray field
+ * from an old client must never silently move an order onto someone else's
+ * name in normal operation. A bad id from an admin who IS allowed to use it
+ * is a 400, because there the caller meant something specific and got it
+ * wrong.
+ *
+ * Returns { actor, onBehalf } or { error }.
+ */
+function resolveOrderMedrep(user, requestedMedrepId) {
+  const fallback = resolveActor(user, 'medrep');
+  const asked = requestedMedrepId !== undefined && requestedMedrepId !== null && requestedMedrepId !== '';
+  if (!asked) return { actor: fallback, onBehalf: false };
+
+  const isAdmin = (user.role || '').toLowerCase() === 'admin';
+  if (!isTestModeEnabled() || !isAdmin) return { actor: fallback, onBehalf: false };
+
+  const target = db
+    .prepare('SELECT id, name, email, role, salesperson FROM users WHERE id = ? AND is_active = 1')
+    .get(requestedMedrepId);
+
+  if (!target || (target.role || '').toLowerCase() !== 'medrep') {
+    return {
+      error: {
+        code: 'INVALID_MEDREP',
+        message: `medrep_id ${requestedMedrepId} is not an active MedRep account.`
+      }
+    };
+  }
+  return { actor: target, onBehalf: target.id !== user.id };
+}
 
 // How long GET /api/orders/:id will wait on Zoho before giving up and serving
 // the order as it stands. Deliberately short — this is a page load, and the
@@ -113,14 +168,83 @@ exports.getCustomers = (req, res, next) => {
     // the dropdown shows every customer too — no point filtering it down
     // when no order created here can ever reach Zoho anyway.
     const testZohoIds = dryRun ? [] : getTestCustomerZohoIds();
-    const customers = testZohoIds.length
-      ? db.prepare(
-          `SELECT * FROM customers WHERE is_active = 1 AND zoho_contact_id IN (${testZohoIds.map(() => '?').join(',')}) ORDER BY name`
-        ).all(...testZohoIds)
-      : db.prepare('SELECT * FROM customers WHERE is_active = 1 ORDER BY name').all();
+
+    // Sep 2, 2026: active customers by default, with ?include_inactive=true
+    // to see the rest — the same shape getProducts already uses for inactive
+    // items, and for the same reason: "this client exists and is inactive in
+    // Zoho" is far more useful to a MedRep than the client simply not
+    // appearing and them assuming they mistyped the name. Inactive rows are
+    // returned labelled (is_active = 0) and the form refuses to select one,
+    // since Zoho rejects a Sales Order raised against an inactive contact.
+    const includeInactive = req.query.include_inactive === 'true';
+
+    // Sep 2, 2026 (2): SEARCH AND LIMIT, server-side.
+    //
+    // This used to return every customer, unbounded. That was survivable at
+    // a few hundred and became unusable the moment the real org synced in:
+    // ~95,000 rows of SELECT * shipped to the browser on page load, then
+    // re-filtered in JavaScript on every keystroke, then rendered as
+    // however many thousand <li> a one-letter query matches. The order
+    // form's customer box lagged for exactly that reason.
+    //
+    // The Clients Directory already solved this — its suggestion dropdown
+    // is a small `limit`-bounded server query (see customers.controller.js's
+    // getCustomersOverview). This brings the order form in line.
+    const search = (req.query.search || '').trim();
+    const category = (req.query.category || '').trim().toLowerCase();
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 25));
+
+    const where = [];
+    const params = [];
+    if (!includeInactive) where.push('is_active = 1');
+    if (testZohoIds.length) {
+      where.push(`zoho_contact_id IN (${testZohoIds.map(() => '?').join(',')})`);
+      params.push(...testZohoIds);
+    }
+    if (search) {
+      where.push('(name LIKE ? OR contact_person LIKE ? OR contact_number LIKE ?)');
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+    if (category) {
+      where.push('category = ?');
+      params.push(category);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // Active first, so the ones a MedRep can actually order for are never
+    // buried under inactive ones with alphabetically earlier names.
+    const customers = db
+      .prepare(`SELECT * FROM customers ${whereSql} ORDER BY is_active DESC, name LIMIT ?`)
+      .all(...params, limit);
+
+    // So the UI can say "showing 25 of 1,240" rather than implying the list
+    // is everything there is.
+    const totalMatching = db
+      .prepare(`SELECT COUNT(*) c FROM customers ${whereSql}`)
+      .get(...params).c;
+
+    // How many the toggle would add, counted under the same gate so the
+    // number always matches what turning it on actually shows.
+    const inactiveWhere = ['is_active = 0'];
+    if (testZohoIds.length) {
+      inactiveWhere.push(`zoho_contact_id IN (${testZohoIds.map(() => '?').join(',')})`);
+    }
+    const inactiveCount = db
+      .prepare(`SELECT COUNT(*) c FROM customers WHERE ${inactiveWhere.join(' AND ')}`)
+      .get(...testZohoIds).c;
+
     res.json({
       success: true,
-      data: { customers, test_customer_gate_enabled: testZohoIds.length > 0, zoho_dry_run_enabled: dryRun }
+      data: {
+        customers,
+        total_matching: totalMatching,
+        limit,
+        inactive_count: inactiveCount,
+        includes_inactive: includeInactive,
+        test_customer_gate_enabled: testZohoIds.length > 0,
+        zoho_dry_run_enabled: dryRun
+      }
     });
   } catch (err) { next(err); }
 };
@@ -135,6 +259,63 @@ exports.getProducts = (req, res, next) => {
     // not appearing at all and them assuming they mistyped the name.
     const products = db.prepare('SELECT * FROM products ORDER BY is_active DESC, name').all();
     res.json({ success: true, data: { products } });
+  } catch (err) { next(err); }
+};
+
+/**
+ * GET /api/orders/meta/salesperson — is the caller's Salesperson real?
+ *
+ * Sep 2, 2026. Zoho has "Salesperson" as a MANDATORY field on Sales Orders
+ * in this org and matches it by name, so an order naming a Salesperson Zoho
+ * has never heard of is rejected on submit — after the MedRep has filled in
+ * the whole form. The order form asks this on open and warns instead.
+ *
+ * Read-only towards Zoho (listSalespersons), and answers cached for a few
+ * minutes in salespersonService so re-opening the form doesn't re-read.
+ *
+ * Never fails the request: "could not reach Zoho" comes back as
+ * checked:false rather than a 5xx, because not being able to check is not
+ * the same as the name being wrong, and the form should say so precisely.
+ */
+/**
+ * GET /api/orders/meta/medreps — who can this order be raised for?
+ *
+ * Sep 2, 2026. Only ever non-empty for an admin in TEST_MODE; everyone else
+ * gets `{ enabled: false, medreps: [] }`. Deliberately a 200 with an empty
+ * list rather than a 403: the order form calls this unconditionally and uses
+ * `enabled` to decide whether to render the picker at all, so the BACKEND
+ * decides who sees it. The alternative — the frontend checking
+ * VITE_TEST_MODE — would put the same decision in two places that can drift,
+ * and the one that matters is the server's, since it is the server that
+ * honours or ignores `medrep_id` on create.
+ *
+ * `salesperson` comes along so the form can show what each choice would put
+ * on the Zoho Sales Order without a second call per rep.
+ */
+exports.getMedreps = (req, res, next) => {
+  try {
+    const isAdmin = (req.user.role || '').toLowerCase() === 'admin';
+    if (!isTestModeEnabled() || !isAdmin) {
+      return res.json({ success: true, data: { enabled: false, medreps: [] } });
+    }
+    const medreps = db
+      .prepare(
+        `SELECT id, name, email, display_name, division, sub_division, salesperson
+         FROM users
+         WHERE LOWER(role) = 'medrep' AND is_active = 1
+         ORDER BY COALESCE(NULLIF(TRIM(display_name), ''), name)`
+      )
+      .all();
+    res.json({ success: true, data: { enabled: true, medreps } });
+  } catch (err) { next(err); }
+};
+
+exports.getSalespersonStatus = async (req, res, next) => {
+  try {
+    const status = await salespersonService.statusForUser(req.user.id, {
+      force: req.query.refresh === 'true'
+    });
+    res.json({ success: true, data: status });
   } catch (err) { next(err); }
 };
 
@@ -442,10 +623,24 @@ exports.create = async (req, res, next) => {
       // BPO WALLET / 60 Day / DSWD/PCSO, or a custom typed value). Same
       // "optional, free text, not wired into the Zoho payload yet" pattern
       // as delivery_method/terms above.
-      payment_terms
+      payment_terms,
+      // Sep 2, 2026: TEST_MODE + admin only — raise this order for a named
+      // MedRep instead of the seeded stand-in. See resolveOrderMedrep above
+      // for the four conditions and why it is ignored rather than refused
+      // everywhere else.
+      medrep_id
     } = req.body;
     const clean = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
-    const effectiveActor = resolveActor(req.user, 'medrep');
+
+    const medrepChoice = resolveOrderMedrep(req.user, medrep_id);
+    if (medrepChoice.error) {
+      return res.status(400).json({ success: false, error: medrepChoice.error });
+    }
+    const effectiveActor = medrepChoice.actor;
+    const onBehalfOf = medrepChoice.onBehalf;
+    // Salesperson + Division + Sub-division, from the MedRep the order is
+    // FOR (not whoever is clicking) — one read, so they cannot disagree.
+    const medrepProfile = salespersonService.profileForUser(effectiveActor.id);
 
     const ALLOWED_INVOICING_FROM = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 
@@ -577,7 +772,28 @@ exports.create = async (req, res, next) => {
       // cf_invoicing_from configured (not a separate Zoho organization, as
       // ZOHO_SALES_ORDER_FIELD_MAPPING.md previously assumed before this
       // was checked live).
-      invoicing_from: clean(invoicing_from)
+      invoicing_from: clean(invoicing_from),
+      // Sep 2, 2026: the ordering MedRep's own Salesperson —
+      // "<division> | <display name>" from their sign-up, generated in the
+      // database (users.salesperson).
+      //
+      // Keyed off effectiveActor, NOT req.user: in TEST_MODE an admin can
+      // raise the order for a named MedRep (see resolveOrderMedrep), and the
+      // Sales Order has to carry that rep's Salesperson — attributing it to
+      // the admin would defeat the entire point of being able to choose.
+      // Same row that goes into orders.medrep_id below, so the two can never
+      // disagree.
+      //
+      // NULL for an account created before sign-up collected a division
+      // (the seeded logins), in which case LiveZohoAdapter falls back to
+      // the TEST | MEDREP stand-in for TestGM- orders and to nothing for a
+      // real one — see the note there.
+      salesperson_name: medrepProfile.salesperson,
+      // Sep 2, 2026: Division / Sub-division — this org's own Sales Order
+      // custom fields (cf_division / cf_sub_division), read from the same
+      // user row as the Salesperson above so all three agree.
+      division: medrepProfile.division,
+      sub_division: medrepProfile.sub_division
     };
     // Aug 30, 2026: delivery_method, terms, and each line's discount/tax are
     // all captured and stored below (in the orders/order_items tables) but
@@ -688,7 +904,16 @@ exports.create = async (req, res, next) => {
           newStatus: finalStatus,
           actorId: effectiveActor.id,
           actorName: effectiveActor.name,
-          notes: `Order submitted for ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'})`
+          notes:
+            `Order submitted for ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'})` +
+            // Sep 2, 2026: an order raised by an admin FOR a MedRep is
+            // attributed to that MedRep everywhere else, which is what makes
+            // the Zoho Salesperson right — so the trail has to say who
+            // actually clicked, or the attribution becomes untraceable.
+            (onBehalfOf ? ` — raised by ${req.user.name} (admin, Test Mode) on behalf of ${effectiveActor.name}` : ''),
+          metadata: onBehalfOf
+            ? { onBehalfOf: true, raisedByUserId: req.user.id, raisedByName: req.user.name }
+            : undefined
         });
 
         if (zohoSyncStatus === 'failed') {
@@ -709,7 +934,12 @@ exports.create = async (req, res, next) => {
           newStatus: 'draft',
           actorId: effectiveActor.id,
           actorName: effectiveActor.name,
-          notes: 'Draft order created'
+          notes:
+            'Draft order created' +
+            (onBehalfOf ? ` — raised by ${req.user.name} (admin, Test Mode) on behalf of ${effectiveActor.name}` : ''),
+          metadata: onBehalfOf
+            ? { onBehalfOf: true, raisedByUserId: req.user.id, raisedByName: req.user.name }
+            : undefined
         });
       }
 
@@ -754,7 +984,7 @@ exports.create = async (req, res, next) => {
 exports.submit = async (req, res, next) => {
   try {
     const order = db.prepare(`
-      SELECT o.*, c.name as customer_name, c.type as customer_master_type, c.contact_number, c.zoho_contact_id as customer_zoho_contact_id, u.name as medrep_name, u.email as medrep_email
+      SELECT o.*, c.name as customer_name, c.type as customer_master_type, c.contact_number, c.zoho_contact_id as customer_zoho_contact_id, u.name as medrep_name, u.email as medrep_email, u.salesperson as medrep_salesperson, u.division as medrep_division, u.sub_division as medrep_sub_division
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
@@ -803,7 +1033,14 @@ exports.submit = async (req, res, next) => {
       // on an already-stored draft.
       doctor_name: order.intake_doctor,
       order_source: order.intake_source,
-      invoicing_from: order.invoicing_from
+      invoicing_from: order.invoicing_from,
+      // Sep 2, 2026: the Salesperson of the MedRep the ORDER belongs to
+      // (order.medrep_id), not whoever is submitting it — an admin
+      // submitting on someone's behalf must not have the Sales Order
+      // attributed to them. Comes from the users join in the query above.
+      salesperson_name: order.medrep_salesperson || null,
+      division: order.medrep_division || null,
+      sub_division: order.medrep_sub_division || null
     };
     let zohoResult = null;
     let zohoSyncStatus = 'pending';

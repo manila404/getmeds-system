@@ -1,4 +1,5 @@
 const ZohoAdapter = require('./ZohoAdapter');
+const { findSalesperson, SalespersonNotFoundError } = require('./salespersonName');
 const { items, contacts } = require('./fixtures');
 
 /**
@@ -23,7 +24,7 @@ const { items, contacts } = require('./fixtures');
  * run to run.
  */
 class MockZohoAdapter extends ZohoAdapter {
-  constructor({ seedItems = items, seedContacts = contacts, log = console.log } = {}) {
+  constructor({ seedItems = items, seedContacts = contacts, seedSalespersons, log = console.log } = {}) {
     super();
     this._log = log;
     this._items = new Map(seedItems.map((i) => [i.item_id, { ...i }]));
@@ -31,6 +32,31 @@ class MockZohoAdapter extends ZohoAdapter {
     this._salesOrders = new Map();
     this._soCounter = 1;
     this._simulatedOutage = false;
+    // Sep 2, 2026: enough of a Salesperson list to exercise both branches of
+    // the "does this name exist in Zoho?" check without a network call.
+    // Override via seedSalespersons in a test that needs a specific list.
+    //
+    // Sep 2, 2026 (2): every seeded login is here too, because
+    // createSalesOrder now REFUSES a name it cannot resolve to an id (see
+    // salespersonName.js). Without these, seeding a database would give you
+    // six accounts that cannot place an order — and the mock would be
+    // lenient where live is strict, which is the exact divergence that hid
+    // the listSalespersons parsing bug.
+    this._salespersons =
+      seedSalespersons || [
+        { salesperson_id: 'MOCK-SP-1', salesperson_name: 'TEST | MEDREP' },
+        { salesperson_id: 'MOCK-SP-2', salesperson_name: 'TEST | Aaron Manila' },
+        { salesperson_id: 'MOCK-SP-3', salesperson_name: 'NORTH | Juan dela Cruz' },
+        { salesperson_id: 'MOCK-SP-4', salesperson_name: 'NORTH | Maria Santos' },
+        { salesperson_id: 'MOCK-SP-5', salesperson_name: 'TEST | Admin User' },
+        { salesperson_id: 'MOCK-SP-6', salesperson_name: 'TEST | Rosa Reyes' },
+        { salesperson_id: 'MOCK-SP-7', salesperson_name: 'TEST | Ben Ramos' },
+        { salesperson_id: 'MOCK-SP-8', salesperson_name: 'TEST | Carlo Tan' },
+        // orderAsMedrep.test.js's second rep. Here rather than injected,
+        // because those tests go through the app's adapter singleton and
+        // cannot pass seedSalespersons to it.
+        { salesperson_id: 'MOCK-SP-9', salesperson_name: 'NORTH | Bea Cruz' }
+      ];
   }
 
   get mode() {
@@ -102,6 +128,20 @@ class MockZohoAdapter extends ZohoAdapter {
       line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity }))
     });
 
+    // Mirrors LiveZohoAdapter's salesperson resolution exactly, refusal
+    // included: the name is resolved to an id against this mock's own list
+    // and an unmatched one throws. Being lenient here would let the suite
+    // pass while live orders fail — or worse, while live quietly creates a
+    // Salesperson, which is what actually happened before Sep 2.
+    const salespersonName = (orderData.salesperson_name || '').trim();
+    if (!salespersonName) {
+      throw new SalespersonNotFoundError(null);
+    }
+    const salespersonMatch = findSalesperson(this._salespersons, salespersonName);
+    if (!salespersonMatch) {
+      throw new SalespersonNotFoundError(salespersonName);
+    }
+
     const salesorder = {
       salesorder_id,
       salesorder_number,
@@ -111,6 +151,8 @@ class MockZohoAdapter extends ZohoAdapter {
       total: orderData.total_amount,
       reference_number: orderData.getmeds_order_id,
       notes,
+      salesperson_id: salespersonMatch.salesperson_id,
+      salesperson_name: salespersonMatch.salesperson_name,
       date: new Date().toISOString().slice(0, 10),
       line_items: (orderData.items || []).map((item) => ({
         item_id: item.zoho_item_id || null,
@@ -121,7 +163,12 @@ class MockZohoAdapter extends ZohoAdapter {
       })),
       custom_fields: [
         { label: 'Getmeds Customer Type', value: customerTypeLabel },
-        { label: 'Payment Status', value: paymentStatusLabel }
+        { label: 'Payment Status', value: paymentStatusLabel },
+        // Sep 2, 2026: mirrors LiveZohoAdapter's cf_division /
+        // cf_sub_division so a test can assert what would have been sent.
+        // Omitted entirely when blank, exactly as there.
+        ...(orderData.division ? [{ label: 'Division', value: orderData.division }] : []),
+        ...(orderData.sub_division ? [{ label: 'Sub-division', value: orderData.sub_division }] : [])
       ],
       created_time: new Date().toISOString(),
       _mock: true
@@ -170,6 +217,11 @@ class MockZohoAdapter extends ZohoAdapter {
       try { opts.onPage({ processed: items.length, page: 1, hasMorePages: false }); } catch (_) {}
     }
     return { code: 0, message: 'success', items, truncated: false, newWatermark: null, stoppedEarly: false };
+  }
+
+  /** Mirrors LiveZohoAdapter.listSalespersons' shape. Read-only, like there. */
+  async listSalespersons() {
+    return { code: 0, message: 'success', salespersons: [...this._salespersons] };
   }
 
   /** Mirrors LiveZohoAdapter.getContact's shape — returns the full seeded contact (including billing_address, if the fixture has one). */

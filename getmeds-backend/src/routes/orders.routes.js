@@ -9,6 +9,16 @@ router.use(requireAuth);
 // Meta endpoints (customers + products for dropdowns)
 router.get('/meta/customers', c.getCustomers);
 router.get('/meta/products', c.getProducts);
+// Sep 2, 2026: does Zoho know this MedRep's Salesperson name? Zoho has
+// Salesperson as a mandatory Sales Order field in this org and matches it by
+// name, so the order form checks before the MedRep fills anything in. Any
+// authenticated role — an admin submitting on a rep's behalf wants the same
+// answer. Read-only towards Zoho.
+router.get('/meta/salesperson', c.getSalespersonStatus);
+// Sep 2, 2026: the MedRep an admin can raise an order for, in TEST_MODE.
+// Returns an empty, disabled list for everyone else — the server decides who
+// gets the picker, since the server is what honours `medrep_id` on create.
+router.get('/meta/medreps', c.getMedreps);
 
 // Order CRUD
 router.get('/', c.getAll);

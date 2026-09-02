@@ -2,18 +2,34 @@ require('dotenv').config();
 const db = require('./database');
 const bcrypt = require('bcryptjs');
 
-// Aug 28, 2026: this script wipes and reseeds customers/products/orders with
-// fixed demo data on every run — safe on a brand-new dev DB, but this app's
-// database now also holds REAL customers/inventory pulled in from the live
-// Zoho org (see customers.controller.js's sync-from-zoho / inventory.controller.js's
+// Aug 28, 2026: this script wipes and reseeds the database with fixed demo
+// data on every run — safe on a brand-new dev DB, but this app's database now
+// also holds REAL customers/inventory pulled in from the live Zoho org (see
+// customers.controller.js's sync-from-zoho / inventory.controller.js's
 // sync-pull). Running `npm run seed` (or `npm run setup`, which chains
 // migrate + seed) against that same database would silently delete all of
-// that real synced data and replace it with the 5 demo customers / 10 demo
-// products below. Nothing here ever calls the Zoho API — this is a
+// that real synced data. Nothing here ever calls the Zoho API — this is a
 // local-only wipe, not a push to Zoho — but it's exactly the kind of
 // "missing customer" bug this project already spent a session chasing, so
 // this refuses to run against a database carrying real Zoho-synced rows
 // unless explicitly forced.
+//
+// Sep 2, 2026: the 5 demo customers and 10 demo products this used to insert
+// are GONE, and so are the DELETEs that used to clear those two tables.
+// Customers and products come from ONE place now — a read-only pull from the
+// real Zoho org — and a hand-written row alongside them was actively harmful:
+// it carried no zoho_contact_id / zoho_item_id, so an order raised against
+// "St. Luke's Medical Center" or "Amoxicillin 500mg Cap" could never reach
+// Zoho (createSalesOrder requires both ids and fails loudly without them).
+// A tester hitting that failure learns nothing about the real flow.
+//
+// Consequence worth knowing: seeding no longer gives you anything to order.
+// After `npm run seed`, log in as admin and run Full Resync for customers and
+// inventory to populate them from Zoho.
+//
+// The guard below stays, and now protects the orders/users/roles wipe rather
+// than the customer/product one — running this against a working database is
+// still destructive, just no longer destructive to the Zoho mirror.
 function hasRealZohoData(db) {
   try {
     const customers = db
@@ -36,10 +52,11 @@ function run() {
   if (!forced && (realCustomers > 0 || realProducts > 0)) {
     console.error('\n🛑 Refusing to run: this database holds REAL data synced from Zoho, not just demo data.');
     console.error(`   Found ${realCustomers} customer(s) and ${realProducts} product(s) carrying Zoho sync fields (zoho_contact_id / zoho_item_id / zoho_stock).`);
-    console.error('   npm run seed deletes and replaces customers/products/orders (and everything under them) with fixed');
-    console.error('   demo data — running it now would locally erase what was pulled in from the real Zoho org.');
-    console.error('   (This never touches Zoho itself either way — Zoho\'s own data is completely unaffected.)');
-    console.error('\n   If you really want to reset this database to demo data anyway, run: npm run seed -- --force\n');
+    console.error('   npm run seed deletes every order, event, payment, dispatch record, notification, user and');
+    console.error('   role and recreates the six demo logins — a working database would lose all of that.');
+    console.error('   (Customers and products are no longer touched either way, and Zoho itself is never');
+    console.error('   contacted by this script — the real Zoho org is completely unaffected.)');
+    console.error('\n   If you really do want to reset the accounts on this database, run: npm run seed -- --force\n');
     process.exitCode = 1;
     return false;
   }
@@ -56,15 +73,17 @@ function run() {
     db.prepare('DELETE FROM order_items').run();
     db.prepare('DELETE FROM orders').run();
 
-    // 2. Parent tables
-    db.prepare('DELETE FROM products').run();
-    db.prepare('DELETE FROM customers').run();
+    // 2. Accounts. `customers` and `products` are deliberately NOT in this
+    //    list — see the note at the top of this file. They belong to the Zoho
+    //    mirror and are only ever filled by the read-only sync.
     db.prepare('DELETE FROM users').run();
     db.prepare('DELETE FROM roles').run();
 
-    // Reset autoincrement sequences
+    // Reset autoincrement sequences for the tables actually cleared above.
+    // 'customers' and 'products' are excluded on purpose: their rows survive,
+    // so reusing their ids would collide.
     try {
-      db.prepare("DELETE FROM sqlite_sequence WHERE name IN ('roles','users','customers','products','orders','order_items','payments','dispatch_records','order_events','notifications')").run();
+      db.prepare("DELETE FROM sqlite_sequence WHERE name IN ('roles','users','orders','order_items','payments','dispatch_records','order_events','notifications')").run();
     } catch (e) {
       // sqlite_sequence may not exist if no rows were ever inserted
     }
@@ -83,44 +102,37 @@ function run() {
     console.log('✅ Seeded roles (Admin, MedRep, Finance, Dispatch).');
 
     // Seed Users
-    const insUser = db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)');
-    insUser.run('Admin User', 'admin@getmeds.ph', hash('demo123'), 'admin');
-    insUser.run('Juan dela Cruz', 'medrep@getmeds.ph', hash('demo123'), 'medrep');
-    insUser.run('Maria Santos', 'medrep2@getmeds.ph', hash('demo123'), 'medrep');
-    insUser.run('Rosa Reyes', 'finance@getmeds.ph', hash('demo123'), 'finance');
-    insUser.run('Ben Ramos', 'dispatch@getmeds.ph', hash('demo123'), 'dispatch');
-    insUser.run('Carlo Tan', 'manager@getmeds.ph', hash('demo123'), 'management');
+    // Sep 2, 2026 (2): division + display_name, so `users.salesperson` (a
+    // generated column reading "<division> | <display name>") resolves for
+    // these accounts. Not decoration: createSalesOrder now refuses an order
+    // whose rep has no Salesperson mapping, because Salesperson is
+    // mandatory in this Zoho org AND Zoho creates any name it does not
+    // recognise. Without these the six demo logins could not place an
+    // order at all. The names match MockZohoAdapter's seeded list.
+    const insUser = db.prepare(
+      'INSERT INTO users (name, email, password_hash, role, display_name, division) VALUES (?, ?, ?, ?, ?, ?)'
+    );
+    insUser.run('Admin User', 'admin@getmeds.ph', hash('demo123'), 'admin', 'Admin User', 'TEST');
+    insUser.run('Juan dela Cruz', 'medrep@getmeds.ph', hash('demo123'), 'medrep', 'Juan dela Cruz', 'NORTH');
+    insUser.run('Maria Santos', 'medrep2@getmeds.ph', hash('demo123'), 'medrep', 'Maria Santos', 'NORTH');
+    insUser.run('Rosa Reyes', 'finance@getmeds.ph', hash('demo123'), 'finance', 'Rosa Reyes', 'TEST');
+    insUser.run('Ben Ramos', 'dispatch@getmeds.ph', hash('demo123'), 'dispatch', 'Ben Ramos', 'TEST');
+    insUser.run('Carlo Tan', 'manager@getmeds.ph', hash('demo123'), 'management', 'Carlo Tan', 'TEST');
     console.log('✅ Seeded users.');
-
-    // Seed Customers
-    const insCust = db.prepare('INSERT INTO customers (name, type, credit_limit, contact_person, contact_number, address) VALUES (?, ?, ?, ?, ?, ?)');
-    insCust.run("St. Luke's Medical Center", 'credit', 500000, 'Dr. Santos', '02-8723-0101', 'E. Rodriguez Ave, Quezon City');
-    insCust.run('The Medical City', 'credit', 300000, 'Dr. Cruz', '02-9888-8999', 'Ortigas Ave, Pasig City');
-    insCust.run('Makati Med Pharmacy', 'credit', 200000, 'Ms. Lim', '02-8888-8000', '2 Amorsolo St, Makati City');
-    insCust.run('Jose dela Cruz', 'direct', 0, 'Jose dela Cruz', '09171234567', '123 Main St, Manila');
-    insCust.run('Maria Reyes', 'direct', 0, 'Maria Reyes', '09281234567', '456 Rizal Ave, Quezon City');
-    console.log('✅ Seeded customers.');
-
-    // Seed Products
-    const insProd = db.prepare('INSERT INTO products (name, sku, unit_price, unit, stock) VALUES (?, ?, ?, ?, ?)');
-    insProd.run('Amoxicillin 500mg Cap', 'AMX500', 12.50, 'cap', 500);
-    insProd.run('Metformin 500mg Tab', 'MET500', 8.75, 'tab', 500);
-    insProd.run('Amlodipine 5mg Tab', 'AML005', 15.00, 'tab', 500);
-    insProd.run('Losartan 50mg Tab', 'LOS050', 18.50, 'tab', 500);
-    insProd.run('Omeprazole 20mg Cap', 'OMP020', 22.00, 'cap', 500);
-    insProd.run('Atorvastatin 20mg Tab', 'ATV020', 35.00, 'tab', 500);
-    insProd.run('Salbutamol Inhaler', 'SAL-INH', 285.00, 'pcs', 100);
-    insProd.run('Vitamin C 500mg Tab', 'VTC500', 5.50, 'tab', 1000);
-    insProd.run('Paracetamol 500mg Tab', 'PAR500', 4.25, 'tab', 1000);
-    insProd.run('Cetirizine 10mg Tab', 'CET010', 11.00, 'tab', 500);
-    console.log('✅ Seeded products.');
   });
 
   seedTransaction();
+
+  const count = (t) => {
+    try { return db.prepare(`SELECT COUNT(*) c FROM "${t}"`).get().c; } catch (e) { return 'n/a'; }
+  };
+  console.log(`\n   Customers: ${count('customers')}   Products: ${count('products')}  (untouched — pulled from Zoho, never seeded)`);
+  if (count('customers') === 0 || count('products') === 0) {
+    console.log('   ⚠️  Nothing to order yet. Log in as admin and run Full Resync for customers and inventory.');
+  }
   return true;
 }
 
 if (run()) {
   console.log('🎉 Seeding complete.');
 }
-

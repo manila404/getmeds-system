@@ -35,9 +35,19 @@ function getCustomersOverview(req, res, next) {
     const search = (req.query.search || '').trim();
     const category = (req.query.category || '').trim().toLowerCase();
     const type = (req.query.type || '').trim().toLowerCase();
+    // Sep 2, 2026: ?status=active|inactive|all. Defaults to 'active', which
+    // is exactly what this endpoint did before the filter existed — the
+    // difference is that the inactive ones are now reachable at all.
+    // `is_active` mirrors Zoho's own contact status (reconcileContacts
+    // below); before that mirroring landed, every row read as active and
+    // this filter would have had nothing to show.
+    const status = (req.query.status || 'active').trim().toLowerCase();
 
-    const where = ['is_active = 1'];
+    const where = [];
     const params = [];
+    if (status === 'active') where.push('is_active = 1');
+    else if (status === 'inactive') where.push('is_active = 0');
+    // 'all' adds no clause.
 
     if (search) {
       where.push('(name LIKE ? OR contact_person LIKE ? OR contact_number LIKE ?)');
@@ -113,13 +123,29 @@ function getCustomerStats(req, res, next) {
       )
       .get();
 
+    // Sep 2, 2026: the KPI cards keep counting ACTIVE clients — that is what
+    // "Total Clients" has always meant here and changing it silently would
+    // move a number people read every day. The active/inactive split is
+    // reported alongside instead, so the Status filter can show how many it
+    // would reveal without redefining anything above it.
+    const split = db
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active,
+           SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) AS inactive
+         FROM customers`
+      )
+      .get();
+
     res.json({
       success: true,
       data: {
         total: row.total || 0,
         credit: row.credit || 0,
         direct: row.direct || 0,
-        uncategorized: row.uncategorized || 0
+        uncategorized: row.uncategorized || 0,
+        active: split.active || 0,
+        inactive: split.inactive || 0
       }
     });
   } catch (err) { next(err); }
@@ -191,10 +217,10 @@ function reconcileContacts(contacts) {
   const findByZohoId = db.prepare('SELECT id FROM customers WHERE zoho_contact_id = ?');
   const insert = db.prepare(`
     INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active)
-    VALUES (?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), 1)
+    VALUES (?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?)
   `);
   const update = db.prepare(`
-    UPDATE customers SET name = ?, contact_person = ?, contact_number = ?, address = ?, last_synced_at = datetime('now')
+    UPDATE customers SET name = ?, contact_person = ?, contact_number = ?, address = ?, is_active = ?, last_synced_at = datetime('now')
     WHERE zoho_contact_id = ?
   `);
 
@@ -216,12 +242,27 @@ function reconcileContacts(contacts) {
         ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ')
         : null;
 
+      // Sep 2, 2026: mirror Zoho's own contact status into `is_active`.
+      //
+      // Until now this was hard-coded to 1 on insert and never touched on
+      // update, so every synced client read as active no matter what Zoho
+      // said — and the MedRep order form, which filters on is_active, would
+      // happily offer a contact Zoho has since deactivated and then have the
+      // Sales Order rejected at submit with nothing on screen explaining
+      // why. `products.is_active` has mirrored Zoho this way since Aug 27;
+      // this brings customers in line.
+      //
+      // Only an explicit 'inactive' deactivates. A missing/unknown status
+      // is treated as active, so a Zoho response that omits the field can
+      // never mass-hide the directory.
+      const isActive = String(contact.status || '').toLowerCase() === 'inactive' ? 0 : 1;
+
       const existing = findByZohoId.get(contact.contact_id);
       if (existing) {
-        update.run(name, contactPerson, phone, address, contact.contact_id);
+        update.run(name, contactPerson, phone, address, isActive, contact.contact_id);
         updated++;
       } else {
-        insert.run(name, type, contact.contact_id, contactPerson, phone, address);
+        insert.run(name, type, contact.contact_id, contactPerson, phone, address, isActive);
         created++;
       }
     }

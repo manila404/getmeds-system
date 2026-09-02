@@ -6,6 +6,7 @@ import Layout from './components/layout/Layout';
 
 // Pages
 import LoginPage from './pages/LoginPage';
+import SignupPage from './pages/SignupPage';
 import DashboardPage from './pages/DashboardPage';
 import MedrepDashboardPage from './pages/medrep/MedrepDashboardPage';
 import NewOrderPage from './pages/medrep/NewOrderPage';
@@ -54,9 +55,30 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={user ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
-        
+
+        {/* Sep 2, 2026: public self-service sign-up. Outside <Layout /> and
+            outside ProtectedRoute for the same reason as the login page —
+            there is no session yet. Signing up creates a MedRep and logs the
+            user straight in, so an already-signed-in visitor is bounced to
+            the dashboard rather than shown the form again. */}
+        <Route path="/signup" element={user ? <Navigate to="/dashboard" replace /> : <SignupPage />} />
+
         <Route element={<Layout />}>
-          <Route path="/test-mode" element={<TestModePage />} />
+          {/* Sep 2, 2026: was reachable by URL to anyone, signed in or not.
+              Not exploitable — the backend refuses /api/test/* whenever
+              NODE_ENV=production — but an anonymous visitor could still load
+              the page and read what it describes. ProtectedRoute with no
+              allowedRoles requires a session and nothing more, deliberately:
+              restricting it by role would lock out the MedReps who run the
+              gated test flow, which is what the page is for. */}
+          <Route
+            path="/test-mode"
+            element={
+              <ProtectedRoute>
+                <TestModePage />
+              </ProtectedRoute>
+            }
+          />
           <Route path="/dashboard" element={<DashboardPage />} />
           
           {/* MedRep Routes */}

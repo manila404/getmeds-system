@@ -3,11 +3,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchClients,
   fetchClientStats,
-  startCustomersSyncJob,
-  fetchSyncJobStatus,
   updateCustomerCategory
 } from '../../api/queries';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
+import { useSyncJobs } from '../../context/SyncJobsContext';
 import toast from 'react-hot-toast';
 import {
   Users,
@@ -57,6 +56,11 @@ const ClientsPage = () => {
   const [page, setPage] = useState(1);
   const [categoryFilter, setCategoryFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  // Sep 2, 2026: Zoho's own contact status, mirrored locally by the sync.
+  // Defaults to 'active' — what this page has always shown — so the only
+  // change for anyone not touching the filter is that the inactive ones are
+  // now reachable instead of invisible.
+  const [statusFilter, setStatusFilter] = useState('active');
   const searchContainerRef = useRef(null);
 
   // Aug 28, 2026: debounce the raw input into `search` instead of requiring
@@ -83,14 +87,15 @@ const ClientsPage = () => {
   }, []);
 
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['clients', page, search, categoryFilter, typeFilter],
+    queryKey: ['clients', page, search, categoryFilter, typeFilter, statusFilter],
     queryFn: () =>
       fetchClients({
         page,
         limit: PAGE_SIZE,
         search: search || undefined,
         category: categoryFilter || undefined,
-        type: typeFilter || undefined
+        type: typeFilter || undefined,
+        status: statusFilter || undefined
       }),
     keepPreviousData: true
   });
@@ -101,14 +106,15 @@ const ClientsPage = () => {
   // browser just to suggest a few names.
   const showSuggestions = isSuggestOpen && search.length >= 2;
   const { data: suggestData, isFetching: isSuggestFetching } = useQuery({
-    queryKey: ['clients-suggest', search, categoryFilter, typeFilter],
+    queryKey: ['clients-suggest', search, categoryFilter, typeFilter, statusFilter],
     queryFn: () =>
       fetchClients({
         page: 1,
         limit: SUGGESTION_LIMIT,
         search,
         category: categoryFilter || undefined,
-        type: typeFilter || undefined
+        type: typeFilter || undefined,
+        status: statusFilter || undefined
       }),
     enabled: showSuggestions,
     keepPreviousData: true
@@ -129,65 +135,18 @@ const ClientsPage = () => {
   // org was reported as taking a long time with no feedback in between.
   // Both still ONLY read from Zoho (POST .../sync-from-zoho/start) —
   // nothing here writes anything to Zoho.
-  const [syncJobId, setSyncJobId] = useState(null);
-
-  const startSyncMutation = useMutation({
-    mutationFn: (mode) => startCustomersSyncJob(mode),
-    onSuccess: (res) => setSyncJobId(res.data.job_id),
-    onError: (err) => {
-      const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-      toast.error(`Could not start sync: ${msg}`);
-    }
-  });
-
-  const { data: syncJobData } = useQuery({
-    queryKey: ['customers-sync-job', syncJobId],
-    queryFn: () => fetchSyncJobStatus(syncJobId),
-    enabled: !!syncJobId,
-    // Keep polling every 1.2s while the job is still running; stop the
-    // moment it's done/errored (or if it 404s because the server restarted
-    // mid-job — no `data` to read a status off of, so this just stops).
-    refetchInterval: (query) => (query.state.data?.data?.status === 'running' ? 1200 : false)
-  });
-
-  const syncJob = syncJobData?.data || null;
-
-  // Fires exactly once per job, the moment its status flips away from
-  // "running" — invalidates the table/stats so the new/updated contacts
-  // show up, surfaces a toast (persistent + ⚠️ if the pull hit its own
-  // safety cap or Zoho errored), and clears syncJobId so the progress bar
-  // disappears and the buttons re-enable.
-  useEffect(() => {
-    if (!syncJob) return;
-    if (syncJob.status === 'running') return;
-
-    const modeLabel = syncJob.mode === 'full' ? 'Full Resync' : 'Quick Sync';
-
-    if (syncJob.status === 'done') {
-      qc.invalidateQueries({ queryKey: ['clients'] });
-      qc.invalidateQueries({ queryKey: ['clients-stats'] });
-      const r = syncJob.result || {};
-      if (r.truncated) {
-        toast.error(
-          `⚠️ ${modeLabel} pulled ${r.total_from_zoho ?? 0} contact(s), but Zoho reported even more beyond this ` +
-            `pull's safety limit — incomplete (${r.created ?? 0} new, ${r.updated ?? 0} refreshed). Nothing was ` +
-            'written to Zoho.',
-          { icon: '⚠️', duration: 15000 }
-        );
-      } else {
-        toast.success(
-          `${modeLabel} complete — ${r.created ?? 0} new, ${r.updated ?? 0} refreshed` +
-            (r.skipped ? `, ${r.skipped} skipped` : '') + '.',
-          { icon: '🔄' }
-        );
-      }
-    } else if (syncJob.status === 'error') {
-      toast.error(`${modeLabel} failed: ${syncJob.error || 'unknown error'}`);
-    }
-
-    setSyncJobId(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncJob?.status]);
+  //
+  // Sep 2, 2026: the job id, the polling and the completion toast all moved
+  // OUT of this page and into context/SyncJobsContext.jsx, which is mounted
+  // above the router. They used to live here in useState — so clicking any
+  // other tab unmounted this page, took the job id with it, and stopped the
+  // polling. The pull itself never stopped (it is a background job on the
+  // server), but the progress bar vanished, the table was never refreshed
+  // when it finished, and the buttons re-enabled and invited a second
+  // identical pull against an org with a daily API budget.
+  const { startSync, jobFor, isRunning, isStarting } = useSyncJobs();
+  const syncJob = jobFor('customers');
+  const syncBusy = isRunning('customers') || isStarting;
 
   const categoryMutation = useMutation({
     mutationFn: ({ id, category }) => updateCustomerCategory(id, category),
@@ -240,6 +199,11 @@ const ClientsPage = () => {
     setPage(1);
   };
 
+  const handleStatusFilterChange = (e) => {
+    setStatusFilter(e.target.value);
+    setPage(1);
+  };
+
   const clientsData = data?.data || {};
   const clients = clientsData.customers || [];
   const pagination = clientsData.pagination || { total: 0, page: 1, limit: PAGE_SIZE, pages: 1 };
@@ -285,8 +249,8 @@ const ClientsPage = () => {
               </button>
 
               <button
-                onClick={() => startSyncMutation.mutate('quick')}
-                disabled={!!syncJobId || startSyncMutation.isPending}
+                onClick={() => startSync('customers', 'quick')}
+                disabled={syncBusy}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
                 title="Fast — pulls only contacts created or changed in Zoho since the last sync (read-only)"
               >
@@ -295,8 +259,8 @@ const ClientsPage = () => {
               </button>
 
               <button
-                onClick={() => startSyncMutation.mutate('full')}
-                disabled={!!syncJobId || startSyncMutation.isPending}
+                onClick={() => startSync('customers', 'full')}
+                disabled={syncBusy}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
                 title="Slower, but guaranteed — pulls every contact in Zoho, registered here or not (read-only)"
               >
@@ -438,6 +402,17 @@ const ClientsPage = () => {
 
           <div className="flex items-center gap-2 flex-wrap">
             <select
+              value={statusFilter}
+              onChange={handleStatusFilterChange}
+              className="text-xs px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
+              title="Mirrors each client's status in Zoho"
+            >
+              <option value="active">Active{stats.active ? ` (${stats.active})` : ''}</option>
+              <option value="inactive">Inactive{stats.inactive ? ` (${stats.inactive})` : ''}</option>
+              <option value="all">All statuses</option>
+            </select>
+
+            <select
               value={typeFilter}
               onChange={handleTypeFilterChange}
               className="text-xs px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
@@ -509,12 +484,28 @@ const ClientsPage = () => {
                   return (
                     <tr key={cl.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-3 px-4">
-                        <div className="font-semibold text-slate-900">{cl.name}</div>
-                        {cl.is_test_customer ? (
-                          <div className="text-[10px] font-bold text-amber-700 bg-amber-50 inline-block px-1.5 py-0.5 rounded mt-0.5">
-                            TEST customer
-                          </div>
-                        ) : null}
+                        <div className={`font-semibold ${cl.is_active === 0 ? 'text-slate-500' : 'text-slate-900'}`}>
+                          {cl.name}
+                        </div>
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {cl.is_test_customer ? (
+                            <span className="text-[10px] font-bold text-amber-700 bg-amber-50 inline-block px-1.5 py-0.5 rounded">
+                              TEST customer
+                            </span>
+                          ) : null}
+                          {/* Sep 2, 2026: only ever shown for the inactive
+                              ones — badging all 94k as "Active" would be
+                              noise on a column where the exception is the
+                              information. */}
+                          {cl.is_active === 0 ? (
+                            <span
+                              className="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 inline-block px-1.5 py-0.5 rounded"
+                              title="Inactive in Zoho — cannot be put on a Sales Order"
+                            >
+                              INACTIVE
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                       <td className="py-3 px-4">
                         <span

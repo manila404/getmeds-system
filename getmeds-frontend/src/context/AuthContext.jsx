@@ -31,28 +31,43 @@ export const AuthProvider = ({ children }) => {
     fetchUser();
   }, [token]);
 
+  // Shared by login/signup/quickLogin: all three return the same
+  // { token, user } payload, so the session is established the same way.
+  const establishSession = (data) => {
+    const { token: newToken, user: userData } = data;
+    sessionStorage.setItem('token', newToken);
+    setToken(newToken);
+    setUser(userData);
+    return userData;
+  };
+
   const login = async (email, password) => {
     const { data } = await client.post('/api/auth/login', { email, password });
-    if (data.success) {
-      const { token: newToken, user: userData } = data.data;
-      sessionStorage.setItem('token', newToken);
-      setToken(newToken);
-      setUser(userData);
-      return userData;
-    }
+    if (data.success) return establishSession(data.data);
     throw new Error('Login failed');
+  };
+
+  // Sep 2, 2026. Self-service sign-up. Takes the whole form as one object —
+  // first/middle/last, display_name, division, sub_division, email, password.
+  //
+  // Two fields are deliberately NOT parameters here:
+  //   role        — the backend hard-codes every sign-up to medrep and
+  //                 ignores a role sent by the client.
+  //   salesperson — a generated column in the database, always
+  //                 "<division> | <display name>". The form shows it as a
+  //                 preview; sending it would imply the client decides it.
+  // A successful sign-up returns a token exactly like a login, so the new
+  // user lands straight in the app.
+  const signup = async (fields) => {
+    const { data } = await client.post('/api/auth/register', fields);
+    if (data.success) return establishSession(data.data);
+    throw new Error('Sign up failed');
   };
 
   const quickLogin = async (target) => {
     const payload = typeof target === 'string' ? { email: target } : target;
     const { data } = await client.post('/api/test/quick-login', payload);
-    if (data.success) {
-      const { token: newToken, user: userData } = data.data;
-      sessionStorage.setItem('token', newToken);
-      setToken(newToken);
-      setUser(userData);
-      return userData;
-    }
+    if (data.success) return establishSession(data.data);
     throw new Error('Quick login failed');
   };
 
@@ -63,7 +78,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, quickLogin, logout, isLoading }}>
+    <AuthContext.Provider value={{ user, token, login, signup, quickLogin, logout, isLoading }}>
       {children}
     </AuthContext.Provider>
   );

@@ -7,6 +7,23 @@ CREATE TABLE IF NOT EXISTS roles (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Sep 2, 2026: the name/division fields below arrived with the sign-up form
+-- (POST /api/auth/register). `name` predates them and is what the whole
+-- frontend already renders (Topbar, order lists, audit entries), so it is
+-- kept in sync with `display_name` rather than replaced — one less thing to
+-- chase through the UI.
+--
+-- `salesperson` is a GENERATED column on purpose. Zoho has "Salesperson"
+-- configured as a MANDATORY field on every Sales Order in this org (see
+-- LiveZohoAdapter.createSalesOrder), formatted "<division> | <display name>"
+-- — e.g. "TEST | Aaron Manila". Deriving it in the schema means it can never
+-- drift from the two columns it is built out of: there is no code path that
+-- can update a division and forget the salesperson string, because there is
+-- no stored string to forget. VIRTUAL rather than STORED since it costs
+-- nothing to compute and STORED cannot be added by ALTER TABLE.
+-- NULL when either part is missing — which is exactly right for the seeded
+-- accounts and any user created before this existed: they have no Zoho
+-- salesperson mapping, and NULL says so.
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -15,6 +32,19 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK(role IN ('medrep','finance','dispatch','management','admin')),
   is_active INTEGER DEFAULT 1,
   is_test_account INTEGER DEFAULT 0,
+  first_name TEXT,
+  middle_name TEXT,
+  last_name TEXT,
+  display_name TEXT,
+  division TEXT,
+  sub_division TEXT,
+  salesperson TEXT GENERATED ALWAYS AS (
+    CASE
+      WHEN division IS NULL OR TRIM(division) = '' THEN NULL
+      WHEN display_name IS NULL OR TRIM(display_name) = '' THEN NULL
+      ELSE TRIM(division) || ' | ' || TRIM(display_name)
+    END
+  ) VIRTUAL,
   created_at TEXT DEFAULT (datetime('now'))
 );
 

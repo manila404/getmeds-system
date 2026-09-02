@@ -9,8 +9,16 @@ const db = require('./database');
 // grow an existing table's shape. It only ever ADDs a column (never drops,
 // renames, or rewrites one), so it's safe to run repeatedly and safe to run
 // against a database that already has real orders/customers in it.
+//
+// Sep 2, 2026: this reads table_xINFO, not table_info. The difference only
+// shows up once a table has a GENERATED column (users.salesperson does):
+// `PRAGMA table_info` omits generated columns entirely, so the check below
+// concluded the column was missing, tried to add it again, and the second
+// `npm run migrate` on any database died with "duplicate column name:
+// salesperson". `table_xinfo` returns the same rows plus generated/hidden
+// ones, which is what "does this column already exist" actually means here.
 function ensureColumn(table, column, ddlType) {
-  const existing = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  const existing = db.prepare(`PRAGMA table_xinfo(${table})`).all().map((c) => c.name);
   if (!existing.includes(column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddlType}`);
   }
@@ -226,6 +234,32 @@ function migrate() {
   // throttle, so neither re-reads an order the other just did. NULL means
   // never reconciled, which sorts to the front of the queue.
   ensureColumn('orders', 'last_reconciled_at', 'TEXT');
+
+  // Sep 2, 2026: sign-up form fields (see schema.sql's `users` table
+  // comment). `name` is left alone and kept in sync with `display_name` by
+  // the sign-up controller, so everything already rendering user.name keeps
+  // working untouched.
+  //
+  // Order matters here: `salesperson` is a GENERATED column derived from
+  // `division` and `display_name`, so both have to exist before SQLite will
+  // accept it. ensureColumn is sequential, so listing them first is enough.
+  ensureColumn('users', 'first_name', 'TEXT');
+  ensureColumn('users', 'middle_name', 'TEXT');
+  ensureColumn('users', 'last_name', 'TEXT');
+  ensureColumn('users', 'display_name', 'TEXT');
+  ensureColumn('users', 'division', 'TEXT');
+  ensureColumn('users', 'sub_division', 'TEXT');
+  ensureColumn(
+    'users',
+    'salesperson',
+    `TEXT GENERATED ALWAYS AS (
+      CASE
+        WHEN division IS NULL OR TRIM(division) = '' THEN NULL
+        WHEN display_name IS NULL OR TRIM(display_name) = '' THEN NULL
+        ELSE TRIM(division) || ' | ' || TRIM(display_name)
+      END
+    ) VIRTUAL`
+  );
 
   // Sep 1, 2026: run LAST, after every ensureColumn above — the rebuild
   // copies rows across on the intersection of the old and new column lists,

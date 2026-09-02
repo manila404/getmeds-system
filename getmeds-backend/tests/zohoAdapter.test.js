@@ -11,6 +11,10 @@ const sampleOrderData = {
   customer_master_type: 'direct',
   total_amount: 100,
   delivery_address: '123 Test St',
+  // Sep 2, 2026 (2): required now. createSalesOrder refuses an order it
+  // cannot resolve to a salesperson_id, so a fixture without one no longer
+  // reaches the assertions these tests are actually about.
+  salesperson_name: 'TEST | MEDREP',
   items: [{ sku: 'PARA-500-TAB', name: 'Paracetamol 500mg Tablet', quantity: 10, unit_price: 2.25, subtotal: 22.5 }]
 };
 

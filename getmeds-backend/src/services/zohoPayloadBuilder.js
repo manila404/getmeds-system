@@ -26,9 +26,11 @@ const db = require('../db/database');
  */
 function buildZohoSalesOrderPayload(orderId) {
   const order = db.prepare(`
-    SELECT o.*, c.name as customer_name, c.type as customer_master_type, c.zoho_contact_id as customer_zoho_contact_id
+    SELECT o.*, c.name as customer_name, c.type as customer_master_type, c.zoho_contact_id as customer_zoho_contact_id,
+           u.salesperson as medrep_salesperson, u.division as medrep_division, u.sub_division as medrep_sub_division
     FROM orders o
     LEFT JOIN customers c ON o.customer_id = c.id
+    LEFT JOIN users u ON o.medrep_id = u.id
     WHERE o.id = ?
   `).get(orderId);
 
@@ -52,7 +54,18 @@ function buildZohoSalesOrderPayload(orderId) {
     items,
     doctor_name: order.intake_doctor,
     order_source: order.intake_source,
-    invoicing_from: order.invoicing_from
+    invoicing_from: order.invoicing_from,
+    // Sep 2, 2026: the Salesperson of the MedRep who owns the order. Read
+    // fresh here like everything else in this function — if the rep's
+    // division or display name was corrected after the failed sync, the
+    // retry sends the corrected string rather than the one that failed.
+    // That is the entire point of rebuilding the payload instead of
+    // replaying the stored snapshot.
+    salesperson_name: order.medrep_salesperson || null,
+    // Same row, same reason as salesperson above — a division corrected
+    // after a failed sync is picked up by the retry.
+    division: order.medrep_division || null,
+    sub_division: order.medrep_sub_division || null
   };
 }
 

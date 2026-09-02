@@ -20,13 +20,15 @@ import {
   Loader2,
   X,
   CalendarDays,
-  UserRound
+  UserRound,
+  FlaskConical,
+  Building2
 } from 'lucide-react';
 import { useDebug } from '../../context/DebugContext';
 import { useAuth } from '../../hooks/useAuth';
 
 import { useProducts, useCustomers } from '../../hooks/useOrderData';
-import { fetchCustomerZohoAddress } from '../../api/queries';
+import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
 // paper/spreadsheet-styled "Order Intake Details" block (label-left rows,
@@ -178,39 +180,116 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const [isReviewOpen, setIsReviewOpen] = useState(false);
 
   // Step 1: Query hooks
-  const { data: customersData, isLoading: loadingCustomers } = useCustomers();
+  //
+  // Sep 2, 2026: the dropdown lists ACTIVE clients by default. Inactive ones
+  // (deactivated in Zoho — mirrored into is_active by the customer sync) are
+  // fetched only when the MedRep asks, and even then are shown greyed out and
+  // unselectable, because Zoho rejects a Sales Order raised against an
+  // inactive contact. Showing them beats hiding them: "this client exists and
+  // is inactive" is a real answer, where a silently missing row just reads as
+  // a typo. Same treatment inactive products already get.
+  const [showInactiveCustomers, setShowInactiveCustomers] = useState(false);
+  const { data: customersData, isLoading: loadingCustomers } = useCustomers(showInactiveCustomers);
+  // Sep 2, 2026 (2): this list is now a small, server-capped sample (25),
+  // NOT every customer. The searchable dropdown queries the server itself —
+  // see CustomerAutocomplete. What is left here is only what still needs a
+  // handful of rows: the Test Mode auto-fill buttons, and the gate flag.
   const customers = customersData?.customers || [];
+  const inactiveCustomerCount = customersData?.inactiveCount ?? 0;
   const testCustomerGateEnabled = !!customersData?.testCustomerGateEnabled;
   const { data: products = [], isLoading: loadingProducts } = useProducts();
 
-  const selectedCustomer = customers.find(c => String(c.id) === String(customerId));
+  // Held as an object rather than looked up by id, because there is no
+  // longer a full list to look it up in.
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
+
+  // Sep 2, 2026: "raise this order as…" — TEST_MODE + admin only.
+  //
+  // In Test Mode an admin passes every role gate, so they can reach this
+  // form; until now their order was silently attributed to the one seeded
+  // medrep@getmeds.ph account (auditService's resolveActor). That was
+  // harmless when nothing was per-MedRep and is not any more: each MedRep
+  // now carries their own Zoho Salesperson, and testing one means being able
+  // to order AS them without logging out and back in.
+  //
+  // Whether the picker appears is the SERVER's decision, not
+  // VITE_TEST_MODE's — /api/orders/meta/medreps returns enabled:false for
+  // everyone else, and create() independently ignores `medrep_id` unless the
+  // same four conditions hold. Two places would drift; the server's is the
+  // one that counts.
+  const [actingMedrepId, setActingMedrepId] = useState('');
+  const { data: medrepPicker } = useQuery({
+    queryKey: ['order-medreps'],
+    queryFn: async () => (await client.get('/api/orders/meta/medreps')).data.data,
+    staleTime: 1000 * 60 * 5
+  });
+  const canPickMedrep = !!medrepPicker?.enabled;
+  const medrepOptions = medrepPicker?.medreps || [];
+  const actingMedrep = canPickMedrep
+    ? medrepOptions.find(m => String(m.id) === String(actingMedrepId)) || null
+    : null;
 
   // Aug 30, 2026: the backend stamps every live Zoho Sales Order created
   // while the TEST-customer gate is on with a fixed "TEST | MEDREP"
   // Salesperson (see LiveZohoAdapter.createSalesOrder — this Zoho org
-  // requires a Salesperson on every Sales Order, and the real per-MedRep
-  // mapping is still deferred work). Show that same value here instead of
-  // the logged-in user's name whenever a TEST customer is selected, so
-  // what's on screen matches what actually reaches Zoho. This only ever
-  // displays; it isn't submitted to the backend at all today.
+  // requires a Salesperson on every Sales Order). Show that same value here
+  // instead of the logged-in user's name whenever a TEST customer is
+  // selected, so what's on screen matches what actually reaches Zoho.
   //
   // Aug 31, 2026 (7): generalized from a single hardcoded TEST-CUSTOMER_1
   // id/name check. The backend's getCustomers already filters this very
   // dropdown down to only the designated TEST customers whenever the gate
   // is on (see orders.controller.js's checkTestCustomerGate, now backed by
   // ZOHO_TEST_CUSTOMER_IDS — a list, not a single id) — so if the gate is
-  // on, ANY customer selectable here already IS a test customer. No need
-  // to hardcode which one(s), and this now stays correct automatically as
-  // TEST-CUSTOMER_2/3/etc. get added.
+  // on, ANY customer selectable here already IS a test customer.
+  //
+  // Sep 2, 2026: the per-MedRep mapping that was deferred above now exists.
+  // `user.salesperson` is the generated "<division> | <display name>" from
+  // sign-up (e.g. "TEST | Aaron Manila"), carried on every authenticated
+  // request by requireAuth. The precedence below mirrors
+  // LiveZohoAdapter.createSalesOrder EXACTLY, and that is the whole point of
+  // this line — it is a read-only mirror of what will be sent, so it has to
+  // agree with it in every branch:
+  //
+  //   1. the rep's own Salesperson, when their account has one — it wins
+  //      even on a TEST order, same as in the adapter;
+  //   2. otherwise the TEST | MEDREP stand-in, but only on a TEST order;
+  //   3. otherwise nothing, and the field says so rather than falling back
+  //      to user.name — showing a name that will NOT be sent is worse than
+  //      showing none, because it reads like a working mapping.
+  //
+  // When an admin has picked a MedRep to raise the order as (above), it is
+  // THAT rep's Salesperson that goes to Zoho — same row the backend reads —
+  // so it is theirs that belongs on screen.
   const isTestCustomerSelected = !!selectedCustomer && testCustomerGateEnabled;
-  const displaySalesPerson = isTestCustomerSelected ? 'TEST | MEDREP' : (user?.name || '—');
+  const mySalesperson = ((actingMedrep ? actingMedrep.salesperson : user?.salesperson) || '').trim();
+  const displaySalesPerson =
+    mySalesperson || (isTestCustomerSelected ? 'TEST | MEDREP' : 'Not set');
+
+  // Sep 2, 2026: Division and Sub-division are their own custom fields on
+  // this org's Sales Order (cf_division / cf_sub_division) and are sent with
+  // every order, so they are shown rather than left invisible. Read from the
+  // SAME source as the Salesperson above — the acting MedRep when an admin
+  // has picked one, otherwise the logged-in account — because the backend
+  // reads all three from one user row and the screen must not imply
+  // otherwise.
+  const myDivision = ((actingMedrep ? actingMedrep.division : user?.division) || '').trim();
+  const mySubDivision = ((actingMedrep ? actingMedrep.sub_division : user?.sub_division) || '').trim();
 
   // Doctor Name is manual free text, but pre-filled with suggestions drawn
   // from customers already tagged category='doctor' (populated by
   // Management in the Clients Directory, itself sourced from the Zoho
   // contacts sync) — "manual, but if there's a doctor from Zoho, get it."
+  // Sep 2, 2026 (2): its own bounded query. This used to filter the full
+  // customer array for category='doctor' — which only worked while the whole
+  // table was in the browser, and was a large part of why it was.
+  const { data: doctorData } = useQuery({
+    queryKey: ['customers-doctors'],
+    queryFn: () => fetchCustomers({ category: 'doctor', limit: 100 }),
+    staleTime: 1000 * 60 * 5
+  });
   const doctorSuggestions = Array.from(
-    new Set(customers.filter(c => c.category === 'doctor').map(c => c.name).filter(Boolean))
+    new Set((doctorData?.data?.customers || []).map(c => c.name).filter(Boolean))
   );
 
   // Aug 27, 2026: fetching the live address from Zoho (see below) — shown
@@ -228,6 +307,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     if (!c) return;
     selectedCustomerIdRef.current = String(c.id);
     setCustomerId(c.id);
+    setSelectedCustomer(c);
     setCustomerType(c.type || 'credit');
     // Fill in whatever's already cached locally immediately (instant, no
     // network wait) — this is what's usually already there from a
@@ -268,6 +348,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const handleCustomerClear = () => {
     selectedCustomerIdRef.current = '';
     setCustomerId('');
+    setSelectedCustomer(null);
     setIsFetchingZohoAddress(false);
   };
 
@@ -475,7 +556,11 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         delivery_method: deliveryMethod,
         terms: termsAndConditions,
         payment_terms: paymentTerms,
-        invoicing_from: invoicingFrom
+        invoicing_from: invoicingFrom,
+        // Sep 2, 2026: only ever sent when the server said the picker is
+        // allowed AND one was chosen. The server ignores it otherwise, so
+        // this is belt-and-braces rather than the control itself.
+        ...(canPickMedrep && actingMedrepId ? { medrep_id: parseInt(actingMedrepId) } : {})
       });
       const order = createRes.data.data.order;
       return order;
@@ -596,11 +681,10 @@ const OrderForm = ({ onCancel, onSuccess }) => {
 
             <Field label="Customer Name" required>
               <CustomerAutocomplete
-                customers={customers}
-                value={customerId}
+                selected={selectedCustomer}
                 onSelect={handleCustomerChange}
                 onClear={handleCustomerClear}
-                disabled={loadingCustomers}
+                includeInactive={showInactiveCustomers}
               />
               {selectedCustomer && (
                 <p className="text-[11px] text-ink-secondary mt-1">
@@ -609,7 +693,53 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                     : 'Direct patient — requires Finance payment verification before picking.'}
                 </p>
               )}
+              {/* Only offered when there is actually something behind it —
+                  a checkbox that reveals nothing is worse than no checkbox. */}
+              {(inactiveCustomerCount > 0 || showInactiveCustomers) && (
+                <label className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-ink-secondary cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={showInactiveCustomers}
+                    onChange={(e) => setShowInactiveCustomers(e.target.checked)}
+                    className="rounded border-slate-300 text-getmeds-blue focus:ring-getmeds-blue"
+                  />
+                  Show inactive clients
+                  {inactiveCustomerCount > 0 && ` (${inactiveCustomerCount})`}
+                  <span className="text-ink-secondary/70">— listed for reference, cannot be ordered for</span>
+                </label>
+              )}
             </Field>
+
+            {/* Sep 2, 2026: Test Mode only, and only for an admin — see the
+                note beside `canPickMedrep` above. Sits directly over the
+                Salesperson field because that is what it changes. */}
+            {canPickMedrep && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 flex items-start gap-3">
+                <FlaskConical size={16} className="text-amber-700 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <label className="block text-xs font-bold uppercase tracking-wide text-amber-900 mb-1.5">
+                    Raise this order as
+                  </label>
+                  <select
+                    value={actingMedrepId}
+                    onChange={e => setActingMedrepId(e.target.value)}
+                    className={inputClass}
+                  >
+                    <option value="">Default — the seeded MedRep account</option>
+                    {medrepOptions.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {(m.display_name || m.name)}
+                        {m.salesperson ? ` — ${m.salesperson}` : ' — no Salesperson set'}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-amber-900/80 mt-1.5">
+                    Test Mode only. The order is attributed to the MedRep you pick and carries
+                    their Salesperson to Zoho — the audit trail still records that you raised it.
+                  </p>
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               <Field label="Sales Order Date">
@@ -619,10 +749,19 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 </span>
               </Field>
 
-              <Field label="Sales Person">
+              <Field
+                label="Salesperson"
+                help={
+                  mySalesperson
+                    ? 'From your account — sent as the Salesperson on the Zoho Sales Order.'
+                    : 'Set from your Division and Display name at sign-up.'
+                }
+              >
                 <span className={readOnlyPillClass}>
                   <UserRound size={14} className="text-ink-secondary shrink-0" />
-                  {displaySalesPerson}
+                  <span className={mySalesperson ? '' : 'text-ink-secondary'}>
+                    {displaySalesPerson}
+                  </span>
                 </span>
               </Field>
 
@@ -638,6 +777,34 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 <datalist id="delivery-method-suggestions">
                   {DELIVERY_METHOD_SUGGESTIONS.map(opt => <option key={opt} value={opt} />)}
                 </datalist>
+              </Field>
+
+              {/* Sep 2, 2026: read-only, like Salesperson — all three come
+                  from the ordering MedRep's account, not from this form.
+                  Shown because all three are sent to Zoho, and a field that
+                  reaches the Sales Order should not be invisible here. */}
+              <Field
+                label="Division"
+                help={myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Set at sign-up.'}
+              >
+                <span className={readOnlyPillClass}>
+                  <Building2 size={14} className="text-ink-secondary shrink-0" />
+                  <span className={myDivision ? '' : 'text-ink-secondary'}>
+                    {myDivision || 'Not set'}
+                  </span>
+                </span>
+              </Field>
+
+              <Field
+                label="Sub-division"
+                help={mySubDivision ? 'Sent as Sub-division on the Zoho Sales Order.' : 'Optional — blank is not sent.'}
+              >
+                <span className={readOnlyPillClass}>
+                  <Building2 size={14} className="text-ink-secondary shrink-0" />
+                  <span className={mySubDivision ? '' : 'text-ink-secondary'}>
+                    {mySubDivision || '—'}
+                  </span>
+                </span>
               </Field>
 
               <Field label="Payment Terms" help="Type to see suggestions (matches Zoho's list), or enter your own.">
@@ -983,9 +1150,19 @@ const OrderForm = ({ onCancel, onSuccess }) => {
               <span className="font-medium text-ink-primary">{todayLabel}</span>
             </div>
             <div className="flex justify-between items-center">
-              <span className="text-xs text-ink-secondary font-medium">Sales Person:</span>
+              <span className="text-xs text-ink-secondary font-medium">Salesperson:</span>
               <span className="font-medium text-ink-primary">{displaySalesPerson}</span>
             </div>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-ink-secondary font-medium">Division:</span>
+              <span className="font-medium text-ink-primary">{myDivision || '—'}</span>
+            </div>
+            {mySubDivision && (
+              <div className="flex justify-between items-center">
+                <span className="text-xs text-ink-secondary font-medium">Sub-division:</span>
+                <span className="font-medium text-ink-primary">{mySubDivision}</span>
+              </div>
+            )}
             <div className="flex justify-between items-center">
               <span className="text-xs text-ink-secondary font-medium">Source:</span>
               <span className="font-medium text-ink-primary">{orderSource}</span>
@@ -1104,7 +1281,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
       {submittedOrder && (
         <Modal
           isOpen={Boolean(submittedOrder)}
-          onClose={() => navigate(`/orders/${submittedOrder.id}`)}
+          onClose={() => navigate(`/orders/${submittedOrder.id}?tab=timeline`)}
           title="Order Submitted Successfully"
         >
           <div className="text-center py-4 space-y-4">
@@ -1143,7 +1320,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
               </button>
               <button
                 type="button"
-                onClick={() => navigate(`/orders/${submittedOrder.id}`)}
+                onClick={() => navigate(`/orders/${submittedOrder.id}?tab=timeline`)}
                 className="px-6 py-2 bg-pharmacy-green text-white rounded-lg text-xs font-bold hover:bg-pharmacy-green-hover shadow-md shadow-pharmacy-green/20"
               >
                 View Order Details

@@ -31,13 +31,34 @@ export const fetchProducts = async () => {
  * (nothing can reach Zoho either way). Response shape is the same
  * ({ data: { customers: [...] } }), so this is a drop-in swap.
  */
-export const fetchCustomers = async () => {
+/**
+ * Sep 2, 2026: takes an options object.
+ *  - `search`         server-side LIKE over name/contact person/number
+ *  - `includeInactive` also return clients Zoho has deactivated (each
+ *                      carrying is_active so the caller can label them)
+ *  - `limit`          server caps at 100, defaults to 25
+ *  - `category`       e.g. 'doctor', for the Doctor Name suggestions
+ *
+ * Searching is server-side because this endpoint used to return EVERY
+ * customer — ~95,000 rows once the real org synced — which the order form
+ * then re-filtered on every keystroke. See orders.controller.js's
+ * getCustomers.
+ */
+export const fetchCustomers = async ({ search = '', includeInactive = false, limit, category } = {}) => {
+  const qs = new URLSearchParams();
+  if (search) qs.set('search', search);
+  if (includeInactive) qs.set('include_inactive', 'true');
+  if (limit) qs.set('limit', String(limit));
+  if (category) qs.set('category', category);
+  const query = qs.toString();
+  const path = `/api/orders/meta/customers${query ? `?${query}` : ''}`;
+
   const token = sessionStorage.getItem('token');
-  const response = await fetch(`${API_BASE_URL}/api/orders/meta/customers`, {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {}
   });
   if (!response.ok) {
-    const res = await client.get('/api/orders/meta/customers');
+    const res = await client.get(path);
     return res.data;
   }
   return response.json();

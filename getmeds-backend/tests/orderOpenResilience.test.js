@@ -118,7 +118,9 @@ describe('Order detail survives anything the Zoho refresh does', () => {
         const app = require('${path.join(BACKEND, 'src/app.js').replace(/\\/g, '\\\\')}');
         const db = require('${path.join(BACKEND, 'src/db/database.js').replace(/\\/g, '\\\\')}');
         const u = db.prepare("SELECT id FROM users WHERE role='medrep' LIMIT 1").get();
-        const c = db.prepare('SELECT id FROM customers LIMIT 1').get();
+        // seed.js no longer creates demo customers (Sep 2) — the mirror is
+        // Zoho's job — so this fixture makes its own instead of assuming one.
+        const c = { id: db.prepare("INSERT INTO customers (name, type) VALUES ('NOMIG Test Customer','credit')").run().lastInsertRowid };
         const id = db.prepare("INSERT INTO orders (getmeds_order_id,customer_id,medrep_id,status,customer_type,total_amount,delivery_address,zoho_so_id) VALUES ('NOMIG-1',?,?,'so_created','credit',100,'Manila','ZSO-NOMIG')").run(c.id, u.id).lastInsertRowid;
         (async () => {
           const l = await request(app).post('/api/auth/login').send({ email: 'admin@getmeds.ph', password: 'demo123' });

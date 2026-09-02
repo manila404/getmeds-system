@@ -18,14 +18,46 @@ const syncJobsRoutes = require('./routes/syncJobs.routes');
 
 const app = express();
 
+// Sep 2, 2026: both branches of this used to `callback(null, true)` — the
+// localhost check computed an answer and then allowed everything regardless,
+// so any website a logged-in user visited could call this API with their
+// cookies. Harmless while the only origin was a laptop; not harmless on a
+// public URL.
+//
+// CORS_ALLOWED_ORIGINS is a comma-separated allowlist. Unset, it falls back to
+// local dev origins only, so a deployment that forgets to set it fails closed
+// (the frontend breaks loudly) rather than open (everything works, including
+// for attackers).
+const DEV_ORIGINS = [/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/];
+const configuredOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
+if (!configuredOrigins.length && process.env.NODE_ENV === 'production') {
+  console.warn(
+    '\n⚠️  CORS_ALLOWED_ORIGINS is not set and NODE_ENV=production.\n' +
+      '   Only localhost origins are allowed, so the deployed frontend will be blocked.\n' +
+      '   Set it to the frontend URL, e.g. CORS_ALLOWED_ORIGINS=https://orders.getmeds.ph\n'
+  );
+}
+
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow any localhost / 127.0.0.1 port or requests without origin (like Postman / mobile)
-    if (!origin || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-      callback(null, true);
-    } else {
-      callback(null, true);
-    }
+    // No Origin header at all: same-origin, curl, Postman, and server-to-server
+    // callers such as Zoho's webhook. CORS is a browser mechanism and has
+    // nothing to say about these — the webhook is authenticated by
+    // ZOHO_WEBHOOK_SECRET, not by its origin.
+    if (!origin) return callback(null, true);
+
+    const normalized = origin.replace(/\/+$/, '');
+    if (configuredOrigins.includes(normalized)) return callback(null, true);
+    if (DEV_ORIGINS.some((re) => re.test(normalized))) return callback(null, true);
+
+    // Refused as "not allowed", not as an error: throwing here surfaces to the
+    // browser as an opaque network failure and to the log as a stack trace for
+    // something that is a routine, expected rejection.
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],

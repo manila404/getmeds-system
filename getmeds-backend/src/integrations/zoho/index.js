@@ -28,6 +28,14 @@
  * Unknown/unset ZOHO_MODE -> falls back to "mock" and logs a warning,
  * rather than guessing at something riskier.
  */
+// Sep 2, 2026 (2): loaded HERE, not left to whoever requires this module.
+// app.js and db/database.js both call dotenv, so the server was fine — but a
+// script that requires only this module got an unset ZOHO_MODE, silently fell
+// through to mock, and cheerfully reported "success" while talking to nothing.
+// That cost twenty minutes today. dotenv does not override variables that are
+// already set, so this is a no-op everywhere else, tests included.
+require('dotenv').config();
+
 const MockZohoAdapter = require('./MockZohoAdapter');
 const LiveZohoAdapter = require('./LiveZohoAdapter');
 
@@ -133,14 +141,37 @@ function buildOAuthTokenGetter(env) {
       grant_type: 'refresh_token'
     });
 
-    const res = await fetch(`${accountsUrl}/oauth/v2/token`, {
-      method: 'POST',
-      body: params
-    });
+    // Sep 2, 2026: the token refresh is the FIRST network call of any sync,
+    // so when the network is the problem this is what fails — and reporting
+    // undici's bare "fetch failed" here made a DNS/proxy/TLS problem look
+    // like a Zoho or credentials problem. Name the real cause instead.
+    let res;
+    try {
+      res = await fetch(`${accountsUrl}/oauth/v2/token`, {
+        method: 'POST',
+        body: params,
+        signal: AbortSignal.timeout(Number(env.ZOHO_REQUEST_TIMEOUT_MS) || 30000)
+      });
+    } catch (err) {
+      const cause = err?.cause;
+      const detail =
+        err?.name === 'TimeoutError'
+          ? 'timed out'
+          : [cause?.code, cause?.message].filter(Boolean).join(': ') || err?.message || 'unknown network error';
+      const wrapped = new Error(
+        `Could not reach Zoho accounts at ${accountsUrl} to refresh the access token: ${detail}. ` +
+          'This is a network/DNS/proxy problem, not a credentials one — the request never got there.'
+      );
+      wrapped.cause = err;
+      throw wrapped;
+    }
 
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) {
-      throw new Error(`Failed to refresh Zoho access token: ${data.error || res.statusText}`);
+      throw new Error(
+        `Failed to refresh Zoho access token: ${data.error || res.statusText} (HTTP ${res.status}). ` +
+          `Accounts domain tried: ${accountsUrl} — a token issued in one Zoho datacentre does not work against another.`
+      );
     }
 
     cachedToken = data.access_token;
@@ -190,6 +221,14 @@ const facadeMethods = [
   'listContacts',
   'listItems',
   'getContact',
+  // Sep 2, 2026: added here, not just on the adapters. Both Mock and Live
+  // implement listSalespersons, but this facade is what every controller and
+  // service actually imports — so while it was missing from this list,
+  // salespersonService.verify() got `undefined is not a function` and
+  // reported ZOHO_UNREACHABLE in EVERY mode, live included. The New Order
+  // page's "this rep has no Zoho Salesperson" banner could therefore never
+  // fire: the one outcome the pre-check exists to produce was unreachable.
+  'listSalespersons',
   'setSimulatedOutage',
   'isSimulatedOutage'
 ];

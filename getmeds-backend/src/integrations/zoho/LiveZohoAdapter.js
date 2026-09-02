@@ -1,4 +1,59 @@
 const ZohoAdapter = require('./ZohoAdapter');
+const { findSalesperson, SalespersonNotFoundError } = require('./salespersonName');
+
+// Sep 2, 2026 — network resilience, added after a Full Resync died with the
+// famously unhelpful "fetch failed". See _request below for why retries are
+// GET-only.
+const REQUEST_TIMEOUT_MS = Number(process.env.ZOHO_REQUEST_TIMEOUT_MS) || 30000;
+const RETRY_ATTEMPTS = Math.max(1, Number(process.env.ZOHO_REQUEST_RETRIES) || 3);
+const RETRY_BASE_MS = Number(process.env.ZOHO_REQUEST_RETRY_BASE_MS) || 800;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Turn undici's opaque `TypeError: fetch failed` into something that names
+ * the actual problem.
+ *
+ * Node's fetch reports every transport-level failure — DNS, TLS, refused
+ * connection, timeout, proxy — with the same three words, and puts the real
+ * reason on `err.cause`. Reporting only the wrapper is why "Full Resync
+ * failed: fetch failed" tells nobody anything; the cause underneath says
+ * ENOTFOUND, or ConnectTimeoutError, or a certificate error, and each of
+ * those has a completely different fix.
+ */
+function describeNetworkError(err, url, method) {
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+    const e = new Error(
+      `Zoho did not respond within ${REQUEST_TIMEOUT_MS / 1000}s (${method} ${new URL(url).pathname}). ` +
+        'Raise ZOHO_REQUEST_TIMEOUT_MS if the org is simply slow.'
+    );
+    e.cause = err;
+    return e;
+  }
+
+  const cause = err?.cause;
+  const code = cause?.code || err?.code;
+  const detail = [code, cause?.message].filter(Boolean).join(': ') || err?.message || 'unknown network error';
+
+  const hints = {
+    ENOTFOUND: 'DNS could not resolve the host — check ZOHO_API_BASE_URL, and that this machine is online.',
+    EAI_AGAIN: 'DNS lookup failed temporarily — usually no internet, or a VPN/proxy in the way.',
+    ECONNREFUSED: 'The connection was refused — wrong host/port, or something is blocking outbound HTTPS.',
+    ECONNRESET: 'The connection was reset mid-request — often a corporate proxy or firewall interfering.',
+    UND_ERR_CONNECT_TIMEOUT: 'Could not establish a connection in time — network, VPN, or firewall.',
+    UND_ERR_HEADERS_TIMEOUT: 'Zoho accepted the connection but sent no response in time.',
+    CERT_HAS_EXPIRED: 'TLS certificate rejected — usually a proxy doing HTTPS interception.',
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'TLS chain could not be verified — usually a proxy doing HTTPS interception.'
+  };
+
+  const e = new Error(
+    `Could not reach Zoho (${method} ${new URL(url).host}): ${detail}` +
+      (hints[code] ? ` — ${hints[code]}` : '')
+  );
+  e.cause = err;
+  e.networkCode = code || null;
+  return e;
+}
 
 /**
  * LiveZohoAdapter — makes real HTTP calls, using the built-in global
@@ -85,23 +140,78 @@ class LiveZohoAdapter extends ZohoAdapter {
     this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] ${method} ${path} (org=${this.organizationId})`);
 
     const token = await this.getAccessToken();
-    const resp = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Zoho-oauthtoken ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
 
-    const json = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      const err = new Error(json.message || `Zoho API error (HTTP ${resp.status})`);
-      err.zohoResponse = json;
-      err.httpStatus = resp.status;
-      throw err;
+    // Sep 2, 2026: retries, but ONLY for GET.
+    //
+    // A Full Resync is ~475 sequential page requests against a 95k-contact
+    // org. One transient blip anywhere in that sequence used to abort the
+    // whole job and throw away every page already fetched, which is how
+    // "Full Resync failed: fetch failed" happens on a connection that is
+    // basically fine.
+    //
+    // POST is deliberately NOT retried. `createSalesOrder` is the only POST
+    // this class makes, and a network error tells you nothing about whether
+    // Zoho received it — retrying could put a SECOND real Sales Order in the
+    // company's org. A failed create belongs in zohoRetryService's outbox,
+    // where the payload is rebuilt and a human decides, not in a silent
+    // loop here.
+    const retryable = method === 'GET';
+    const attempts = retryable ? RETRY_ATTEMPTS : 1;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let resp;
+      try {
+        resp = await fetch(url, {
+          method,
+          headers: {
+            Authorization: `Zoho-oauthtoken ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: body ? JSON.stringify(body) : undefined,
+          // Without this a stalled connection hangs until Node's own
+          // default gives up, with the job sitting at "running" throughout.
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        });
+      } catch (err) {
+        // `fetch failed` is undici's generic wrapper and says nothing on its
+        // own — the real reason (ENOTFOUND, ECONNRESET, ConnectTimeoutError,
+        // a TLS failure, a proxy refusing) is on err.cause. Unwrapping it
+        // here is the difference between an unactionable message and one
+        // that names what to fix.
+        lastError = describeNetworkError(err, url, method);
+        if (attempt < attempts) {
+          const wait = RETRY_BASE_MS * attempt;
+          this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] ${method} ${path} failed (${lastError.message}) — retry ${attempt}/${attempts - 1} in ${wait}ms`);
+          await sleep(wait);
+          continue;
+        }
+        throw lastError;
+      }
+
+      const json = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        // 429 (rate limited) and 5xx are worth another go on a GET; a 4xx
+        // like a bad org id or a revoked token will fail identically every
+        // time, so retrying it just delays the real message.
+        const worthRetrying = retryable && (resp.status === 429 || resp.status >= 500);
+        const err = new Error(json.message || `Zoho API error (HTTP ${resp.status})`);
+        err.zohoResponse = json;
+        err.httpStatus = resp.status;
+
+        if (worthRetrying && attempt < attempts) {
+          const wait = RETRY_BASE_MS * attempt * (resp.status === 429 ? 4 : 1);
+          this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] ${method} ${path} HTTP ${resp.status} — retry ${attempt}/${attempts - 1} in ${wait}ms`);
+          await sleep(wait);
+          lastError = err;
+          continue;
+        }
+        throw err;
+      }
+      return json;
     }
-    return json;
+
+    throw lastError || new Error(`Zoho request failed: ${method} ${path}`);
   }
 
   /**
@@ -162,18 +272,35 @@ class LiveZohoAdapter extends ZohoAdapter {
     // Aug 30, 2026: this Zoho org has "Salesperson" configured as a
     // mandatory field on every Sales Order — Zoho rejects creation with
     // "Salesperson cannot be empty" otherwise (confirmed live, see the
-    // ZOHO_SYNC_FAILED audit entries on TestGM-20260830-0001). Proper
-    // MedRep -> Zoho Salesperson mapping is deliberately deferred (see
-    // ZOHO_SALES_ORDER_FIELD_MAPPING.md's "Sales Person" row); as a
-    // stand-in that unblocks the TEST-customer-gated flow today without
-    // pretending to solve that mapping, every TestGM- order is stamped
-    // with a single dedicated Salesperson ("TEST | MEDREP") created in
-    // Zoho specifically for this purpose. Real (non-test) orders
-    // intentionally do NOT get a salesperson here yet — wiring an actual
-    // per-MedRep mapping is still future work.
-    if (isTestOrder) {
-      body.salesperson_name = 'TEST | MEDREP';
+    // ZOHO_SYNC_FAILED audit entries on TestGM-20260830-0001).
+    //
+    // Sep 2, 2026 (2): the rest of what used to be written here was WRONG,
+    // and the correction is why this sends an id instead of a name.
+    //
+    // It said Zoho matches by name and rejects a name it does not recognise,
+    // so sending one was safe: worst case a failed order. It does not reject
+    // it. It CREATES it. Reading GET /salespersons on this org turns up
+    // "TEST | Juan dela Cruz" and "TEST | Aaron Manila", both with ids in the
+    // recent range, neither typed by a human — this app made them by sending
+    // names during testing. So `createSalesOrder` was never the only write
+    // this adapter performed; it was quietly appending to a list the whole
+    // company uses, and the pre-check on the order form was guarding against
+    // a rejection that never happens.
+    //
+    // Resolving to a salesperson_id closes it. An unmatched name throws here
+    // rather than travelling to Zoho, so the failure is loud, local, and
+    // fixable — and no typo can add another row. The TestGM- "TEST | MEDREP"
+    // fallback is gone for the same reason: it was one more unmatched name
+    // waiting to be created.
+    const salespersonName = (orderData.salesperson_name || '').trim();
+    if (!salespersonName) {
+      throw new SalespersonNotFoundError(null);
     }
+    const salespersonId = await this._resolveSalespersonId(salespersonName);
+    if (!salespersonId) {
+      throw new SalespersonNotFoundError(salespersonName);
+    }
+    body.salesperson_id = salespersonId;
 
     // Aug 30, 2026 (3): "Doctor Name" and "Source" — confirmed live (via
     // ZohoInventory_get_sales_order on an existing real Sales Order in this
@@ -204,6 +331,28 @@ class LiveZohoAdapter extends ZohoAdapter {
     }
     if (orderData.invoicing_from) {
       customFields.push({ customfield_id: '2254168001900812580', value: orderData.invoicing_from });
+    }
+    // Sep 2, 2026: "Division" and "Sub-division" — the two custom fields
+    // sitting directly under Salesperson on this org's Sales Order screen.
+    // Ids read live from the org's own field list (Books list_custom_fields,
+    // entity=salesorder); the same call returned the three ids above
+    // unchanged, which is what makes these two trustworthy rather than
+    // guessed:
+    //   cf_division     (text) -> 2254168002003349004
+    //   cf_sub_division (text) -> 2254168002003349006
+    // Both plain text, so the value goes across as typed.
+    //
+    // These come from the ordering MedRep's own account (users.division /
+    // users.sub_division, collected at sign-up) — the same row the
+    // Salesperson string is generated from, so the three always describe one
+    // person. Sub-division is optional and simply omitted when blank, like
+    // every other custom field here: an omitted field is left alone in Zoho
+    // rather than overwritten with an empty string.
+    if (orderData.division) {
+      customFields.push({ customfield_id: '2254168002003349004', value: orderData.division });
+    }
+    if (orderData.sub_division) {
+      customFields.push({ customfield_id: '2254168002003349006', value: orderData.sub_division });
     }
     if (customFields.length) {
       body.custom_fields = customFields;
@@ -419,6 +568,54 @@ class LiveZohoAdapter extends ZohoAdapter {
   async getContact(contactId) {
     const result = await this._request('GET', `/contacts/${contactId}`);
     return { code: 0, message: 'success', contact: result.contact };
+  }
+
+  /**
+   * Read-only: GET /salespersons — the org's configured Salespersons.
+   *
+   * Sep 2, 2026. Not run through _paginatedList: Zoho returns the whole
+   * Salesperson list in one response (there are tens of these, not the
+   * ~95k contacts that made pagination necessary), so walking pages here
+   * would be machinery with nothing to do.
+   *
+   * A plain GET. This adapter has no method that creates a Salesperson,
+   * and this one does not become that by accident.
+   *
+   * Sep 2, 2026 (2): this endpoint answers under `data`, NOT `salespersons`.
+   * Every other list endpoint in this API names its array after the resource
+   * (`contacts`, `items`, `salesorders`), so `result.salespersons` looked
+   * right and was verified against MockZohoAdapter, which returns exactly
+   * that shape. The result was a bug no test could see: live returned `[]`
+   * for an org with a populated list, and because an empty list is a
+   * perfectly valid answer, nothing threw. Every name checked against it came
+   * back `exists: false`.
+   *
+   * Both keys are read, and the mock's shape stays valid — but the ordering
+   * matters: `data` is what the real API sends.
+   */
+  /**
+   * A name -> salesperson_id lookup against the live list, cached briefly.
+   *
+   * Same TTL knob as services/salespersonService (ZOHO_SALESPERSON_CACHE_MS):
+   * the list changes when somebody edits it in Zoho, which is rarely, and a
+   * burst of order submissions should not mean a burst of identical reads.
+   * Per-adapter and in-memory, so it dies with the process.
+   */
+  async _resolveSalespersonId(name) {
+    const ttl = Number(process.env.ZOHO_SALESPERSON_CACHE_MS) || 5 * 60 * 1000;
+    const now = Date.now();
+    if (!this._salespersonCache || now - this._salespersonCache.fetchedAt > ttl) {
+      const { salespersons } = await this.listSalespersons();
+      this._salespersonCache = { salespersons, fetchedAt: now };
+    }
+    const match = findSalesperson(this._salespersonCache.salespersons, name);
+    return match ? match.salesperson_id : null;
+  }
+
+  async listSalespersons() {
+    const result = await this._request('GET', '/salespersons');
+    const salespersons = result.data || result.salespersons || [];
+    return { code: 0, message: 'success', salespersons };
   }
 }
 

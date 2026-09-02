@@ -12,6 +12,10 @@
     "setup": "npm run migrate && npm run seed",
     "test": "jest",
     "reset:orders": "node scripts/reset-orders.js",
+    "fresh:start": "node scripts/fresh-start.js",
+    "secrets:init": "node scripts/set-secrets.js",
+    "check:zoho": "node scripts/check-zoho.js",
+    "check:salespersons": "node scripts/check-salespersons.js",
     "mock-server": "node mock-server/server.js",
     "simulate:webhook": "node scripts/simulate-zoho-webhook.js"
   },

@@ -1,12 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import React, { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
 import {
-  fetchInventoryStatus,
-  startInventorySyncJob,
-  fetchSyncJobStatus
+  fetchInventoryStatus
 } from '../../api/queries';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
+import { useSyncJobs } from '../../context/SyncJobsContext';
 import toast from 'react-hot-toast';
 import {
   Package,
@@ -63,57 +62,15 @@ const InventoryPage = () => {
   // page's sync (see ClientsPage.jsx and components/SyncProgressIndicator).
   // Both still ONLY read from Zoho (POST .../sync-pull/start) — nothing
   // here writes anything to Zoho.
-  const [syncJobId, setSyncJobId] = useState(null);
-
-  const startSyncMutation = useMutation({
-    mutationFn: (mode) => startInventorySyncJob(mode),
-    onSuccess: (res) => setSyncJobId(res.data.job_id),
-    onError: (err) => {
-      const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-      toast.error(`Could not start sync: ${msg}`);
-    }
-  });
-
-  const { data: syncJobData } = useQuery({
-    queryKey: ['inventory-sync-job', syncJobId],
-    queryFn: () => fetchSyncJobStatus(syncJobId),
-    enabled: !!syncJobId,
-    refetchInterval: (query) => (query.state.data?.data?.status === 'running' ? 1200 : false)
-  });
-
-  const syncJob = syncJobData?.data || null;
-
-  useEffect(() => {
-    if (!syncJob) return;
-    if (syncJob.status === 'running') return;
-
-    const modeLabel = syncJob.mode === 'full' ? 'Full Resync' : 'Quick Sync';
-
-    if (syncJob.status === 'done') {
-      qc.invalidateQueries({ queryKey: ['inventoryStatus'] });
-      qc.invalidateQueries({ queryKey: ['products'] });
-      const r = syncJob.result || {};
-      if (r.truncated) {
-        toast.error(
-          `⚠️ ${modeLabel} pulled ${r.total_from_zoho ?? 0} item(s), but Zoho reported even more beyond this ` +
-            `pull's safety limit — incomplete (${r.created ?? 0} new, ${r.updated ?? 0} updated). Nothing was ` +
-            'written to Zoho.',
-          { icon: '⚠️', duration: 15000 }
-        );
-      } else {
-        toast.success(
-          `${modeLabel} complete — ${r.created ?? 0} new product(s), ${r.updated ?? 0} updated` +
-            (r.skipped ? `, ${r.skipped} skipped` : '') + '.',
-          { icon: '🔄' }
-        );
-      }
-    } else if (syncJob.status === 'error') {
-      toast.error(`${modeLabel} failed: ${syncJob.error || 'unknown error'}`);
-    }
-
-    setSyncJobId(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncJob?.status]);
+  //
+  // Sep 2, 2026: the job id, the polling and the completion toast moved out
+  // of this page into context/SyncJobsContext.jsx, mounted above the router.
+  // They used to live here in useState, so clicking another tab unmounted
+  // the page and stopped the watching — the pull carried on server-side, but
+  // the progress bar vanished and nothing ever refreshed when it finished.
+  const { startSync, jobFor, isRunning, isStarting } = useSyncJobs();
+  const syncJob = jobFor('inventory');
+  const syncBusy = isRunning('inventory') || isStarting;
 
   const inventoryData = data?.data || {};
   const products = inventoryData.products || [];
@@ -181,8 +138,8 @@ const InventoryPage = () => {
               </button>
 
               <button
-                onClick={() => startSyncMutation.mutate('quick')}
-                disabled={!!syncJobId || startSyncMutation.isPending}
+                onClick={() => startSync('inventory', 'quick')}
+                disabled={syncBusy}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
                 title="Fast — pulls only items created or changed in Zoho since the last sync (read-only)"
               >
@@ -191,8 +148,8 @@ const InventoryPage = () => {
               </button>
 
               <button
-                onClick={() => startSyncMutation.mutate('full')}
-                disabled={!!syncJobId || startSyncMutation.isPending}
+                onClick={() => startSync('inventory', 'full')}
+                disabled={syncBusy}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
                 title="Slower, but guaranteed — pulls every item in Zoho Inventory (read-only)"
               >

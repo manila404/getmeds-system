@@ -89,7 +89,7 @@ describe('zohoRetryService', () => {
     const result = db.prepare(`
       INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
         delivery_address, zoho_sync_status, created_at, submitted_at, updated_at)
-      VALUES (?, ?, ?, 'waiting_for_payment', 'direct', 20, '1 Retry Test St', 'failed', ?, ?, ?)
+      VALUES (?, ?, ?, 'so_pending', 'direct', 20, '1 Retry Test St', 'failed', ?, ?, ?)
     `).run(getmedsOrderId, customerId, medrepId, now, now, now);
     createdOrderIds.push(result.lastInsertRowid);
     return result.lastInsertRowid;
@@ -218,7 +218,7 @@ describe('admin.controller — Zoho queue endpoints', () => {
     const orderId = db.prepare(`
       INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
         delivery_address, zoho_sync_status, created_at, updated_at)
-      VALUES ('GM-TESTQ-ADMIN1', ?, ?, 'waiting_for_payment', 'direct', 20, '1 Admin Test St', 'failed', ?, ?)
+      VALUES ('GM-TESTQ-ADMIN1', ?, ?, 'so_pending', 'direct', 20, '1 Admin Test St', 'failed', ?, ?)
     `).run(customerId, medrepId, now, now).lastInsertRowid;
     createdOrderIds.push(orderId);
     zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-ADMIN1' }, error: 'down' });
@@ -238,7 +238,7 @@ describe('admin.controller — Zoho queue endpoints', () => {
     const orderId = db.prepare(`
       INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
         delivery_address, zoho_sync_status, created_at, updated_at)
-      VALUES ('GM-TESTQ-ADMIN2', ?, ?, 'waiting_for_payment', 'direct', 20, '1 Admin Test St', 'failed', ?, ?)
+      VALUES ('GM-TESTQ-ADMIN2', ?, ?, 'so_pending', 'direct', 20, '1 Admin Test St', 'failed', ?, ?)
     `).run(customerId, medrepId, now, now).lastInsertRowid;
     createdOrderIds.push(orderId);
     zohoRetryService.enqueue({

@@ -37,6 +37,11 @@
  *   adapter performs — see src/controllers/customers.controller.js and
  *   inventory.controller.js's syncPullStock.
  *
+ *   Sep 2, 2026: `listSalespersons` follows the same rule. It exists so the
+ *   app can CHECK that a MedRep's Salesperson name is already present in
+ *   Zoho before sending an order that names it. There is still no method
+ *   that creates one — a missing Salesperson is added by a human, in Zoho.
+ *
  * Every method here mirrors the real Zoho Books/Inventory REST API's
  * request/response shape (see MockZohoAdapter.js and mock-server/ for the
  * exact field names), so code written against the mock needs zero changes
@@ -137,6 +142,27 @@ class ZohoAdapter {
    * @returns {Promise<{code:number, message:string, contact:object}>}
    */
   async getContact(contactId) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Read-only: list the Salespersons configured in the Zoho org.
+   *
+   * Sep 2, 2026. "Salesperson" is a MANDATORY field on every Sales Order in
+   * this org, and `createSalesOrder` sends it by NAME
+   * ("<division> | <display name>", from users.salesperson — see the sign-up
+   * form). Zoho matches that name against its own list; a name it does not
+   * recognise means the Sales Order is rejected. This exists so the app can
+   * check the name first and say so on the order form, rather than letting a
+   * MedRep fill in a whole order and discover the problem at submit.
+   *
+   * Read-only, like every other list method here. It is deliberately NOT a
+   * create: if a MedRep's Salesperson is missing from Zoho, a human adds it
+   * in Zoho. Nothing in this app creates one — same rule as contacts and
+   * items.
+   * @returns {Promise<{code:number, message:string, salespersons:object[]}>}
+   */
+  async listSalespersons() {
     throw new Error('Not implemented');
   }
 

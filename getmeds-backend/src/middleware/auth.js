@@ -12,7 +12,18 @@ function requireAuth(req, res, next) {
   try {
     const decoded = jwt.verify(token, SECRET);
     // Refresh user from DB to pick up role/active changes
-    const user = db.prepare('SELECT id, name, email, role, is_active FROM users WHERE id = ?').get(decoded.id);
+    // Sep 2, 2026: `salesperson` joins the set every authenticated request
+    // carries. It is the generated "<division> | <display name>" from
+    // sign-up, and it is what LiveZohoAdapter puts on the Sales Order — so
+    // the New Order form showing it needs no extra round trip, and what a
+    // MedRep reads on screen is the value that actually reaches Zoho.
+    // Division and sub_division come along for the same reason: this org's
+    // Sales Order screen has them as their own fields beside Salesperson, so
+    // the order form shows all three, and all three come from one row.
+    // NULL for accounts created before sign-up collected a division.
+    const user = db
+      .prepare('SELECT id, name, email, role, is_active, salesperson, division, sub_division FROM users WHERE id = ?')
+      .get(decoded.id);
     if (!user || !user.is_active) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'User not found or inactive' } });
     }

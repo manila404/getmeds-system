@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import ErrorMessage from '../components/ui/ErrorMessage';
 import LoadingSpinner from '../components/ui/LoadingSpinner';
 import { EyeOff, FlaskConical, ArrowRight } from 'lucide-react';
@@ -148,6 +148,15 @@ const LoginPage = () => {
                   Sign in
                 </button>
               </div>
+
+              {/* Sep 2, 2026: sign-up creates a MedRep account only — every
+                  other role is still made by an admin on /admin/users. */}
+              <p className="text-[13px] text-ink-secondary text-center">
+                New here?{' '}
+                <Link to="/signup" className="text-getmeds-blue font-semibold hover:underline">
+                  Create an account
+                </Link>
+              </p>
             </form>
           </div>
 

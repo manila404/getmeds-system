@@ -124,7 +124,9 @@ describe('ZOHO_DRY_RUN — no Zoho call, ever, and the single-TEST-customer gate
   });
 
   test('meta/customers dropdown: shows every customer (not just the gate-designated one) and reports zoho_dry_run_enabled=true', async () => {
-    const req = { user: { id: medrepId, role: 'medrep' } };
+    // getCustomers reads req.query.include_inactive — Express always
+    // provides req.query, so a hand-built stub has to as well.
+    const req = { user: { id: medrepId, role: 'medrep' }, query: {} };
     const res = makeRes();
     const next = jest.fn();
 

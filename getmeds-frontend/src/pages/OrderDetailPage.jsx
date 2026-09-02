@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw, Pencil, Trash2 } from 'lucide-react';
@@ -93,7 +93,15 @@ const OrderDetailPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const qc = useQueryClient();
-  const [activeTab, setActiveTab] = useState('items');
+  const [searchParams] = useSearchParams();
+  // Defaults to the timeline (see the tabs array below). ?tab=items|payment|
+  // dispatch|timeline overrides it, so a link can point at a specific tab
+  // without this component having to guess where the visitor came from.
+  const VALID_TABS = ['timeline', 'items', 'payment', 'dispatch'];
+  const requestedTab = searchParams.get('tab');
+  const [activeTab, setActiveTab] = useState(
+    VALID_TABS.includes(requestedTab) ? requestedTab : 'timeline'
+  );
   // Aug 31, 2026: lets a MedRep/Admin fix an order's line items in place —
   // added after TestGM-20260831-0001 failed Zoho sync with "Inactive items
   // cannot be added to the sales order" and there was no way to swap the
@@ -227,11 +235,18 @@ const OrderDetailPage = () => {
   const { order, items = [], payment, dispatch, events = [] } = data?.data || {};
   if (!order) return null;
 
+  // Sep 2, 2026: Audit Timeline moved to the front and made the default.
+  // Opening an order is almost always asking "what has happened to this?" —
+  // where it is in the Zoho flow, whether the Sales Order synced, who moved
+  // it and when. The line items are fixed at creation and rarely the
+  // question. This also means the "View Order Details" link straight after
+  // submitting lands on the story of the order rather than on a table the
+  // MedRep just typed themselves.
   const tabs = [
+    { id: 'timeline', label: 'Audit Timeline', icon: Clock },
     { id: 'items', label: 'Order Items', icon: Package },
     { id: 'payment', label: 'Payment', icon: CreditCard },
     { id: 'dispatch', label: 'Dispatch', icon: Truck },
-    { id: 'timeline', label: 'Audit Timeline', icon: Clock },
   ];
 
   return (
