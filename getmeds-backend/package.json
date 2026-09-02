@@ -13,6 +13,7 @@
     "test": "jest",
     "reset:orders": "node scripts/reset-orders.js",
     "fresh:start": "node scripts/fresh-start.js",
+    "backup": "node scripts/backup-db.js",
     "secrets:init": "node scripts/set-secrets.js",
     "check:zoho": "node scripts/check-zoho.js",
     "check:salespersons": "node scripts/check-salespersons.js",
