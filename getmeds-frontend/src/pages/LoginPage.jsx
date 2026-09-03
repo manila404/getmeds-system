@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNavigate, Link } from 'react-router-dom';
 import ErrorMessage from '../components/ui/ErrorMessage';
 import LoadingSpinner from '../components/ui/LoadingSpinner';
-import { EyeOff, FlaskConical, ArrowRight } from 'lucide-react';
+import { Eye, EyeOff, FlaskConical, ArrowRight } from 'lucide-react';
 import employeeBg from '../assets/employee.jpg';
 
 const LoginPage = () => {
@@ -11,6 +11,11 @@ const LoginPage = () => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  // Sep 3, 2026: the reveal button on this page had no state and no onClick —
+  // it was a static EyeOff icon over an input hard-coded to type="password",
+  // so it looked like a control and did nothing, on local and on the deployed
+  // site alike. SignupPage has had a working one since it was written.
+  const [showPassword, setShowPassword] = useState(false);
   const { login, quickLogin } = useAuth();
   const navigate = useNavigate();
 
@@ -124,15 +129,29 @@ const LoginPage = () => {
                   <label className="block text-[13px] font-semibold text-ink-primary mb-1.5">Password</label>
                   <div className="relative">
                     <input
-                      type="password"
+                      type={showPassword ? 'text' : 'password'}
                       required
+                      autoComplete="current-password"
                       placeholder="Enter Password"
-                      className="w-full px-4 py-3.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-getmeds-blue focus:border-transparent placeholder-ink-secondary/50"
+                      className="w-full px-4 py-3.5 pr-12 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-getmeds-blue focus:border-transparent placeholder-ink-secondary/50"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                     />
-                    <button type="button" className="absolute right-4 top-3.5 text-ink-secondary hover:text-ink-primary">
-                      <EyeOff className="h-5 w-5 mt-0.5" />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((v) => !v)}
+                      className="absolute right-4 top-3.5 text-ink-secondary hover:text-ink-primary focus:outline-none focus:ring-2 focus:ring-getmeds-blue rounded"
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {/*
+                        Eye means "reveal", EyeOff means "hide" — the icon names
+                        the action the click performs, matching the aria-label
+                        beside it. Showing EyeOff while the label reads "Show
+                        password" contradicts itself.
+                      */}
+                      {showPassword
+                        ? <EyeOff className="h-5 w-5 mt-0.5" />
+                        : <Eye className="h-5 w-5 mt-0.5" />}
                     </button>
                   </div>
                 </div>

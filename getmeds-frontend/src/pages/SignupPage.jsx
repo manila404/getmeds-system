@@ -277,10 +277,20 @@ const SignupPage = () => {
                     <button
                       type="button"
                       onClick={() => setShowPassword((v) => !v)}
-                      className="absolute right-4 top-3 text-ink-secondary hover:text-ink-primary"
+                      className="absolute right-4 top-3 text-ink-secondary hover:text-ink-primary focus:outline-none focus:ring-2 focus:ring-getmeds-blue rounded"
                       aria-label={showPassword ? 'Hide password' : 'Show password'}
                     >
-                      {showPassword ? <Eye className="h-5 w-5" /> : <EyeOff className="h-5 w-5" />}
+                      {/*
+                        Sep 3, 2026: icons swapped to agree with the aria-label
+                        above. This button showed EyeOff while its own label
+                        read "Show password" — and the reverse when revealed.
+                        Eye means "reveal", EyeOff means "hide": the icon names
+                        the action the click performs, which is also what
+                        LoginPage now does, so the two auth screens match.
+                      */}
+                      {showPassword
+                        ? <EyeOff className="h-5 w-5" />
+                        : <Eye className="h-5 w-5" />}
                     </button>
                   </div>
                 </div>
