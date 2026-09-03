@@ -18,8 +18,8 @@
  */
 
 const assert = require('assert');
-const db = require('./src/db/database');
-const { acquire, release, withLock } = require('./src/services/cronLock');
+const db = require('../src/db/database');
+const { acquire, release, withLock } = require('../src/services/cronLock');
 
 let pass=0, fail=0;
 async function t(name, fn){ try{ await fn(); pass++; console.log('  ok   '+name);}catch(e){fail++; console.log('  FAIL '+name+'\n       '+e.message);} }

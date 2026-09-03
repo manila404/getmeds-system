@@ -342,6 +342,27 @@ function pass(file, source, { doDbCalls }) {
 
   const wrap = (p) => {
     if (awaited(p)) return;
+
+    /**
+     * Directly chained: `runOnce().catch(...)` / `.then(...)` / `.finally(...)`.
+     *
+     * resultUsedAsPromise() below only inspects calls assigned to a VARIABLE,
+     * which missed this shape entirely and produced `(await runOnce()).catch(...)`
+     * in three places — awaiting the promise, then calling .catch on the
+     * resolved VALUE. That is a TypeError at runtime, and in
+     * zohoAutoSyncService.start() it did not fire until the first 5-minute
+     * interval tick, crashing the server long after a clean startup.
+     */
+    const parent = p.parent.node;
+    if (
+      parent.type === 'MemberExpression' &&
+      parent.object === p.node &&
+      ['then', 'catch', 'finally'].includes(parent.property && parent.property.name)
+    ) {
+      promiseValued.push(`${file.split(/[\\/]/).slice(-2).join('/')}:${lineOfNode(source, p.node)}`);
+      return;
+    }
+
     if (resultUsedAsPromise(p)) {
       promiseValued.push(`${file.split(/[\\/]/).slice(-2).join('/')}:${lineOfNode(source, p.node)}`);
       return;

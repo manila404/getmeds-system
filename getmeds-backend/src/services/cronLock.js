@@ -80,7 +80,7 @@ async function withLock(name, ttlMs, fn) {
   } finally {
     // Always released, including when fn throws — otherwise one failing run
     // blocks every subsequent one until the lease expires.
-    await (await release(name)).catch((err) => console.error('[cronLock] release failed:', err.message));
+    await release(name).catch((err) => console.error('[cronLock] release failed:', err.message));
   }
 }
 

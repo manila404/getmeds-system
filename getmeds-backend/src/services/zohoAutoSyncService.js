@@ -190,14 +190,14 @@ function start(intervalMs = INTERVAL_MS) {
   if (intervalHandle) return intervalHandle;
   if (!isEnabled()) return null;
 
-  intervalHandle = setInterval(async () => {
+  intervalHandle = setInterval(() => {
     // Skip rather than overlap: a slow tick (twenty orders staggered against a
     // sluggish Zoho) can outlast the interval, and two concurrent passes would
     // pick the same batch — neither having stamped it yet — and double every
     // API call.
     if (running) return;
     running = true;
-    (await runOnce())
+    runOnce()
       .catch((err) => console.error('[ZOHO_AUTO_SYNC] pass failed:', err.message))
       .finally(() => { running = false; });
   }, intervalMs);

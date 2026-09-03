@@ -175,8 +175,8 @@ let intervalHandle = null;
 /** Start the background polling loop. No-op if already started. */
 function start(intervalMs = parseInt(process.env.ZOHO_RETRY_INTERVAL_MS, 10) || 30000) {
   if (intervalHandle) return intervalHandle;
-  intervalHandle = setInterval(async () => {
-    (await processQueue()).catch((err) => console.error('[ZOHO_RETRY] queue processing error:', err.message));
+  intervalHandle = setInterval(() => {
+    processQueue().catch((err) => console.error('[ZOHO_RETRY] queue processing error:', err.message));
   }, intervalMs);
   if (intervalHandle.unref) intervalHandle.unref();
   return intervalHandle;
