@@ -273,4 +273,37 @@ describe('inactive products are listed and labelled', () => {
     expect(r.body.error.message).toContain('Label Inactive Med');
     expect(r.body.error.message).toMatch(/Inactive in Zoho/i);
   });
+
+  // Sep 3, 2026. Zoho reports a NEGATIVE stock_on_hand for an oversold or
+  // backordered item — a normal thing for it to say. products.stock carries
+  // CHECK(stock >= 0), and the whole reconcile runs in one transaction, so
+  // until today a single backordered item aborted the ENTIRE inventory sync
+  // and wrote nothing at all: 1 bad item out of 3,446 meant 0 rows.
+  //
+  // The second item in this list is the assertion that matters. It is only
+  // written if the negative one did not poison the transaction.
+  test('a negative stock_on_hand from Zoho does not abort the whole sync', async () => {
+    const { __test__ } = require('../src/controllers/inventory.controller');
+
+    const result = await __test__.reconcileItems([
+      { item_id: 'NEG-A', name: 'REG Backordered Item', sku: 'REG-NEG-A', rate: 10, stock_on_hand: -5 },
+      { item_id: 'NEG-B', name: 'REG Item After It', sku: 'REG-NEG-B', rate: 10, stock_on_hand: 7 }
+    ]);
+
+    expect(result.createdCount).toBe(2);
+
+    const rows = await db
+      .prepare("SELECT sku, stock, zoho_stock FROM products WHERE sku LIKE 'REG-NEG-%' ORDER BY sku")
+      .all();
+    expect(rows).toHaveLength(2);
+
+    // `stock` is Getmeds' own working count and is clamped at the floor the
+    // schema has always insisted on...
+    expect(Number(rows[0].stock)).toBe(0);
+    // ...but `zoho_stock` is the snapshot of what Zoho actually said, so the
+    // real position is not lost — the Inventory page can still show -5.
+    expect(Number(rows[0].zoho_stock)).toBe(-5);
+
+    expect(Number(rows[1].stock)).toBe(7);
+  });
 });

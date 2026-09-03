@@ -124,10 +124,9 @@ async function getInventoryStatus(req, res) {
  * directly) and the new background Quick Sync / Full Resync jobs
  * (startSyncJob), so the two can never quietly drift apart.
  */
-async function reconcileItems(zohoItems) {
-  const findByZohoId = db.prepare('SELECT id FROM products WHERE zoho_item_id = ?');
-  const findBySku = db.prepare('SELECT id FROM products WHERE sku = ?');
-  const findByName = db.prepare('SELECT id FROM products WHERE name = ?');
+async function reconcileItems(zohoItems, opts = {}) {
+  const { onProgress } = opts;
+
   // Aug 27, 2026 (2): now also stamps zoho_stock/zoho_price — the
   // snapshot getInventoryStatus compares against without ever calling
   // Zoho itself. `stock` (Getmeds' own working count) is still set to
@@ -147,32 +146,117 @@ async function reconcileItems(zohoItems) {
   const updateStmt = db.prepare(`
     UPDATE products SET stock = ?, zoho_stock = ?, zoho_price = ?, zoho_item_id = ?, is_active = ?, last_synced_at = datetime('now') WHERE id = ?
   `);
+  // Sep 3, 2026: ON CONFLICT DO NOTHING, rather than letting the insert throw
+  // and catching it.
+  //
+  // This is a Postgres correctness fix, not a tidy-up. The SKU collision this
+  // guards against was handled by a try/catch until today, which was correct
+  // under SQLite: the failed statement was discarded and the loop carried on.
+  // Postgres does not work that way — ANY error inside a transaction aborts
+  // the whole transaction, and every statement after it fails with "current
+  // transaction is aborted, commands ignored until end of transaction block".
+  //
+  // So on the first duplicate SKU in the live catalogue, the old code would
+  // have caught the error, incremented skippedCount, kept looping happily
+  // through the remaining items — and then failed at COMMIT, losing the entire
+  // sync. `sku` is the only UNIQUE column on this table, so naming it as the
+  // conflict target covers exactly the case the catch was written for.
   const insertStmt = db.prepare(`
     INSERT INTO products (name, sku, unit_price, unit, stock, zoho_stock, zoho_price, zoho_item_id, is_active, last_synced_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT (sku) DO NOTHING
   `);
 
   let updatedCount = 0;
   let createdCount = 0;
   let skippedCount = 0;
   let deactivatedCount = 0;
+  let processed = 0;
 
   const syncTx = db.transaction(async () => {
+    // Sep 3, 2026: the three match lookups and the is_active re-read are done
+    // ONCE, up front, instead of once per item.
+    //
+    // Same reasoning as customers.controller.js's reconcileContacts — see the
+    // long comment on RECONCILE_BATCH_SIZE there. Under better-sqlite3 these
+    // were in-process calls against a local file; against Supabase each is a
+    // network round trip. The live catalogue is 3,446 items, so the old shape
+    // was ~14,000 sequential round trips — around ten minutes of pure waiting,
+    // during which the progress bar showed nothing at all.
+    //
+    // The whole products table is ~3,400 rows of six small columns, so holding
+    // it in three maps costs a couple of megabytes and one query. The writes
+    // below are still per-row (an item can match by zoho_item_id, SKU or name,
+    // and an insert can collide on SKU, so they cannot be collapsed into one
+    // statement the way the customer upsert can) — but one round trip per item
+    // instead of four is a four-fold cut, and it is the lookups that dominated.
+    const byZohoId = new Map();
+    const bySku = new Map();
+    const byName = new Map();
+    for (const p of await db.prepare('SELECT id, name, sku, zoho_item_id, is_active FROM products').all()) {
+      if (p.zoho_item_id != null) byZohoId.set(String(p.zoho_item_id), p);
+      if (p.sku != null) bySku.set(p.sku, p);
+      if (p.name != null) byName.set(p.name, p);
+    }
+
+    /**
+     * Keep the maps in step with what this transaction has already written.
+     *
+     * This is not bookkeeping for its own sake. The old code re-queried the
+     * database on every item, so a row this loop had just inserted or updated
+     * was immediately visible to the next item — and two Zoho items sharing a
+     * SKU relied on exactly that, the second one matching the first's new row
+     * and updating it rather than colliding on the UNIQUE index. Preloading
+     * without this would silently turn those into skips.
+     */
+    function remember(row) {
+      if (row.zoho_item_id != null) byZohoId.set(String(row.zoho_item_id), row);
+      if (row.sku != null) bySku.set(row.sku, row);
+      if (row.name != null) byName.set(row.name, row);
+    }
+
     for (const item of zohoItems) {
+      processed++;
+      if (onProgress && processed % 100 === 0) onProgress(processed);
+
       const zohoStock = item.stock_on_hand ?? item.actual_available_stock ?? item.initial_stock ?? 0;
       const zohoPrice = item.rate ?? item.price ?? null;
       const isActiveFromZoho = item.status === 'inactive' ? 0 : 1;
 
-      let existing = item.item_id ? await findByZohoId.get(item.item_id) : undefined;
-      if (!existing && item.sku) existing = await findBySku.get(item.sku);
-      if (!existing && item.name) existing = await findByName.get(item.name);
+      // Sep 3, 2026: `stock` is clamped at zero; `zoho_stock` is not.
+      //
+      // Zoho reports a NEGATIVE stock_on_hand for an oversold or backordered
+      // item, which is a normal thing for it to say. `products.stock` carries
+      // CHECK(stock >= 0), so writing that figure through raises a constraint
+      // violation — and because this whole reconcile runs in one transaction,
+      // a single backordered item aborted the ENTIRE inventory sync and wrote
+      // nothing at all, with an error naming only the constraint. Verified:
+      // one item at -5 and 3,445 good ones produced zero rows.
+      //
+      // The two columns mean different things, which is what makes clamping
+      // right rather than a fudge: `zoho_stock` is the snapshot of what Zoho
+      // said, kept exactly so getInventoryStatus can show the real position
+      // (it is DOUBLE PRECISION with no CHECK, so it holds the negative
+      // happily), while `stock` is Getmeds' own working count, which the
+      // schema has always insisted cannot go below zero.
+      const localStock = Math.max(0, Number(zohoStock) || 0);
+
+      let existing = item.item_id ? byZohoId.get(String(item.item_id)) : undefined;
+      if (!existing && item.sku) existing = bySku.get(item.sku);
+      if (!existing && item.name) existing = byName.get(item.name);
 
       if (existing) {
-        if (!isActiveFromZoho) {
-          const wasActive = (await db.prepare('SELECT is_active FROM products WHERE id = ?').get(existing.id))?.is_active;
-          if (wasActive) deactivatedCount++;
+        // `existing.is_active` is the cached value, kept current by the write
+        // below — so an item deactivated earlier in this same run is not
+        // counted as newly deactivated a second time, exactly as the old
+        // per-item re-read behaved.
+        if (!isActiveFromZoho && existing.is_active) deactivatedCount++;
+        await updateStmt.run(localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, existing.id);
+        existing.is_active = isActiveFromZoho;
+        if (item.item_id) {
+          existing.zoho_item_id = item.item_id;
+          byZohoId.set(String(item.item_id), existing);
         }
-        await updateStmt.run(zohoStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, existing.id);
         updatedCount++;
         continue;
       }
@@ -187,16 +271,29 @@ async function reconcileItems(zohoItems) {
       const unitPrice = Number(zohoPrice ?? 0) || 0;
       const unit = item.unit || 'pc';
 
-      try {
-        await insertStmt.run(name, sku, unitPrice, unit, zohoStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho);
+      const ins = await insertStmt.run(
+        name, sku, unitPrice, unit, localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho
+      );
+      if (ins.changes > 0) {
         createdCount++;
-      } catch (e) {
-        // Most likely a SKU collision (two Zoho items sharing a SKU, or a
-        // clash with an existing local one under a different name) — skip
-        // that one row rather than aborting the whole pull.
+        // Visible to the rest of this loop, same as the old per-item re-query
+        // made it — see remember()'s comment above.
+        remember({
+          id: ins.lastInsertRowid,
+          name,
+          sku,
+          zoho_item_id: item.item_id || null,
+          is_active: isActiveFromZoho
+        });
+      } else {
+        // A SKU collision (two Zoho items sharing a SKU, or a clash with an
+        // existing local one under a different name) — skip that one row
+        // rather than aborting the whole pull.
         skippedCount++;
       }
     }
+
+    if (onProgress) onProgress(processed);
   });
 
   await syncTx();
@@ -268,8 +365,10 @@ async function startSyncJob(req, res) {
   const job = syncJobs.createJob({ type: 'inventory', mode });
 
   if (mode === 'full') {
+    // Doubled: fetch is the first half of the bar, the database write the
+    // second. See the same comment in customers.controller.js's startSyncJob.
     const priorTotal = parseInt(await getSyncState('inventory_last_full_total'), 10);
-    if (priorTotal > 0) syncJobs.updateProgress(job.id, { total: priorTotal });
+    if (priorTotal > 0) syncJobs.updateProgress(job.id, { total: priorTotal * 2 });
   }
 
   res.status(202).json({ success: true, data: { job_id: job.id, mode } });
@@ -286,7 +385,13 @@ async function startSyncJob(req, res) {
 
       const zohoRes = await zoho.listItems({}, opts);
       const zohoItems = zohoRes.items || [];
-      const { createdCount, updatedCount, skippedCount } = await reconcileItems(zohoItems);
+
+      const fetched = zohoItems.length;
+      syncJobs.updateProgress(job.id, { processed: fetched, total: fetched * 2 });
+
+      const { createdCount, updatedCount, skippedCount } = await reconcileItems(zohoItems, {
+        onProgress: (written) => syncJobs.updateProgress(job.id, { processed: fetched + written })
+      });
 
       if (zohoRes.newWatermark) await setSyncState('inventory_last_modified_watermark', zohoRes.newWatermark);
       if (mode === 'full') {
@@ -357,5 +462,7 @@ module.exports = {
   getInventoryStatus,
   syncPullStock,
   startSyncJob,
-  adjustStock
+  adjustStock,
+  // See customers.controller.js's __test__ export for why this exists.
+  __test__: { reconcileItems }
 };

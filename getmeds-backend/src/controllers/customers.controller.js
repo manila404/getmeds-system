@@ -213,63 +213,161 @@ async function updateCustomerCategory(req, res, next) {
  * against it directly) and the new background Quick Sync / Full Resync
  * jobs (startSyncJob), so the two can never quietly drift apart.
  */
-async function reconcileContacts(contacts) {
-  const findByZohoId = db.prepare('SELECT id FROM customers WHERE zoho_contact_id = ?');
-  const insert = db.prepare(`
-    INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active)
-    VALUES (?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?)
-  `);
-  const update = db.prepare(`
-    UPDATE customers SET name = ?, contact_person = ?, contact_number = ?, address = ?, is_active = ?, last_synced_at = datetime('now')
-    WHERE zoho_contact_id = ?
-  `);
+/**
+ * How many contacts go into one round trip.
+ *
+ * Sep 3, 2026. This constant is the whole reason this function was rewritten,
+ * so it is worth writing down why it exists.
+ *
+ * Until today this function walked `contacts` one at a time, issuing a SELECT
+ * and then an INSERT or UPDATE per contact. Under better-sqlite3 those were
+ * synchronous in-process calls against a local file — microseconds each — so
+ * 95,000 contacts cost a second or two and nobody ever noticed the shape.
+ *
+ * Against Supabase every one of those is a network round trip. A Full Resync
+ * of the live org is 94,985 contacts, so the old loop was ~190,000 sequential
+ * round trips. At the ~40-150ms Manila-to-Supabase latency this app actually
+ * sees, that is somewhere between two and eight HOURS, spent entirely waiting.
+ * And because it all ran inside one transaction, nothing was visible in the
+ * Clients Directory for the whole of it — the directory read 0 clients while
+ * the job looked frozen, which is exactly what it looked like from the UI.
+ *
+ * Batching turns those ~190,000 round trips into ~380 (one existence probe
+ * and one upsert per batch). 500 rows x 7 bind parameters is 3,500 parameters
+ * per statement, comfortably under Postgres' 65,535 limit, with room to raise
+ * this if it is ever worth it.
+ */
+const RECONCILE_BATCH_SIZE = 500;
+
+/**
+ * @param {Array} contacts
+ * @param {{ onProgress?: (written: number) => void }} [opts]
+ *        Called after each batch commits its statement, with the running
+ *        count of contacts written. The Full Resync job uses this to keep the
+ *        progress bar moving through the write phase — without it the bar sits
+ *        at the fetched-count and reads as a hang.
+ */
+async function reconcileContacts(contacts, opts = {}) {
+  const { onProgress } = opts;
+
+  let skipped = 0;
+
+  // Normalise first, database second. This loop is pure CPU and touches
+  // nothing remote, so it costs nothing to do it up front, and it makes the
+  // batching below operate on plain rows instead of Zoho's response shape.
+  const rows = [];
+  for (const contact of contacts) {
+    if (!contact.contact_id) { skipped++; continue; }
+
+    // Sep 2, 2026: mirror Zoho's own contact status into `is_active`.
+    //
+    // Until then this was hard-coded to 1 on insert and never touched on
+    // update, so every synced client read as active no matter what Zoho
+    // said — and the MedRep order form, which filters on is_active, would
+    // happily offer a contact Zoho has since deactivated and then have the
+    // Sales Order rejected at submit with nothing on screen explaining
+    // why. `products.is_active` has mirrored Zoho this way since Aug 27;
+    // this brings customers in line.
+    //
+    // Only an explicit 'inactive' deactivates. A missing/unknown status
+    // is treated as active, so a Zoho response that omits the field can
+    // never mass-hide the directory.
+    rows.push({
+      zohoId: contact.contact_id,
+      name: contact.contact_name || contact.company_name || 'Unnamed Zoho Contact',
+      type: contact.customer_sub_type === 'business' ? 'credit' : 'direct',
+      contactPerson: contact.first_name
+        ? `${contact.first_name} ${contact.last_name || ''}`.trim()
+        : null,
+      phone: contact.phone || contact.mobile || null,
+      address: contact.billing_address
+        ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ')
+        : null,
+      isActive: String(contact.status || '').toLowerCase() === 'inactive' ? 0 : 1
+    });
+  }
+
+  // Collapse duplicate contact_ids within one payload, last occurrence
+  // winning — the same order the old per-row loop resolved them in, since
+  // each pass overwrote the one before.
+  //
+  // This is not defensive padding: a single INSERT ... ON CONFLICT DO UPDATE
+  // statement cannot touch the same row twice ("ON CONFLICT DO UPDATE command
+  // cannot affect row a second time"), so a duplicate inside a batch would
+  // abort the whole sync. The old loop tolerated duplicates silently; this
+  // one has to remove them.
+  const byZohoId = new Map();
+  for (const r of rows) byZohoId.set(r.zohoId, r);
+  const unique = [...byZohoId.values()];
+  // Second and later occurrences counted as updates in the old loop, so they
+  // still do here — these numbers are asserted by tests/customersSync.test.js
+  // and shown to the user in the sync result message.
+  const duplicateHits = rows.length - unique.length;
 
   let created = 0;
   let updated = 0;
-  let skipped = 0;
+  let written = 0;
 
   const txn = db.transaction(async () => {
-    for (const contact of contacts) {
-      if (!contact.contact_id) { skipped++; continue; }
+    for (let i = 0; i < unique.length; i += RECONCILE_BATCH_SIZE) {
+      const batch = unique.slice(i, i + RECONCILE_BATCH_SIZE);
 
-      const name = contact.contact_name || contact.company_name || 'Unnamed Zoho Contact';
-      const type = contact.customer_sub_type === 'business' ? 'credit' : 'direct';
-      const contactPerson = contact.first_name
-        ? `${contact.first_name} ${contact.last_name || ''}`.trim()
-        : null;
-      const phone = contact.phone || contact.mobile || null;
-      const address = contact.billing_address
-        ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ')
-        : null;
-
-      // Sep 2, 2026: mirror Zoho's own contact status into `is_active`.
+      // One probe per batch to learn which of these already exist. The upsert
+      // below would work without it, but `created` vs `updated` would then
+      // have to be inferred from the `xmax = 0` trick, and an exact count from
+      // an obvious query is worth one round trip per 500 rows.
       //
-      // Until now this was hard-coded to 1 on insert and never touched on
-      // update, so every synced client read as active no matter what Zoho
-      // said — and the MedRep order form, which filters on is_active, would
-      // happily offer a contact Zoho has since deactivated and then have the
-      // Sales Order rejected at submit with nothing on screen explaining
-      // why. `products.is_active` has mirrored Zoho this way since Aug 27;
-      // this brings customers in line.
-      //
-      // Only an explicit 'inactive' deactivates. A missing/unknown status
-      // is treated as active, so a Zoho response that omits the field can
-      // never mass-hide the directory.
-      const isActive = String(contact.status || '').toLowerCase() === 'inactive' ? 0 : 1;
+      // The array is wrapped in an extra array on purpose. db/pg.js's
+      // flatten() preserves better-sqlite3's habit of accepting BOTH
+      // `.all(a, b)` and `.all([a, b])`, so a bare `.all(ids)` would be read
+      // as 500 separate parameters rather than one array-valued one. `[ids]`
+      // is unambiguous: one parameter, which happens to be an array.
+      const existingRows = await db
+        .prepare('SELECT zoho_contact_id FROM customers WHERE zoho_contact_id = ANY(?)')
+        .all([batch.map((r) => r.zohoId)]);
+      const existing = new Set(existingRows.map((r) => r.zoho_contact_id));
 
-      const existing = await findByZohoId.get(contact.contact_id);
-      if (existing) {
-        await update.run(name, contactPerson, phone, address, isActive, contact.contact_id);
-        updated++;
-      } else {
-        await insert.run(name, type, contact.contact_id, contactPerson, phone, address, isActive);
-        created++;
-      }
+      const params = [];
+      const tuples = batch.map((r) => {
+        params.push(r.name, r.type, r.zohoId, r.contactPerson, r.phone, r.address, r.isActive);
+        return "(?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?)";
+      });
+
+      // ON CONFLICT names the index predicate as well as the column because
+      // idx_customers_zoho_contact_id is PARTIAL (... WHERE zoho_contact_id IS
+      // NOT NULL). Postgres will not infer a partial index without it.
+      //
+      // `type` and `source` are deliberately absent from the DO UPDATE list.
+      // Zoho has no equivalent of the credit-vs-direct distinction, so `type`
+      // is only ever a guess on first insert that an admin then corrects
+      // locally — re-deriving it on every sync would silently undo that
+      // correction. This matches the old UPDATE statement, which set neither.
+      await db
+        .prepare(
+          `INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active)
+           VALUES ${tuples.join(', ')}
+           ON CONFLICT (zoho_contact_id) WHERE zoho_contact_id IS NOT NULL
+           DO UPDATE SET
+             name = EXCLUDED.name,
+             contact_person = EXCLUDED.contact_person,
+             contact_number = EXCLUDED.contact_number,
+             address = EXCLUDED.address,
+             is_active = EXCLUDED.is_active,
+             last_synced_at = EXCLUDED.last_synced_at`
+        )
+        .run(...params);
+
+      const newRows = batch.reduce((n, r) => n + (existing.has(r.zohoId) ? 0 : 1), 0);
+      created += newRows;
+      updated += batch.length - newRows;
+
+      written += batch.length;
+      if (onProgress) onProgress(written);
     }
   });
   await txn();
 
-  return { created, updated, skipped };
+  return { created, updated: updated + duplicateHits, skipped };
 }
 
 async function syncFromZoho(req, res, next) {
@@ -341,9 +439,23 @@ async function startSyncJob(req, res) {
 
   const job = syncJobs.createJob({ type: 'customers', mode });
 
+  // Sep 3, 2026: the job's `total` counts each contact TWICE — once for
+  // fetching it from Zoho, once for writing it to the database.
+  //
+  // Before today the write phase reported no progress at all, because under
+  // SQLite it was over before the frontend could poll it. Against Supabase it
+  // is now the longer of the two phases, and a bar frozen at the fetched count
+  // for minutes is indistinguishable from a crash — which is exactly how it
+  // was read when the live Full Resync sat at "95002 found so far" while the
+  // Clients Directory showed 0 clients.
+  //
+  // Counting fetch and write as equal halves of one bar keeps it monotonic:
+  // 0-50% is the Zoho pull, 50-100% is the database write. The alternative —
+  // resetting `processed` to zero when the write phase starts — makes the bar
+  // jump backwards, which reads as a restart.
   if (mode === 'full') {
     const priorTotal = parseInt(await getSyncState('customers_last_full_total'), 10);
-    if (priorTotal > 0) syncJobs.updateProgress(job.id, { total: priorTotal });
+    if (priorTotal > 0) syncJobs.updateProgress(job.id, { total: priorTotal * 2 });
   }
 
   res.status(202).json({ success: true, data: { job_id: job.id, mode } });
@@ -364,7 +476,15 @@ async function startSyncJob(req, res) {
 
       const result = await zoho.listContacts({}, opts);
       const contacts = result.contacts || [];
-      const { created, updated, skipped } = await reconcileContacts(contacts);
+
+      // The fetch is done, so the true count is known — replace the estimate
+      // from the prior run with it, still doubled (see the comment above).
+      const fetched = contacts.length;
+      syncJobs.updateProgress(job.id, { processed: fetched, total: fetched * 2 });
+
+      const { created, updated, skipped } = await reconcileContacts(contacts, {
+        onProgress: (written) => syncJobs.updateProgress(job.id, { processed: fetched + written })
+      });
 
       if (result.newWatermark) await setSyncState('customers_last_modified_watermark', result.newWatermark);
       if (mode === 'full') {
@@ -465,5 +585,9 @@ module.exports = {
   getZohoAddress,
   updateCustomerCategory,
   getCustomerStats,
-  ALLOWED_CATEGORIES
+  ALLOWED_CATEGORIES,
+  // Exposed for tests/reconcileBatch.verify.js, which measures the number of
+  // queries a reconcile issues — the thing the Sep 3 batching rewrite exists
+  // to change, and the one property the HTTP-level suites cannot see.
+  __test__: { reconcileContacts }
 };
