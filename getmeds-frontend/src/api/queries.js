@@ -1,21 +1,64 @@
 import client from './client';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+/**
+ * Sep 3, 2026: the trailing slash is stripped, and it is not cosmetic.
+ *
+ * The two functions below build their URL by string concatenation —
+ * `${API_BASE_URL}${path}` — where every `path` starts with '/'. So a
+ * VITE_API_URL ending in '/' produced:
+ *
+ *   https://getmeds-system-backend.vercel.app//api/orders/meta/customers
+ *                                           ^^ two slashes
+ *
+ * Vercel 308-redirects that to the single-slash form, and a browser refuses to
+ * follow a redirect on a CORS preflight — "Redirect is not allowed for a
+ * preflight request". The MedRep order form's customer and product lookups
+ * both died this way in production while every other endpoint worked, because
+ * everything else goes through the axios client in ./client.js, whose
+ * combineURLs collapses the double slash. Locally VITE_API_URL is unset, the
+ * default below has no trailing slash, and nothing breaks — which is exactly
+ * why this only ever appeared on the deployed site.
+ *
+ * Normalising here rather than relying on whoever sets the environment
+ * variable to omit the slash: both spellings are reasonable to type, and a URL
+ * that works everywhere except two endpoints in production is not a mistake
+ * anyone should have to make twice.
+ */
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/+$/, '');
+
+/**
+ * Run a raw-fetch call, falling back to the axios client if it fails.
+ *
+ * The two callers below predate the rest of this file's use of `client` and
+ * were written with a fallback for exactly the situation above. It never ran.
+ * The guard was `if (!response.ok)`, but a CORS or network failure makes
+ * fetch() REJECT rather than resolve with a not-ok response — so the fallback
+ * was unreachable precisely when it was needed, and the failure surfaced in
+ * the order form as "No registered customer matches", which reads as "this
+ * client is not in the system" rather than "the lookup could not run".
+ *
+ * Catching the throw as well as the not-ok response is what makes the fallback
+ * real. It also means a future base-URL mistake degrades to a slower request
+ * through axios instead of an empty dropdown.
+ */
+async function fetchWithClientFallback(path, { token } = {}) {
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
+    if (response.ok) return response.json();
+  } catch (err) {
+    // Network-level failure (CORS, DNS, offline). Fall through to axios.
+  }
+  return (await client.get(path)).data;
+}
 
 /**
  * Fetch all active pharmaceutical products from database
  */
 export const fetchProducts = async () => {
   const token = sessionStorage.getItem('token');
-  const response = await fetch(`${API_BASE_URL}/api/products`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {}
-  });
-  if (!response.ok) {
-    // Fallback to axios client if fetch encounters cross-origin/interceptor issues
-    const res = await client.get('/api/products');
-    return res.data;
-  }
-  return response.json();
+  return fetchWithClientFallback('/api/products', { token });
 };
 
 /**
@@ -54,14 +97,7 @@ export const fetchCustomers = async ({ search = '', includeInactive = false, lim
   const path = `/api/orders/meta/customers${query ? `?${query}` : ''}`;
 
   const token = sessionStorage.getItem('token');
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {}
-  });
-  if (!response.ok) {
-    const res = await client.get(path);
-    return res.data;
-  }
-  return response.json();
+  return fetchWithClientFallback(path, { token });
 };
 
 /**
