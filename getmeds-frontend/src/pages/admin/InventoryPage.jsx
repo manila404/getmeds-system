@@ -4,6 +4,7 @@ import { formatDistanceToNow } from 'date-fns';
 import {
   fetchInventoryStatus
 } from '../../api/queries';
+import { parseDate } from '../../utils/dateUtils';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
 import { useSyncJobs } from '../../context/SyncJobsContext';
 import toast from 'react-hot-toast';
@@ -160,8 +161,28 @@ const InventoryPage = () => {
             <SyncProgressIndicator job={syncJob} />
             <span className="text-[11px] text-ink-secondary flex items-center gap-1">
               <Clock size={11} />
-              {summary.last_synced_at
-                ? <>Zoho data as of {formatDistanceToNow(new Date(summary.last_synced_at + 'Z'), { addSuffix: true })} — click Quick Sync or Full Resync for the latest</>
+              {/*
+                Sep 3, 2026: parseDate(), not `new Date(x + 'Z')`.
+
+                The hand-appended 'Z' was written for SQLite, whose
+                datetime('now') produced "2026-09-02 08:47:34" — naive, in fact
+                UTC but with nothing in the string saying so, so the browser
+                would have read it as local time. Appending 'Z' fixed that.
+
+                Postgres iso_now() already ends in Z, so the same line built
+                "2026-09-03T05:23:24.554ZZ", which is an Invalid Date, and
+                formatDistanceToNow throws RangeError on it. An uncaught throw
+                in render unmounts the tree, so the ENTIRE Inventory page went
+                blank — including the Full Resync button, which is the only way
+                to fix inventory data from the UI.
+
+                utils/dateUtils.js has handled both formats since it was
+                written; this line simply never used it. parseDate also returns
+                null rather than an Invalid Date for anything unparseable, so a
+                bad timestamp now costs one label instead of the whole screen.
+              */}
+              {parseDate(summary.last_synced_at)
+                ? <>Zoho data as of {formatDistanceToNow(parseDate(summary.last_synced_at), { addSuffix: true })} — click Quick Sync or Full Resync for the latest</>
                 : <>Never pulled from Zoho yet — click Quick Sync or Full Resync to fetch stock</>}
             </span>
           </div>
