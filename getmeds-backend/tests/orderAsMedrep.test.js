@@ -88,26 +88,26 @@ beforeAll(async () => {
   repB = await signUp('repb', 'NORTH', 'Bea Cruz');
   repBToken = await login(repB.email);
 
-  customerId = db
+  customerId = (await db
     .prepare("INSERT INTO customers (name, type, zoho_contact_id) VALUES (?, 'credit', ?)")
-    .run(`${PREFIX}client`, `${PREFIX}zc`).lastInsertRowid;
-  productId = db
+    .run(`${PREFIX}client`, `${PREFIX}zc`)).lastInsertRowid;
+  productId = (await db
     .prepare('INSERT INTO products (name, sku, unit_price) VALUES (?, ?, 10)')
-    .run(`${PREFIX}product`, `${PREFIX}sku`).lastInsertRowid;
+    .run(`${PREFIX}product`, `${PREFIX}sku`)).lastInsertRowid;
 });
 
-afterAll(() => {
+afterAll(async () => {
   for (const id of createdOrderIds) {
-    db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+    await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
   }
-  if (productId) db.prepare('DELETE FROM products WHERE id = ?').run(productId);
-  if (customerId) db.prepare('DELETE FROM customers WHERE id = ?').run(customerId);
-  db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${PREFIX}%`);
+  if (productId) await db.prepare('DELETE FROM products WHERE id = ?').run(productId);
+  if (customerId) await db.prepare('DELETE FROM customers WHERE id = ?').run(customerId);
+  await db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${PREFIX}%`);
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -155,7 +155,7 @@ describe('POST /api/orders with medrep_id', () => {
 
     // Attributed to the chosen rep, not to the admin and not to the seeded
     // medrep account resolveActor would otherwise have picked.
-    const row = db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(order.id);
+    const row = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(order.id);
     expect(row.medrep_id).toBe(repA.id);
 
     // And the Sales Order carries their Salesperson — the whole point.
@@ -176,7 +176,7 @@ describe('POST /api/orders with medrep_id', () => {
     const res = await createOrder(adminToken, { medrep_id: repA.id });
     createdOrderIds.push(res.body.data.order.id);
 
-    const event = db
+    const event = await db
       .prepare("SELECT actor_id, actor_name, notes, metadata FROM order_events WHERE order_id = ? ORDER BY id LIMIT 1")
       .get(res.body.data.order.id);
 
@@ -191,16 +191,16 @@ describe('POST /api/orders with medrep_id', () => {
   });
 
   test('an unknown medrep_id is a 400, and creates nothing', async () => {
-    const before = db.prepare('SELECT COUNT(*) c FROM orders').get().c;
+    const before = (await db.prepare('SELECT COUNT(*) c FROM orders').get()).c;
 
     const res = await createOrder(adminToken, { medrep_id: 999999 });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('INVALID_MEDREP');
-    expect(db.prepare('SELECT COUNT(*) c FROM orders').get().c).toBe(before);
+    expect((await db.prepare('SELECT COUNT(*) c FROM orders').get()).c).toBe(before);
   });
 
   test('an id that is a real user but not a MedRep is refused too', async () => {
-    const admin = db.prepare("SELECT id FROM users WHERE email = 'admin@getmeds.ph'").get();
+    const admin = await db.prepare("SELECT id FROM users WHERE email = 'admin@getmeds.ph'").get();
     const res = await createOrder(adminToken, { medrep_id: admin.id });
 
     expect(res.status).toBe(400);
@@ -213,7 +213,7 @@ describe('POST /api/orders with medrep_id', () => {
     expect(res.status).toBe(201);
     createdOrderIds.push(res.body.data.order.id);
 
-    const row = db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(res.body.data.order.id);
+    const row = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(res.body.data.order.id);
     expect(row.medrep_id).toBe(repB.id);
 
     const so = await zoho.getSalesOrder(res.body.data.order.zoho_so_id);
@@ -227,7 +227,7 @@ describe('POST /api/orders with medrep_id', () => {
       expect(res.status).toBe(201);
       createdOrderIds.push(res.body.data.order.id);
 
-      const row = db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(res.body.data.order.id);
+      const row = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(res.body.data.order.id);
       expect(row.medrep_id).toBe(repB.id);
     } finally {
       setEnv('TEST_MODE', 'true');
@@ -239,10 +239,10 @@ describe('POST /api/orders with medrep_id', () => {
     expect(res.status).toBe(201);
     createdOrderIds.push(res.body.data.order.id);
 
-    const row = db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(res.body.data.order.id);
+    const row = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(res.body.data.order.id);
     expect(row.medrep_id).toBe(repB.id);
 
-    const event = db
+    const event = await db
       .prepare('SELECT notes, metadata FROM order_events WHERE order_id = ? ORDER BY id LIMIT 1')
       .get(res.body.data.order.id);
     expect(event.notes).not.toContain('on behalf of');

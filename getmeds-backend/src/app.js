@@ -15,6 +15,7 @@ const testRoutes = require('./routes/test.routes');
 const webhookRoutes = require('./routes/webhook.routes');
 const customersRoutes = require('./routes/customers.routes');
 const syncJobsRoutes = require('./routes/syncJobs.routes');
+const cronRoutes = require('./routes/cron.routes');
 
 const app = express();
 
@@ -93,6 +94,10 @@ app.use('/api/customers', customersRoutes);
 // Aug 28, 2026: shared polling endpoint for the customers/inventory
 // background Quick Sync / Full Resync jobs (see services/syncJobs.js).
 app.use('/api/sync-jobs', syncJobsRoutes);
+// Sep 3, 2026: the serverless replacement for the two setInterval loops in
+// server.js. Vercel never calls app.listen(), so those timers do not exist
+// there. Authenticated by CRON_SECRET inside the controller, not requireAuth.
+app.use('/api/cron', cronRoutes);
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } }));

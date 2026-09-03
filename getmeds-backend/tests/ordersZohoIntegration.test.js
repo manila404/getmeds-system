@@ -38,53 +38,53 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
   let productId;
   const createdOrderIds = [];
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // Clean up any stale test records from previous runs
-    const staleOrders = db.prepare(`
+    const staleOrders = await db.prepare(`
       SELECT id FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE name LIKE 'ZOHO-TEST%')
     `).all();
     for (const o of staleOrders) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(o.id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(o.id);
     }
-    db.prepare(`DELETE FROM products WHERE sku = 'ZOHOTEST-SKU-001'`).run();
-    db.prepare(`DELETE FROM customers WHERE name LIKE 'ZOHO-TEST%'`).run();
+    await db.prepare(`DELETE FROM products WHERE sku = 'ZOHOTEST-SKU-001'`).run();
+    await db.prepare(`DELETE FROM customers WHERE name LIKE 'ZOHO-TEST%'`).run();
 
-    const medrep = db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
+    const medrep = await db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
     if (!medrep) throw new Error('Expected seeded medrep@getmeds.ph to exist — run `npm run setup` first.');
     medrepId = medrep.id;
 
-    creditCustomerId = db.prepare(
+    creditCustomerId = (await db.prepare(
       `INSERT INTO customers (name, type, credit_limit, is_active) VALUES (?, 'credit', 100000, 1)`
-    ).run('ZOHO-TEST Credit Customer').lastInsertRowid;
+    ).run('ZOHO-TEST Credit Customer')).lastInsertRowid;
 
-    directCustomerId = db.prepare(
+    directCustomerId = (await db.prepare(
       `INSERT INTO customers (name, type, credit_limit, is_active) VALUES (?, 'direct', 0, 1)`
-    ).run('ZOHO-TEST Direct Customer').lastInsertRowid;
+    ).run('ZOHO-TEST Direct Customer')).lastInsertRowid;
 
-    productId = db.prepare(
+    productId = (await db.prepare(
       `INSERT INTO products (name, sku, unit_price, unit, stock, is_active) VALUES (?, ?, ?, 'tab', 500, 1)`
-    ).run('ZOHO-TEST Product', 'ZOHOTEST-SKU-001', 10).lastInsertRowid;
+    ).run('ZOHO-TEST Product', 'ZOHOTEST-SKU-001', 10)).lastInsertRowid;
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of createdOrderIds) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
-    if (productId) db.prepare('DELETE FROM products WHERE id = ?').run(productId);
+    if (productId) await db.prepare('DELETE FROM products WHERE id = ?').run(productId);
     if (creditCustomerId && directCustomerId) {
-      db.prepare('DELETE FROM customers WHERE id IN (?, ?)').run(creditCustomerId, directCustomerId);
+      await db.prepare('DELETE FROM customers WHERE id IN (?, ?)').run(creditCustomerId, directCustomerId);
     }
   });
 
@@ -146,11 +146,11 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(order.zoho_so_id).toMatch(/^MOCK-SO-\d{6}$/);
     // The Zoho-side status baseline is seeded here, so the first "Confirm"
     // in Zoho diffs against 'draft' instead of against nothing.
-    const seeded = db.prepare('SELECT zoho_so_status FROM orders WHERE id = ?').get(order.id);
+    const seeded = await db.prepare('SELECT zoho_so_status FROM orders WHERE id = ?').get(order.id);
     expect(seeded.zoho_so_status).toBe('draft');
 
-    const dispatch = db.prepare('SELECT * FROM dispatch_records WHERE order_id = ?').get(order.id);
-    const payment = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
+    const dispatch = await db.prepare('SELECT * FROM dispatch_records WHERE order_id = ?').get(order.id);
+    const payment = await db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
     expect(dispatch).toBeDefined();
     expect(payment).toBeUndefined();
   });
@@ -168,7 +168,7 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(order.status).toBe('ready_for_draft_invoice');
     expect(order.zoho_sync_status).toBe('synced');
 
-    const payment = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
+    const payment = await db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
     expect(payment).toBeDefined();
     expect(payment.status).toBe('pending');
   });
@@ -192,13 +192,13 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(order.zoho_sync_status).toBe('failed');
     expect(order.zoho_so_id).toBeNull();
 
-    const queued = db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(order.id);
+    const queued = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(order.id);
     expect(queued).toBeDefined();
     expect(queued.status).toBe('pending');
     expect(queued.attempts).toBe(0);
     expect(JSON.parse(queued.payload).getmeds_order_id).toBe(order.getmeds_order_id);
 
-    const events = db.prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SYNC_FAILED'").all(order.id);
+    const events = await db.prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SYNC_FAILED'").all(order.id);
     expect(events.length).toBe(1); // audit trail records the sync failure
   });
 
@@ -228,7 +228,7 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(submitRes.body.data.order.status).toBe('so_created');
     expect(submitRes.body.data.zoho.salesorder_id).toMatch(/^MOCK-SO-\d{6}$/);
 
-    const reloaded = db.prepare('SELECT * FROM orders WHERE id = ?').get(draftOrder.id);
+    const reloaded = await db.prepare('SELECT * FROM orders WHERE id = ?').get(draftOrder.id);
     expect(reloaded.zoho_sync_status).toBe('synced');
   });
 
@@ -251,11 +251,11 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(submitRes.body.data.zoho).toBeNull();
     expect(submitRes.body.data.zoho_sync_status).toBe('failed');
 
-    const reloaded = db.prepare('SELECT * FROM orders WHERE id = ?').get(draftOrder.id);
+    const reloaded = await db.prepare('SELECT * FROM orders WHERE id = ?').get(draftOrder.id);
     expect(reloaded.status).toBe('ready_for_draft_invoice'); // advanced normally, not stuck in draft
     expect(reloaded.zoho_sync_status).toBe('failed');
 
-    const queued = db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(draftOrder.id);
+    const queued = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(draftOrder.id);
     expect(queued).toBeDefined();
     expect(queued.status).toBe('pending');
   });

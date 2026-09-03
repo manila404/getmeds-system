@@ -50,15 +50,15 @@ const { isTestModeEnabled } = require('../middleware/testMode');
  *
  * Returns { actor, onBehalf } or { error }.
  */
-function resolveOrderMedrep(user, requestedMedrepId) {
-  const fallback = resolveActor(user, 'medrep');
+async function resolveOrderMedrep(user, requestedMedrepId) {
+  const fallback = await resolveActor(user, 'medrep');
   const asked = requestedMedrepId !== undefined && requestedMedrepId !== null && requestedMedrepId !== '';
   if (!asked) return { actor: fallback, onBehalf: false };
 
   const isAdmin = (user.role || '').toLowerCase() === 'admin';
   if (!isTestModeEnabled() || !isAdmin) return { actor: fallback, onBehalf: false };
 
-  const target = db
+  const target = await db
     .prepare('SELECT id, name, email, role, salesperson FROM users WHERE id = ? AND is_active = 1')
     .get(requestedMedrepId);
 
@@ -161,7 +161,7 @@ function buildDryRunSalesOrder(payload) {
 // before.
 //
 // Aug 31, 2026 (6): widened from one id to a list — see checkTestCustomerGate.
-exports.getCustomers = (req, res, next) => {
+exports.getCustomers = async (req, res, next) => {
   try {
     const dryRun = isDryRunMode();
     // Dry run bypasses the gate everywhere (see checkTestCustomerGate), so
@@ -214,15 +214,15 @@ exports.getCustomers = (req, res, next) => {
 
     // Active first, so the ones a MedRep can actually order for are never
     // buried under inactive ones with alphabetically earlier names.
-    const customers = db
+    const customers = await db
       .prepare(`SELECT * FROM customers ${whereSql} ORDER BY is_active DESC, name LIMIT ?`)
       .all(...params, limit);
 
     // So the UI can say "showing 25 of 1,240" rather than implying the list
     // is everything there is.
-    const totalMatching = db
+    const totalMatching = (await db
       .prepare(`SELECT COUNT(*) c FROM customers ${whereSql}`)
-      .get(...params).c;
+      .get(...params)).c;
 
     // How many the toggle would add, counted under the same gate so the
     // number always matches what turning it on actually shows.
@@ -230,9 +230,9 @@ exports.getCustomers = (req, res, next) => {
     if (testZohoIds.length) {
       inactiveWhere.push(`zoho_contact_id IN (${testZohoIds.map(() => '?').join(',')})`);
     }
-    const inactiveCount = db
+    const inactiveCount = (await db
       .prepare(`SELECT COUNT(*) c FROM customers WHERE ${inactiveWhere.join(' AND ')}`)
-      .get(...testZohoIds).c;
+      .get(...testZohoIds)).c;
 
     res.json({
       success: true,
@@ -249,7 +249,7 @@ exports.getCustomers = (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.getProducts = (req, res, next) => {
+exports.getProducts = async (req, res, next) => {
   try {
     // Sep 1, 2026 (7): inactive products are returned too, so the order form
     // can LABEL them rather than silently omitting them. They are not
@@ -257,7 +257,7 @@ exports.getProducts = (req, res, next) => {
     // the validation in create/submit), but "this medicine exists and is
     // deactivated in Zoho" is far more useful to a MedRep than the product
     // not appearing at all and them assuming they mistyped the name.
-    const products = db.prepare('SELECT * FROM products ORDER BY is_active DESC, name').all();
+    const products = await db.prepare('SELECT * FROM products ORDER BY is_active DESC, name').all();
     res.json({ success: true, data: { products } });
   } catch (err) { next(err); }
 };
@@ -292,13 +292,13 @@ exports.getProducts = (req, res, next) => {
  * `salesperson` comes along so the form can show what each choice would put
  * on the Zoho Sales Order without a second call per rep.
  */
-exports.getMedreps = (req, res, next) => {
+exports.getMedreps = async (req, res, next) => {
   try {
     const isAdmin = (req.user.role || '').toLowerCase() === 'admin';
     if (!isTestModeEnabled() || !isAdmin) {
       return res.json({ success: true, data: { enabled: false, medreps: [] } });
     }
-    const medreps = db
+    const medreps = await db
       .prepare(
         `SELECT id, name, email, display_name, division, sub_division, salesperson
          FROM users
@@ -321,7 +321,7 @@ exports.getSalespersonStatus = async (req, res, next) => {
 
 // ─── LIST / GET ────────────────────────────────────────────────────────────────
 
-exports.getAll = (req, res, next) => {
+exports.getAll = async (req, res, next) => {
   try {
     const { status, customer_type, page = 1, limit = 20 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -339,7 +339,7 @@ exports.getAll = (req, res, next) => {
 
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
-    const orders = db.prepare(`
+    const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, c.type as customer_type_detail,
              u.name as medrep_name,
              p.status as payment_status,
@@ -354,7 +354,7 @@ exports.getAll = (req, res, next) => {
       LIMIT ? OFFSET ?
     `).all(...params, parseInt(limit), offset);
 
-    const totalRow = db.prepare(
+    const totalRow = await db.prepare(
       `SELECT COUNT(*) as total FROM orders o ${whereClause}`
     ).get(...params);
 
@@ -375,7 +375,7 @@ exports.getAll = (req, res, next) => {
 
 exports.getById = async (req, res, next) => {
   try {
-    const loadOrder = () => db.prepare(`
+    const loadOrder = async () => await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_person, c.contact_number,
              u.name as medrep_name, u.email as medrep_email
       FROM orders o
@@ -384,7 +384,7 @@ exports.getById = async (req, res, next) => {
       WHERE o.id = ?
     `).get(req.params.id);
 
-    let order = loadOrder();
+    let order = await loadOrder();
 
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
 
@@ -420,7 +420,7 @@ exports.getById = async (req, res, next) => {
     // the reconcile still finishes in the background and its results show up
     // on the next load; the poller is the backstop either way.
     try {
-      if (shouldRefreshOnOpen(order)) {
+      if (await shouldRefreshOnOpen(order)) {
         const reconcile = reconcileOrderFully({
           orderId: order.id,
           actorId: req.user?.id || null,
@@ -434,38 +434,38 @@ exports.getById = async (req, res, next) => {
           console.warn(`[ORDER_OPEN] Zoho refresh for order ${order.id} exceeded ${OPEN_REFRESH_TIMEOUT_MS}ms — serving what we have.`);
           // Stamp anyway once it eventually lands, so a permanently slow Zoho
           // doesn't make every page load start another overlapping call.
-          reconcile.then(() => markRefreshed(order.id)).catch(() => {});
+          reconcile.then(async () => await markRefreshed(order.id)).catch(() => {});
         } else {
-          markRefreshed(order.id);
+          await markRefreshed(order.id);
         }
-        order = loadOrder() || order;
+        order = (await loadOrder()) || order;
       }
     } catch (err) {
       console.warn(`[ORDER_OPEN] Zoho refresh for order ${order.id} failed (order still served): ${err.message}`);
     }
 
-    const items = db.prepare(`
+    const items = await db.prepare(`
       SELECT oi.*, p.name as product_name, p.sku, p.unit
       FROM order_items oi
       LEFT JOIN products p ON oi.product_id = p.id
       WHERE oi.order_id = ?
     `).all(order.id);
 
-    const payment = db.prepare(`
+    const payment = await db.prepare(`
       SELECT p.*, u.name as verified_by_name
       FROM payments p
       LEFT JOIN users u ON p.verified_by = u.id
       WHERE p.order_id = ?
     `).get(order.id);
 
-    const dispatch = db.prepare(`
+    const dispatch = await db.prepare(`
       SELECT d.*, u.name as dispatched_by_name
       FROM dispatch_records d
       LEFT JOIN users u ON d.dispatched_by = u.id
       WHERE d.order_id = ?
     `).get(order.id);
 
-    const events = db.prepare(
+    const events = await db.prepare(
       'SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC'
     ).all(order.id);
 
@@ -498,7 +498,7 @@ exports.syncFromZoho = async (req, res, next) => {
     // refresh-on-open path run the exact same code as this button rather than
     // a second copy that would drift. All that is left here is what is
     // genuinely HTTP: who is allowed to ask, and what the response looks like.
-    const owner = db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(req.params.id);
+    const owner = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(req.params.id);
     if (!owner) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     if (req.user.role === 'medrep' && owner.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
@@ -540,7 +540,7 @@ exports.syncFromZoho = async (req, res, next) => {
 // marked 'failed_permanent' after exhausting its automatic attempts).
 exports.retryZohoSync = async (req, res, next) => {
   try {
-    const order = db.prepare(`
+    const order = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.name as medrep_name, u.email as medrep_email, u.id as medrep_user_id
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -566,7 +566,7 @@ exports.retryZohoSync = async (req, res, next) => {
     // deliberately not filtered to status='pending' so a row that already
     // hit 'failed_permanent' (5 automatic attempts exhausted) can still be
     // retried manually here.
-    const row = db.prepare(`
+    const row = await db.prepare(`
       SELECT * FROM zoho_sync_queue WHERE order_id = ? ORDER BY created_at DESC LIMIT 1
     `).get(order.id);
 
@@ -578,15 +578,15 @@ exports.retryZohoSync = async (req, res, next) => {
     }
 
     const result = await zohoRetryService.processOne(row);
-    const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
 
     res.json({ success: true, data: { order: updatedOrder, result } });
   } catch (err) { next(err); }
 };
 
-exports.getEvents = (req, res, next) => {
+exports.getEvents = async (req, res, next) => {
   try {
-    const events = db.prepare(
+    const events = await db.prepare(
       'SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC'
     ).all(req.params.id);
     res.json({ success: true, data: { events } });
@@ -632,7 +632,7 @@ exports.create = async (req, res, next) => {
     } = req.body;
     const clean = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
 
-    const medrepChoice = resolveOrderMedrep(req.user, medrep_id);
+    const medrepChoice = await resolveOrderMedrep(req.user, medrep_id);
     if (medrepChoice.error) {
       return res.status(400).json({ success: false, error: medrepChoice.error });
     }
@@ -640,7 +640,7 @@ exports.create = async (req, res, next) => {
     const onBehalfOf = medrepChoice.onBehalf;
     // Salesperson + Division + Sub-division, from the MedRep the order is
     // FOR (not whoever is clicking) — one read, so they cannot disagree.
-    const medrepProfile = salespersonService.profileForUser(effectiveActor.id);
+    const medrepProfile = await salespersonService.profileForUser(effectiveActor.id);
 
     const ALLOWED_INVOICING_FROM = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 
@@ -659,7 +659,7 @@ exports.create = async (req, res, next) => {
     }
 
     // Verify customer exists
-    const customer = db.prepare('SELECT * FROM customers WHERE id = ? AND is_active = 1').get(customer_id);
+    const customer = await db.prepare('SELECT * FROM customers WHERE id = ? AND is_active = 1').get(customer_id);
     if (!customer) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Customer not found' } });
 
     const gateError = checkTestCustomerGate(customer);
@@ -681,7 +681,7 @@ exports.create = async (req, res, next) => {
       // not exist. Zoho rejects an inactive item on a Sales Order
       // ("Inactive items cannot be added to the sales order"), so this is the
       // same refusal, just made early and in words that explain it.
-      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
+      const product = await db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
       if (!product) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Product ${item.product_id} not found` } });
       if (!product.is_active) {
         return res.status(400).json({
@@ -731,7 +731,7 @@ exports.create = async (req, res, next) => {
     }
 
     // 1. Generate unique Getmeds Order ID (GM-YYYYMMDD-XXXX)
-    const getmedsOrderId = generateOrderId();
+    const getmedsOrderId = await generateOrderId();
     const isDraft = requestedStatus === 'draft';
     const isCredit = resolvedCustomerType === 'credit';
     // Sep 1, 2026: same change as submit() below — a credit order stops at
@@ -824,8 +824,8 @@ exports.create = async (req, res, next) => {
       }
     }
 
-    const createOrderTxn = db.transaction(() => {
-      const result = db.prepare(`
+    const createOrderTxn = db.transaction(async () => {
+      const result = await db.prepare(`
         INSERT INTO orders (
           getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
           delivery_address, delivery_notes,
@@ -882,7 +882,7 @@ exports.create = async (req, res, next) => {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const ri of resolvedItems) {
-        insItem.run(
+        await insItem.run(
           orderId, ri.product_id, ri.quantity, ri.unit_price, ri.subtotal,
           ri.discount_amount, ri.tax_percent, ri.tax_label, ri.line_total
         );
@@ -891,13 +891,13 @@ exports.create = async (req, res, next) => {
       // 2. Evaluate Workflow Gate & Create Child Records
       if (!isDraft) {
         if (isCredit) {
-          db.prepare("INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'queued', datetime('now'))").run(orderId);
+          await db.prepare("INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'queued', datetime('now'))").run(orderId);
         } else {
-          db.prepare("INSERT INTO payments (order_id, status, created_at) VALUES (?, 'pending', datetime('now'))").run(orderId);
+          await db.prepare("INSERT INTO payments (order_id, status, created_at) VALUES (?, 'pending', datetime('now'))").run(orderId);
         }
 
         // 3. Trigger Audit Trail (ORDER_SUBMITTED in the same transaction)
-        logEvent({
+        await logEvent({
           orderId,
           eventType: 'ORDER_SUBMITTED',
           oldStatus: 'draft',
@@ -917,8 +917,8 @@ exports.create = async (req, res, next) => {
         });
 
         if (zohoSyncStatus === 'failed') {
-          zohoRetryService.enqueue({ orderId, payload: zohoPayload, error: zohoError });
-          logEvent({
+          await zohoRetryService.enqueue({ orderId, payload: zohoPayload, error: zohoError });
+          await logEvent({
             orderId,
             eventType: 'ZOHO_SYNC_FAILED',
             oldStatus: finalStatus,
@@ -928,7 +928,7 @@ exports.create = async (req, res, next) => {
           });
         }
       } else {
-        logEvent({
+        await logEvent({
           orderId,
           eventType: 'ORDER_CREATED',
           newStatus: 'draft',
@@ -946,7 +946,7 @@ exports.create = async (req, res, next) => {
       return { orderId, getmedsOrderId, finalStatus, isCredit, zohoResult };
     });
 
-    const { orderId } = createOrderTxn();
+    const { orderId } = await createOrderTxn();
 
     // Trigger Notifications outside transaction
     if (!isDraft) {
@@ -957,7 +957,7 @@ exports.create = async (req, res, next) => {
         medrep_email: req.user.email
       };
 
-      notify({
+      await notify({
         orderId,
         recipientIds: [req.user.id],
         message: `Your order ${getmedsOrderId} for ${customer.name} has been submitted (${isCredit ? 'Sales Order drafted in Zoho — awaiting confirmation' : 'Waiting for Finance Payment Verification'}).`,
@@ -966,15 +966,15 @@ exports.create = async (req, res, next) => {
       });
 
       if (!isCredit) {
-        const financeIds = getUserIdsByRole('finance');
-        notify({ orderId, recipientIds: financeIds, message: `New direct patient order ${getmedsOrderId} requires payment verification.`, eventType: 'PAYMENT_VERIFICATION_REQUIRED', orderData: orderDataForNotif });
+        const financeIds = await getUserIdsByRole('finance');
+        await notify({ orderId, recipientIds: financeIds, message: `New direct patient order ${getmedsOrderId} requires payment verification.`, eventType: 'PAYMENT_VERIFICATION_REQUIRED', orderData: orderDataForNotif });
       } else {
-        const dispatchIds = getUserIdsByRole('dispatch');
-        notify({ orderId, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} is ready for dispatch.`, eventType: 'ORDER_READY_FOR_DISPATCH', orderData: orderDataForNotif });
+        const dispatchIds = await getUserIdsByRole('dispatch');
+        await notify({ orderId, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} is ready for dispatch.`, eventType: 'ORDER_READY_FOR_DISPATCH', orderData: orderDataForNotif });
       }
     }
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     res.status(201).json({ success: true, data: { order } });
   } catch (err) { next(err); }
 };
@@ -983,7 +983,7 @@ exports.create = async (req, res, next) => {
 
 exports.submit = async (req, res, next) => {
   try {
-    const order = db.prepare(`
+    const order = await db.prepare(`
       SELECT o.*, c.name as customer_name, c.type as customer_master_type, c.contact_number, c.zoho_contact_id as customer_zoho_contact_id, u.name as medrep_name, u.email as medrep_email, u.salesperson as medrep_salesperson, u.division as medrep_division, u.sub_division as medrep_sub_division
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -1001,13 +1001,13 @@ exports.submit = async (req, res, next) => {
     const gateError = checkTestCustomerGate({ name: order.customer_name, zoho_contact_id: order.customer_zoho_contact_id });
     if (gateError) return res.status(403).json({ success: false, error: gateError });
 
-    const items = db.prepare(`
+    const items = await db.prepare(`
       SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit FROM order_items oi
       LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
     `).all(order.id);
 
     // Step 1: submitted → validating → so_pending → so_created
-    const getmedsOrderId = generateOrderId();
+    const getmedsOrderId = await generateOrderId();
     const now = new Date().toISOString();
 
     // Step 2: Create Zoho SO. Done *before* opening the DB transaction
@@ -1063,7 +1063,7 @@ exports.submit = async (req, res, next) => {
       }
     }
 
-    const submitTxn = db.transaction(() => {
+    const submitTxn = db.transaction(async () => {
       // Step 3: Determine next status based on customer type.
       //
       // Sep 1, 2026: a CREDIT order now stops at 'so_created' instead of
@@ -1090,7 +1090,7 @@ exports.submit = async (req, res, next) => {
       // reading correctly from the SECOND status change onward.
       const initialZohoStatus = zohoResult ? (zohoResult.salesorder.status || 'draft') : null;
 
-      db.prepare(`
+      await db.prepare(`
         UPDATE orders SET
           getmeds_order_id = ?, customer_type = ?, status = ?, submitted_at = ?, updated_at = ?,
           zoho_so_id = ?, zoho_so_number = ?, zoho_so_status = ?, zoho_sync_status = ?
@@ -1103,12 +1103,12 @@ exports.submit = async (req, res, next) => {
         order.id);
 
       if (zohoSyncStatus === 'failed') {
-        zohoRetryService.enqueue({ orderId: order.id, payload: zohoPayload, error: zohoError });
+        await zohoRetryService.enqueue({ orderId: order.id, payload: zohoPayload, error: zohoError });
       }
 
       // Step 4: If direct patient, create payment record for Finance queue
       if (!isCredit) {
-        db.prepare(`
+        await db.prepare(`
           INSERT INTO payments (order_id, status, created_at)
           VALUES (?, 'pending', datetime('now'))
         `).run(order.id);
@@ -1116,7 +1116,7 @@ exports.submit = async (req, res, next) => {
 
       // Step 5: If credit customer, create dispatch record immediately
       if (isCredit) {
-        db.prepare(`
+        await db.prepare(`
           INSERT INTO dispatch_records (order_id, status, created_at)
           VALUES (?, 'queued', datetime('now'))
         `).run(order.id);
@@ -1129,11 +1129,11 @@ exports.submit = async (req, res, next) => {
         ? ['submitted', 'validating', 'so_pending', 'so_created']
         : ['submitted', 'validating', 'so_pending', 'so_created', 'ready_for_draft_invoice'];
 
-      const effectiveActor = resolveActor(req.user, 'medrep');
+      const effectiveActor = await resolveActor(req.user, 'medrep');
 
       let prev = 'draft';
       for (const s of statusPath) {
-        logEvent({ orderId: order.id, eventType: 'STATUS_CHANGE', oldStatus: prev, newStatus: s, actorId: effectiveActor.id, actorName: effectiveActor.name,
+        await logEvent({ orderId: order.id, eventType: 'STATUS_CHANGE', oldStatus: prev, newStatus: s, actorId: effectiveActor.id, actorName: effectiveActor.name,
           notes: s === 'so_created'
             ? (zohoResult ? `Zoho SO created: ${zohoResult.salesorder.salesorder_number}` : `Zoho sync failed, queued for automatic retry: ${zohoError}`)
             : undefined });
@@ -1144,7 +1144,7 @@ exports.submit = async (req, res, next) => {
       const orderDataForNotif = { getmeds_order_id: getmedsOrderId, customer_name: order.customer_name, status: finalStatus, medrep_email: order.medrep_email };
 
       // 6a. Notify submitting MedRep
-      notify({
+      await notify({
         orderId: order.id,
         recipientIds: [effectiveActor.id],
         message: `Your order ${getmedsOrderId} for ${order.customer_name} has been submitted (${isCredit ? 'Sales Order drafted in Zoho — awaiting confirmation' : 'Waiting for Finance Payment Verification'}).`,
@@ -1154,22 +1154,22 @@ exports.submit = async (req, res, next) => {
 
       // 6b. Route notification based on customer type
       if (order.customer_type === 'direct') {
-        const financeIds = getUserIdsByRole('finance');
-        notify({ orderId: order.id, recipientIds: financeIds, message: `New direct patient order ${getmedsOrderId} requires payment verification.`, eventType: 'PAYMENT_VERIFICATION_REQUIRED', orderData: orderDataForNotif });
+        const financeIds = await getUserIdsByRole('finance');
+        await notify({ orderId: order.id, recipientIds: financeIds, message: `New direct patient order ${getmedsOrderId} requires payment verification.`, eventType: 'PAYMENT_VERIFICATION_REQUIRED', orderData: orderDataForNotif });
       } else {
         // Sep 1, 2026: Dispatch is told the order exists, not that it's
         // ready — it isn't until Zoho confirms the Sales Order. The
         // ORDER_READY_FOR_DISPATCH notification now fires from the
         // salesorder.confirmed webhook instead.
-        const dispatchIds = getUserIdsByRole('dispatch');
-        notify({ orderId: order.id, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} drafted in Zoho — will reach dispatch once Finance confirms the Sales Order.`, eventType: 'ORDER_SUBMITTED', orderData: orderDataForNotif });
+        const dispatchIds = await getUserIdsByRole('dispatch');
+        await notify({ orderId: order.id, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} drafted in Zoho — will reach dispatch once Finance confirms the Sales Order.`, eventType: 'ORDER_SUBMITTED', orderData: orderDataForNotif });
       }
 
       return { getmedsOrderId, finalStatus, zohoResult, zohoSyncStatus };
     });
 
-    const result = submitTxn();
-    const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    const result = await submitTxn();
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     res.json({
       success: true,
       data: {
@@ -1183,29 +1183,29 @@ exports.submit = async (req, res, next) => {
 
 // ─── EXCEPTION / ON HOLD ──────────────────────────────────────────────────────
 
-exports.setException = (req, res, next) => {
+exports.setException = async (req, res, next) => {
   try {
     const { reason, status } = req.body;
     const targetStatus = status === 'on_hold' ? 'on_hold' : 'exception';
-    const effectiveActor = resolveActor(req.user, 'management');
+    const effectiveActor = await resolveActor(req.user, 'management');
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     if (!stateMachine.canTransition(order.status, targetStatus)) {
       return res.status(409).json({ success: false, error: { code: 'INVALID_TRANSITION', message: `Cannot move from ${order.status} to ${targetStatus}` } });
     }
 
-    const txn = db.transaction(() => {
-      db.prepare('UPDATE orders SET status = ?, exception_reason = ?, updated_at = datetime(\'now\') WHERE id = ?')
+    const txn = db.transaction(async () => {
+      await db.prepare('UPDATE orders SET status = ?, exception_reason = ?, updated_at = datetime(\'now\') WHERE id = ?')
         .run(targetStatus, reason || null, order.id);
 
-      logEvent({ orderId: order.id, eventType: 'EXCEPTION_SET', oldStatus: order.status, newStatus: targetStatus, actorId: effectiveActor.id, actorName: effectiveActor.name, notes: reason });
+      await logEvent({ orderId: order.id, eventType: 'EXCEPTION_SET', oldStatus: order.status, newStatus: targetStatus, actorId: effectiveActor.id, actorName: effectiveActor.name, notes: reason });
     });
-    txn();
+    await txn();
 
     const medrepIds = [order.medrep_id];
-    const mgmtIds = getUserIdsByRole('management');
-    notify({ orderId: order.id, recipientIds: [...medrepIds, ...mgmtIds], message: `Order ${order.getmeds_order_id} is now ${targetStatus}. Reason: ${reason || 'None provided'}`, eventType: 'ORDER_EXCEPTION', orderData: order });
+    const mgmtIds = await getUserIdsByRole('management');
+    await notify({ orderId: order.id, recipientIds: [...medrepIds, ...mgmtIds], message: `Order ${order.getmeds_order_id} is now ${targetStatus}. Reason: ${reason || 'None provided'}`, eventType: 'ORDER_EXCEPTION', orderData: order });
 
     res.json({ success: true, data: { status: targetStatus } });
   } catch (err) { next(err); }
@@ -1236,9 +1236,9 @@ exports.setException = (req, res, next) => {
 // recomputes total_amount. Logs one ORDER_ITEMS_EDITED audit entry with a
 // before/after summary so it's obvious from the trail alone what changed
 // and why, without needing to diff raw item rows.
-exports.updateItems = (req, res, next) => {
+exports.updateItems = async (req, res, next) => {
   try {
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
@@ -1279,7 +1279,7 @@ exports.updateItems = (req, res, next) => {
       // not exist. Zoho rejects an inactive item on a Sales Order
       // ("Inactive items cannot be added to the sales order"), so this is the
       // same refusal, just made early and in words that explain it.
-      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
+      const product = await db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
       if (!product) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Product ${item.product_id} not found` } });
       if (!product.is_active) {
         return res.status(400).json({
@@ -1316,24 +1316,24 @@ exports.updateItems = (req, res, next) => {
       });
     }
 
-    const oldItemsSummary = db.prepare(`
+    const oldItemsSummary = (await db.prepare(`
       SELECT oi.quantity, p.name FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
-    `).all(order.id).map((r) => `${r.quantity}x ${r.name || 'Unknown product'}`).join(', ') || 'none';
+    `).all(order.id)).map((r) => `${r.quantity}x ${r.name || 'Unknown product'}`).join(', ') || 'none';
     const newItemsSummary = resolvedItems.map((it) => `${it.quantity}x ${it.name}`).join(', ');
 
     const now = new Date().toISOString();
-    const txn = db.transaction(() => {
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(order.id);
+    const txn = db.transaction(async () => {
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(order.id);
       const insertItem = db.prepare(`
         INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal, discount_amount, tax_percent, tax_label, line_total)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const it of resolvedItems) {
-        insertItem.run(order.id, it.product_id, it.quantity, it.unit_price, it.subtotal, it.discount_amount, it.tax_percent, it.tax_label, it.line_total);
+        await insertItem.run(order.id, it.product_id, it.quantity, it.unit_price, it.subtotal, it.discount_amount, it.tax_percent, it.tax_label, it.line_total);
       }
-      db.prepare('UPDATE orders SET total_amount = ?, updated_at = ? WHERE id = ?').run(total_amount, now, order.id);
+      await db.prepare('UPDATE orders SET total_amount = ?, updated_at = ? WHERE id = ?').run(total_amount, now, order.id);
 
-      logEvent({
+      await logEvent({
         orderId: order.id,
         eventType: 'ORDER_ITEMS_EDITED',
         oldStatus: order.status,
@@ -1344,10 +1344,10 @@ exports.updateItems = (req, res, next) => {
         metadata: { oldItemsSummary, newItemsSummary, total_amount }
       });
     });
-    txn();
+    await txn();
 
-    const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
-    const updatedItems = db.prepare(`
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const updatedItems = await db.prepare(`
       SELECT oi.*, p.name as product_name, p.sku, p.unit
       FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
     `).all(order.id);

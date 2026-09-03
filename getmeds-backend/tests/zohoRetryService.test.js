@@ -27,66 +27,66 @@ describe('zohoRetryService', () => {
   let productId;
   const createdOrderIds = [];
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // Clean up any stale test records from previous runs
-    const staleOrders = db.prepare(`
+    const staleOrders = await db.prepare(`
       SELECT id FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE name LIKE 'ZOHO-RETRY%') OR getmeds_order_id LIKE 'GM-TESTQ%'
     `).all();
     for (const o of staleOrders) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(o.id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(o.id);
     }
-    db.prepare(`DELETE FROM products WHERE sku = 'ZOHORETRY-SKU-001'`).run();
-    db.prepare(`DELETE FROM customers WHERE name LIKE 'ZOHO-RETRY%'`).run();
+    await db.prepare(`DELETE FROM products WHERE sku = 'ZOHORETRY-SKU-001'`).run();
+    await db.prepare(`DELETE FROM customers WHERE name LIKE 'ZOHO-RETRY%'`).run();
 
-    const medrep = db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
+    const medrep = await db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
     if (!medrep) throw new Error('Expected seeded medrep@getmeds.ph to exist — run `npm run setup` first.');
     medrepId = medrep.id;
 
-    customerId = db.prepare(
+    customerId = (await db.prepare(
       `INSERT INTO customers (name, type, credit_limit, is_active) VALUES (?, 'direct', 0, 1)`
-    ).run('ZOHO-RETRY-TEST Customer').lastInsertRowid;
+    ).run('ZOHO-RETRY-TEST Customer')).lastInsertRowid;
 
-    productId = db.prepare(
+    productId = (await db.prepare(
       `INSERT INTO products (name, sku, unit_price, unit, stock, is_active) VALUES (?, ?, ?, 'tab', 500, 1)`
-    ).run('ZOHO-RETRY-TEST Product', 'ZOHORETRY-SKU-001', 10).lastInsertRowid;
+    ).run('ZOHO-RETRY-TEST Product', 'ZOHORETRY-SKU-001', 10)).lastInsertRowid;
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of createdOrderIds) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
-    if (productId) db.prepare('DELETE FROM products WHERE id = ?').run(productId);
-    if (customerId) db.prepare('DELETE FROM customers WHERE id = ?').run(customerId);
+    if (productId) await db.prepare('DELETE FROM products WHERE id = ?').run(productId);
+    if (customerId) await db.prepare('DELETE FROM customers WHERE id = ?').run(customerId);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // Each test enqueues its own row and drives processQueue({force:true}),
     // which (by design, to let an admin "retry everything now") ignores
     // next_attempt_at entirely — so a prior test's still-pending row would
     // otherwise get swept up in a later test's forced pass and steal its
     // mocked zoho.createSalesOrder call. Start every test with a clean queue.
-    db.prepare('DELETE FROM zoho_sync_queue').run();
+    await db.prepare('DELETE FROM zoho_sync_queue').run();
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
   });
 
-  function makeOrder(getmedsOrderId) {
+  async function makeOrder(getmedsOrderId) {
     const now = new Date().toISOString();
-    const result = db.prepare(`
+    const result = await db.prepare(`
       INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
         delivery_address, zoho_sync_status, created_at, submitted_at, updated_at)
       VALUES (?, ?, ?, 'so_pending', 'direct', 20, '1 Retry Test St', 'failed', ?, ?, ?)
@@ -95,11 +95,11 @@ describe('zohoRetryService', () => {
     return result.lastInsertRowid;
   }
 
-  test('enqueue() + listQueue(): a queued row is visible with status=pending, attempts=0', () => {
-    const orderId = makeOrder('GM-TESTQ-0001');
-    zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-0001' }, error: 'boom' });
+  test('enqueue() + listQueue(): a queued row is visible with status=pending, attempts=0', async () => {
+    const orderId = await makeOrder('GM-TESTQ-0001');
+    await zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-0001' }, error: 'boom' });
 
-    const queue = zohoRetryService.listQueue();
+    const queue = await zohoRetryService.listQueue();
     const row = queue.find((q) => q.order_id === orderId);
     expect(row).toBeDefined();
     expect(row.status).toBe('pending');
@@ -109,8 +109,8 @@ describe('zohoRetryService', () => {
   });
 
   test('processQueue({force:true}): a successful retry backfills the order and marks the row succeeded', async () => {
-    const orderId = makeOrder('GM-TESTQ-0002');
-    zohoRetryService.enqueue({
+    const orderId = await makeOrder('GM-TESTQ-0002');
+    await zohoRetryService.enqueue({
       orderId,
       payload: {
         getmeds_order_id: 'GM-TESTQ-0002',
@@ -127,36 +127,36 @@ describe('zohoRetryService', () => {
     const result = results.find((r) => r.orderId === orderId);
     expect(result.outcome).toBe('succeeded');
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     expect(order.zoho_sync_status).toBe('synced');
     expect(order.zoho_so_id).toMatch(/^MOCK-SO-\d{6}$/);
 
-    const queueRow = db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
+    const queueRow = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
     expect(queueRow.status).toBe('succeeded');
 
-    const recovered = db.prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SYNC_RECOVERED'").all(orderId);
+    const recovered = await db.prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SYNC_RECOVERED'").all(orderId);
     expect(recovered.length).toBe(1);
   });
 
   test('processQueue(): without {force:true}, a row whose next_attempt_at is in the future is skipped', async () => {
-    const orderId = makeOrder('GM-TESTQ-0003');
-    zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-0003' }, error: 'down' });
+    const orderId = await makeOrder('GM-TESTQ-0003');
+    await zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-0003' }, error: 'down' });
 
     const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    db.prepare('UPDATE zoho_sync_queue SET next_attempt_at = ? WHERE order_id = ?').run(future, orderId);
+    await db.prepare('UPDATE zoho_sync_queue SET next_attempt_at = ? WHERE order_id = ?').run(future, orderId);
 
     const spy = jest.spyOn(zoho, 'createSalesOrder');
     const results = await zohoRetryService.processQueue(); // no force
     expect(spy).not.toHaveBeenCalled();
     expect(results.find((r) => r.orderId === orderId)).toBeUndefined();
 
-    const queueRow = db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
+    const queueRow = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
     expect(queueRow.status).toBe('pending'); // untouched
   });
 
   test('processQueue({force:true}): a retry that fails again increments attempts and schedules backoff', async () => {
-    const orderId = makeOrder('GM-TESTQ-0004');
-    zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-0004', items: [] }, error: 'down' });
+    const orderId = await makeOrder('GM-TESTQ-0004');
+    await zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-0004', items: [] }, error: 'down' });
 
     jest.spyOn(zoho, 'createSalesOrder').mockRejectedValueOnce(new Error('still down'));
     const results = await zohoRetryService.processQueue({ force: true });
@@ -164,7 +164,7 @@ describe('zohoRetryService', () => {
 
     expect(result.outcome).toBe('retry_scheduled');
 
-    const queueRow = db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
+    const queueRow = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
     expect(queueRow.status).toBe('pending');
     expect(queueRow.attempts).toBe(1);
     expect(queueRow.last_error).toBe('still down');
@@ -172,8 +172,8 @@ describe('zohoRetryService', () => {
   });
 
   test('processQueue({force:true}): after MAX_ATTEMPTS consecutive failures, the row is marked failed_permanent', async () => {
-    const orderId = makeOrder('GM-TESTQ-0005');
-    zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-0005', items: [] }, error: 'down' });
+    const orderId = await makeOrder('GM-TESTQ-0005');
+    await zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-0005', items: [] }, error: 'down' });
 
     for (let i = 0; i < zohoRetryService.MAX_ATTEMPTS; i++) {
       jest.spyOn(zoho, 'createSalesOrder').mockRejectedValueOnce(new Error(`still down #${i + 1}`));
@@ -181,11 +181,11 @@ describe('zohoRetryService', () => {
       await zohoRetryService.processQueue({ force: true });
     }
 
-    const queueRow = db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
+    const queueRow = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
     expect(queueRow.status).toBe('failed_permanent');
     expect(queueRow.attempts).toBe(zohoRetryService.MAX_ATTEMPTS);
 
-    const permanentEvents = db.prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SYNC_FAILED_PERMANENT'").all(orderId);
+    const permanentEvents = await db.prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SYNC_FAILED_PERMANENT'").all(orderId);
     expect(permanentEvents.length).toBe(1);
 
     // A failed_permanent row is no longer picked up by future passes.
@@ -201,31 +201,31 @@ describe('admin.controller — Zoho queue endpoints', () => {
   let customerId;
   const createdOrderIds = [];
 
-  beforeAll(() => {
-    const medrep = db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
+  beforeAll(async () => {
+    const medrep = await db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
     medrepId = medrep.id;
-    customerId = db.prepare(
+    customerId = (await db.prepare(
       `INSERT INTO customers (name, type, credit_limit, is_active) VALUES (?, 'direct', 0, 1)`
-    ).run('ZOHO-ADMIN-TEST Customer').lastInsertRowid;
+    ).run('ZOHO-ADMIN-TEST Customer')).lastInsertRowid;
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
   });
 
-  test('getZohoQueue: returns queue rows plus a status summary', () => {
+  test('getZohoQueue: returns queue rows plus a status summary', async () => {
     const now = new Date().toISOString();
-    const orderId = db.prepare(`
+    const orderId = (await db.prepare(`
       INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
         delivery_address, zoho_sync_status, created_at, updated_at)
       VALUES ('GM-TESTQ-ADMIN1', ?, ?, 'so_pending', 'direct', 20, '1 Admin Test St', 'failed', ?, ?)
-    `).run(customerId, medrepId, now, now).lastInsertRowid;
+    `).run(customerId, medrepId, now, now)).lastInsertRowid;
     createdOrderIds.push(orderId);
-    zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-ADMIN1' }, error: 'down' });
+    await zohoRetryService.enqueue({ orderId, payload: { getmeds_order_id: 'GM-TESTQ-ADMIN1' }, error: 'down' });
 
     const req = {};
     const res = makeRes();
-    adminController.getZohoQueue(req, res, jest.fn());
+    await adminController.getZohoQueue(req, res, jest.fn());
 
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
@@ -235,13 +235,13 @@ describe('admin.controller — Zoho queue endpoints', () => {
 
   test('retryZohoQueue: triggers an immediate forced pass and reports results', async () => {
     const now = new Date().toISOString();
-    const orderId = db.prepare(`
+    const orderId = (await db.prepare(`
       INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
         delivery_address, zoho_sync_status, created_at, updated_at)
       VALUES ('GM-TESTQ-ADMIN2', ?, ?, 'so_pending', 'direct', 20, '1 Admin Test St', 'failed', ?, ?)
-    `).run(customerId, medrepId, now, now).lastInsertRowid;
+    `).run(customerId, medrepId, now, now)).lastInsertRowid;
     createdOrderIds.push(orderId);
-    zohoRetryService.enqueue({
+    await zohoRetryService.enqueue({
       orderId,
       payload: { getmeds_order_id: 'GM-TESTQ-ADMIN2', customer_name: 'x', total_amount: 20, delivery_address: 'y', items: [] },
       error: 'down'
@@ -256,18 +256,18 @@ describe('admin.controller — Zoho queue endpoints', () => {
     expect(res.body.data.results.some((r) => r.orderId === orderId && r.outcome === 'succeeded')).toBe(true);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of createdOrderIds) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
     if (customerId) {
-      db.prepare('DELETE FROM customers WHERE id = ?').run(customerId);
+      await db.prepare('DELETE FROM customers WHERE id = ?').run(customerId);
     }
   });
 });

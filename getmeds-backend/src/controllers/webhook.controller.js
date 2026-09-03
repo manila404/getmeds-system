@@ -114,9 +114,9 @@ function parseWebhookPayload(req) {
 /**
  * Finds order in database by zoho_so_id or getmeds_order_id.
  */
-function findOrder(identifier) {
+async function findOrder(identifier) {
   if (!identifier) return null;
-  return db.prepare(`
+  return await db.prepare(`
     SELECT o.*, c.name as customer_name, c.type as customer_type_detail,
            u.id as medrep_user_id, u.name as medrep_name, u.email as medrep_email
     FROM orders o
@@ -155,7 +155,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
       });
     }
 
-    const order = findOrder(identifier) || (zohoSoId ? findOrder(zohoSoId) : null) || (refNumber ? findOrder(refNumber) : null);
+    const order = (await findOrder(identifier)) || (zohoSoId ? await findOrder(zohoSoId) : null) || (refNumber ? await findOrder(refNumber) : null);
 
     if (!order) {
       console.warn(`[ZOHO_WEBHOOK] No local order found matching identifier: ${identifier}`);
@@ -281,17 +281,17 @@ exports.handleZohoWebhook = async (req, res, next) => {
       const paymentRef = payment?.payment_number || payment?.reference_number || payment?.payment_id || 'ZOHO-PAYMENT';
       const paymentDate = payment?.date || now.split('T')[0];
 
-      db.transaction(() => {
+      await db.transaction(async () => {
         // Upsert payment record
-        const existingPayment = db.prepare('SELECT id FROM payments WHERE order_id = ?').get(order.id);
+        const existingPayment = await db.prepare('SELECT id FROM payments WHERE order_id = ?').get(order.id);
         if (existingPayment) {
-          db.prepare(`
+          await db.prepare(`
             UPDATE payments
             SET status = 'verified', payment_reference = ?, amount = ?, payment_date = ?, notes = 'Verified via Zoho Webhook', verified_at = ?
             WHERE order_id = ?
           `).run(paymentRef, paymentAmount, paymentDate, now, order.id);
         } else {
-          db.prepare(`
+          await db.prepare(`
             INSERT INTO payments (order_id, status, payment_reference, amount, payment_date, notes, verified_at, created_at)
             VALUES (?, 'verified', ?, ?, ?, 'Verified via Zoho Webhook', ?, ?)
           `).run(order.id, paymentRef, paymentAmount, paymentDate, now, now);
@@ -322,7 +322,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // on payment terms: it can land at any point and the order's stage is
         // unaffected either way.
 
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_PAYMENT_VERIFIED',
           oldStatus: previousStatus,
@@ -334,9 +334,9 @@ exports.handleZohoWebhook = async (req, res, next) => {
         });
 
         // Notifications
-        const dispatchUserIds = getUserIdsByRole('dispatch', 'finance');
+        const dispatchUserIds = await getUserIdsByRole('dispatch', 'finance');
         const recipients = Array.from(new Set([order.medrep_user_id, ...dispatchUserIds].filter(Boolean)));
-        notify({
+        await notify({
           orderId: order.id,
           recipientIds: recipients,
           message: `Payment for ${order.getmeds_order_id} was verified in Zoho. Order status: ${newStatus}.`,
@@ -346,7 +346,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
 
         // Was payment the last of the two? If the order has already shipped,
         // this closes it out.
-        const completion = evaluateCompletion({
+        const completion = await evaluateCompletion({
           orderId: order.id,
           currentStatus: newStatus,
           actorName: 'Zoho Webhook',
@@ -373,7 +373,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
       const zohoInvoiceNumber = invoice?.invoice_number || order.zoho_invoice_number;
       const zohoInvoiceId = invoice?.invoice_id || order.zoho_invoice_id;
 
-      db.transaction(() => {
+      await db.transaction(async () => {
         // Only ever moves an order FORWARD into invoice_sent from a state
         // that precedes it. An order that has already been packed or shipped
         // (the dispatch-first ordering, where the invoice is raised after the
@@ -383,18 +383,18 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // invoice number is still recorded either way.
         const preInvoice = ['so_created', 'ready_for_draft_invoice', 'ready_for_invoice_sent'];
         if (preInvoice.includes(order.status)) {
-          const moved = advanceTo(order.id, order.status, 'ready_for_dispatch', now);
+          const moved = await advanceTo(order.id, order.status, 'ready_for_dispatch', now);
           if (moved.changed) newStatus = moved.status;
         }
 
-        db.prepare(`
+        await db.prepare(`
           UPDATE orders
           SET zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number),
               updated_at = ?
           WHERE id = ?
         `).run(zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
 
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_INVOICE_SENT',
           oldStatus: previousStatus,
@@ -405,8 +405,8 @@ exports.handleZohoWebhook = async (req, res, next) => {
           metadata: { zohoInvoiceId, zohoInvoiceNumber, webhook: rawEvent }
         });
 
-        const recipients = getUserIdsByRole('finance', 'dispatch');
-        notify({
+        const recipients = await getUserIdsByRole('finance', 'dispatch');
+        await notify({
           orderId: order.id,
           recipientIds: Array.from(new Set([order.medrep_user_id, ...recipients].filter(Boolean))),
           message: `Invoice ${zohoInvoiceNumber || ''} for ${order.getmeds_order_id} has been sent to the customer.`,
@@ -427,7 +427,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
       const zohoInvoiceNumber = invoice?.invoice_number || order.zoho_invoice_number;
       const zohoInvoiceId = invoice?.invoice_id || order.zoho_invoice_id;
 
-      db.transaction(() => {
+      await db.transaction(async () => {
         // Aug 31, 2026 (3): 'tracking_shared' added — in Getmeds' actual
         // fulfillment order (dispatch happens BEFORE invoicing, confirmed
         // live), an order sits at 'tracking_shared' once shipped (see the
@@ -458,18 +458,18 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // the list keeps the intent explicit rather than relying on that.
         const preInvoice = ['so_created', 'ready_for_finance_verified', 'ready_for_draft_invoice', 'tracking_shared'];
         if (preInvoice.includes(order.status)) {
-          const moved = advanceTo(order.id, order.status, 'ready_for_invoice_sent', now);
+          const moved = await advanceTo(order.id, order.status, 'ready_for_invoice_sent', now);
           if (moved.changed) newStatus = moved.status;
         }
 
-        db.prepare(`
+        await db.prepare(`
           UPDATE orders
           SET zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number),
               updated_at = ?
           WHERE id = ?
         `).run(zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
 
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_INVOICE_DRAFTED',
           oldStatus: previousStatus,
@@ -492,8 +492,8 @@ exports.handleZohoWebhook = async (req, res, next) => {
           metadata: { zohoInvoiceId, zohoInvoiceNumber, financeVerificationSkipped: previousStatus === 'ready_for_finance_verified' }
         });
 
-        const financeIds = getUserIdsByRole('finance');
-        notify({
+        const financeIds = await getUserIdsByRole('finance');
+        await notify({
           orderId: order.id,
           recipientIds: Array.from(new Set([order.medrep_user_id, ...financeIds].filter(Boolean))),
           message: `Zoho Invoice ${zohoInvoiceNumber || ''} drafted for ${order.getmeds_order_id}. Awaiting payment confirmation in Zoho.`,
@@ -510,7 +510,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
       const zohoSoNumber = salesorder?.salesorder_number || order.zoho_so_number;
       const soId = salesorder?.salesorder_id || order.zoho_so_id;
 
-      db.transaction(() => {
+      await db.transaction(async () => {
         // Sep 1, 2026: 'so_created' added to this list, and it matters more
         // than it looks. Submit used to run an order straight through to
         // waiting_for_payment (direct) or ready_for_dispatch (credit), so by
@@ -528,18 +528,18 @@ exports.handleZohoWebhook = async (req, res, next) => {
           // Sep 1, 2026 (8): confirming the Sales Order now hands the order
           // to Finance for account verification, not straight to invoicing.
           const target = 'ready_for_finance_verified';
-          const moved = advanceTo(order.id, order.status, target, now);
+          const moved = await advanceTo(order.id, order.status, target, now);
           if (moved.changed) newStatus = moved.status;
         }
 
-        db.prepare(`
+        await db.prepare(`
           UPDATE orders
           SET zoho_so_id = COALESCE(?, zoho_so_id), zoho_so_number = COALESCE(?, zoho_so_number),
               zoho_so_status = 'confirmed', zoho_sync_status = 'synced', updated_at = ?
           WHERE id = ?
         `).run(soId || null, zohoSoNumber || null, now, order.id);
 
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_SO_CONFIRMED',
           oldStatus: previousStatus,
@@ -550,7 +550,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
           metadata: { zohoSoId: soId, zohoSoNumber }
         });
 
-        notify({
+        await notify({
           orderId: order.id,
           recipientIds: [order.medrep_user_id],
           message: `Zoho Sales Order ${zohoSoNumber || ''} confirmed for ${order.getmeds_order_id}.`,
@@ -574,16 +574,16 @@ exports.handleZohoWebhook = async (req, res, next) => {
       const trackingNumber = shipment?.tracking_number || shipment?.shipment_number || null;
       const courier = shipment?.carrier || shipment?.delivery_method || shipment?.service_provider || null;
 
-      db.transaction(() => {
-        const existingDispatch = db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
+      await db.transaction(async () => {
+        const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
         if (existingDispatch) {
-          db.prepare(`
+          await db.prepare(`
             UPDATE dispatch_records
             SET status = 'dispatched', courier = COALESCE(?, courier), tracking_number = COALESCE(?, tracking_number), dispatched_at = COALESCE(dispatched_at, ?)
             WHERE order_id = ?
           `).run(courier, trackingNumber, now, order.id);
         } else {
-          db.prepare(`
+          await db.prepare(`
             INSERT INTO dispatch_records (order_id, status, tracking_number, courier, dispatched_at, created_at)
             VALUES (?, 'dispatched', ?, ?, ?, ?)
           `).run(order.id, trackingNumber, courier, now, now);
@@ -602,11 +602,11 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // arrives here sitting at 'ready_for_dispatch', and would otherwise be
         // unrecognised as a valid pre-shipment state.
         if (['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'].includes(order.status)) {
-          const moved = advanceTo(order.id, order.status, 'dispatched', now);
+          const moved = await advanceTo(order.id, order.status, 'dispatched', now);
           if (moved.changed) newStatus = moved.status;
         }
 
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_DISPATCHED',
           oldStatus: previousStatus,
@@ -632,10 +632,10 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // once tracking details are present, and leave it there.
         if (trackingNumber && newStatus === 'dispatched') {
           const dispatchedStatus = newStatus;
-          const moved = advanceTo(order.id, dispatchedStatus, 'tracking_shared', now);
+          const moved = await advanceTo(order.id, dispatchedStatus, 'tracking_shared', now);
           if (moved.changed) {
             newStatus = moved.status;
-            logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus, actorId: null, actorName: 'Zoho Webhook', notes: `${courier || 'Courier'}: ${trackingNumber}` });
+            await logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus, actorId: null, actorName: 'Zoho Webhook', notes: `${courier || 'Courier'}: ${trackingNumber}` });
           }
         }
 
@@ -645,7 +645,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // shipping is the last of the two and closes the order out here.
         // Same shared function the payment branch calls, so the two arrival
         // orders can't diverge.
-        const completion = evaluateCompletion({
+        const completion = await evaluateCompletion({
           orderId: order.id,
           currentStatus: newStatus,
           actorName: 'Zoho Webhook',
@@ -653,7 +653,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
         });
         if (completion.completed) newStatus = 'completed';
 
-        notify({
+        await notify({
           orderId: order.id,
           recipientIds: [order.medrep_user_id],
           message: trackingNumber
@@ -673,12 +673,12 @@ exports.handleZohoWebhook = async (req, res, next) => {
     // Sales Order (items picked & packed, not yet shipped). Visibility
     // checkpoint only, same pattern as Invoice Drafted for Finance.
     else if (isPackageEvent) {
-      db.transaction(() => {
-        const existingDispatch = db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
+      await db.transaction(async () => {
+        const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
         if (existingDispatch) {
-          db.prepare(`UPDATE dispatch_records SET status = 'packing' WHERE order_id = ?`).run(order.id);
+          await db.prepare(`UPDATE dispatch_records SET status = 'packing' WHERE order_id = ?`).run(order.id);
         } else {
-          db.prepare(`INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'packing', ?)`).run(order.id, now);
+          await db.prepare(`INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'packing', ?)`).run(order.id, now);
         }
 
         // Aug 31, 2026 (5): 'ready_for_invoice_sent' added — per the confirmed
@@ -693,11 +693,11 @@ exports.handleZohoWebhook = async (req, res, next) => {
         // the warehouse starts packing it, and it would otherwise stall here
         // exactly as the note above describes.
         if (['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch'].includes(order.status)) {
-          const moved = advanceTo(order.id, order.status, 'picking_packing', now);
+          const moved = await advanceTo(order.id, order.status, 'picking_packing', now);
           if (moved.changed) newStatus = moved.status;
         }
 
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_PACKAGE_CREATED',
           oldStatus: previousStatus,
@@ -708,7 +708,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
           metadata: { rawEvent }
         });
 
-        notify({
+        await notify({
           orderId: order.id,
           recipientIds: [order.medrep_user_id],
           message: `Order ${order.getmeds_order_id} is being picked & packed (Package created in Zoho).`,
@@ -752,12 +752,12 @@ exports.handleZohoWebhook = async (req, res, next) => {
         const notifyVerb = isSalesOrderDeleted ? 'deleted' : 'cancelled';
         let refused = false;
 
-        db.transaction(() => {
+        await db.transaction(async () => {
           // Cancellation can arrive from almost anywhere in the pipeline, so
           // it goes through setOrderStatus rather than advanceTo — if the
           // state machine refuses it, that's a gap in the map worth seeing in
           // the log, not something to silently skip.
-          const moved = setOrderStatus(order.id, order.status, newStatus, now);
+          const moved = await setOrderStatus(order.id, order.status, newStatus, now);
           if (!moved.changed) {
             newStatus = moved.status;
             refused = moved.refused;
@@ -775,7 +775,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
               ? `${baseNote} Order status kept as "${order.status}" — it had already finished, and removing the Zoho record does not undo that.`
               : baseNote;
 
-          logEvent({
+          await logEvent({
             orderId: order.id,
             eventType,
             oldStatus: previousStatus,
@@ -786,9 +786,9 @@ exports.handleZohoWebhook = async (req, res, next) => {
             metadata: { rawEvent, refused }
           });
 
-          const adminUserIds = getUserIdsByRole('admin', 'management');
+          const adminUserIds = await getUserIdsByRole('admin', 'management');
           const recipients = Array.from(new Set([order.medrep_user_id, ...adminUserIds].filter(Boolean)));
-          notify({
+          await notify({
             orderId: order.id,
             recipientIds: recipients,
             message: refused
@@ -841,7 +841,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
       }
 
       if (!liveSalesOrder) {
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_SO_EDITED',
           oldStatus: previousStatus,
@@ -876,21 +876,21 @@ exports.handleZohoWebhook = async (req, res, next) => {
           ? `Sales Order ${liveZohoStatus === 'confirmed' ? 'confirmed' : 'status changed'} in Zoho (${previousZohoStatus} → ${liveZohoStatus})`
           : null;
 
-        db.transaction(() => {
+        await db.transaction(async () => {
           if (changes.length) {
             const setClause = changes.map((c) => `${c.localColumn} = ?`).join(', ');
             const values = changes.map((c) => c.newValue);
-            db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`).run(...values, now, order.id);
+            await db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`).run(...values, now, order.id);
           }
           if (liveZohoStatus && liveZohoStatus !== previousZohoStatus) {
-            db.prepare('UPDATE orders SET zoho_so_status = ?, updated_at = ? WHERE id = ?').run(liveZohoStatus, now, order.id);
+            await db.prepare('UPDATE orders SET zoho_so_status = ?, updated_at = ? WHERE id = ?').run(liveZohoStatus, now, order.id);
           }
 
           const fieldNote = changes.length ? `Sales Order edited in Zoho — ${summarizeChanges(changes)}` : null;
           const notes = [statusNote, fieldNote].filter(Boolean).join('; ') ||
             'Sales Order edited in Zoho (no change detected in the fields this app tracks — e.g. an item, address, or tax edit; check Zoho for details)';
 
-          logEvent({
+          await logEvent({
             orderId: order.id,
             eventType: zohoStatusChanged ? 'ZOHO_SO_STATUS_CHANGED' : 'ZOHO_SO_EDITED',
             oldStatus: previousStatus,
@@ -903,9 +903,9 @@ exports.handleZohoWebhook = async (req, res, next) => {
         })();
 
         if (changes.length || zohoStatusChanged) {
-          const financeIds = getUserIdsByRole('finance');
+          const financeIds = await getUserIdsByRole('finance');
           const message = [statusNote, changes.length ? summarizeChanges(changes) : null].filter(Boolean).join(' — ');
-          notify({
+          await notify({
             orderId: order.id,
             recipientIds: Array.from(new Set([order.medrep_user_id, ...financeIds].filter(Boolean))),
             message: `Order ${order.getmeds_order_id} — ${message}`,
@@ -920,7 +920,7 @@ exports.handleZohoWebhook = async (req, res, next) => {
       }
     } else {
       // General Zoho event / sync update
-      logEvent({
+      await logEvent({
         orderId: order.id,
         eventType: 'ZOHO_EVENT_RECEIVED',
         oldStatus: previousStatus,

@@ -30,19 +30,19 @@ describe('order id generation is collision-safe', () => {
     delete process.env.ZOHO_TEST_CUSTOMER_IDS;
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of createdOrderIds) {
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
     delete process.env.ZOHO_DRY_RUN;
     delete process.env.ZOHO_TEST_CUSTOMER_ID;
     delete process.env.ZOHO_TEST_CUSTOMER_IDS;
   });
 
-  test('successive ids are distinct and increment, with no order inserted between them', () => {
-    const a = generateOrderId();
-    const b = generateOrderId();
-    const c = generateOrderId();
+  test('successive ids are distinct and increment, with no order inserted between them', async () => {
+    const a = await generateOrderId();
+    const b = await generateOrderId();
+    const c = await generateOrderId();
 
     expect(new Set([a, b, c]).size).toBe(3);
     expect(seqOf(b)).toBe(seqOf(a) + 1);
@@ -50,51 +50,51 @@ describe('order id generation is collision-safe', () => {
     expect(a.startsWith(`GM-${today()}-`)).toBe(true);
   });
 
-  test('the number is four digits, zero padded', () => {
-    expect(generateOrderId()).toMatch(new RegExp(`^GM-${today()}-\\d{4}$`));
+  test('the number is four digits, zero padded', async () => {
+    expect(await generateOrderId()).toMatch(new RegExp(`^GM-${today()}-\\d{4}$`));
   });
 
-  test('a reserved number is never reissued, even when its order is never created', () => {
+  test('a reserved number is never reissued, even when its order is never created', async () => {
     // The Zoho call rejected the order, or the request died. The number is
     // spent regardless — a gap in the sequence is fine, a duplicate is not.
-    const abandoned = generateOrderId();
-    const next = generateOrderId();
+    const abandoned = await generateOrderId();
+    const next = await generateOrderId();
     expect(next).not.toBe(abandoned);
     expect(seqOf(next)).toBe(seqOf(abandoned) + 1);
   });
 
-  test('each tier prefix counts independently', () => {
-    const real = generateOrderId();
+  test('each tier prefix counts independently', async () => {
+    const real = await generateOrderId();
     process.env.ZOHO_DRY_RUN = 'true';
-    const dry = generateOrderId();
+    const dry = await generateOrderId();
 
     expect(real.startsWith('GM-')).toBe(true);
     expect(dry.startsWith(`DryGM-${today()}-`)).toBe(true);
     // Separate counters, so a dry run cannot burn real order numbers.
     delete process.env.ZOHO_DRY_RUN;
-    expect(seqOf(generateOrderId())).toBe(seqOf(real) + 1);
+    expect(seqOf(await generateOrderId())).toBe(seqOf(real) + 1);
   });
 
-  test('picks up from orders already on the database rather than restarting at 0001', () => {
+  test('picks up from orders already on the database rather than restarting at 0001', async () => {
     // The case that matters on deploy day: an existing database has orders
     // for today but no counter row yet. Starting from zero would collide
     // with rows that already exist.
     process.env.ZOHO_TEST_CUSTOMER_ID = 'FIXTURE-CONTACT-1';
     const prefix = `TestGM-${today()}`;
 
-    const customer = db.prepare('SELECT id FROM customers LIMIT 1').get();
-    const medrep = db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
+    const customer = await db.prepare('SELECT id FROM customers LIMIT 1').get();
+    const medrep = await db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
 
-    db.prepare('DELETE FROM order_id_sequences WHERE prefix = ?').run(prefix);
-    const existing = db
+    await db.prepare('DELETE FROM order_id_sequences WHERE prefix = ?').run(prefix);
+    const existing = (await db
       .prepare(
         `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type,
                              total_amount, delivery_address)
          VALUES (?, ?, ?, 'draft', 'direct', 100, '1 Seed St')`
       )
-      .run(`${prefix}-0042`, customer.id, medrep.id).lastInsertRowid;
+      .run(`${prefix}-0042`, customer.id, medrep.id)).lastInsertRowid;
     createdOrderIds.push(existing);
 
-    expect(generateOrderId()).toBe(`${prefix}-0043`);
+    expect(await generateOrderId()).toBe(`${prefix}-0043`);
   });
 });

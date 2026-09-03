@@ -3,9 +3,9 @@ const bcrypt = require('bcryptjs');
 const zohoRetryService = require('../services/zohoRetryService');
 
 // Get all users with their roles
-const getAllUsers = (req, res, next) => {
+const getAllUsers = async (req, res, next) => {
   try {
-    const users = db.prepare('SELECT id, name, email, role, is_active, created_at FROM users ORDER BY name').all();
+    const users = await db.prepare('SELECT id, name, email, role, is_active, created_at FROM users ORDER BY name').all();
     const enriched = users.map(u => ({
       ...u,
       username: u.email ? u.email.split('@')[0] : `user_${u.id}`,
@@ -21,15 +21,15 @@ const getAllUsers = (req, res, next) => {
 };
 
 // Deactivate a user (Soft Delete)
-const deactivateUser = (req, res, next) => {
+const deactivateUser = async (req, res, next) => {
   try {
     const userId = req.params.id;
-    const user = db.prepare('SELECT id, name, is_active FROM users WHERE id = ?').get(userId);
+    const user = await db.prepare('SELECT id, name, is_active FROM users WHERE id = ?').get(userId);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    db.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(userId);
+    await db.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(userId);
     res.status(200).json({ 
       success: true, 
       message: `User ${userId} deactivated successfully.` 
@@ -41,7 +41,7 @@ const deactivateUser = (req, res, next) => {
 };
 
 // Create a new user
-const create = (req, res, next) => {
+const create = async (req, res, next) => {
   try {
     const { name, email, password, role } = req.body;
     if (!name || !email || !password || !role) {
@@ -51,12 +51,12 @@ const create = (req, res, next) => {
     if (!valid_roles.includes(role.toLowerCase())) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `role must be one of: ${valid_roles.join(', ')}` } });
     }
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    const existing = await db.prepare('SELECT id FROM users WHERE email = ?').get(email);
     if (existing) return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'Email already in use' } });
 
     const hash = bcrypt.hashSync(password, 10);
-    const result = db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)').run(name, email, hash, role.toLowerCase());
-    const user = db.prepare('SELECT id, name, email, role, is_active, created_at FROM users WHERE id = ?').get(result.lastInsertRowid);
+    const result = await db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)').run(name, email, hash, role.toLowerCase());
+    const user = await db.prepare('SELECT id, name, email, role, is_active, created_at FROM users WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json({ success: true, data: { user } });
   } catch (err) {
     if (next) next(err);
@@ -65,16 +65,16 @@ const create = (req, res, next) => {
 };
 
 // Update an existing user
-const update = (req, res, next) => {
+const update = async (req, res, next) => {
   try {
     const { role, is_active } = req.body;
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+    const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
     if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
 
-    if (role !== undefined) db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
-    if (is_active !== undefined) db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
+    if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
+    if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
 
-    const updated = db.prepare('SELECT id, name, email, role, is_active, created_at FROM users WHERE id = ?').get(user.id);
+    const updated = await db.prepare('SELECT id, name, email, role, is_active, created_at FROM users WHERE id = ?').get(user.id);
     res.json({ success: true, data: { user: updated } });
   } catch (err) {
     if (next) next(err);
@@ -83,9 +83,9 @@ const update = (req, res, next) => {
 };
 
 // GET /api/admin/zoho/queue — view the Zoho sync retry outbox
-const getZohoQueue = (req, res, next) => {
+const getZohoQueue = async (req, res, next) => {
   try {
-    const queue = zohoRetryService.listQueue();
+    const queue = await zohoRetryService.listQueue();
     res.json({
       success: true,
       data: {

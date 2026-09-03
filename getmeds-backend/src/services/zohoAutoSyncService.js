@@ -62,10 +62,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * changes when someone runs a migration, which means a restart.
  */
 let _hasColumn = null;
-function hasReconcileColumn() {
+async function hasReconcileColumn() {
   if (_hasColumn !== null) return _hasColumn;
   try {
-    _hasColumn = db.prepare('PRAGMA table_info(orders)').all().some((c) => c.name === 'last_reconciled_at');
+    _hasColumn = (await db.prepare('PRAGMA table_info(orders)').all()).some((c) => c.name === 'last_reconciled_at');
   } catch (err) {
     _hasColumn = false;
   }
@@ -92,9 +92,9 @@ function isEnabled() {
 }
 
 /** Orders worth asking Zoho about: live, synced, and least-recently checked. */
-function pickBatch(limit = BATCH_SIZE) {
-  if (!hasReconcileColumn()) return [];
-  return db
+async function pickBatch(limit = BATCH_SIZE) {
+  if (!(await hasReconcileColumn())) return [];
+  return await db
     .prepare(
       `SELECT id, getmeds_order_id, status
        FROM orders
@@ -106,10 +106,10 @@ function pickBatch(limit = BATCH_SIZE) {
     .all(...TERMINAL, limit);
 }
 
-function markRefreshed(orderId, when = new Date().toISOString()) {
-  if (!hasReconcileColumn()) return false;
+async function markRefreshed(orderId, when = new Date().toISOString()) {
+  if (!(await hasReconcileColumn())) return false;
   try {
-    db.prepare('UPDATE orders SET last_reconciled_at = ? WHERE id = ?').run(when, orderId);
+    await db.prepare('UPDATE orders SET last_reconciled_at = ? WHERE id = ?').run(when, orderId);
     return true;
   } catch (err) {
     // Bookkeeping. Never worth failing a request or a poll over.
@@ -127,10 +127,10 @@ function markRefreshed(orderId, when = new Date().toISOString()) {
  * frontend re-fetches on a timer — would be another read against the live org.
  * Off is the safe failure direction.
  */
-function shouldRefreshOnOpen(order) {
+async function shouldRefreshOnOpen(order) {
   if (!order || !order.zoho_so_id) return false;
   if (TERMINAL.includes(order.status)) return false;
-  if (!hasReconcileColumn()) return false;
+  if (!(await hasReconcileColumn())) return false;
   if (!order.last_reconciled_at) return true;
   const age = Date.now() - new Date(order.last_reconciled_at).getTime();
   return !Number.isFinite(age) || age >= OPEN_COOLDOWN_MS;
@@ -156,7 +156,7 @@ async function reconcileOne(order, source) {
     actorName: source === 'page_open' ? 'Auto Sync (order opened)' : 'Auto Sync',
     source
   });
-  markRefreshed(order.id);
+  await markRefreshed(order.id);
 
   if (!result.ok) {
     console.warn(`[ZOHO_AUTO_SYNC] ${order.getmeds_order_id}: ${result.code} — ${result.message}`);
@@ -168,7 +168,7 @@ async function reconcileOne(order, source) {
 
 /** One pass over a batch. Never throws — a bad order must not stop the rest. */
 async function runOnce({ limit = BATCH_SIZE, source = 'auto_sync' } = {}) {
-  const orders = pickBatch(limit);
+  const orders = await pickBatch(limit);
   const results = [];
   for (const order of orders) {
     try {
@@ -190,14 +190,14 @@ function start(intervalMs = INTERVAL_MS) {
   if (intervalHandle) return intervalHandle;
   if (!isEnabled()) return null;
 
-  intervalHandle = setInterval(() => {
+  intervalHandle = setInterval(async () => {
     // Skip rather than overlap: a slow tick (twenty orders staggered against a
     // sluggish Zoho) can outlast the interval, and two concurrent passes would
     // pick the same batch — neither having stamped it yet — and double every
     // API call.
     if (running) return;
     running = true;
-    runOnce()
+    (await runOnce())
       .catch((err) => console.error('[ZOHO_AUTO_SYNC] pass failed:', err.message))
       .finally(() => { running = false; });
   }, intervalMs);

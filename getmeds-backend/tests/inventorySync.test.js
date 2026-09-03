@@ -53,12 +53,12 @@ describe('Inventory & Stock Synchronization API', () => {
   // and nothing would actually show up as selectable in the order form.
   // Now it's created locally (never written back to Zoho).
   describe('sync-pull creates new local products for unmatched Zoho items', () => {
-    afterAll(() => {
-      db.prepare(`DELETE FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%'`).run();
+    afterAll(async () => {
+      await db.prepare(`DELETE FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%'`).run();
     });
 
     test('the 3 mock-fixture items (none match the demo seed by SKU/name) are created as new local products', async () => {
-      db.prepare(`DELETE FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%'`).run();
+      await db.prepare(`DELETE FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%'`).run();
 
       const res = await request(app)
         .post('/api/inventory/sync-pull')
@@ -67,7 +67,7 @@ describe('Inventory & Stock Synchronization API', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.created).toBe(3);
 
-      const created = db.prepare(`SELECT * FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%' ORDER BY sku`).all();
+      const created = await db.prepare(`SELECT * FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%' ORDER BY sku`).all();
       expect(created).toHaveLength(3);
       const skus = created.map((p) => p.sku);
       expect(skus).toEqual(expect.arrayContaining(['AMOX-500-CAP', 'PARA-500-TAB', 'LOSA-50-TAB']));
@@ -78,7 +78,7 @@ describe('Inventory & Stock Synchronization API', () => {
     });
 
     test('running it again does not duplicate — matches by zoho_item_id and updates instead', async () => {
-      const before = db.prepare(`SELECT COUNT(*) as n FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%'`).get().n;
+      const before = (await db.prepare(`SELECT COUNT(*) as n FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%'`).get()).n;
       expect(before).toBe(3);
 
       const res = await request(app)
@@ -89,13 +89,13 @@ describe('Inventory & Stock Synchronization API', () => {
       expect(res.body.data.created).toBe(0);
       expect(res.body.data.updated).toBeGreaterThanOrEqual(3);
 
-      const after = db.prepare(`SELECT COUNT(*) as n FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%'`).get().n;
+      const after = (await db.prepare(`SELECT COUNT(*) as n FROM products WHERE zoho_item_id LIKE 'ITEM-FIX-%'`).get()).n;
       expect(after).toBe(3);
     });
   });
 
   test('POST /api/inventory/adjust adjusts stock level and reflects locally', async () => {
-    const product = db.prepare('SELECT * FROM products LIMIT 1').get();
+    const product = await db.prepare('SELECT * FROM products LIMIT 1').get();
     const initialStock = product.stock;
 
     const res = await request(app)
@@ -111,12 +111,12 @@ describe('Inventory & Stock Synchronization API', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.new_stock).toBe(initialStock + 10);
 
-    const updated = db.prepare('SELECT stock FROM products WHERE id = ?').get(product.id);
+    const updated = await db.prepare('SELECT stock FROM products WHERE id = ?').get(product.id);
     expect(updated.stock).toBe(initialStock + 10);
   });
 
   test('RBAC: MedRep cannot call admin inventory mutation endpoints', async () => {
-    const product = db.prepare('SELECT * FROM products LIMIT 1').get();
+    const product = await db.prepare('SELECT * FROM products LIMIT 1').get();
     const res = await request(app)
       .post('/api/inventory/adjust')
       .set('Authorization', `Bearer ${medrepToken}`)
@@ -148,7 +148,7 @@ describe('Inventory & Stock Synchronization API', () => {
     test('sync-pull stamps zoho_stock/zoho_price; a later local-only adjust is what status reports as a mismatch (not a fresh Zoho call)', async () => {
       await request(app).post('/api/inventory/sync-pull').set('Authorization', `Bearer ${adminToken}`);
 
-      const product = db.prepare(`SELECT * FROM products WHERE zoho_item_id IS NOT NULL LIMIT 1`).get();
+      const product = await db.prepare(`SELECT * FROM products WHERE zoho_item_id IS NOT NULL LIMIT 1`).get();
       expect(product).toBeDefined();
       expect(product.zoho_stock).not.toBeNull();
 
@@ -203,23 +203,23 @@ describe('inactive products are listed and labelled', () => {
     json(b) { this.body = b; return this; }
   });
 
-  beforeAll(() => {
-    db.prepare("DELETE FROM products WHERE sku IN ('LBL-ACTIVE', 'LBL-INACTIVE')").run();
-    activeId = db.prepare(
+  beforeAll(async () => {
+    await db.prepare("DELETE FROM products WHERE sku IN ('LBL-ACTIVE', 'LBL-INACTIVE')").run();
+    activeId = (await db.prepare(
       "INSERT INTO products (name, sku, unit_price, unit, stock, is_active) VALUES ('Label Active Med', 'LBL-ACTIVE', 10, 'tab', 5, 1)"
-    ).run().lastInsertRowid;
-    inactiveId = db.prepare(
+    ).run()).lastInsertRowid;
+    inactiveId = (await db.prepare(
       "INSERT INTO products (name, sku, unit_price, unit, stock, is_active) VALUES ('Label Inactive Med', 'LBL-INACTIVE', 10, 'tab', 5, 0)"
-    ).run().lastInsertRowid;
+    ).run()).lastInsertRowid;
   });
 
-  afterAll(() => {
-    db.prepare("DELETE FROM products WHERE sku IN ('LBL-ACTIVE', 'LBL-INACTIVE')").run();
+  afterAll(async () => {
+    await db.prepare("DELETE FROM products WHERE sku IN ('LBL-ACTIVE', 'LBL-INACTIVE')").run();
   });
 
-  test('the order form product list includes inactive items, with the flag', () => {
+  test('the order form product list includes inactive items, with the flag', async () => {
     const r = res();
-    ordersController.getProducts({}, r, jest.fn());
+    await ordersController.getProducts({}, r, jest.fn());
     const products = r.body.data.products;
     const active = products.find((p) => p.id === activeId);
     const inactive = products.find((p) => p.id === inactiveId);
@@ -239,16 +239,16 @@ describe('inactive products are listed and labelled', () => {
     expect(products.find((p) => p.id === inactiveId).is_active).toBe(0);
   });
 
-  test('active products sort ahead of inactive ones', () => {
+  test('active products sort ahead of inactive ones', async () => {
     const r = res();
-    ordersController.getProducts({}, r, jest.fn());
+    await ordersController.getProducts({}, r, jest.fn());
     const ids = r.body.data.products.map((p) => p.id);
     expect(ids.indexOf(activeId)).toBeLessThan(ids.indexOf(inactiveId));
   });
 
   test('submitting an inactive product is refused by name, not as "not found"', async () => {
-    const medrep = db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
-    const customer = db.prepare('SELECT id FROM customers LIMIT 1').get();
+    const medrep = await db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
+    const customer = await db.prepare('SELECT id FROM customers LIMIT 1').get();
     const r = res();
 
     await ordersController.create(

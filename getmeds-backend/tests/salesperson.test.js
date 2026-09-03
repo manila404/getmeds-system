@@ -41,36 +41,36 @@ const signUp = (overrides = {}) =>
 
 beforeEach(() => salespersonService.clearCache());
 
-afterAll(() => {
-  db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${EMAIL_PREFIX}%`);
+afterAll(async () => {
+  await db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${EMAIL_PREFIX}%`);
   salespersonService.clearCache();
 });
 
 describe('salespersonService.forUser', () => {
   test('returns the generated "<division> | <display name>" for a signed-up rep', async () => {
     const res = await signUp();
-    expect(salespersonService.forUser(res.body.data.user.id)).toBe('TEST | Aaron Manila');
+    expect(await salespersonService.forUser(res.body.data.user.id)).toBe('TEST | Aaron Manila');
   });
 
-  test('returns null for an account with no division — nothing to attribute to', () => {
+  test('returns null for an account with no division — nothing to attribute to', async () => {
     // Sep 2, 2026 (2): this used to read admin@getmeds.ph, on the reasoning
     // that the seeded logins predate these fields. They no longer do —
     // seed.js gives all six a division and display name, because an account
     // without a mapping can no longer place an order at all. So the case is
     // made explicitly instead of borrowed from the seed.
-    const id = db
+    const id = (await db
       .prepare(
         `INSERT INTO users (name, email, password_hash, role)
          VALUES ('No Mapping', ?, 'x', 'medrep')`
       )
-      .run(`${EMAIL_PREFIX}no-division@getmeds.ph`).lastInsertRowid;
+      .run(`${EMAIL_PREFIX}no-division@getmeds.ph`)).lastInsertRowid;
     try {
-      expect(salespersonService.forUser(id)).toBeNull();
+      expect(await salespersonService.forUser(id)).toBeNull();
     } finally {
-      db.prepare('DELETE FROM users WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM users WHERE id = ?').run(id);
     }
-    expect(salespersonService.forUser(null)).toBeNull();
-    expect(salespersonService.forUser(999999)).toBeNull();
+    expect(await salespersonService.forUser(null)).toBeNull();
+    expect(await salespersonService.forUser(999999)).toBeNull();
   });
 });
 
@@ -327,7 +327,7 @@ describe('Division and Sub-division on the Sales Order', () => {
   // than the Division field beside it.
   test('they come from the same account as the Salesperson', async () => {
     const res = await signUp();
-    const profile = salespersonService.profileForUser(res.body.data.user.id);
+    const profile = await salespersonService.profileForUser(res.body.data.user.id);
     expect(profile).toEqual({
       salesperson: 'TEST | Aaron Manila',
       division: 'TEST',
@@ -335,24 +335,24 @@ describe('Division and Sub-division on the Sales Order', () => {
     });
   });
 
-  test('profileForUser is all-null for an account that has none', () => {
+  test('profileForUser is all-null for an account that has none', async () => {
     // Explicitly created: the seeded logins all carry a mapping now.
-    const id = db
+    const id = (await db
       .prepare(
         `INSERT INTO users (name, email, password_hash, role)
          VALUES ('No Mapping', ?, 'x', 'medrep')`
       )
-      .run(`${EMAIL_PREFIX}no-profile@getmeds.ph`).lastInsertRowid;
+      .run(`${EMAIL_PREFIX}no-profile@getmeds.ph`)).lastInsertRowid;
     try {
-      expect(salespersonService.profileForUser(id)).toEqual({
+      expect(await salespersonService.profileForUser(id)).toEqual({
         salesperson: null,
         division: null,
         sub_division: null
       });
     } finally {
-      db.prepare('DELETE FROM users WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM users WHERE id = ?').run(id);
     }
-    expect(salespersonService.profileForUser(null)).toEqual({
+    expect(await salespersonService.profileForUser(null)).toEqual({
       salesperson: null,
       division: null,
       sub_division: null

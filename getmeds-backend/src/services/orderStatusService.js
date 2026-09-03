@@ -23,7 +23,7 @@ const stateMachine = require('../workflow/stateMachine');
  * same impossible thing on a schedule. Callers get `refused: true` back and
  * can log it in the audit trail.
  */
-function setOrderStatus(orderId, fromStatus, toStatus, now = new Date().toISOString()) {
+async function setOrderStatus(orderId, fromStatus, toStatus, now = new Date().toISOString()) {
   if (!toStatus || fromStatus === toStatus) {
     return { changed: false, status: fromStatus, refused: false };
   }
@@ -43,7 +43,7 @@ function setOrderStatus(orderId, fromStatus, toStatus, now = new Date().toISOStr
     return { changed: false, status: fromStatus, refused: true };
   }
 
-  db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(toStatus, now, orderId);
+  await db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(toStatus, now, orderId);
   return { changed: true, status: toStatus, refused: false };
 }
 
@@ -55,11 +55,11 @@ function setOrderStatus(orderId, fromStatus, toStatus, now = new Date().toISOStr
  * the webhook handler and the manual sync — and which drifted apart from
  * each other more than once.
  */
-function advanceTo(orderId, fromStatus, toStatus, now) {
+async function advanceTo(orderId, fromStatus, toStatus, now) {
   if (!stateMachine.canTransition(fromStatus, toStatus)) {
     return { changed: false, status: fromStatus, refused: false, skipped: true };
   }
-  return setOrderStatus(orderId, fromStatus, toStatus, now);
+  return await setOrderStatus(orderId, fromStatus, toStatus, now);
 }
 
 module.exports = { setOrderStatus, advanceTo };

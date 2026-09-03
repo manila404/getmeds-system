@@ -69,19 +69,19 @@ describe('Test Mode Security & Controller', () => {
   });
 
   describe('Bulk Account Creation & Cleanup', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       process.env.TEST_MODE = 'true';
       process.env.NODE_ENV = 'development';
-      testController.cleanupTestAccounts({}, { json: () => {} }, () => {});
+      await testController.cleanupTestAccounts({}, { json: () => {} }, () => {});
     });
 
-    afterEach(() => {
+    afterEach(async () => {
       // Clean up any test users created during test
       const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
-      testController.cleanupTestAccounts({}, res, () => {});
+      await testController.cleanupTestAccounts({}, res, () => {});
     });
 
-    test('creates test accounts in bulk with proper naming and roles', () => {
+    test('creates test accounts in bulk with proper naming and roles', async () => {
       const req = {
         body: {
           count: 3,
@@ -99,7 +99,7 @@ describe('Test Mode Security & Controller', () => {
         })
       };
 
-      testController.createBulkAccounts(req, res, (err) => { throw err; });
+      await testController.createBulkAccounts(req, res, (err) => { throw err; });
 
       expect(res.status).toHaveBeenCalledWith(201);
       expect(responseData.success).toBe(true);
@@ -111,12 +111,12 @@ describe('Test Mode Security & Controller', () => {
       expect(responseData.data.accounts[0].role).toBe('medrep');
 
       // Verify users are saved in DB
-      const userInDb = db.prepare('SELECT * FROM users WHERE email = ?').get('testunit001@test.getmeds.ph');
+      const userInDb = await db.prepare('SELECT * FROM users WHERE email = ?').get('testunit001@test.getmeds.ph');
       expect(userInDb).toBeDefined();
       expect(userInDb.name).toBe('Testunit User 001');
     });
 
-    test('supports mixed roles distribution', () => {
+    test('supports mixed roles distribution', async () => {
       const req = {
         body: {
           count: 5,
@@ -132,47 +132,47 @@ describe('Test Mode Security & Controller', () => {
         json: jest.fn((data) => { responseData = data; })
       };
 
-      testController.createBulkAccounts(req, res, (err) => { throw err; });
+      await testController.createBulkAccounts(req, res, (err) => { throw err; });
 
       expect(responseData.data.createdCount).toBe(5);
       const roles = responseData.data.accounts.map(a => a.role);
       expect(roles).toEqual(['medrep', 'finance', 'dispatch', 'management', 'admin']);
     });
 
-    test('safely cleans up only test accounts without touching protected system accounts', () => {
+    test('safely cleans up only test accounts without touching protected system accounts', async () => {
       // Seeded / protected account check
-      const adminBefore = db.prepare("SELECT * FROM users WHERE email = 'admin@getmeds.ph'").get();
+      const adminBefore = await db.prepare("SELECT * FROM users WHERE email = 'admin@getmeds.ph'").get();
       
       // Create some test accounts
       const createReq = {
         body: { count: 2, prefix: 'testuser', role: 'medrep' }
       };
       const dummyRes = { status: jest.fn().mockReturnThis(), json: jest.fn() };
-      testController.createBulkAccounts(createReq, dummyRes, () => {});
+      await testController.createBulkAccounts(createReq, dummyRes, () => {});
 
       // Perform cleanup
       let cleanupData = null;
       const cleanupRes = {
         json: jest.fn((data) => { cleanupData = data; })
       };
-      testController.cleanupTestAccounts({}, cleanupRes, () => {});
+      await testController.cleanupTestAccounts({}, cleanupRes, () => {});
 
       expect(cleanupData.success).toBe(true);
       expect(cleanupData.data.deletedCount).toBeGreaterThanOrEqual(2);
 
       // Verify test accounts were deleted
-      const testUser = db.prepare("SELECT * FROM users WHERE email = 'testuser001@test.getmeds.ph'").get();
+      const testUser = await db.prepare("SELECT * FROM users WHERE email = 'testuser001@test.getmeds.ph'").get();
       expect(testUser).toBeUndefined();
 
       // Verify protected admin still exists
       if (adminBefore) {
-        const adminAfter = db.prepare("SELECT * FROM users WHERE email = 'admin@getmeds.ph'").get();
+        const adminAfter = await db.prepare("SELECT * FROM users WHERE email = 'admin@getmeds.ph'").get();
         expect(adminAfter).toBeDefined();
         expect(adminAfter.email).toBe('admin@getmeds.ph');
       }
     });
 
-    test('authenticates user via quickLogin without password check when test mode is enabled', () => {
+    test('authenticates user via quickLogin without password check when test mode is enabled', async () => {
       // Ensure admin@getmeds.ph exists
       const req = { body: { email: 'admin@getmeds.ph' } };
       let responseData = null;
@@ -180,7 +180,7 @@ describe('Test Mode Security & Controller', () => {
         json: jest.fn((data) => { responseData = data; })
       };
 
-      testController.quickLogin(req, res, (err) => { throw err; });
+      await testController.quickLogin(req, res, (err) => { throw err; });
 
       expect(responseData.success).toBe(true);
       expect(responseData.data.token).toBeDefined();
@@ -188,14 +188,14 @@ describe('Test Mode Security & Controller', () => {
       expect(responseData.data.user.role).toBe('admin');
     });
 
-    test('returns 404 when quickLogin is attempted with nonexistent email', () => {
+    test('returns 404 when quickLogin is attempted with nonexistent email', async () => {
       const req = { body: { email: 'nonexistent@test.getmeds.ph' } };
       const res = {
         status: jest.fn().mockReturnThis(),
         json: jest.fn()
       };
 
-      testController.quickLogin(req, res, (err) => { throw err; });
+      await testController.quickLogin(req, res, (err) => { throw err; });
 
       expect(res.status).toHaveBeenCalledWith(404);
       expect(res.json).toHaveBeenCalledWith(
@@ -226,27 +226,27 @@ describe('Test Mode Security & Controller', () => {
       expect(zoho.isSimulatedOutage()).toBe(false);
     });
 
-    test('resolveActor: maps Admin actions to seeded role users in Test Mode', () => {
+    test('resolveActor: maps Admin actions to seeded role users in Test Mode', async () => {
       const { resolveActor } = require('../src/services/auditService');
       const adminUser = { id: 1, name: 'Admin User', email: 'admin@getmeds.ph', role: 'admin' };
       
       process.env.TEST_MODE = 'true';
       process.env.NODE_ENV = 'development';
 
-      const medrepActor = resolveActor(adminUser, 'medrep');
+      const medrepActor = await resolveActor(adminUser, 'medrep');
       expect(medrepActor.email).toBe('medrep@getmeds.ph');
       expect(medrepActor.role).toBe('medrep');
 
-      const financeActor = resolveActor(adminUser, 'finance');
+      const financeActor = await resolveActor(adminUser, 'finance');
       expect(financeActor.email).toBe('finance@getmeds.ph');
       expect(financeActor.role).toBe('finance');
 
-      const dispatchActor = resolveActor(adminUser, 'dispatch');
+      const dispatchActor = await resolveActor(adminUser, 'dispatch');
       expect(dispatchActor.email).toBe('dispatch@getmeds.ph');
       expect(dispatchActor.role).toBe('dispatch');
 
       // Unchanged when acting as admin
-      const adminActor = resolveActor(adminUser, 'admin');
+      const adminActor = await resolveActor(adminUser, 'admin');
       expect(adminActor.email).toBe('admin@getmeds.ph');
     });
 

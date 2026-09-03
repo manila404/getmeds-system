@@ -28,8 +28,8 @@ const { notify, getUserIdsByRole } = require('./notificationService');
  */
 
 /** Has Finance's payment been recorded and verified? */
-function isPaid(orderId) {
-  const payment = db
+async function isPaid(orderId) {
+  const payment = await db
     .prepare("SELECT id FROM payments WHERE order_id = ? AND status = 'verified'")
     .get(orderId);
   return Boolean(payment);
@@ -41,8 +41,8 @@ function isPaid(orderId) {
  * with tracking details attached or (when the Package placeholder list can't
  * expose them) without.
  */
-function isShipped(orderId) {
-  const dispatch = db
+async function isShipped(orderId) {
+  const dispatch = await db
     .prepare('SELECT status, tracking_number FROM dispatch_records WHERE order_id = ?')
     .get(orderId);
   if (!dispatch) return false;
@@ -57,8 +57,10 @@ function isShipped(orderId) {
  *
  * @returns {{completed: boolean, paid: boolean, shipped: boolean, status: string}}
  */
-function evaluateCompletion({ orderId, currentStatus, actorId = null, actorName = 'System', trigger = null }) {
-  const order = db
+async function evaluateCompletion(
+  { orderId, currentStatus, actorId = null, actorName = 'System', trigger = null }
+) {
+  const order = await db
     .prepare(
       `SELECT o.*, u.id as medrep_user_id
        FROM orders o LEFT JOIN users u ON o.medrep_id = u.id
@@ -70,23 +72,23 @@ function evaluateCompletion({ orderId, currentStatus, actorId = null, actorName 
 
   const status = currentStatus || order.status;
   if (['completed', 'cancelled'].includes(status)) {
-    return { completed: status === 'completed', paid: isPaid(orderId), shipped: isShipped(orderId), status };
+    return { completed: status === 'completed', paid: await isPaid(orderId), shipped: await isShipped(orderId), status };
   }
 
-  const paid = isPaid(orderId);
-  const shipped = isShipped(orderId);
+  const paid = await isPaid(orderId);
+  const shipped = await isShipped(orderId);
   if (!paid || !shipped) {
     return { completed: false, paid, shipped, status };
   }
 
   const now = new Date().toISOString();
-  const result = setOrderStatus(orderId, status, 'completed', now);
+  const result = await setOrderStatus(orderId, status, 'completed', now);
 
   if (!result.changed) {
     // The state machine refused the hop — record why rather than silently
     // leaving a shipped-and-paid order looking unfinished with no
     // explanation for whoever goes looking later.
-    logEvent({
+    await logEvent({
       orderId,
       eventType: 'ORDER_COMPLETION_BLOCKED',
       oldStatus: status,
@@ -101,7 +103,7 @@ function evaluateCompletion({ orderId, currentStatus, actorId = null, actorName 
     return { completed: false, paid, shipped, status };
   }
 
-  logEvent({
+  await logEvent({
     orderId,
     eventType: 'ORDER_COMPLETED',
     oldStatus: status,
@@ -112,8 +114,8 @@ function evaluateCompletion({ orderId, currentStatus, actorId = null, actorName 
     metadata: { trigger, paid, shipped, previousStatus: status }
   });
 
-  const watchers = getUserIdsByRole('finance', 'management');
-  notify({
+  const watchers = await getUserIdsByRole('finance', 'management');
+  await notify({
     orderId,
     recipientIds: Array.from(new Set([order.medrep_user_id, ...watchers].filter(Boolean))),
     message: `Order ${order.getmeds_order_id} is complete — shipped and paid.`,

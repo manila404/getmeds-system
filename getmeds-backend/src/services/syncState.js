@@ -11,14 +11,14 @@ const db = require('../db/database');
  * Zoho.
  */
 
-function getSyncState(key) {
-  const row = db.prepare('SELECT value FROM sync_state WHERE key = ?').get(key);
+async function getSyncState(key) {
+  const row = await db.prepare('SELECT value FROM sync_state WHERE key = ?').get(key);
   return row ? row.value : null;
 }
 
-function setSyncState(key, value) {
+async function setSyncState(key, value) {
   const v = value === null || value === undefined ? null : String(value);
-  db.prepare(
+  await db.prepare(
     `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, datetime('now'))
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
   ).run(key, v);

@@ -9,21 +9,21 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
   let medrepUser;
   let customer;
 
-  beforeAll(() => {
-    medrepUser = db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
-    customer = db.prepare("SELECT id FROM customers WHERE type = 'direct' LIMIT 1").get();
+  beforeAll(async () => {
+    medrepUser = await db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
+    customer = await db.prepare("SELECT id FROM customers WHERE type = 'direct' LIMIT 1").get();
   });
 
-  beforeEach(() => {
-    const existing = db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(testOrderNumber);
+  beforeEach(async () => {
+    const existing = await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(testOrderNumber);
     if (existing) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
     }
-    const result = db.prepare(`
+    const result = await db.prepare(`
       INSERT INTO orders (
         getmeds_order_id, customer_id, medrep_id, status, customer_type,
         total_amount, delivery_address, zoho_so_id, zoho_so_number, zoho_sync_status
@@ -32,13 +32,13 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     testOrderId = result.lastInsertRowid;
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     if (testOrderId) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(testOrderId);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(testOrderId);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(testOrderId);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(testOrderId);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(testOrderId);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(testOrderId);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(testOrderId);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(testOrderId);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(testOrderId);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(testOrderId);
     }
   });
 
@@ -90,16 +90,16 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     // jumping there because money arrived would skip both Finance stages and
     // tell the warehouse to pack something that was never invoiced.
     expect(res.body.new_status).toBe('ready_for_draft_invoice');
-    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('ready_for_draft_invoice');
-    const payment = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(testOrderId);
+    const payment = await db.prepare('SELECT * FROM payments WHERE order_id = ?').get(testOrderId);
     expect(payment).toBeDefined();
     expect(payment.status).toBe('verified');
     expect(payment.payment_reference).toBe('PAY-ZOHO-9988');
   });
 
   test('Processes shipment.created: updates dispatch_records and advances to tracking_shared', async () => {
-    db.prepare("UPDATE orders SET status = 'ready_for_dispatch' WHERE id = ?").run(testOrderId);
+    await db.prepare("UPDATE orders SET status = 'ready_for_dispatch' WHERE id = ?").run(testOrderId);
     const res = await request(app)
       .post('/api/webhooks/zoho')
       .send({
@@ -112,12 +112,12 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     // Sep 1, 2026: shipping alone no longer finishes an order — it stops at
     // tracking_shared and waits for the payment half of the rule.
     expect(res.body.new_status).toBe('tracking_shared');
-    const dispatch = db.prepare('SELECT * FROM dispatch_records WHERE order_id = ?').get(testOrderId);
+    const dispatch = await db.prepare('SELECT * FROM dispatch_records WHERE order_id = ?').get(testOrderId);
     expect(dispatch.tracking_number).toBe('LBC-PH-99228811');
   });
 
   test('Processes invoice.sent: moves invoice_drafted → invoice_sent (not a duplicate "drafted")', async () => {
-    db.prepare("UPDATE orders SET status = 'ready_for_invoice_sent' WHERE id = ?").run(testOrderId);
+    await db.prepare("UPDATE orders SET status = 'ready_for_invoice_sent' WHERE id = ?").run(testOrderId);
     const res = await request(app)
       .post('/api/webhooks/zoho')
       .send({
@@ -128,20 +128,20 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     expect(res.body.action).toBe('INVOICE_SENT');
     expect(res.body.new_status).toBe('ready_for_dispatch');
 
-    const order = db.prepare('SELECT status, zoho_invoice_number FROM orders WHERE id = ?').get(testOrderId);
+    const order = await db.prepare('SELECT status, zoho_invoice_number FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('ready_for_dispatch');
     expect(order.zoho_invoice_number).toBe('INV-000771');
 
     // The bug this branch was written to kill: a "sent" invoice used to be
     // matched by the drafted check and logged as another INVOICE_DRAFTED.
-    const drafted = db
+    const drafted = await db
       .prepare("SELECT COUNT(*) as n FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_INVOICE_DRAFTED'")
       .get(testOrderId);
     expect(drafted.n).toBe(0);
   });
 
   test('Shipment then payment: payment arriving last completes the order', async () => {
-    db.prepare("UPDATE orders SET status = 'ready_for_dispatch' WHERE id = ?").run(testOrderId);
+    await db.prepare("UPDATE orders SET status = 'ready_for_dispatch' WHERE id = ?").run(testOrderId);
 
     await request(app)
       .post('/api/webhooks/zoho')
@@ -149,7 +149,7 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
         event_type: 'shipment.created',
         shipment: { salesorder_id: testZohoSoId, tracking_number: 'JRS-77120', carrier: 'JRS Express' }
       });
-    let order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    let order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('tracking_shared');
 
     // This is the case that used to dead-end: an order already shipped, then
@@ -164,7 +164,7 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     expect(res.body.action).toBe('PAYMENT_VERIFIED_ORDER_COMPLETED');
     expect(res.body.new_status).toBe('completed');
 
-    order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('completed');
   });
 
@@ -175,7 +175,7 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
         event_type: 'payment.created',
         payment: { salesorder_id: testZohoSoId, payment_number: 'PAY-FIRST-01', amount: 1500.0, date: '2026-09-01' }
       });
-    let order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    let order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     // Paid, but the pipeline hasn't moved — payment is on terms and only
     // decides completion.
     expect(order.status).toBe('ready_for_draft_invoice');
@@ -189,12 +189,12 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     expect(res.body.action).toBe('DISPATCHED_ORDER_COMPLETED');
     expect(res.body.new_status).toBe('completed');
 
-    order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('completed');
   });
 
   test('A completed order is not reopened by a later invoice webhook', async () => {
-    db.prepare("UPDATE orders SET status = 'completed' WHERE id = ?").run(testOrderId);
+    await db.prepare("UPDATE orders SET status = 'completed' WHERE id = ?").run(testOrderId);
     const res = await request(app)
       .post('/api/webhooks/zoho')
       .send({
@@ -202,7 +202,7 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
         invoice: { salesorder_id: testZohoSoId, invoice_id: 'INV-Z-999', invoice_number: 'INV-000999' }
       });
     expect(res.status).toBe(200);
-    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('completed');
   });
 
@@ -217,7 +217,7 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.action).toBe('SO_CANCELLED');
     expect(res.body.new_status).toBe('cancelled');
-    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('cancelled');
   });
 
@@ -229,23 +229,23 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     expect(res.body.action).toBe('SO_DELETED');
     expect(res.body.new_status).toBe('deleted');
 
-    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('deleted');
 
     // The point of the separate status: a removed Sales Order no longer looks
     // identical to a voided one on the order itself, not just in the trail.
-    const event = db
+    const event = await db
       .prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SO_DELETED'")
       .get(testOrderId);
     expect(event).toBeDefined();
     expect(event.notes).toMatch(/no longer exists/i);
     expect(
-      db.prepare("SELECT COUNT(*) n FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SO_CANCELLED'").get(testOrderId).n
+      (await db.prepare("SELECT COUNT(*) n FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SO_CANCELLED'").get(testOrderId)).n
     ).toBe(0);
   });
 
   test('A deleted SO on an already-completed order is logged but does not un-finish it', async () => {
-    db.prepare("UPDATE orders SET status = 'completed' WHERE id = ?").run(testOrderId);
+    await db.prepare("UPDATE orders SET status = 'completed' WHERE id = ?").run(testOrderId);
 
     const res = await request(app)
       .post('/api/webhooks/zoho')
@@ -253,13 +253,13 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     expect(res.status).toBe(200);
     expect(res.body.action).toBe('SO_DELETED_LOGGED_ONLY');
 
-    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('completed');
 
     // Before Sep 1 2026 this case logged nothing at all — the whole branch
     // was skipped — so a Sales Order deleted after an order shipped left no
     // trace anywhere.
-    const event = db
+    const event = await db
       .prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SO_DELETED'")
       .get(testOrderId);
     expect(event).toBeDefined();
@@ -274,17 +274,17 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
     //
     // 'completed' is terminal, so a *cancellation* (not a deletion — that
     // path has its own already-finished handling) is refused from there.
-    db.prepare("UPDATE orders SET status = 'completed' WHERE id = ?").run(testOrderId);
+    await db.prepare("UPDATE orders SET status = 'completed' WHERE id = ?").run(testOrderId);
 
     const res = await request(app)
       .post('/api/webhooks/zoho')
       .send({ event_type: 'salesorder.cancelled', salesorder: { salesorder_id: testZohoSoId, status: 'void' } });
     expect(res.status).toBe(200);
 
-    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
+    const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId);
     expect(order.status).toBe('completed');
 
-    const event = db
+    const event = await db
       .prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SO_CANCELLED' ORDER BY id DESC")
       .get(testOrderId);
     expect(event).toBeDefined();
@@ -299,7 +299,7 @@ describe('Zoho Webhook Receiver — POST /api/webhooks/zoho', () => {
       .post('/api/webhooks/zoho')
       .send({ event_type: 'salesorder.cancelled', salesorder: { salesorder_id: testZohoSoId, status: 'void' } });
     expect(res.body.action).toBe('SO_CANCELLED');
-    expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId).status).toBe('cancelled');
+    expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(testOrderId)).status).toBe('cancelled');
   });
 
   test('Handles JSONString formatted payload from Zoho Custom Webhook', async () => {

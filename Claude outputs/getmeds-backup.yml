@@ -1,0 +1,90 @@
+# Nightly database backup.
+#
+# Sep 3, 2026. Supabase's free plan has NO automatic backups. That matters less
+# than it sounds for most of this database and more than it sounds for a small
+# part of it:
+#
+#   ~98% of the rows are a rebuildable Zoho cache — 94,985 customers and 3,446
+#   products that a Full Resync brings back.
+#
+#   ~120 rows are not. `users` (logins, roles, bcrypt hashes), `order_events`
+#   (the audit trail — "who in THIS app did what", which Zoho has no record
+#   of), `dispatch_records` (courier and tracking, entered here), the
+#   `intake_*` fields on orders (never sent to Zoho, by design), `notifications`,
+#   and the sync watermarks.
+#
+# Those 120 rows are the entire reason this file exists. They cannot be
+# reconstructed from anywhere.
+#
+# SETUP
+#   Repo -> Settings -> Secrets and variables -> Actions:
+#     SUPABASE_DB_URL   the SESSION POOLER string:
+#                         aws-<region>.pooler.supabase.com:5432
+#                       NOT the transaction pooler (6543) — pg_dump needs
+#                       session-level features it does not provide. And NOT the
+#                       direct connection (db.<ref>.supabase.co), which is
+#                       IPv6-only without the paid add-on; GitHub's runners are
+#                       IPv4, so it would hang and time out.
+#
+# Retention is 30 days via the artifact upload. If the data ever outgrows that
+# being enough, the dump step is the same — only the destination changes.
+
+name: Nightly database backup
+
+on:
+  schedule:
+    - cron: '0 18 * * *' # 02:00 Asia/Manila
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install postgresql-client 16
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+
+      - name: Dump
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$DB_URL" ]; then
+            echo "::error::SUPABASE_DB_URL is not set"
+            exit 1
+          fi
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          # --no-owner / --no-acl so the dump restores into any database,
+          # including a fresh local one for testing a restore.
+          pg_dump "$DB_URL" --no-owner --no-acl --format=custom \
+            --file="getmeds-$STAMP.dump"
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+          ls -lh "getmeds-$STAMP.dump"
+
+      - name: Sanity-check the dump is not empty
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          # A backup job that silently produces an empty file is worse than no
+          # backup job, because it looks green. Assert the tables that cannot
+          # be rebuilt from Zoho actually appear in the dump's table of
+          # contents, and that users is non-empty in the live database.
+          pg_restore --list "getmeds-$STAMP.dump" > toc.txt
+          for t in users order_events dispatch_records orders; do
+            grep -q "TABLE DATA public $t " toc.txt || {
+              echo "::error::table '$t' missing from the dump"; exit 1; }
+          done
+          USERS=$(psql "$DB_URL" -tAc 'SELECT COUNT(*) FROM users')
+          echo "users in live database: $USERS"
+          [ "$USERS" -gt 0 ] || { echo "::error::users table is empty — refusing to call this a good backup"; exit 1; }
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: getmeds-db-${{ env.STAMP }}
+          path: getmeds-*.dump
+          retention-days: 30
+          if-no-files-found: error

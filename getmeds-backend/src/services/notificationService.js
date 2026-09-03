@@ -99,7 +99,7 @@ async function sendRealGoogleChat(chatPayload) {
 
 // ─── notify() ────────────────────────────────────────────────────────────────
 
-function notify({ orderId, recipientIds, message, eventType, orderData = {} }) {
+async function notify({ orderId, recipientIds, message, eventType, orderData = {} }) {
   const now = new Date().toISOString();
 
   // 1. In-App notification (stored in DB for each recipient)
@@ -109,7 +109,7 @@ function notify({ orderId, recipientIds, message, eventType, orderData = {} }) {
       VALUES (?, ?, 'in_app', ?, ?, ?)
     `);
     for (const rid of recipientIds) {
-      if (rid) ins.run(orderId || null, rid, message, null, now);
+      if (rid) await ins.run(orderId || null, rid, message, null, now);
     }
   }
 
@@ -148,7 +148,7 @@ function notify({ orderId, recipientIds, message, eventType, orderData = {} }) {
     triggered_by: triggeredBy
   };
   console.log('[EMAIL_LOG]', JSON.stringify(internalEmailPayload, null, 2));
-  sendRealEmail(internalEmailPayload); // fire-and-forget; no-op if SMTP isn't configured
+  await sendRealEmail(internalEmailPayload); // fire-and-forget; no-op if SMTP isn't configured
 
   // 2b. Customer-Facing Email Variant (Conditional on customer-relevant events)
   const customerFacingEvents = ['ORDER_SUBMITTED', 'PAYMENT_VERIFIED', 'ORDER_DISPATCHED', 'ORDER_COMPLETED'];
@@ -181,7 +181,7 @@ function notify({ orderId, recipientIds, message, eventType, orderData = {} }) {
       timestamp: now
     };
     console.log('[CUSTOMER_EMAIL_LOG]', JSON.stringify(customerEmailPayload, null, 2));
-    sendRealEmail(customerEmailPayload); // fire-and-forget; no-op if SMTP isn't configured
+    await sendRealEmail(customerEmailPayload); // fire-and-forget; no-op if SMTP isn't configured
   }
 
   // 3. Google Chat (log the full card payload always; POST it for real too if configured)
@@ -226,15 +226,15 @@ function notify({ orderId, recipientIds, message, eventType, orderData = {} }) {
     timestamp: now
   };
   console.log('[GOOGLE_CHAT_LOG]', JSON.stringify(chatPayload));
-  sendRealGoogleChat(chatPayload); // fire-and-forget; no-op if the webhook URL isn't configured
+  await sendRealGoogleChat(chatPayload); // fire-and-forget; no-op if the webhook URL isn't configured
 }
 
 /**
  * Get user IDs by role(s)
  */
-function getUserIdsByRole(...roles) {
+async function getUserIdsByRole(...roles) {
   const placeholders = roles.map(() => '?').join(',');
-  const users = db.prepare(
+  const users = await db.prepare(
     `SELECT id FROM users WHERE role IN (${placeholders}) AND is_active = 1`
   ).all(...roles);
   return users.map(u => u.id);

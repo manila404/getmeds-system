@@ -1,27 +1,29 @@
-const path = require('path');
-
 process.env.IS_JEST = 'true';
 process.env.ZOHO_MODE = 'mock';
 process.env.NODE_ENV = 'test';
 
-// Sep 2, 2026: every worker opens the throwaway database that
-// tests/globalSetup.js builds, and never data/getmeds.db.
+// Sep 3, 2026: every worker connects to the throwaway PostgreSQL database that
+// tests/globalSetup.js builds, and never the real one.
 //
-// Until now the suite ran against the REAL database - the one holding ~95k
-// customers mirrored from the live Zoho org and the actual orders. That was
-// not merely untidy: customersSync.test.js opens with
-//     DELETE FROM customers WHERE source = 'zoho'
-// which, against that database, is an attempt to delete the entire mirror. It
-// failed only because a foreign key from an existing order refused it, which
-// is luck rather than a safeguard - with no order referencing a synced
-// customer it would have succeeded silently, and the only way back would have
-// been a Full Resync (~475 paginated Zoho reads).
+// The original note here is worth keeping, because the hazard got WORSE rather
+// than better when the database stopped being a local file:
 //
-// src/db/database.js has honoured GETMEDS_DB_DIR since Sep 1, added so
-// statusMigration.test.js could migrate a scratch database; this points the
-// whole suite at it. Keep the path in step with tests/globalSetup.js, which
-// is what builds the database this line then opens.
-process.env.GETMEDS_DB_DIR = path.join(__dirname, '..', 'data', 'test-db');
+//   Until Sep 2 the suite ran against the REAL database - the one holding ~95k
+//   customers mirrored from the live Zoho org and the actual orders.
+//   customersSync.test.js opens with
+//       DELETE FROM customers WHERE source = 'zoho'
+//   which, against that database, is an attempt to delete the entire mirror. It
+//   failed only because a foreign key from an existing order refused it, which
+//   is luck rather than a safeguard - with no order referencing a synced
+//   customer it would have succeeded silently, and the only way back would have
+//   been a Full Resync (~475 paginated Zoho reads).
+//
+// A hosted database cannot be restored by deleting a local file, so
+// tests/globalSetup.js now REFUSES outright to run against a URL that looks
+// hosted, or whose database name does not say "test". This line is only the
+// default; that check is the actual safeguard.
+process.env.DATABASE_URL =
+  process.env.TEST_DATABASE_URL || 'postgres://postgres@localhost:5432/getmeds_test';
 
 // Sep 2, 2026 (2): the suite must not inherit the developer's real webhook
 // secret from .env. Once `npm run secrets:init` set one, every unauthenticated

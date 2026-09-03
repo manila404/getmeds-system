@@ -39,7 +39,7 @@ exports.getStatus = (req, res) => {
  * GET /api/test/accounts
  * List all current test accounts
  */
-exports.getTestAccounts = (req, res, next) => {
+exports.getTestAccounts = async (req, res, next) => {
   try {
     const isDebug = process.env.DEBUG === 'true';
     if (isDebug) {
@@ -55,7 +55,7 @@ exports.getTestAccounts = (req, res, next) => {
         AND email NOT IN (${placeholders})
       ORDER BY id ASC
     `;
-    const accounts = db.prepare(query).all(...PROTECTED_EMAILS);
+    const accounts = await db.prepare(query).all(...PROTECTED_EMAILS);
 
     res.json({
       success: true,
@@ -73,7 +73,7 @@ exports.getTestAccounts = (req, res, next) => {
  * POST /api/test/accounts
  * Dedicated test-only bulk account creation endpoint
  */
-exports.createBulkAccounts = (req, res, next) => {
+exports.createBulkAccounts = async (req, res, next) => {
   try {
     const count = Math.min(Math.max(parseInt(req.body.count, 10) || 3, 1), 50);
     const prefix = (req.body.prefix || 'testuser').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '') || 'testuser';
@@ -111,7 +111,7 @@ exports.createBulkAccounts = (req, res, next) => {
       }
 
       // Check if user already exists
-      const existing = checkStmt.get(email);
+      const existing = await checkStmt.get(email);
       if (existing) {
         failedCount++;
         results.push({
@@ -131,7 +131,7 @@ exports.createBulkAccounts = (req, res, next) => {
       }
 
       try {
-        const result = insertStmt.run(name, email, hash, role, isActive);
+        const result = await insertStmt.run(name, email, hash, role, isActive);
         createdCount++;
         results.push({
           index: num,
@@ -183,10 +183,10 @@ exports.createBulkAccounts = (req, res, next) => {
  * DELETE /api/test/accounts/:id
  * Delete an individual test account
  */
-exports.deleteSingleAccount = (req, res, next) => {
+exports.deleteSingleAccount = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const user = db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(id);
+    const user = await db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(id);
     if (!user) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Test account not found' } });
     }
@@ -194,15 +194,15 @@ exports.deleteSingleAccount = (req, res, next) => {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Cannot delete protected system account' } });
     }
 
-    const performDelete = db.transaction(() => {
-      db.prepare('DELETE FROM notifications WHERE recipient_id = ?').run(user.id);
-      db.prepare('UPDATE order_events SET actor_id = NULL WHERE actor_id = ?').run(user.id);
-      db.prepare('UPDATE payments SET verified_by = NULL WHERE verified_by = ?').run(user.id);
-      db.prepare('UPDATE dispatch_records SET dispatched_by = NULL WHERE dispatched_by = ?').run(user.id);
-      db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
+    const performDelete = db.transaction(async () => {
+      await db.prepare('DELETE FROM notifications WHERE recipient_id = ?').run(user.id);
+      await db.prepare('UPDATE order_events SET actor_id = NULL WHERE actor_id = ?').run(user.id);
+      await db.prepare('UPDATE payments SET verified_by = NULL WHERE verified_by = ?').run(user.id);
+      await db.prepare('UPDATE dispatch_records SET dispatched_by = NULL WHERE dispatched_by = ?').run(user.id);
+      await db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
     });
 
-    performDelete();
+    await performDelete();
     console.log(`✅ [TEST_MODE] Deleted single test account ${user.email} (id: ${user.id})`);
     res.json({ success: true, data: { deletedAccount: user } });
   } catch (err) {
@@ -214,7 +214,7 @@ exports.deleteSingleAccount = (req, res, next) => {
  * DELETE /api/test/accounts or POST /api/test/accounts/cleanup
  * Safely delete all test accounts without affecting production / seeded accounts
  */
-exports.cleanupTestAccounts = (req, res, next) => {
+exports.cleanupTestAccounts = async (req, res, next) => {
   try {
     console.log('\n🧹 [TEST_MODE] Test account cleanup requested');
 
@@ -225,7 +225,7 @@ exports.cleanupTestAccounts = (req, res, next) => {
       WHERE (is_test_account = 1 OR email LIKE 'test%' OR email LIKE '%@test.%')
         AND email NOT IN (${placeholders})
     `;
-    const accountsToDelete = db.prepare(selectQuery).all(...PROTECTED_EMAILS);
+    const accountsToDelete = await db.prepare(selectQuery).all(...PROTECTED_EMAILS);
 
     if (accountsToDelete.length === 0) {
       console.log('ℹ️  [TEST_MODE] No test accounts found to delete.');
@@ -243,28 +243,28 @@ exports.cleanupTestAccounts = (req, res, next) => {
     const idPlaceholders = deleteUserIds.map(() => '?').join(',');
 
     // Use transaction for safe multi-table cleanup
-    const performCleanup = db.transaction(() => {
+    const performCleanup = db.transaction(async () => {
       // 1. Clean notifications recipient links for test users
-      db.prepare(`DELETE FROM notifications WHERE recipient_id IN (${idPlaceholders})`).run(...deleteUserIds);
+      await db.prepare(`DELETE FROM notifications WHERE recipient_id IN (${idPlaceholders})`).run(...deleteUserIds);
 
       // 2. Clear actor references in order_events for test users if any
-      db.prepare(`UPDATE order_events SET actor_id = NULL WHERE actor_id IN (${idPlaceholders})`).run(...deleteUserIds);
+      await db.prepare(`UPDATE order_events SET actor_id = NULL WHERE actor_id IN (${idPlaceholders})`).run(...deleteUserIds);
 
       // 3. Clear verified_by and dispatched_by references if any
-      db.prepare(`UPDATE payments SET verified_by = NULL WHERE verified_by IN (${idPlaceholders})`).run(...deleteUserIds);
-      db.prepare(`UPDATE dispatch_records SET dispatched_by = NULL WHERE dispatched_by IN (${idPlaceholders})`).run(...deleteUserIds);
+      await db.prepare(`UPDATE payments SET verified_by = NULL WHERE verified_by IN (${idPlaceholders})`).run(...deleteUserIds);
+      await db.prepare(`UPDATE dispatch_records SET dispatched_by = NULL WHERE dispatched_by IN (${idPlaceholders})`).run(...deleteUserIds);
 
       // 4. Reassign medrep_id in orders to default user (id 1 or first protected user) to preserve order records
-      const defaultUser = db.prepare('SELECT id FROM users LIMIT 1').get();
+      const defaultUser = await db.prepare('SELECT id FROM users LIMIT 1').get();
       if (defaultUser) {
-        db.prepare(`UPDATE orders SET medrep_id = ? WHERE medrep_id IN (${idPlaceholders})`).run(defaultUser.id, ...deleteUserIds);
+        await db.prepare(`UPDATE orders SET medrep_id = ? WHERE medrep_id IN (${idPlaceholders})`).run(defaultUser.id, ...deleteUserIds);
       }
 
       // 5. Finally delete the test users
-      db.prepare(`DELETE FROM users WHERE id IN (${idPlaceholders})`).run(...deleteUserIds);
+      await db.prepare(`DELETE FROM users WHERE id IN (${idPlaceholders})`).run(...deleteUserIds);
     });
 
-    performCleanup();
+    await performCleanup();
 
     console.log(`✅ [TEST_MODE] Successfully deleted ${accountsToDelete.length} test accounts.\n`);
 
@@ -284,7 +284,7 @@ exports.cleanupTestAccounts = (req, res, next) => {
  * POST /api/test/quick-login
  * Direct 1-click login for test accounts when Test Mode is active
  */
-exports.quickLogin = (req, res, next) => {
+exports.quickLogin = async (req, res, next) => {
   try {
     const { email, role } = req.body;
     if (!email && !role) {
@@ -293,12 +293,12 @@ exports.quickLogin = (req, res, next) => {
 
     let user;
     if (email) {
-      user = db.prepare('SELECT id, name, email, role, is_active FROM users WHERE email = ?').get(email);
+      user = await db.prepare('SELECT id, name, email, role, is_active FROM users WHERE email = ?').get(email);
     }
     
     // Fallback by role if user by email not found or only role provided
     if (!user && role) {
-      user = db.prepare('SELECT id, name, email, role, is_active FROM users WHERE role = ? AND is_active = 1 ORDER BY id ASC LIMIT 1').get(role);
+      user = await db.prepare('SELECT id, name, email, role, is_active FROM users WHERE role = ? AND is_active = 1 ORDER BY id ASC LIMIT 1').get(role);
     }
 
     if (!user) {

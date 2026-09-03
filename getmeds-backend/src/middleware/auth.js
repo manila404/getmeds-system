@@ -3,7 +3,7 @@ const db = require('../db/database');
 
 const SECRET = process.env.JWT_SECRET || 'getmeds_secret_change_in_production';
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
     return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'No token provided' } });
@@ -21,7 +21,7 @@ function requireAuth(req, res, next) {
     // Sales Order screen has them as their own fields beside Salesperson, so
     // the order form shows all three, and all three come from one row.
     // NULL for accounts created before sign-up collected a division.
-    const user = db
+    const user = await db
       .prepare('SELECT id, name, email, role, is_active, salesperson, division, sub_division FROM users WHERE id = ?')
       .get(decoded.id);
     if (!user || !user.is_active) {

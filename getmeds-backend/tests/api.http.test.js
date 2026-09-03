@@ -101,29 +101,29 @@ describe('HTTP API — full scenario walk-throughs', () => {
 
   beforeAll(async () => {
     // Clean up any leftovers from previous failed test runs
-    const staleOrders = db.prepare(`
+    const staleOrders = await db.prepare(`
       SELECT id FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE name LIKE 'HTTP-TEST%')
     `).all();
     for (const o of staleOrders) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(o.id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(o.id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(o.id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(o.id);
     }
-    db.prepare(`DELETE FROM products WHERE sku = 'HTTPTEST-SKU-001'`).run();
-    db.prepare(`DELETE FROM customers WHERE name LIKE 'HTTP-TEST%'`).run();
+    await db.prepare(`DELETE FROM products WHERE sku = 'HTTPTEST-SKU-001'`).run();
+    await db.prepare(`DELETE FROM customers WHERE name LIKE 'HTTP-TEST%'`).run();
 
-    creditCustomerId = db.prepare(
+    creditCustomerId = (await db.prepare(
       `INSERT INTO customers (name, type, credit_limit, is_active) VALUES (?, 'credit', 100000, 1)`
-    ).run('HTTP-TEST Credit Customer').lastInsertRowid;
-    directCustomerId = db.prepare(
+    ).run('HTTP-TEST Credit Customer')).lastInsertRowid;
+    directCustomerId = (await db.prepare(
       `INSERT INTO customers (name, type, credit_limit, is_active) VALUES (?, 'direct', 0, 1)`
-    ).run('HTTP-TEST Direct Customer').lastInsertRowid;
-    productId = db.prepare(
+    ).run('HTTP-TEST Direct Customer')).lastInsertRowid;
+    productId = (await db.prepare(
       `INSERT INTO products (name, sku, unit_price, unit, stock, is_active) VALUES (?, ?, ?, 'tab', 500, 1)`
-    ).run('HTTP-TEST Product', 'HTTPTEST-SKU-001', 15).lastInsertRowid;
+    ).run('HTTP-TEST Product', 'HTTPTEST-SKU-001', 15)).lastInsertRowid;
 
     medrepToken = await loginAs('medrep@getmeds.ph');
     financeToken = await loginAs('finance@getmeds.ph');
@@ -131,18 +131,18 @@ describe('HTTP API — full scenario walk-throughs', () => {
     managementToken = await loginAs('manager@getmeds.ph');
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of createdOrderIds) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
-    if (productId) db.prepare('DELETE FROM products WHERE id = ?').run(productId);
+    if (productId) await db.prepare('DELETE FROM products WHERE id = ?').run(productId);
     if (creditCustomerId && directCustomerId) {
-      db.prepare('DELETE FROM customers WHERE id IN (?, ?)').run(creditCustomerId, directCustomerId);
+      await db.prepare('DELETE FROM customers WHERE id IN (?, ?)').run(creditCustomerId, directCustomerId);
     }
   });
 
@@ -372,38 +372,38 @@ describe('HTTP API — finance account verification', () => {
   const createdOrderIds = [];
   let medrepToken, financeToken;
 
-  const cleanupOrder = (id) => {
-    db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-    db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+  const cleanupOrder = async id => {
+    await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+    await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
   };
 
   beforeAll(async () => {
-    const stale = db.prepare(`
+    const stale = await db.prepare(`
       SELECT id FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE name LIKE 'FINVERIFY-TEST%')
     `).all();
-    for (const o of stale) cleanupOrder(o.id);
-    db.prepare(`DELETE FROM products WHERE sku = 'FINVERIFY-SKU-001'`).run();
-    db.prepare(`DELETE FROM customers WHERE name LIKE 'FINVERIFY-TEST%'`).run();
+    for (const o of stale) await cleanupOrder(o.id);
+    await db.prepare(`DELETE FROM products WHERE sku = 'FINVERIFY-SKU-001'`).run();
+    await db.prepare(`DELETE FROM customers WHERE name LIKE 'FINVERIFY-TEST%'`).run();
 
-    customerId = db.prepare(
+    customerId = (await db.prepare(
       `INSERT INTO customers (name, type, credit_limit, is_active) VALUES (?, 'credit', 100000, 1)`
-    ).run('FINVERIFY-TEST Customer').lastInsertRowid;
-    productId = db.prepare(
+    ).run('FINVERIFY-TEST Customer')).lastInsertRowid;
+    productId = (await db.prepare(
       `INSERT INTO products (name, sku, unit_price, unit, stock, is_active) VALUES (?, ?, ?, 'tab', 500, 1)`
-    ).run('FINVERIFY-TEST Product', 'FINVERIFY-SKU-001', 20).lastInsertRowid;
+    ).run('FINVERIFY-TEST Product', 'FINVERIFY-SKU-001', 20)).lastInsertRowid;
 
     medrepToken = await loginAs('medrep@getmeds.ph');
     financeToken = await loginAs('finance@getmeds.ph');
   });
 
-  afterAll(() => {
-    for (const id of createdOrderIds) cleanupOrder(id);
-    if (productId) db.prepare('DELETE FROM products WHERE id = ?').run(productId);
-    if (customerId) db.prepare('DELETE FROM customers WHERE id = ?').run(customerId);
+  afterAll(async () => {
+    for (const id of createdOrderIds) await cleanupOrder(id);
+    if (productId) await db.prepare('DELETE FROM products WHERE id = ?').run(productId);
+    if (customerId) await db.prepare('DELETE FROM customers WHERE id = ?').run(customerId);
   });
 
   // An order sitting at ready_for_finance_verified, i.e. confirmed in Zoho and
@@ -427,13 +427,12 @@ describe('HTTP API — finance account verification', () => {
     return order;
   };
 
-  const statusOf = (id) => db.prepare('SELECT status FROM orders WHERE id = ?').get(id).status;
-  const eventsOf = (id) =>
-    db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY id').all(id);
+  const statusOf = async id => (await db.prepare('SELECT status FROM orders WHERE id = ?').get(id)).status;
+  const eventsOf = async id => await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY id').all(id);
 
   test('approving moves the order to ready_for_draft_invoice and names the approver', async () => {
     const order = await orderAwaitingVerification();
-    expect(statusOf(order.id)).toBe('ready_for_finance_verified');
+    expect(await statusOf(order.id)).toBe('ready_for_finance_verified');
 
     const res = await request(app)
       .post(`/api/finance/orders/${order.id}/verify`)
@@ -442,9 +441,9 @@ describe('HTTP API — finance account verification', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('ready_for_draft_invoice');
-    expect(statusOf(order.id)).toBe('ready_for_draft_invoice');
+    expect(await statusOf(order.id)).toBe('ready_for_draft_invoice');
 
-    const ev = eventsOf(order.id).find((e) => e.event_type === 'FINANCE_VERIFIED');
+    const ev = (await eventsOf(order.id)).find((e) => e.event_type === 'FINANCE_VERIFIED');
     expect(ev).toBeDefined();
     expect(ev.old_status).toBe('ready_for_finance_verified');
     expect(ev.new_status).toBe('ready_for_draft_invoice');
@@ -463,16 +462,16 @@ describe('HTTP API — finance account verification', () => {
       .send({ approved: false, reason: '48,000 overdue past 60 days' });
 
     expect(res.status).toBe(200);
-    expect(statusOf(order.id)).toBe('on_hold');
+    expect(await statusOf(order.id)).toBe('on_hold');
 
-    const ev = eventsOf(order.id).find((e) => e.event_type === 'FINANCE_REJECTED');
+    const ev = (await eventsOf(order.id)).find((e) => e.event_type === 'FINANCE_REJECTED');
     expect(ev).toBeDefined();
     expect(ev.new_status).toBe('on_hold');
     expect(ev.notes).toContain('48,000 overdue');
 
     // The reason also has to survive where the Exception Hub reads it, not
     // only in the timeline.
-    const row = db.prepare('SELECT exception_reason FROM orders WHERE id = ?').get(order.id);
+    const row = await db.prepare('SELECT exception_reason FROM orders WHERE id = ?').get(order.id);
     expect(row.exception_reason).toContain('48,000 overdue');
   });
 
@@ -488,8 +487,8 @@ describe('HTTP API — finance account verification', () => {
       expect(res.body.error.code).toBe('VALIDATION_ERROR');
     }
 
-    expect(statusOf(order.id)).toBe('ready_for_finance_verified');
-    expect(eventsOf(order.id).some((e) => e.event_type === 'FINANCE_REJECTED')).toBe(false);
+    expect(await statusOf(order.id)).toBe('ready_for_finance_verified');
+    expect((await eventsOf(order.id)).some((e) => e.event_type === 'FINANCE_REJECTED')).toBe(false);
   });
 
   test('a missing or non-boolean "approved" is refused', async () => {
@@ -502,7 +501,7 @@ describe('HTTP API — finance account verification', () => {
         .send(body);
       expect(res.status).toBe(400);
     }
-    expect(statusOf(order.id)).toBe('ready_for_finance_verified');
+    expect(await statusOf(order.id)).toBe('ready_for_finance_verified');
   });
 
   test('verifying an order that is not awaiting verification is a 409, not a silent no-op', async () => {
@@ -521,10 +520,10 @@ describe('HTTP API — finance account verification', () => {
       .send({ approved: true });
     expect(second.status).toBe(409);
     expect(second.body.error.code).toBe('NOT_AWAITING_VERIFICATION');
-    expect(statusOf(order.id)).toBe('ready_for_draft_invoice');
+    expect(await statusOf(order.id)).toBe('ready_for_draft_invoice');
 
     // And exactly one FINANCE_VERIFIED event, not two.
-    expect(eventsOf(order.id).filter((e) => e.event_type === 'FINANCE_VERIFIED')).toHaveLength(1);
+    expect((await eventsOf(order.id)).filter((e) => e.event_type === 'FINANCE_VERIFIED')).toHaveLength(1);
   });
 
   test('an unknown order id is a 404', async () => {
@@ -542,7 +541,7 @@ describe('HTTP API — finance account verification', () => {
       .set('Authorization', `Bearer ${medrepToken}`)
       .send({ approved: true });
     expect(res.status).toBe(403);
-    expect(statusOf(order.id)).toBe('ready_for_finance_verified');
+    expect(await statusOf(order.id)).toBe('ready_for_finance_verified');
   });
 
   test('an invoice raised in Zoho first moves the order on anyway, and says so', async () => {
@@ -557,8 +556,8 @@ describe('HTTP API — finance account verification', () => {
       invoice: { salesorder_id: order.zoho_so_id, invoice_id: 'INV-FV-1', invoice_number: 'INV-FV-0001' }
     });
 
-    expect(statusOf(order.id)).toBe('ready_for_invoice_sent');
-    const notes = eventsOf(order.id).map((e) => e.notes || '').join(' | ');
+    expect(await statusOf(order.id)).toBe('ready_for_invoice_sent');
+    const notes = (await eventsOf(order.id)).map((e) => e.notes || '').join(' | ');
     expect(notes).toMatch(/not been marked Finance Verified/i);
   });
 });

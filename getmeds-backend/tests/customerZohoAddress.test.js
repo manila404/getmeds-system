@@ -22,14 +22,14 @@ describe('GET /api/customers/:id/address-from-zoho', () => {
     medrepToken = medrepRes.body.data.token;
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of cleanupCustomerIds) {
-      db.prepare('DELETE FROM customers WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM customers WHERE id = ?').run(id);
     }
   });
 
   test('a customer synced from Zoho (has zoho_contact_id) gets its address filled in from the Get-a-Contact detail call', async () => {
-    const insert = db.prepare(`
+    const insert = await db.prepare(`
       INSERT INTO customers (name, type, zoho_contact_id, source, is_active)
       VALUES ('St. Luke Medical Center (Fixture)', 'credit', 'CONTACT-FIX-1001', 'zoho', 1)
     `).run();
@@ -45,12 +45,12 @@ describe('GET /api/customers/:id/address-from-zoho', () => {
     expect(res.body.data.address).toContain('Quezon City');
 
     // Cached locally so a re-selection later doesn't need another Zoho call.
-    const stored = db.prepare('SELECT address FROM customers WHERE id = ?').get(customerId);
+    const stored = await db.prepare('SELECT address FROM customers WHERE id = ?').get(customerId);
     expect(stored.address).toContain('Quezon City');
   });
 
   test('a local-only customer (never synced from Zoho) returns its stored address without calling Zoho', async () => {
-    const insert = db.prepare(`
+    const insert = await db.prepare(`
       INSERT INTO customers (name, type, source, address, is_active)
       VALUES ('Local Only Pharmacy', 'direct', 'local', '123 Local St', 1)
     `).run();

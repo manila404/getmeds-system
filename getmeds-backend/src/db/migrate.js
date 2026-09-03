@@ -1,6 +1,10 @@
+// @sqlite-only — this runner drives SQLite (PRAGMA, sqlite_master, the
+// legacy_alter_table table rebuild). The PostgreSQL equivalent is
+// src/db/migrate.pg.js (`npm run migrate:pg`). Kept working so a SQLite copy
+// of the database can still be migrated; excluded from scripts/portcheck.js.
 const fs = require('fs');
 const path = require('path');
-const db = require('./database');
+const db = require('./database.sqlite');
 
 // Adds `column` to `table` only if it doesn't already exist. schema.sql's
 // `CREATE TABLE IF NOT EXISTS` is a no-op once a table already exists, so a

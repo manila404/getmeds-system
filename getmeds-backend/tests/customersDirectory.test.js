@@ -28,14 +28,14 @@ describe('Customers — Clients Directory (pagination, filters, category)', () =
       VALUES (?, 'direct', ?, ?, 'local', 1)
     `);
     for (let i = 0; i < 30; i++) {
-      const info = insert.run(`Directory Test Client ${String(i).padStart(2, '0')}`, 'Test Contact', '09170000000');
+      const info = await insert.run(`Directory Test Client ${String(i).padStart(2, '0')}`, 'Test Contact', '09170000000');
       seededIds.push(info.lastInsertRowid);
     }
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of seededIds) {
-      db.prepare('DELETE FROM customers WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM customers WHERE id = ?').run(id);
     }
   });
 
@@ -162,12 +162,12 @@ describe('Customers — GET /api/customers/stats', () => {
       INSERT INTO customers (name, type, category, source, is_active)
       VALUES (?, ?, ?, 'local', 1)
     `);
-    seededIds.push(insert.run('Stats Test Credit Doctor', 'credit', 'doctor').lastInsertRowid);
-    seededIds.push(insert.run('Stats Test Direct Uncategorized', 'direct', null).lastInsertRowid);
+    seededIds.push((await insert.run('Stats Test Credit Doctor', 'credit', 'doctor')).lastInsertRowid);
+    seededIds.push((await insert.run('Stats Test Direct Uncategorized', 'direct', null)).lastInsertRowid);
   });
 
-  afterAll(() => {
-    for (const id of seededIds) db.prepare('DELETE FROM customers WHERE id = ?').run(id);
+  afterAll(async () => {
+    for (const id of seededIds) await db.prepare('DELETE FROM customers WHERE id = ?').run(id);
   });
 
   test('returns total/credit/direct/uncategorized counts in a single request', async () => {

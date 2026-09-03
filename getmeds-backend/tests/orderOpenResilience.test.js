@@ -31,36 +31,36 @@ describe('Order detail survives anything the Zoho refresh does', () => {
   const cleanup = [];
 
   beforeAll(async () => {
-    const medrep = db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
-    const customer = db.prepare('SELECT id FROM customers LIMIT 1').get();
-    const existing = db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get('OPEN-RESIL-1');
+    const medrep = await db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
+    const customer = await db.prepare('SELECT id FROM customers LIMIT 1').get();
+    const existing = await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get('OPEN-RESIL-1');
     if (existing) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
     }
-    orderId = db
+    orderId = (await db
       .prepare(
         `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type,
                              total_amount, delivery_address, zoho_so_id, zoho_sync_status)
          VALUES ('OPEN-RESIL-1', ?, ?, 'so_created', 'credit', 500, 'Manila', 'ZSO-RESIL', 'synced')`
       )
-      .run(customer.id, medrep.id).lastInsertRowid;
+      .run(customer.id, medrep.id)).lastInsertRowid;
     cleanup.push(orderId);
 
     const login = await request(app).post('/api/auth/login').send({ email: 'admin@getmeds.ph', password: 'demo123' });
     token = login.body.data.token;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     jest.restoreAllMocks();
     // Clear the cooldown so each test actually exercises the refresh path.
-    db.prepare('UPDATE orders SET last_reconciled_at = NULL WHERE id = ?').run(orderId);
+    await db.prepare('UPDATE orders SET last_reconciled_at = NULL WHERE id = ?').run(orderId);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of cleanup) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
   });
 
@@ -96,51 +96,86 @@ describe('Order detail survives anything the Zoho refresh does', () => {
 
   /**
    * The exact production failure: server on new code, database not migrated.
-   * Runs in a child process against a temp database built from schema.sql with
-   * the column stripped, because the db module is a process-wide singleton and
-   * this test's own database has the column.
+   *
+   * Sep 3, 2026: rewritten for PostgreSQL. The SQLite version built a temp
+   * database file from schema.sql with the column stripped by regex. The
+   * Postgres equivalent is more direct and more honest — apply the real schema,
+   * then DROP the column — which SQLite could not do at all, and which is the
+   * same reason src/db/migrate.js had to rebuild whole tables.
+   *
+   * Still a child process: src/db/pg.js memoises one pool per process, and this
+   * suite's own database HAS the column.
    */
-  test('an un-migrated database (no last_reconciled_at) still serves the order', () => {
+  test('an un-migrated database (no last_reconciled_at) still serves the order', async () => {
     const BACKEND = path.join(__dirname, '..');
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'getmeds-nomigrate-'));
+    const { Client } = require('pg');
+
+    const baseUrl = process.env.DATABASE_URL;
+    const nomigUrl = baseUrl.replace(/\/[^/?]+(\?|$)/, '/getmeds_nomig_test$1');
+    const adminUrl = baseUrl.replace(/\/[^/?]+(\?|$)/, '/postgres$1');
+
+    const admin = new Client({ connectionString: adminUrl });
+    await admin.connect();
     try {
-      const schema = fs
-        .readFileSync(path.join(BACKEND, 'src/db/schema.sql'), 'utf8')
-        .replace(/^\s*last_reconciled_at TEXT,\s*$/m, '');
-      expect(schema).not.toContain('last_reconciled_at');
+      await admin.query('DROP DATABASE IF EXISTS getmeds_nomig_test WITH (FORCE)');
+      await admin.query('CREATE DATABASE getmeds_nomig_test');
+    } finally {
+      await admin.end();
+    }
+
+    try {
+      const c = new Client({ connectionString: nomigUrl });
+      await c.connect();
+      try {
+        await c.query(fs.readFileSync(path.join(BACKEND, 'src/db/schema.pg.sql'), 'utf8'));
+        await c.query('ALTER TABLE orders DROP COLUMN last_reconciled_at');
+        const cols = await c.query(
+          "SELECT column_name FROM information_schema.columns WHERE table_name='orders' AND column_name='last_reconciled_at'"
+        );
+        expect(cols.rows).toHaveLength(0);
+      } finally {
+        await c.end();
+      }
+
+      execFileSync(process.execPath, [path.join(BACKEND, 'src/db/seed.js')], {
+        cwd: BACKEND,
+        env: { ...process.env, DATABASE_URL: nomigUrl, ZOHO_MODE: 'mock' },
+        encoding: 'utf8',
+      });
 
       const script = `
-        const Database = require('better-sqlite3');
-        const fs = require('fs');
-        new Database(process.env.GETMEDS_DB_DIR + '/getmeds.db').exec(fs.readFileSync(process.env.SCHEMA_FILE, 'utf8'));
-        require('${path.join(BACKEND, 'src/db/seed.js').replace(/\\/g, '\\\\')}');
         const request = require('supertest');
         const app = require('${path.join(BACKEND, 'src/app.js').replace(/\\/g, '\\\\')}');
         const db = require('${path.join(BACKEND, 'src/db/database.js').replace(/\\/g, '\\\\')}');
-        const u = db.prepare("SELECT id FROM users WHERE role='medrep' LIMIT 1").get();
-        // seed.js no longer creates demo customers (Sep 2) — the mirror is
-        // Zoho's job — so this fixture makes its own instead of assuming one.
-        const c = { id: db.prepare("INSERT INTO customers (name, type) VALUES ('NOMIG Test Customer','credit')").run().lastInsertRowid };
-        const id = db.prepare("INSERT INTO orders (getmeds_order_id,customer_id,medrep_id,status,customer_type,total_amount,delivery_address,zoho_so_id) VALUES ('NOMIG-1',?,?,'so_created','credit',100,'Manila','ZSO-NOMIG')").run(c.id, u.id).lastInsertRowid;
         (async () => {
+          await db.init();
+          const u = await db.prepare("SELECT id FROM users WHERE role='medrep' LIMIT 1").get();
+          // seed.js no longer creates demo customers (Sep 2) - the mirror is
+          // Zoho's job - so this fixture makes its own instead of assuming one.
+          const cr = await db.prepare("INSERT INTO customers (name, type) VALUES ('NOMIG Test Customer','credit')").run();
+          const orow = await db.prepare("INSERT INTO orders (getmeds_order_id,customer_id,medrep_id,status,customer_type,total_amount,delivery_address,zoho_so_id) VALUES ('NOMIG-1',?,?,'so_created','credit',100,'Manila','ZSO-NOMIG')").run(cr.lastInsertRowid, u.id);
           const l = await request(app).post('/api/auth/login').send({ email: 'admin@getmeds.ph', password: 'demo123' });
-          const r = await request(app).get('/api/orders/' + id).set('Authorization', 'Bearer ' + l.body.data.token);
+          const r = await request(app).get('/api/orders/' + orow.lastInsertRowid).set('Authorization', 'Bearer ' + l.body.data.token);
           process.stdout.write('RESULT:' + r.status + ':' + (r.body?.data?.order?.getmeds_order_id || ''));
           process.exit(0);
         })();
       `;
-      const schemaFile = path.join(tmp, 'schema.sql');
-      fs.writeFileSync(schemaFile, schema);
 
       const out = execFileSync(process.execPath, ['-e', script], {
         cwd: BACKEND,
-        env: { ...process.env, GETMEDS_DB_DIR: tmp, SCHEMA_FILE: schemaFile, ZOHO_MODE: 'mock' },
-        encoding: 'utf8'
+        env: { ...process.env, DATABASE_URL: nomigUrl, ZOHO_MODE: 'mock' },
+        encoding: 'utf8',
       });
 
       expect(out).toContain('RESULT:200:NOMIG-1');
     } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
+      const cleanup = new Client({ connectionString: adminUrl });
+      await cleanup.connect();
+      try {
+        await cleanup.query('DROP DATABASE IF EXISTS getmeds_nomig_test WITH (FORCE)');
+      } finally {
+        await cleanup.end();
+      }
     }
-  }, 30000);
+  }, 60000);
 });

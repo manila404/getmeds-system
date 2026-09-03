@@ -1,34 +1,34 @@
 const db = require('../db/database');
 
-exports.getSummary = (req, res, next) => {
+exports.getSummary = async (req, res, next) => {
   try {
     // Orders by status
-    const statusRows = db.prepare('SELECT status, COUNT(*) as count FROM orders GROUP BY status').all();
+    const statusRows = await db.prepare('SELECT status, COUNT(*) as count FROM orders GROUP BY status').all();
     const orders_by_status = {};
     for (const row of statusRows) orders_by_status[row.status] = row.count;
 
-    const total_orders = db.prepare('SELECT COUNT(*) as c FROM orders').get().c;
+    const total_orders = (await db.prepare('SELECT COUNT(*) as c FROM orders').get()).c;
     // Sep 1, 2026: invoice_drafted/invoice_sent counted here too. Both are
     // orders Finance is still carrying — invoiced in Zoho but not yet paid —
     // and they are already in the Finance queue, so leaving them out made
     // this KPI disagree with the queue it is meant to summarise.
-    const pending_payment_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('ready_for_draft_invoice','ready_for_invoice_sent','ready_for_dispatch')").get().c;
-    const ready_dispatch_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('ready_for_dispatch','picking_packing')").get().c;
-    const dispatched_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('dispatched','tracking_shared')").get().c;
-    const completed_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status = 'completed'").get().c;
+    const pending_payment_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('ready_for_draft_invoice','ready_for_invoice_sent','ready_for_dispatch')").get()).c;
+    const ready_dispatch_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('ready_for_dispatch','picking_packing')").get()).c;
+    const dispatched_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('dispatched','tracking_shared')").get()).c;
+    const completed_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status = 'completed'").get()).c;
     // 'deleted' counted alongside 'cancelled' (Sep 1, 2026) so an order whose
     // Sales Order was removed in Zoho still shows up somewhere on the
     // dashboard rather than dropping out of every KPI.
-    const exception_count = db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('on_hold','exception','cancelled','deleted')").get().c;
+    const exception_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('on_hold','exception','cancelled','deleted')").get()).c;
 
     const today = new Date().toISOString().slice(0, 10);
-    const orders_today = db.prepare("SELECT COUNT(*) as c FROM orders WHERE DATE(created_at) = ?").get(today).c;
+    const orders_today = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE DATE(created_at) = ?").get(today)).c;
 
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const orders_this_week = db.prepare("SELECT COUNT(*) as c FROM orders WHERE DATE(created_at) >= ?").get(weekAgo).c;
+    const orders_this_week = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE DATE(created_at) >= ?").get(weekAgo)).c;
 
     // Avg processing time (submitted_at → completed dispatched)
-    const avgRow = db.prepare(`
+    const avgRow = await db.prepare(`
       SELECT AVG((JULIANDAY(updated_at) - JULIANDAY(submitted_at)) * 24) as avg_hours
       FROM orders
       WHERE status IN ('completed', 'dispatched', 'tracking_shared') AND submitted_at IS NOT NULL
@@ -53,7 +53,7 @@ exports.getSummary = (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.getAllOrders = (req, res, next) => {
+exports.getAllOrders = async (req, res, next) => {
   try {
     const { status, customer_type, page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -63,7 +63,7 @@ exports.getAllOrders = (req, res, next) => {
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
-    const orders = db.prepare(`
+    const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.name as medrep_name,
              p.status as payment_status, d.status as dispatch_status, d.tracking_number, d.courier
       FROM orders o
@@ -76,7 +76,7 @@ exports.getAllOrders = (req, res, next) => {
       LIMIT ? OFFSET ?
     `).all(...params, parseInt(limit), offset);
 
-    const total = db.prepare(`SELECT COUNT(*) as c FROM orders o ${whereClause}`).get(...params).c;
+    const total = (await db.prepare(`SELECT COUNT(*) as c FROM orders o ${whereClause}`).get(...params)).c;
 
     res.json({ success: true, data: { orders, pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / parseInt(limit)) } } });
   } catch (err) { next(err); }

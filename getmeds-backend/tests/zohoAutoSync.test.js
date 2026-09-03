@@ -19,13 +19,15 @@ describe('Zoho auto-sync', () => {
   let customer;
   const ids = [];
 
-  const makeOrder = ({ ref, status = 'ready_for_draft_invoice', soId = 'ZSO-AUTO', lastReconciled = null }) => {
-    const existing = db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(ref);
+  const makeOrder = async (
+    { ref, status = 'ready_for_draft_invoice', soId = 'ZSO-AUTO', lastReconciled = null }
+  ) => {
+    const existing = await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(ref);
     if (existing) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
     }
-    const r = db
+    const r = await db
       .prepare(
         `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type,
                              total_amount, delivery_address, zoho_so_id, zoho_sync_status, last_reconciled_at)
@@ -36,34 +38,34 @@ describe('Zoho auto-sync', () => {
     return r.lastInsertRowid;
   };
 
-  beforeAll(() => {
-    medrep = db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
-    customer = db.prepare("SELECT id FROM customers WHERE type = 'direct' LIMIT 1").get();
+  beforeAll(async () => {
+    medrep = await db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
+    customer = await db.prepare("SELECT id FROM customers WHERE type = 'direct' LIMIT 1").get();
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of ids) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
     autoSync.stop();
   });
 
   describe('pickBatch', () => {
-    test('skips terminal orders and anything never pushed to Zoho', () => {
-      const live = makeOrder({ ref: 'AUTO-LIVE-1' });
-      const done = makeOrder({ ref: 'AUTO-DONE-1', status: 'completed' });
-      const gone = makeOrder({ ref: 'AUTO-DEL-1', status: 'deleted' });
-      const voided = makeOrder({ ref: 'AUTO-CAN-1', status: 'cancelled' });
+    test('skips terminal orders and anything never pushed to Zoho', async () => {
+      const live = await makeOrder({ ref: 'AUTO-LIVE-1' });
+      const done = await makeOrder({ ref: 'AUTO-DONE-1', status: 'completed' });
+      const gone = await makeOrder({ ref: 'AUTO-DEL-1', status: 'deleted' });
+      const voided = await makeOrder({ ref: 'AUTO-CAN-1', status: 'cancelled' });
 
-      const noSo = makeOrder({ ref: 'AUTO-NOSO-1' });
-      db.prepare('UPDATE orders SET zoho_so_id = NULL WHERE id = ?').run(noSo);
+      const noSo = await makeOrder({ ref: 'AUTO-NOSO-1' });
+      await db.prepare('UPDATE orders SET zoho_so_id = NULL WHERE id = ?').run(noSo);
 
-      const picked = autoSync.pickBatch(100).map((o) => o.id);
+      const picked = (await autoSync.pickBatch(100)).map((o) => o.id);
       expect(picked).toContain(live);
       expect(picked).not.toContain(done);
       expect(picked).not.toContain(gone);
@@ -71,67 +73,67 @@ describe('Zoho auto-sync', () => {
       expect(picked).not.toContain(noSo);
     });
 
-    test('least-recently-reconciled first, never-reconciled ahead of everything', () => {
-      const never = makeOrder({ ref: 'AUTO-NEVER' });
-      const old = makeOrder({ ref: 'AUTO-OLD', lastReconciled: '2026-01-01T00:00:00.000Z' });
-      const fresh = makeOrder({ ref: 'AUTO-FRESH', lastReconciled: new Date().toISOString() });
+    test('least-recently-reconciled first, never-reconciled ahead of everything', async () => {
+      const never = await makeOrder({ ref: 'AUTO-NEVER' });
+      const old = await makeOrder({ ref: 'AUTO-OLD', lastReconciled: '2026-01-01T00:00:00.000Z' });
+      const fresh = await makeOrder({ ref: 'AUTO-FRESH', lastReconciled: new Date().toISOString() });
 
-      const order = autoSync.pickBatch(100).map((o) => o.id);
+      const order = (await autoSync.pickBatch(100)).map((o) => o.id);
       expect(order.indexOf(never)).toBeLessThan(order.indexOf(old));
       expect(order.indexOf(old)).toBeLessThan(order.indexOf(fresh));
     });
 
-    test('honours the batch limit', () => {
-      expect(autoSync.pickBatch(2)).toHaveLength(2);
+    test('honours the batch limit', async () => {
+      expect(await autoSync.pickBatch(2)).toHaveLength(2);
     });
   });
 
   describe('reconcileOne', () => {
     test('stamps last_reconciled_at on success', async () => {
-      const id = makeOrder({ ref: 'AUTO-OK-1' });
+      const id = await makeOrder({ ref: 'AUTO-OK-1' });
       jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({
         code: 0,
         message: 'success',
         salesorder: { salesorder_id: 'ZSO-AUTO', salesorder_number: 'SO-1', status: 'draft' }
       });
 
-      const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+      const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
       await autoSync.reconcileOne(order, 'auto_sync');
 
-      expect(db.prepare('SELECT last_reconciled_at FROM orders WHERE id = ?').get(id).last_reconciled_at).toBeTruthy();
+      expect((await db.prepare('SELECT last_reconciled_at FROM orders WHERE id = ?').get(id)).last_reconciled_at).toBeTruthy();
     });
 
     test('stamps last_reconciled_at even when Zoho is unreachable', async () => {
       // Otherwise the failing order stays at the head of the queue and every
       // future tick burns the whole batch retrying it.
-      const id = makeOrder({ ref: 'AUTO-FAIL-1' });
+      const id = await makeOrder({ ref: 'AUTO-FAIL-1' });
       jest.spyOn(zoho, 'getSalesOrder').mockRejectedValue(new Error('ECONNREFUSED'));
 
-      const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+      const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
       const result = await autoSync.reconcileOne(order, 'auto_sync');
 
       expect(result.ok).toBe(false);
-      expect(db.prepare('SELECT last_reconciled_at FROM orders WHERE id = ?').get(id).last_reconciled_at).toBeTruthy();
+      expect((await db.prepare('SELECT last_reconciled_at FROM orders WHERE id = ?').get(id)).last_reconciled_at).toBeTruthy();
     });
 
     test('actually backfills the trail — a confirmed SO reaches the order', async () => {
-      const id = makeOrder({ ref: 'AUTO-CONF-1', status: 'so_created' });
+      const id = await makeOrder({ ref: 'AUTO-CONF-1', status: 'so_created' });
       jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({
         code: 0,
         message: 'success',
         salesorder: { salesorder_id: 'ZSO-AUTO', salesorder_number: 'SO-AUTO-9', status: 'confirmed' }
       });
 
-      const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+      const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
       const result = await autoSync.reconcileOne(order, 'auto_sync');
 
       expect(result.ok).toBe(true);
       expect(result.action).toBe('SO_CONFIRMED_BACKFILLED');
       // Sep 1, 2026 (8): confirmation hands the order to Finance for account
       // verification, which is a step earlier than invoicing.
-      expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(id).status).toBe('ready_for_finance_verified');
+      expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(id)).status).toBe('ready_for_finance_verified');
 
-      const event = db
+      const event = await db
         .prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SO_CONFIRMED'")
         .get(id);
       expect(event).toBeDefined();
@@ -143,8 +145,8 @@ describe('Zoho auto-sync', () => {
 
   describe('runOnce', () => {
     test('one bad order does not stop the rest of the batch', async () => {
-      const bad = makeOrder({ ref: 'AUTO-BAD', lastReconciled: '2020-01-01T00:00:00.000Z' });
-      const good = makeOrder({ ref: 'AUTO-GOOD', lastReconciled: '2020-01-02T00:00:00.000Z' });
+      const bad = await makeOrder({ ref: 'AUTO-BAD', lastReconciled: '2020-01-01T00:00:00.000Z' });
+      const good = await makeOrder({ ref: 'AUTO-GOOD', lastReconciled: '2020-01-02T00:00:00.000Z' });
 
       jest.spyOn(zoho, 'getSalesOrder').mockImplementation(async () => {
         throw new Error('boom');
@@ -153,7 +155,7 @@ describe('Zoho auto-sync', () => {
       const results = await autoSync.runOnce({ limit: 2 });
       expect(results).toHaveLength(2);
       for (const id of [bad, good]) {
-        expect(db.prepare('SELECT last_reconciled_at FROM orders WHERE id = ?').get(id).last_reconciled_at).toBeTruthy();
+        expect((await db.prepare('SELECT last_reconciled_at FROM orders WHERE id = ?').get(id)).last_reconciled_at).toBeTruthy();
       }
     });
   });
@@ -168,7 +170,7 @@ describe('Zoho auto-sync', () => {
     };
 
     test('opening an order pulls Zoho and returns the updated trail in the same response', async () => {
-      const id = makeOrder({ ref: 'AUTO-OPEN-1', status: 'so_created' });
+      const id = await makeOrder({ ref: 'AUTO-OPEN-1', status: 'so_created' });
       const token = await login();
 
       const spy = jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({
@@ -187,7 +189,7 @@ describe('Zoho auto-sync', () => {
     });
 
     test('re-opening inside the cooldown does not call Zoho again', async () => {
-      const id = makeOrder({ ref: 'AUTO-OPEN-2', status: 'so_created' });
+      const id = await makeOrder({ ref: 'AUTO-OPEN-2', status: 'so_created' });
       const token = await login();
 
       const spy = jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({
@@ -207,7 +209,7 @@ describe('Zoho auto-sync', () => {
     });
 
     test('Zoho being down still returns the order rather than an error page', async () => {
-      const id = makeOrder({ ref: 'AUTO-OPEN-3', status: 'so_created' });
+      const id = await makeOrder({ ref: 'AUTO-OPEN-3', status: 'so_created' });
       const token = await login();
       jest.spyOn(zoho, 'getSalesOrder').mockRejectedValue(new Error('ETIMEDOUT'));
 
@@ -218,13 +220,13 @@ describe('Zoho auto-sync', () => {
   });
 
   describe('shouldRefreshOnOpen', () => {
-    test('yes when never reconciled', () => {
-      expect(autoSync.shouldRefreshOnOpen({ zoho_so_id: 'X', status: 'ready_for_draft_invoice', last_reconciled_at: null })).toBe(true);
+    test('yes when never reconciled', async () => {
+      expect(await autoSync.shouldRefreshOnOpen({ zoho_so_id: 'X', status: 'ready_for_draft_invoice', last_reconciled_at: null })).toBe(true);
     });
 
-    test('no inside the cooldown', () => {
+    test('no inside the cooldown', async () => {
       expect(
-        autoSync.shouldRefreshOnOpen({
+        await autoSync.shouldRefreshOnOpen({
           zoho_so_id: 'X',
           status: 'ready_for_draft_invoice',
           last_reconciled_at: new Date().toISOString()
@@ -232,15 +234,15 @@ describe('Zoho auto-sync', () => {
       ).toBe(false);
     });
 
-    test('yes once the cooldown has elapsed', () => {
+    test('yes once the cooldown has elapsed', async () => {
       const stale = new Date(Date.now() - autoSync.OPEN_COOLDOWN_MS - 1000).toISOString();
-      expect(autoSync.shouldRefreshOnOpen({ zoho_so_id: 'X', status: 'ready_for_draft_invoice', last_reconciled_at: stale })).toBe(true);
+      expect(await autoSync.shouldRefreshOnOpen({ zoho_so_id: 'X', status: 'ready_for_draft_invoice', last_reconciled_at: stale })).toBe(true);
     });
 
-    test('never for terminal orders or orders with no Zoho Sales Order', () => {
-      expect(autoSync.shouldRefreshOnOpen({ zoho_so_id: 'X', status: 'completed', last_reconciled_at: null })).toBe(false);
-      expect(autoSync.shouldRefreshOnOpen({ zoho_so_id: 'X', status: 'deleted', last_reconciled_at: null })).toBe(false);
-      expect(autoSync.shouldRefreshOnOpen({ zoho_so_id: null, status: 'ready_for_draft_invoice', last_reconciled_at: null })).toBe(false);
+    test('never for terminal orders or orders with no Zoho Sales Order', async () => {
+      expect(await autoSync.shouldRefreshOnOpen({ zoho_so_id: 'X', status: 'completed', last_reconciled_at: null })).toBe(false);
+      expect(await autoSync.shouldRefreshOnOpen({ zoho_so_id: 'X', status: 'deleted', last_reconciled_at: null })).toBe(false);
+      expect(await autoSync.shouldRefreshOnOpen({ zoho_so_id: null, status: 'ready_for_draft_invoice', last_reconciled_at: null })).toBe(false);
     });
   });
 });
@@ -286,36 +288,36 @@ describe('replaying a Zoho order that is already several stages along', () => {
     ]
   };
 
-  beforeEach(() => {
-    medrep = db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
-    customer = db.prepare('SELECT id FROM customers LIMIT 1').get();
-    const existing = db.prepare("SELECT id FROM orders WHERE getmeds_order_id = 'ZOHO-SO-REPLAY-1'").get();
+  beforeEach(async () => {
+    medrep = await db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
+    customer = await db.prepare('SELECT id FROM customers LIMIT 1').get();
+    const existing = await db.prepare("SELECT id FROM orders WHERE getmeds_order_id = 'ZOHO-SO-REPLAY-1'").get();
     if (existing) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
     }
-    orderId = db
+    orderId = (await db
       .prepare(
         `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type,
                              total_amount, delivery_address, zoho_so_id, zoho_so_number, zoho_sync_status)
          VALUES ('ZOHO-SO-REPLAY-1', ?, ?, 'so_created', 'credit', 4200, 'Manila', 'ZS-REPLAY', 'SO-REPLAY-1', 'synced')`
       )
-      .run(customer.id, medrep.id).lastInsertRowid;
+      .run(customer.id, medrep.id)).lastInsertRowid;
     jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({ code: 0, message: 'success', salesorder: ZOHO_SO });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     jest.restoreAllMocks();
-    db.prepare('DELETE FROM order_events WHERE order_id = ?').run(orderId);
-    db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(orderId);
-    db.prepare('DELETE FROM orders WHERE id = ?').run(orderId);
+    await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(orderId);
+    await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(orderId);
+    await db.prepare('DELETE FROM orders WHERE id = ?').run(orderId);
   });
 
   test('one pass records only the first checkpoint — which is why callers use ...Fully', async () => {
     const result = await reconcileOrder({ orderId, actorName: 'T', source: 'zoho_import' });
     expect(result.action).toBe('SO_CONFIRMED_BACKFILLED');
-    expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId).status).toBe('ready_for_finance_verified');
+    expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId)).status).toBe('ready_for_finance_verified');
   });
 
   test('the full reconcile rebuilds every stage, in the order they happened', async () => {
@@ -330,9 +332,9 @@ describe('replaying a Zoho order that is already several stages along', () => {
 
     // Shipped but unpaid — tracking_shared, not completed, and definitely not
     // stranded back at picking_packing.
-    expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId).status).toBe('tracking_shared');
+    expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId)).status).toBe('tracking_shared');
 
-    const trail = db
+    const trail = await db
       .prepare('SELECT event_type, old_status, new_status FROM order_events WHERE order_id = ? ORDER BY id')
       .all(orderId);
     expect(trail.map((e) => e.event_type)).toEqual([
@@ -351,12 +353,12 @@ describe('replaying a Zoho order that is already several stages along', () => {
 
   test('running it again is a no-op — no duplicate entries', async () => {
     await reconcileOrderFully({ orderId, actorName: 'T', source: 'zoho_import' });
-    const countBefore = db.prepare('SELECT COUNT(*) n FROM order_events WHERE order_id = ?').get(orderId).n;
+    const countBefore = (await db.prepare('SELECT COUNT(*) n FROM order_events WHERE order_id = ?').get(orderId)).n;
 
     const again = await reconcileOrderFully({ orderId, actorName: 'T', source: 'zoho_import' });
     expect(again.actions).toEqual([]);
     expect(again.action).toBe('NOTHING_NEW');
-    expect(db.prepare('SELECT COUNT(*) n FROM order_events WHERE order_id = ?').get(orderId).n).toBe(countBefore);
+    expect((await db.prepare('SELECT COUNT(*) n FROM order_events WHERE order_id = ?').get(orderId)).n).toBe(countBefore);
   });
 });
 
@@ -378,42 +380,42 @@ describe('a Zoho Sales Order already past confirmed', () => {
 
   let orderId;
 
-  const seed = (salesorder) => {
-    const medrep = db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
-    const customer = db.prepare('SELECT id FROM customers LIMIT 1').get();
-    const existing = db.prepare("SELECT id FROM orders WHERE getmeds_order_id = 'ZOHO-PAST-CONF'").get();
+  const seed = async salesorder => {
+    const medrep = await db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get();
+    const customer = await db.prepare('SELECT id FROM customers LIMIT 1').get();
+    const existing = await db.prepare("SELECT id FROM orders WHERE getmeds_order_id = 'ZOHO-PAST-CONF'").get();
     if (existing) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(existing.id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(existing.id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(existing.id);
     }
-    orderId = db.prepare(
+    orderId = (await db.prepare(
       `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type,
                            total_amount, delivery_address, zoho_so_id, zoho_so_number, zoho_sync_status)
        VALUES ('ZOHO-PAST-CONF', ?, ?, 'so_created', 'credit', 100, 'Manila', 'ZS-PC', 'SO-PC', 'synced')`
-    ).run(customer.id, medrep.id).lastInsertRowid;
+    ).run(customer.id, medrep.id)).lastInsertRowid;
     jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({ code: 0, message: 'success', salesorder });
   };
 
-  afterEach(() => {
+  afterEach(async () => {
     jest.restoreAllMocks();
     if (orderId) {
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(orderId);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(orderId);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(orderId);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(orderId);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(orderId);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(orderId);
     }
   });
 
   test('status "shipped" with no invoice still rebuilds the whole trail', async () => {
-    seed({ salesorder_id: 'ZS-PC', salesorder_number: 'SO-PC', status: 'shipped', packages: PACKAGES });
+    await seed({ salesorder_id: 'ZS-PC', salesorder_number: 'SO-PC', status: 'shipped', packages: PACKAGES });
     const r = await reconcileOrderFully({ orderId, actorName: 'Import', source: 'zoho_import' });
 
     expect(r.actions).toContain('SO_CONFIRMED_BACKFILLED');
-    expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId).status).toBe('tracking_shared');
+    expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId)).status).toBe('tracking_shared');
   });
 
   test('status "shipped" with an invoice rebuilds the finance stages too', async () => {
-    seed({
+    await seed({
       salesorder_id: 'ZS-PC', salesorder_number: 'SO-PC', status: 'shipped',
       invoices: [{ invoice_id: 'I1', invoice_number: 'INV-1', status: 'sent' }],
       packages: PACKAGES
@@ -423,22 +425,22 @@ describe('a Zoho Sales Order already past confirmed', () => {
     expect(r.actions).toEqual([
       'SO_CONFIRMED_BACKFILLED', 'INVOICE_BACKFILLED', 'PACKAGE_BACKFILLED', 'DISPATCHED_BACKFILLED'
     ]);
-    expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId).status).toBe('tracking_shared');
+    expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId)).status).toBe('tracking_shared');
   });
 
   test.each(['fulfilled', 'partially_shipped', 'closed', 'invoiced'])(
     'status "%s" counts as confirmed', async (status) => {
-      seed({ salesorder_id: 'ZS-PC', salesorder_number: 'SO-PC', status });
+      await seed({ salesorder_id: 'ZS-PC', salesorder_number: 'SO-PC', status });
       const r = await reconcileOrderFully({ orderId, actorName: 'Import', source: 'zoho_import' });
       expect(r.actions).toContain('SO_CONFIRMED_BACKFILLED');
-      expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId).status).toBe('ready_for_finance_verified');
+      expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId)).status).toBe('ready_for_finance_verified');
     }
   );
 
   test('a genuine draft is left alone at so_created', async () => {
-    seed({ salesorder_id: 'ZS-PC', salesorder_number: 'SO-PC', status: 'draft' });
+    await seed({ salesorder_id: 'ZS-PC', salesorder_number: 'SO-PC', status: 'draft' });
     const r = await reconcileOrderFully({ orderId, actorName: 'Import', source: 'zoho_import' });
     expect(r.actions).toEqual([]);
-    expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId).status).toBe('so_created');
+    expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId)).status).toBe('so_created');
   });
 });

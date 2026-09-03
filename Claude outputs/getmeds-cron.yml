@@ -1,0 +1,79 @@
+# Scheduled reconcile, run from GitHub Actions instead of Vercel Cron.
+#
+# Sep 3, 2026. Why this exists:
+#
+# Vercel's Hobby plan allows cron ONCE PER DAY, with ±59 minutes of slop, and a
+# more frequent expression fails at deploy time with
+# "Hobby accounts are limited to daily cron jobs". The auto-sync service was
+# designed around a 5-minute cadence, and it is what fills in the audit trail
+# when a Zoho webhook never arrives — which is not hypothetical, because four
+# of the seven Zoho Workflow Rules do not exist yet. Once a day is not a
+# reconcile loop; it is a daily batch job.
+#
+# GitHub Actions scheduled workflows are free on public repos and included in
+# the free minutes on private ones, and they can run every 15 minutes. That is
+# not the 5 minutes of the original loop, but it is 96x better than daily and
+# costs nothing.
+#
+# Be aware of two things:
+#
+#   - GitHub delays scheduled runs under load, sometimes by 10+ minutes, and
+#     may skip them entirely during incidents. Treat this as best-effort. If
+#     the reconcile lag genuinely matters to the business, that is an argument
+#     for Vercel Pro or a host with a real process, not for tuning this file.
+#
+#   - GitHub disables scheduled workflows on repos with no activity for 60
+#     days. A commit re-enables it.
+#
+# SETUP
+#   Repo -> Settings -> Secrets and variables -> Actions:
+#     GETMEDS_API_URL       https://your-backend.vercel.app
+#     GETMEDS_CRON_SECRET   the same value as CRON_SECRET in Vercel
+#
+# The endpoints are safe to call concurrently: they take a database-backed
+# lease (src/services/cronLock.js), so an overlapping run exits immediately
+# rather than double-reconciling.
+
+name: Getmeds scheduled reconcile
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: getmeds-cron
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Auto-sync open orders against Zoho
+        env:
+          API: ${{ secrets.GETMEDS_API_URL }}
+          SECRET: ${{ secrets.GETMEDS_CRON_SECRET }}
+        run: |
+          if [ -z "$API" ] || [ -z "$SECRET" ]; then
+            echo "::error::GETMEDS_API_URL or GETMEDS_CRON_SECRET is not set"
+            exit 1
+          fi
+          # --fail-with-body so a non-2xx fails the step AND shows the body,
+          # rather than passing silently or hiding why it was refused.
+          curl --fail-with-body --silent --show-error \
+               --max-time 120 \
+               -H "Authorization: Bearer $SECRET" \
+               "$API/api/cron/auto-sync"
+          echo
+
+      - name: Drain the Zoho retry queue
+        env:
+          API: ${{ secrets.GETMEDS_API_URL }}
+          SECRET: ${{ secrets.GETMEDS_CRON_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+               --max-time 120 \
+               -H "Authorization: Bearer $SECRET" \
+               "$API/api/cron/zoho-retry"
+          echo

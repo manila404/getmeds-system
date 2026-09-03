@@ -26,7 +26,7 @@ const DEFAULT_PAGE_SIZE = 25;
  * matching the Inventory page) plus optional ?search (matches name/
  * contact_person/contact_number), ?category, and ?type filters.
  */
-function getCustomersOverview(req, res, next) {
+async function getCustomersOverview(req, res, next) {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || DEFAULT_PAGE_SIZE));
@@ -69,8 +69,8 @@ function getCustomersOverview(req, res, next) {
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const total = db.prepare(`SELECT COUNT(*) AS count FROM customers ${whereSql}`).get(...params).count;
-    const customers = db
+    const total = (await db.prepare(`SELECT COUNT(*) AS count FROM customers ${whereSql}`).get(...params)).count;
+    const customers = await db
       .prepare(`SELECT * FROM customers ${whereSql} ORDER BY name LIMIT ? OFFSET ?`)
       .all(...params, limit, offset);
 
@@ -109,9 +109,9 @@ function getCustomersOverview(req, res, next) {
  * grouped local query — one request, one round trip, instead of five
  * (this call plus the paginated list) on every page load.
  */
-function getCustomerStats(req, res, next) {
+async function getCustomerStats(req, res, next) {
   try {
-    const row = db
+    const row = await db
       .prepare(
         `SELECT
            COUNT(*) AS total,
@@ -128,7 +128,7 @@ function getCustomerStats(req, res, next) {
     // move a number people read every day. The active/inactive split is
     // reported alongside instead, so the Status filter can show how many it
     // would reveal without redefining anything above it.
-    const split = db
+    const split = await db
       .prepare(
         `SELECT
            SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active,
@@ -158,7 +158,7 @@ function getCustomerStats(req, res, next) {
  * `customers` table; nothing is ever sent to Zoho, and `type` (credit/
  * direct) is never touched by this endpoint.
  */
-function updateCustomerCategory(req, res, next) {
+async function updateCustomerCategory(req, res, next) {
   try {
     const { id } = req.params;
     let { category } = req.body || {};
@@ -177,13 +177,13 @@ function updateCustomerCategory(req, res, next) {
       });
     }
 
-    const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
+    const customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
     if (!customer) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Customer not found' } });
     }
 
-    db.prepare('UPDATE customers SET category = ? WHERE id = ?').run(category ?? null, id);
-    const updated = db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
+    await db.prepare('UPDATE customers SET category = ? WHERE id = ?').run(category ?? null, id);
+    const updated = await db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
 
     res.json({ success: true, data: { customer: updated } });
   } catch (err) { next(err); }
@@ -213,7 +213,7 @@ function updateCustomerCategory(req, res, next) {
  * against it directly) and the new background Quick Sync / Full Resync
  * jobs (startSyncJob), so the two can never quietly drift apart.
  */
-function reconcileContacts(contacts) {
+async function reconcileContacts(contacts) {
   const findByZohoId = db.prepare('SELECT id FROM customers WHERE zoho_contact_id = ?');
   const insert = db.prepare(`
     INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active)
@@ -228,7 +228,7 @@ function reconcileContacts(contacts) {
   let updated = 0;
   let skipped = 0;
 
-  const txn = db.transaction(() => {
+  const txn = db.transaction(async () => {
     for (const contact of contacts) {
       if (!contact.contact_id) { skipped++; continue; }
 
@@ -257,17 +257,17 @@ function reconcileContacts(contacts) {
       // never mass-hide the directory.
       const isActive = String(contact.status || '').toLowerCase() === 'inactive' ? 0 : 1;
 
-      const existing = findByZohoId.get(contact.contact_id);
+      const existing = await findByZohoId.get(contact.contact_id);
       if (existing) {
-        update.run(name, contactPerson, phone, address, isActive, contact.contact_id);
+        await update.run(name, contactPerson, phone, address, isActive, contact.contact_id);
         updated++;
       } else {
-        insert.run(name, type, contact.contact_id, contactPerson, phone, address, isActive);
+        await insert.run(name, type, contact.contact_id, contactPerson, phone, address, isActive);
         created++;
       }
     }
   });
-  txn();
+  await txn();
 
   return { created, updated, skipped };
 }
@@ -277,7 +277,7 @@ async function syncFromZoho(req, res, next) {
     const result = await zoho.listContacts();
     const contacts = result.contacts || [];
 
-    const { created, updated, skipped } = reconcileContacts(contacts);
+    const { created, updated, skipped } = await reconcileContacts(contacts);
 
     // Aug 28, 2026: listContacts' pagination loop now reports whether it
     // stopped because of its own internal safety cap rather than because
@@ -342,7 +342,7 @@ async function startSyncJob(req, res) {
   const job = syncJobs.createJob({ type: 'customers', mode });
 
   if (mode === 'full') {
-    const priorTotal = parseInt(getSyncState('customers_last_full_total'), 10);
+    const priorTotal = parseInt(await getSyncState('customers_last_full_total'), 10);
     if (priorTotal > 0) syncJobs.updateProgress(job.id, { total: priorTotal });
   }
 
@@ -358,18 +358,18 @@ async function startSyncJob(req, res) {
         onPage: ({ processed }) => syncJobs.updateProgress(job.id, { processed })
       };
       if (mode === 'quick') {
-        const watermark = getSyncState('customers_last_modified_watermark');
+        const watermark = await getSyncState('customers_last_modified_watermark');
         if (watermark) opts.sinceWatermark = watermark;
       }
 
       const result = await zoho.listContacts({}, opts);
       const contacts = result.contacts || [];
-      const { created, updated, skipped } = reconcileContacts(contacts);
+      const { created, updated, skipped } = await reconcileContacts(contacts);
 
-      if (result.newWatermark) setSyncState('customers_last_modified_watermark', result.newWatermark);
+      if (result.newWatermark) await setSyncState('customers_last_modified_watermark', result.newWatermark);
       if (mode === 'full') {
-        setSyncState('customers_last_full_sync_at', new Date().toISOString());
-        setSyncState('customers_last_full_total', contacts.length);
+        await setSyncState('customers_last_full_sync_at', new Date().toISOString());
+        await setSyncState('customers_last_full_total', contacts.length);
       }
 
       syncJobs.finishJob(job.id, {
@@ -407,7 +407,7 @@ async function startSyncJob(req, res) {
  */
 async function getZohoAddress(req, res, next) {
   try {
-    const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+    const customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
     if (!customer) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Customer not found' } });
 
     // Local-only customer (never synced from Zoho) — nothing more accurate
@@ -449,7 +449,7 @@ async function getZohoAddress(req, res, next) {
       : (customer.contact_person || null);
     const contactNumber = contact.phone || contact.mobile || customer.contact_number || null;
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE customers SET address = ?, contact_person = ?, contact_number = ?, last_synced_at = datetime('now')
       WHERE id = ?
     `).run(address || null, contactPerson, contactNumber, customer.id);

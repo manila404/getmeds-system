@@ -48,27 +48,27 @@ const { isDryRunMode, getTestCustomerZohoId } = require('./zohoTestFlags');
  */
 
 /** Reserve and return the next number for `prefixKey`, atomically. */
-const nextSequence = db.transaction((prefixKey) => {
-  let row = db.prepare('SELECT seq FROM order_id_sequences WHERE prefix = ?').get(prefixKey);
+const nextSequence = db.transaction(async prefixKey => {
+  let row = await db.prepare('SELECT seq FROM order_id_sequences WHERE prefix = ?').get(prefixKey);
 
   if (!row) {
     // First order under this prefix on this database. Seed from whatever is
     // already in `orders` rather than from zero — a database that predates
     // this table, or a day already in progress when the app restarts, must
     // not restart numbering at 0001 and collide with rows that exist.
-    const last = db
+    const last = await db
       .prepare(
         `SELECT getmeds_order_id FROM orders WHERE getmeds_order_id LIKE ?
           ORDER BY getmeds_order_id DESC LIMIT 1`
       )
       .get(`${prefixKey}-%`);
     const start = last ? parseInt(last.getmeds_order_id.split('-')[2], 10) || 0 : 0;
-    db.prepare('INSERT INTO order_id_sequences (prefix, seq) VALUES (?, ?)').run(prefixKey, start);
+    await db.prepare('INSERT INTO order_id_sequences (prefix, seq) VALUES (?, ?)').run(prefixKey, start);
     row = { seq: start };
   }
 
   const next = row.seq + 1;
-  db.prepare('UPDATE order_id_sequences SET seq = ?, updated_at = ? WHERE prefix = ?').run(
+  await db.prepare('UPDATE order_id_sequences SET seq = ?, updated_at = ? WHERE prefix = ?').run(
     next,
     new Date().toISOString(),
     prefixKey
@@ -76,13 +76,13 @@ const nextSequence = db.transaction((prefixKey) => {
   return next;
 });
 
-function generateOrderId() {
+async function generateOrderId() {
   const now = new Date();
   const yyyymmdd = now.toISOString().slice(0, 10).replace(/-/g, '');
   const tierPrefix = isDryRunMode() ? 'DryGM' : (getTestCustomerZohoId() ? 'TestGM' : 'GM');
   const prefixKey = `${tierPrefix}-${yyyymmdd}`;
 
-  const seq = nextSequence(prefixKey);
+  const seq = await nextSequence(prefixKey);
   return `${prefixKey}-${seq.toString().padStart(4, '0')}`;
 }
 

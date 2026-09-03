@@ -32,7 +32,7 @@ async function getInventoryStatus(req, res) {
     // in Zoho simply vanished from Inventory, so the only way to discover it
     // was a failed sync reading "Inactive items cannot be added to the sales
     // order". Active first, so the working catalogue still reads top-down.
-    const localProducts = db.prepare('SELECT * FROM products ORDER BY is_active DESC, name ASC').all();
+    const localProducts = await db.prepare('SELECT * FROM products ORDER BY is_active DESC, name ASC').all();
 
     let syncedCount = 0;
     let mismatchCount = 0;
@@ -124,7 +124,7 @@ async function getInventoryStatus(req, res) {
  * directly) and the new background Quick Sync / Full Resync jobs
  * (startSyncJob), so the two can never quietly drift apart.
  */
-function reconcileItems(zohoItems) {
+async function reconcileItems(zohoItems) {
   const findByZohoId = db.prepare('SELECT id FROM products WHERE zoho_item_id = ?');
   const findBySku = db.prepare('SELECT id FROM products WHERE sku = ?');
   const findByName = db.prepare('SELECT id FROM products WHERE name = ?');
@@ -157,22 +157,22 @@ function reconcileItems(zohoItems) {
   let skippedCount = 0;
   let deactivatedCount = 0;
 
-  const syncTx = db.transaction(() => {
+  const syncTx = db.transaction(async () => {
     for (const item of zohoItems) {
       const zohoStock = item.stock_on_hand ?? item.actual_available_stock ?? item.initial_stock ?? 0;
       const zohoPrice = item.rate ?? item.price ?? null;
       const isActiveFromZoho = item.status === 'inactive' ? 0 : 1;
 
-      let existing = item.item_id ? findByZohoId.get(item.item_id) : undefined;
-      if (!existing && item.sku) existing = findBySku.get(item.sku);
-      if (!existing && item.name) existing = findByName.get(item.name);
+      let existing = item.item_id ? await findByZohoId.get(item.item_id) : undefined;
+      if (!existing && item.sku) existing = await findBySku.get(item.sku);
+      if (!existing && item.name) existing = await findByName.get(item.name);
 
       if (existing) {
         if (!isActiveFromZoho) {
-          const wasActive = db.prepare('SELECT is_active FROM products WHERE id = ?').get(existing.id)?.is_active;
+          const wasActive = (await db.prepare('SELECT is_active FROM products WHERE id = ?').get(existing.id))?.is_active;
           if (wasActive) deactivatedCount++;
         }
-        updateStmt.run(zohoStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, existing.id);
+        await updateStmt.run(zohoStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, existing.id);
         updatedCount++;
         continue;
       }
@@ -188,7 +188,7 @@ function reconcileItems(zohoItems) {
       const unit = item.unit || 'pc';
 
       try {
-        insertStmt.run(name, sku, unitPrice, unit, zohoStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho);
+        await insertStmt.run(name, sku, unitPrice, unit, zohoStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho);
         createdCount++;
       } catch (e) {
         // Most likely a SKU collision (two Zoho items sharing a SKU, or a
@@ -199,7 +199,7 @@ function reconcileItems(zohoItems) {
     }
   });
 
-  syncTx();
+  await syncTx();
 
   return { createdCount, updatedCount, skippedCount, deactivatedCount };
 }
@@ -209,7 +209,7 @@ async function syncPullStock(req, res) {
     const zohoRes = await zoho.listItems();
     const zohoItems = zohoRes.items || [];
 
-    const { createdCount, updatedCount, skippedCount, deactivatedCount } = reconcileItems(zohoItems);
+    const { createdCount, updatedCount, skippedCount, deactivatedCount } = await reconcileItems(zohoItems);
 
     // Aug 28, 2026: same safety-cap-truncation reporting added to
     // customers.controller.js's syncFromZoho — listItems shares the exact
@@ -268,7 +268,7 @@ async function startSyncJob(req, res) {
   const job = syncJobs.createJob({ type: 'inventory', mode });
 
   if (mode === 'full') {
-    const priorTotal = parseInt(getSyncState('inventory_last_full_total'), 10);
+    const priorTotal = parseInt(await getSyncState('inventory_last_full_total'), 10);
     if (priorTotal > 0) syncJobs.updateProgress(job.id, { total: priorTotal });
   }
 
@@ -280,18 +280,18 @@ async function startSyncJob(req, res) {
         onPage: ({ processed }) => syncJobs.updateProgress(job.id, { processed })
       };
       if (mode === 'quick') {
-        const watermark = getSyncState('inventory_last_modified_watermark');
+        const watermark = await getSyncState('inventory_last_modified_watermark');
         if (watermark) opts.sinceWatermark = watermark;
       }
 
       const zohoRes = await zoho.listItems({}, opts);
       const zohoItems = zohoRes.items || [];
-      const { createdCount, updatedCount, skippedCount } = reconcileItems(zohoItems);
+      const { createdCount, updatedCount, skippedCount } = await reconcileItems(zohoItems);
 
-      if (zohoRes.newWatermark) setSyncState('inventory_last_modified_watermark', zohoRes.newWatermark);
+      if (zohoRes.newWatermark) await setSyncState('inventory_last_modified_watermark', zohoRes.newWatermark);
       if (mode === 'full') {
-        setSyncState('inventory_last_full_sync_at', new Date().toISOString());
-        setSyncState('inventory_last_full_total', zohoItems.length);
+        await setSyncState('inventory_last_full_sync_at', new Date().toISOString());
+        await setSyncState('inventory_last_full_total', zohoItems.length);
       }
 
       syncJobs.finishJob(job.id, {
@@ -325,7 +325,7 @@ async function adjustStock(req, res) {
       return res.status(400).json({ success: false, message: 'product_id and numeric delta are required' });
     }
 
-    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(product_id);
+    const product = await db.prepare('SELECT * FROM products WHERE id = ?').get(product_id);
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
@@ -335,7 +335,7 @@ async function adjustStock(req, res) {
       return res.status(400).json({ success: false, message: `Cannot reduce stock below 0 (current: ${product.stock}, delta: ${delta})` });
     }
 
-    db.prepare('UPDATE products SET stock = ?, last_synced_at = datetime(\'now\') WHERE id = ?').run(newStock, product.id);
+    await db.prepare('UPDATE products SET stock = ?, last_synced_at = datetime(\'now\') WHERE id = ?').run(newStock, product.id);
 
     res.json({
       success: true,

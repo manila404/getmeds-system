@@ -20,18 +20,18 @@ describe('Orders — optional intake fields', () => {
     const medrepRes = await request(app).post('/api/auth/login').send({ email: 'medrep@getmeds.ph', password: 'demo123' });
     medrepToken = medrepRes.body.data.token;
 
-    customerId = db.prepare(`SELECT id FROM customers WHERE is_active = 1 LIMIT 1`).get().id;
-    productId = db.prepare(`SELECT id FROM products WHERE is_active = 1 LIMIT 1`).get().id;
+    customerId = (await db.prepare(`SELECT id FROM customers WHERE is_active = 1 LIMIT 1`).get()).id;
+    productId = (await db.prepare(`SELECT id FROM products WHERE is_active = 1 LIMIT 1`).get()).id;
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     for (const id of cleanupOrderIds) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
   });
 
@@ -57,7 +57,7 @@ describe('Orders — optional intake fields', () => {
     expect(res.status).toBe(201);
     cleanupOrderIds.push(res.body.data.order.id);
 
-    const stored = db.prepare('SELECT * FROM orders WHERE id = ?').get(res.body.data.order.id);
+    const stored = await db.prepare('SELECT * FROM orders WHERE id = ?').get(res.body.data.order.id);
     expect(stored.intake_courier).toBe('LBC');
     expect(stored.intake_doctor).toBe('Dr. Santos');
     expect(stored.intake_hospital).toBe('Test Hospital');
@@ -86,7 +86,7 @@ describe('Orders — optional intake fields', () => {
     expect(res.status).toBe(201);
     cleanupOrderIds.push(res.body.data.order.id);
 
-    const stored = db.prepare('SELECT * FROM orders WHERE id = ?').get(res.body.data.order.id);
+    const stored = await db.prepare('SELECT * FROM orders WHERE id = ?').get(res.body.data.order.id);
     expect(stored.intake_courier).toBeNull();
     expect(stored.intake_doctor).toBeNull();
     expect(stored.intake_mop).toBeNull();
@@ -107,7 +107,7 @@ describe('Orders — optional intake fields', () => {
     expect(res.status).toBe(201);
     cleanupOrderIds.push(res.body.data.order.id);
 
-    const stored = db.prepare('SELECT * FROM orders WHERE id = ?').get(res.body.data.order.id);
+    const stored = await db.prepare('SELECT * FROM orders WHERE id = ?').get(res.body.data.order.id);
     expect(stored.intake_courier).toBeNull();
     expect(stored.intake_doctor).toBeNull();
   });

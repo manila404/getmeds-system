@@ -33,7 +33,7 @@ const { evaluateCompletion } = require('./orderCompletionService');
  */
 async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync', source = 'auto_sync' }) {
   try {
-    const order = db.prepare(`
+    const order = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.name as medrep_name, u.email as medrep_email, u.id as medrep_user_id
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -46,8 +46,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       return { ok: false, code: 'NO_ZOHO_SO', message: 'This order does not have a Zoho Sales Order yet.' };
     }
 
-    const alreadyLogged = (eventType) =>
-      !!db.prepare('SELECT id FROM order_events WHERE order_id = ? AND event_type = ?').get(order.id, eventType);
+    const alreadyLogged = async eventType => !!(await db.prepare('SELECT id FROM order_events WHERE order_id = ? AND event_type = ?').get(order.id, eventType));
 
     let salesorder;
     try {
@@ -97,7 +96,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       // was stuck at its old status permanently with no way to correct it
       // from the UI. Re-run whenever the order's status doesn't yet reflect
       // the deletion; once it does, this goes quiet again.
-      const deletionLogged = alreadyLogged('ZOHO_SO_DELETED');
+      const deletionLogged = await alreadyLogged('ZOHO_SO_DELETED');
       const statusReflectsDeletion = ['deleted', 'completed', 'cancelled'].includes(order.status);
       if (!deletionLogged || !statusReflectsDeletion) {
         // Sep 1, 2026 (2): 'deleted' rather than 'cancelled' — mirrors the
@@ -107,9 +106,9 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
         if (canChangeStatus) deletedNewStatus = 'deleted';
         let refused = false;
 
-        db.transaction(() => {
+        await db.transaction(async () => {
           if (canChangeStatus) {
-            const moved = setOrderStatus(order.id, order.status, deletedNewStatus, deletedNow);
+            const moved = await setOrderStatus(order.id, order.status, deletedNewStatus, deletedNow);
             if (!moved.changed) {
               deletedNewStatus = moved.status;
               refused = moved.refused;
@@ -128,7 +127,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
               ? 'Sales Order no longer exists in Zoho (deleted) — backfilled by manual sync.'
               : `Sales Order no longer exists in Zoho (deleted) — backfilled by manual sync. Order status kept as "${order.status}" since it was already there; this just records that the Zoho Sales Order itself is gone.`;
 
-          logEvent({
+          await logEvent({
             orderId: order.id,
             eventType: 'ZOHO_SO_DELETED',
             oldStatus: order.status,
@@ -139,8 +138,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
             metadata: { source, refused }
           });
 
-          const adminIds = getUserIdsByRole('admin', 'management');
-          notify({
+          const adminIds = await getUserIdsByRole('admin', 'management');
+          await notify({
             orderId: order.id,
             recipientIds: Array.from(new Set([order.medrep_user_id, ...adminIds].filter(Boolean))),
             message: refused
@@ -153,8 +152,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
         deletedAction = refused ? 'SO_DELETED_NOT_APPLIED' : 'SO_DELETED_BACKFILLED';
       }
 
-      const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
-      const events = db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(order.id);
+      const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+      const events = await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(order.id);
       return { ok: true, action: deletedAction, zohoStatus: 'deleted', order: updatedOrder, events };
     }
     if (!salesorder) {
@@ -188,10 +187,10 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
     let action = 'NOTHING_NEW';
     let newStatus = order.status;
 
-    if (isConfirmed && !alreadyLogged('ZOHO_SO_CONFIRMED')) {
+    if (isConfirmed && !(await alreadyLogged('ZOHO_SO_CONFIRMED'))) {
       const zohoSoNumber = salesorder.salesorder_number || order.zoho_so_number;
 
-      db.transaction(() => {
+      await db.transaction(async () => {
         // Sep 1, 2026: 'so_created' added, mirroring the live webhook — a
         // credit order now waits there until Zoho confirms, so this is the
         // hop that releases it when the webhook was missed.
@@ -199,16 +198,16 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           // Sep 1, 2026 (8): confirming the Sales Order now hands the order
           // to Finance for account verification, not straight to invoicing.
           const target = 'ready_for_finance_verified';
-          const moved = advanceTo(order.id, order.status, target, now);
+          const moved = await advanceTo(order.id, order.status, target, now);
           if (moved.changed) newStatus = moved.status;
         }
 
-        db.prepare(`
+        await db.prepare(`
           UPDATE orders SET zoho_so_number = COALESCE(?, zoho_so_number), zoho_so_status = ?, zoho_sync_status = 'synced', updated_at = ?
           WHERE id = ?
         `).run(zohoSoNumber || null, soStatus || 'confirmed', now, order.id);
 
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_SO_CONFIRMED',
           oldStatus: order.status,
@@ -219,7 +218,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           metadata: { zohoSoId: order.zoho_so_id, zohoSoNumber, source }
         });
 
-        notify({
+        await notify({
           orderId: order.id,
           recipientIds: [order.medrep_user_id],
           message: `Zoho Sales Order ${zohoSoNumber || ''} confirmed for ${order.getmeds_order_id}.`,
@@ -229,14 +228,14 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       })();
 
       action = 'SO_CONFIRMED_BACKFILLED';
-    } else if (isCancelled && !alreadyLogged('ZOHO_SO_CANCELLED') && !['completed', 'cancelled', 'deleted'].includes(order.status)) {
+    } else if (isCancelled && !(await alreadyLogged('ZOHO_SO_CANCELLED')) && !['completed', 'cancelled', 'deleted'].includes(order.status)) {
       newStatus = 'cancelled';
 
-      db.transaction(() => {
-        const moved = setOrderStatus(order.id, order.status, newStatus, now);
+      await db.transaction(async () => {
+        const moved = await setOrderStatus(order.id, order.status, newStatus, now);
         if (!moved.changed) newStatus = moved.status;
 
-        logEvent({
+        await logEvent({
           orderId: order.id,
           eventType: 'ZOHO_SO_CANCELLED',
           oldStatus: order.status,
@@ -247,8 +246,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           metadata: { source }
         });
 
-        const adminIds = getUserIdsByRole('admin', 'management');
-        notify({
+        const adminIds = await getUserIdsByRole('admin', 'management');
+        await notify({
           orderId: order.id,
           recipientIds: Array.from(new Set([order.medrep_user_id, ...adminIds].filter(Boolean))),
           message: `Order ${order.getmeds_order_id} was cancelled in Zoho.`,
@@ -286,8 +285,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       const invoiceIsSent = ['sent', 'overdue', 'partially_paid'].includes(invoiceStatus);
       const invoiceAlreadyKnown =
         order.zoho_invoice_id === zohoInvoiceId &&
-        (invoiceIsPaid ? alreadyLogged('ZOHO_PAYMENT_VERIFIED') : true) &&
-        (invoiceIsSent ? alreadyLogged('ZOHO_INVOICE_SENT') : true);
+        (invoiceIsPaid ? await alreadyLogged('ZOHO_PAYMENT_VERIFIED') : true) &&
+        (invoiceIsSent ? await alreadyLogged('ZOHO_INVOICE_SENT') : true);
       const invoiceNeedsBackfill =
         Boolean(latestInvoice) &&
         !invoiceAlreadyKnown &&
@@ -338,20 +337,20 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           const preInvoice = ['so_created', 'ready_for_finance_verified', 'ready_for_draft_invoice', 'tracking_shared', 'ready_for_invoice_sent'];
           const eventType = invoiceIsSent || invoiceIsPaid ? 'ZOHO_INVOICE_SENT' : 'ZOHO_INVOICE_DRAFTED';
 
-          db.transaction(() => {
+          await db.transaction(async () => {
             if (preInvoice.includes(order.status)) {
-              const moved = advanceTo(order.id, order.status, target, now);
+              const moved = await advanceTo(order.id, order.status, target, now);
               if (moved.changed) newStatus = moved.status;
             }
 
-            db.prepare(`
+            await db.prepare(`
               UPDATE orders
               SET zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number),
                   updated_at = ?
               WHERE id = ?
             `).run(zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
 
-            logEvent({
+            await logEvent({
               orderId: order.id,
               eventType,
               oldStatus: order.status,
@@ -378,22 +377,22 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
             if (invoiceIsPaid) {
               const paidAmount = latestInvoice.total ?? order.total_amount;
               const paidRef = zohoInvoiceNumber || zohoInvoiceId || 'ZOHO-INVOICE-PAID';
-              const existingPayment = db.prepare('SELECT id FROM payments WHERE order_id = ?').get(order.id);
+              const existingPayment = await db.prepare('SELECT id FROM payments WHERE order_id = ?').get(order.id);
               if (existingPayment) {
-                db.prepare(`
+                await db.prepare(`
                   UPDATE payments SET status = 'verified', payment_reference = COALESCE(payment_reference, ?),
                     amount = COALESCE(amount, ?), payment_date = COALESCE(payment_date, ?),
                     notes = 'Verified from Zoho invoice status by manual sync', verified_at = COALESCE(verified_at, ?)
                   WHERE order_id = ?
                 `).run(paidRef, paidAmount, now.split('T')[0], now, order.id);
               } else {
-                db.prepare(`
+                await db.prepare(`
                   INSERT INTO payments (order_id, status, payment_reference, amount, payment_date, notes, verified_at, created_at)
                   VALUES (?, 'verified', ?, ?, ?, 'Verified from Zoho invoice status by manual sync', ?, ?)
                 `).run(order.id, paidRef, paidAmount, now.split('T')[0], now, now);
               }
 
-              logEvent({
+              await logEvent({
                 orderId: order.id,
                 eventType: 'ZOHO_PAYMENT_VERIFIED',
                 oldStatus: newStatus,
@@ -404,7 +403,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
                 metadata: { invoiceStatus, source }
               });
 
-              const completion = evaluateCompletion({
+              const completion = await evaluateCompletion({
                 orderId: order.id,
                 currentStatus: newStatus,
                 actorId,
@@ -414,8 +413,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
               if (completion.completed) newStatus = 'completed';
             }
 
-            const financeIds = getUserIdsByRole('finance');
-            notify({
+            const financeIds = await getUserIdsByRole('finance');
+            await notify({
               orderId: order.id,
               recipientIds: Array.from(new Set([order.medrep_user_id, ...financeIds].filter(Boolean))),
               message: invoiceIsPaid
@@ -430,30 +429,30 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
 
           action = invoiceIsPaid ? 'INVOICE_PAID_BACKFILLED' : 'INVOICE_BACKFILLED';
         }
-      } else if (packages.length > 0 && !alreadyLogged('ZOHO_PACKAGE_CREATED') && ['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch'].includes(order.status)) {
+      } else if (packages.length > 0 && !(await alreadyLogged('ZOHO_PACKAGE_CREATED')) && ['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch'].includes(order.status)) {
         // Aug 31, 2026 (5): 'ready_for_invoice_sent' added here too — same
         // reasoning as the dispatch backfill just above.
         // Sep 1, 2026: and 'ready_for_dispatch' with it, now that Mark-as-Sent is
         // a real status an invoice-first order actually sits at when packing
         // starts.
         newStatus = 'picking_packing';
-        db.transaction(() => {
-          const existingDispatch = db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
+        await db.transaction(async () => {
+          const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
           if (existingDispatch) {
-            db.prepare(`UPDATE dispatch_records SET status = 'packing' WHERE order_id = ?`).run(order.id);
+            await db.prepare(`UPDATE dispatch_records SET status = 'packing' WHERE order_id = ?`).run(order.id);
           } else {
-            db.prepare(`INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'packing', ?)`).run(order.id, now);
+            await db.prepare(`INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'packing', ?)`).run(order.id, now);
           }
 
-          const moved = advanceTo(order.id, order.status, newStatus, now);
+          const moved = await advanceTo(order.id, order.status, newStatus, now);
           if (!moved.changed) newStatus = moved.status;
-          logEvent({
+          await logEvent({
             orderId: order.id, eventType: 'ZOHO_PACKAGE_CREATED', oldStatus: order.status, newStatus,
             actorId, actorName,
             notes: `Package ${latestPackage.package_number || latestPackage.package_id || ''} found in Zoho — backfilled by manual sync`,
             metadata: { source }
           });
-          notify({
+          await notify({
             orderId: order.id,
             recipientIds: [order.medrep_user_id],
             message: `Order ${order.getmeds_order_id} is being picked & packed (Package found in Zoho).`,
@@ -463,17 +462,17 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
         })();
 
         action = 'PACKAGE_BACKFILLED';
-      } else if (trackingNumber && !alreadyLogged('ZOHO_DISPATCHED') && !['completed', 'cancelled'].includes(order.status)) {
-        db.transaction(() => {
-          const existingDispatch = db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
+      } else if (trackingNumber && !(await alreadyLogged('ZOHO_DISPATCHED')) && !['completed', 'cancelled'].includes(order.status)) {
+        await db.transaction(async () => {
+          const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
           if (existingDispatch) {
-            db.prepare(`
+            await db.prepare(`
               UPDATE dispatch_records
               SET status = 'dispatched', courier = COALESCE(?, courier), tracking_number = COALESCE(?, tracking_number), dispatched_at = COALESCE(dispatched_at, ?)
               WHERE order_id = ?
             `).run(courier, trackingNumber, now, order.id);
           } else {
-            db.prepare(`
+            await db.prepare(`
               INSERT INTO dispatch_records (order_id, status, tracking_number, courier, dispatched_at, created_at)
               VALUES (?, 'dispatched', ?, ?, ?, ?)
             `).run(order.id, trackingNumber, courier, now, now);
@@ -494,10 +493,10 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           // through the state machine — same as the live webhook.
           let cascadeStatus = order.status;
           if (['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'].includes(order.status)) {
-            const moved = advanceTo(order.id, order.status, 'dispatched', now);
+            const moved = await advanceTo(order.id, order.status, 'dispatched', now);
             if (moved.changed) cascadeStatus = moved.status;
           }
-          logEvent({
+          await logEvent({
             orderId: order.id, eventType: 'ZOHO_DISPATCHED', oldStatus: order.status, newStatus: cascadeStatus,
             actorId, actorName,
             notes: `Shipment found in Zoho — Tracking: ${trackingNumber} (${courier || 'courier TBD'}) — backfilled by manual sync`,
@@ -505,17 +504,17 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           });
 
           const dispatchedStatus = cascadeStatus;
-          const tracked = advanceTo(order.id, dispatchedStatus, 'tracking_shared', now);
+          const tracked = await advanceTo(order.id, dispatchedStatus, 'tracking_shared', now);
           if (tracked.changed) {
             cascadeStatus = tracked.status;
-            logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus: cascadeStatus, actorId, actorName, notes: `${courier || 'Courier'}: ${trackingNumber}` });
+            await logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus: cascadeStatus, actorId, actorName, notes: `${courier || 'Courier'}: ${trackingNumber}` });
           }
 
           newStatus = cascadeStatus;
 
           // Shipped — if payment was already recorded, that's both halves of
           // the rule and the order closes out here.
-          const completion = evaluateCompletion({
+          const completion = await evaluateCompletion({
             orderId: order.id,
             currentStatus: newStatus,
             actorId,
@@ -524,7 +523,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           });
           if (completion.completed) newStatus = 'completed';
 
-          notify({
+          await notify({
             orderId: order.id,
             recipientIds: [order.medrep_user_id],
             message: `Order ${order.getmeds_order_id} shipped via Zoho. Courier: ${courier || 'TBD'}, Tracking: ${trackingNumber}.`,
@@ -537,8 +536,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       }
     }
 
-    const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
-    const events = db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(order.id);
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const events = await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(order.id);
 
     return { ok: true, action, zohoStatus: soStatus, order: updatedOrder, events };
   } catch (err) {

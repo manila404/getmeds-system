@@ -30,14 +30,14 @@ const bcrypt = require('bcryptjs');
 // The guard below stays, and now protects the orders/users/roles wipe rather
 // than the customer/product one — running this against a working database is
 // still destructive, just no longer destructive to the Zoho mirror.
-function hasRealZohoData(db) {
+async function hasRealZohoData(db) {
   try {
-    const customers = db
+    const customers = (await db
       .prepare("SELECT COUNT(*) as c FROM customers WHERE source = 'zoho' OR zoho_contact_id IS NOT NULL")
-      .get().c;
-    const products = db
+      .get()).c;
+    const products = (await db
       .prepare('SELECT COUNT(*) as c FROM products WHERE zoho_item_id IS NOT NULL OR zoho_stock IS NOT NULL')
-      .get().c;
+      .get()).c;
     return { customers, products };
   } catch (e) {
     // Tables don't exist yet (fresh install, before migrate has ever run) — nothing to protect.
@@ -45,9 +45,9 @@ function hasRealZohoData(db) {
   }
 }
 
-function run() {
+async function run() {
   const forced = process.argv.includes('--force') || process.env.SEED_FORCE === 'true';
-  const { customers: realCustomers, products: realProducts } = hasRealZohoData(db);
+  const { customers: realCustomers, products: realProducts } = await hasRealZohoData(db);
 
   if (!forced && (realCustomers > 0 || realProducts > 0)) {
     console.error('\n🛑 Refusing to run: this database holds REAL data synced from Zoho, not just demo data.');
@@ -64,28 +64,35 @@ function run() {
   const hash = (pw) => bcrypt.hashSync(pw, 10);
 
   // Clean wipe in reverse-relational order to prevent foreign key errors and guarantee idempotency
-  const seedTransaction = db.transaction(() => {
+  const seedTransaction = db.transaction(async () => {
     // 1. Child tables first (Reverse-relational order)
-    db.prepare('DELETE FROM notifications').run();
-    db.prepare('DELETE FROM order_events').run();
-    db.prepare('DELETE FROM dispatch_records').run();
-    db.prepare('DELETE FROM payments').run();
-    db.prepare('DELETE FROM order_items').run();
-    db.prepare('DELETE FROM orders').run();
+    await db.prepare('DELETE FROM notifications').run();
+    await db.prepare('DELETE FROM order_events').run();
+    await db.prepare('DELETE FROM dispatch_records').run();
+    await db.prepare('DELETE FROM payments').run();
+    await db.prepare('DELETE FROM order_items').run();
+    await db.prepare('DELETE FROM orders').run();
 
     // 2. Accounts. `customers` and `products` are deliberately NOT in this
     //    list — see the note at the top of this file. They belong to the Zoho
     //    mirror and are only ever filled by the read-only sync.
-    db.prepare('DELETE FROM users').run();
-    db.prepare('DELETE FROM roles').run();
+    await db.prepare('DELETE FROM users').run();
+    await db.prepare('DELETE FROM roles').run();
 
     // Reset autoincrement sequences for the tables actually cleared above.
     // 'customers' and 'products' are excluded on purpose: their rows survive,
     // so reusing their ids would collide.
-    try {
-      db.prepare("DELETE FROM sqlite_sequence WHERE name IN ('roles','users','orders','order_items','payments','dispatch_records','order_events','notifications')").run();
-    } catch (e) {
-      // sqlite_sequence may not exist if no rows were ever inserted
+    // Sep 3, 2026: SQLite kept these counters in a sqlite_sequence table that
+    // could be DELETEd from. Postgres attaches a real sequence to each identity
+    // column, so the equivalent is ALTER TABLE ... RESTART. Attempted one table
+    // at a time: in a single statement the first table without an identity
+    // column would abort the rest.
+    for (const t of ['roles','users','orders','order_items','payments','dispatch_records','order_events','notifications']) {
+      try {
+        await db.prepare(`ALTER TABLE "${t}" ALTER COLUMN id RESTART WITH 1`).run();
+      } catch (e) {
+        // No identity column on this table, or nothing was ever inserted.
+      }
     }
 
     // Seed Roles
@@ -97,7 +104,7 @@ function run() {
       { name: 'Dispatch', description: 'Dispatch and Logistics Officer' }
     ];
     for (const r of defaultRoles) {
-      insRole.run(r.name, r.description);
+      await insRole.run(r.name, r.description);
     }
     console.log('✅ Seeded roles (Admin, MedRep, Finance, Dispatch).');
 
@@ -112,22 +119,22 @@ function run() {
     const insUser = db.prepare(
       'INSERT INTO users (name, email, password_hash, role, display_name, division) VALUES (?, ?, ?, ?, ?, ?)'
     );
-    insUser.run('Admin User', 'admin@getmeds.ph', hash('demo123'), 'admin', 'Admin User', 'TEST');
-    insUser.run('Juan dela Cruz', 'medrep@getmeds.ph', hash('demo123'), 'medrep', 'Juan dela Cruz', 'NORTH');
-    insUser.run('Maria Santos', 'medrep2@getmeds.ph', hash('demo123'), 'medrep', 'Maria Santos', 'NORTH');
-    insUser.run('Rosa Reyes', 'finance@getmeds.ph', hash('demo123'), 'finance', 'Rosa Reyes', 'TEST');
-    insUser.run('Ben Ramos', 'dispatch@getmeds.ph', hash('demo123'), 'dispatch', 'Ben Ramos', 'TEST');
-    insUser.run('Carlo Tan', 'manager@getmeds.ph', hash('demo123'), 'management', 'Carlo Tan', 'TEST');
+    await insUser.run('Admin User', 'admin@getmeds.ph', hash('demo123'), 'admin', 'Admin User', 'TEST');
+    await insUser.run('Juan dela Cruz', 'medrep@getmeds.ph', hash('demo123'), 'medrep', 'Juan dela Cruz', 'NORTH');
+    await insUser.run('Maria Santos', 'medrep2@getmeds.ph', hash('demo123'), 'medrep', 'Maria Santos', 'NORTH');
+    await insUser.run('Rosa Reyes', 'finance@getmeds.ph', hash('demo123'), 'finance', 'Rosa Reyes', 'TEST');
+    await insUser.run('Ben Ramos', 'dispatch@getmeds.ph', hash('demo123'), 'dispatch', 'Ben Ramos', 'TEST');
+    await insUser.run('Carlo Tan', 'manager@getmeds.ph', hash('demo123'), 'management', 'Carlo Tan', 'TEST');
     console.log('✅ Seeded users.');
   });
 
-  seedTransaction();
+  await seedTransaction();
 
-  const count = (t) => {
-    try { return db.prepare(`SELECT COUNT(*) c FROM "${t}"`).get().c; } catch (e) { return 'n/a'; }
+  const count = async t => {
+    try { return (await db.prepare(`SELECT COUNT(*) c FROM "${t}"`).get()).c; } catch (e) { return 'n/a'; }
   };
-  console.log(`\n   Customers: ${count('customers')}   Products: ${count('products')}  (untouched — pulled from Zoho, never seeded)`);
-  if (count('customers') === 0 || count('products') === 0) {
+  console.log(`\n   Customers: ${await count('customers')}   Products: ${await count('products')}  (untouched — pulled from Zoho, never seeded)`);
+  if ((await count('customers')) === 0 || (await count('products')) === 0) {
     console.log('   ⚠️  Nothing to order yet. Log in as admin and run Full Resync for customers and inventory.');
   }
   return true;

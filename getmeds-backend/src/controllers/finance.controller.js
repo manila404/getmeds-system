@@ -29,9 +29,9 @@ const { notify, getUserIdsByRole } = require('../services/notificationService');
 // this queue until the payment is recorded, which is the point Finance's
 // involvement actually ends — issuing the invoice is a step along the way,
 // not the finish line.
-exports.getQueue = (req, res, next) => {
+exports.getQueue = async (req, res, next) => {
   try {
-    const orders = db.prepare(`
+    const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_number,
              u.name as medrep_name, u.email as medrep_email,
              p.status as payment_status, p.payment_reference, p.amount as payment_amount
@@ -48,9 +48,9 @@ exports.getQueue = (req, res, next) => {
 
 // Payment details for a specific order — populated by the Zoho webhook once
 // Finance records the Customer Payment in Zoho, not by any action in here.
-exports.getPayment = (req, res, next) => {
+exports.getPayment = async (req, res, next) => {
   try {
-    const payment = db.prepare(`
+    const payment = await db.prepare(`
       SELECT p.*, u.name as verified_by_name, o.getmeds_order_id, o.total_amount, o.customer_type,
              o.zoho_so_number, o.zoho_invoice_number
       FROM payments p
@@ -76,7 +76,7 @@ exports.getPayment = (req, res, next) => {
 // verification, the reconcile moves it along anyway and says so (see
 // services/zohoReconcileService.js). Blocking here would only produce orders
 // stuck in this app while Zoho carried on without them.
-exports.verifyAccount = (req, res, next) => {
+exports.verifyAccount = async (req, res, next) => {
   try {
     const { approved, reason } = req.body || {};
     if (typeof approved !== 'boolean') {
@@ -94,7 +94,7 @@ exports.verifyAccount = (req, res, next) => {
       });
     }
 
-    const order = db.prepare(`
+    const order = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.id as medrep_user_id
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -123,20 +123,20 @@ exports.verifyAccount = (req, res, next) => {
       });
     }
 
-    const actor = resolveActor(req.user, 'finance');
+    const actor = await resolveActor(req.user, 'finance');
     const now = new Date().toISOString();
     let newStatus = order.status;
 
-    db.transaction(() => {
-      const moved = setOrderStatus(order.id, order.status, target, now);
+    await db.transaction(async () => {
+      const moved = await setOrderStatus(order.id, order.status, target, now);
       newStatus = moved.status;
 
       if (!approved) {
-        db.prepare('UPDATE orders SET exception_reason = ?, updated_at = ? WHERE id = ?')
+        await db.prepare('UPDATE orders SET exception_reason = ?, updated_at = ? WHERE id = ?')
           .run(String(reason).trim(), now, order.id);
       }
 
-      logEvent({
+      await logEvent({
         orderId: order.id,
         eventType: approved ? 'FINANCE_VERIFIED' : 'FINANCE_REJECTED',
         oldStatus: order.status,
@@ -149,8 +149,8 @@ exports.verifyAccount = (req, res, next) => {
         metadata: { approved, reason: reason ? String(reason).trim() : null }
       });
 
-      const watchers = getUserIdsByRole('management');
-      notify({
+      const watchers = await getUserIdsByRole('management');
+      await notify({
         orderId: order.id,
         recipientIds: Array.from(new Set([order.medrep_user_id, ...watchers].filter(Boolean))),
         message: approved

@@ -37,13 +37,13 @@ function issueToken(user) {
   return jwt.sign({ id: user.id, role: user.role }, SECRET, { expiresIn: '8h' });
 }
 
-exports.login = (req, res, next) => {
+exports.login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Email and password required' } });
     }
-    const user = db.prepare('SELECT * FROM users WHERE email = ? AND is_active = 1').get(email);
+    const user = await db.prepare('SELECT * FROM users WHERE email = ? AND is_active = 1').get(email);
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
       return res.status(401).json({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'Invalid email or password' } });
     }
@@ -113,7 +113,7 @@ exports.login = (req, res, next) => {
  * Nothing here touches Zoho. A user is a purely local record; the Zoho
  * adapter has no concept of one and no method that could create it.
  */
-exports.register = (req, res, next) => {
+exports.register = async (req, res, next) => {
   try {
     if (!isSignupEnabled()) {
       return res.status(403).json({
@@ -186,7 +186,7 @@ exports.register = (req, res, next) => {
       });
     }
 
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    const existing = await db.prepare('SELECT id FROM users WHERE email = ?').get(email);
     if (existing) {
       return res.status(409).json({
         success: false,
@@ -197,7 +197,7 @@ exports.register = (req, res, next) => {
     const hash = bcrypt.hashSync(password, 10);
     // `salesperson` is absent from this INSERT on purpose — it is a GENERATED
     // column and SQLite refuses to be told what it should contain.
-    const result = db
+    const result = await db
       .prepare(
         `INSERT INTO users
            (name, email, password_hash, role, first_name, middle_name, last_name, display_name, division, sub_division)
@@ -216,7 +216,7 @@ exports.register = (req, res, next) => {
         subDivision || null
       );
 
-    const user = db
+    const user = await db
       .prepare(
         `SELECT id, name, email, role, first_name, middle_name, last_name,
                 display_name, division, sub_division, salesperson

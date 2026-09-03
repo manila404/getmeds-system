@@ -61,7 +61,7 @@ describe('Admin Layer Unit Tests', () => {
   });
 
   describe('adminController.getAllUsers', () => {
-    test('fetches user list with HTTP 200', () => {
+    test('fetches user list with HTTP 200', async () => {
       const req = {};
       let responseBody = null;
       const res = {
@@ -69,7 +69,7 @@ describe('Admin Layer Unit Tests', () => {
         json: jest.fn((body) => { responseBody = body; })
       };
 
-      adminController.getAllUsers(req, res);
+      await adminController.getAllUsers(req, res);
 
       expect(res.status).toHaveBeenCalledWith(200);
       expect(responseBody.success).toBe(true);
@@ -79,9 +79,9 @@ describe('Admin Layer Unit Tests', () => {
   });
 
   describe('adminController.deactivateUser', () => {
-    test('soft deletes / deactivates user by setting is_active = 0', () => {
+    test('soft deletes / deactivates user by setting is_active = 0', async () => {
       // Insert temporary user
-      const insert = db.prepare("INSERT INTO users (name, email, password_hash, role, is_active) VALUES ('Temp User', 'temp_unit_deact@test.com', 'hash', 'medrep', 1)").run();
+      const insert = await db.prepare("INSERT INTO users (name, email, password_hash, role, is_active) VALUES ('Temp User', 'temp_unit_deact@test.com', 'hash', 'medrep', 1)").run();
       const tempId = insert.lastInsertRowid;
 
       const req = { params: { id: tempId } };
@@ -91,24 +91,24 @@ describe('Admin Layer Unit Tests', () => {
         json: jest.fn((body) => { responseBody = body; })
       };
 
-      adminController.deactivateUser(req, res);
+      await adminController.deactivateUser(req, res);
 
       expect(res.status).toHaveBeenCalledWith(200);
       expect(responseBody.success).toBe(true);
       expect(responseBody.message).toContain(`User ${tempId} deactivated successfully.`);
 
-      const userInDb = db.prepare('SELECT is_active FROM users WHERE id = ?').get(tempId);
+      const userInDb = await db.prepare('SELECT is_active FROM users WHERE id = ?').get(tempId);
       expect(userInDb.is_active).toBe(0);
 
       // Clean up
-      db.prepare('DELETE FROM users WHERE id = ?').run(tempId);
+      await db.prepare('DELETE FROM users WHERE id = ?').run(tempId);
     });
 
-    test('returns 404 if user does not exist', () => {
+    test('returns 404 if user does not exist', async () => {
       const req = { params: { id: 999999 } };
       const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
 
-      adminController.deactivateUser(req, res);
+      await adminController.deactivateUser(req, res);
 
       expect(res.status).toHaveBeenCalledWith(404);
       expect(res.json).toHaveBeenCalledWith(

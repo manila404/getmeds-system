@@ -30,9 +30,9 @@ const CACHE_TTL_MS = Number(process.env.ZOHO_SALESPERSON_CACHE_MS) || 5 * 60 * 1
 let cache = { names: null, fetchedAt: 0 };
 
 /** The Salesperson string for a user id, or null if they have no mapping. */
-function forUser(userId) {
+async function forUser(userId) {
   if (!userId) return null;
-  const row = db.prepare('SELECT salesperson FROM users WHERE id = ?').get(userId);
+  const row = await db.prepare('SELECT salesperson FROM users WHERE id = ?').get(userId);
   return (row && row.salesperson) || null;
 }
 
@@ -48,10 +48,10 @@ function forUser(userId) {
  *
  * Every field is null when unset; nothing here invents a value.
  */
-function profileForUser(userId) {
+async function profileForUser(userId) {
   const empty = { salesperson: null, division: null, sub_division: null };
   if (!userId) return empty;
-  const row = db
+  const row = await db
     .prepare('SELECT salesperson, division, sub_division FROM users WHERE id = ?')
     .get(userId);
   if (!row) return empty;
@@ -120,7 +120,7 @@ async function verify(name, { force = false } = {}) {
 
 /** Convenience for the order form: the caller's mapping plus its status. */
 async function statusForUser(userId, opts = {}) {
-  const salesperson = forUser(userId);
+  const salesperson = await forUser(userId);
   const verification = await verify(salesperson, opts);
   return { salesperson, ...verification };
 }

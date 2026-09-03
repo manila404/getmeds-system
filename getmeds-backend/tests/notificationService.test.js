@@ -42,8 +42,7 @@ describe('notificationService — real delivery channels', () => {
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const notificationService = require('../src/services/notificationService');
 
-    await expect(
-      notificationService._sendRealEmail({ to: 'medrep@getmeds.ph', subject: 'Test', body: 'Body' })
+    await expect(notificationService._sendRealEmail({ to: 'medrep@getmeds.ph', subject: 'Test', body: 'Body' })
     ).resolves.toBeUndefined();
 
     expect(errorSpy).toHaveBeenCalledWith(

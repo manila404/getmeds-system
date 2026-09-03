@@ -32,23 +32,23 @@ describe('ZOHO_DRY_RUN — no Zoho call, ever, and the single-TEST-customer gate
   const originalDryRun = process.env.ZOHO_DRY_RUN;
   const originalTestCustomer = process.env.ZOHO_TEST_CUSTOMER_ID;
 
-  beforeAll(() => {
-    db.prepare(`DELETE FROM customers WHERE name LIKE 'DRYRUN-TEST%'`).run();
-    db.prepare(`DELETE FROM products WHERE sku = 'DRYRUNTEST-SKU-001'`).run();
+  beforeAll(async () => {
+    await db.prepare(`DELETE FROM customers WHERE name LIKE 'DRYRUN-TEST%'`).run();
+    await db.prepare(`DELETE FROM products WHERE sku = 'DRYRUNTEST-SKU-001'`).run();
 
-    const medrep = db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
+    const medrep = await db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
     if (!medrep) throw new Error('Expected seeded medrep@getmeds.ph to exist — run `npm run setup` first.');
     medrepId = medrep.id;
 
-    customerAId = db.prepare(`
+    customerAId = (await db.prepare(`
       INSERT INTO customers (name, type, zoho_contact_id, source, is_active) VALUES (?, 'credit', 'ZOHO-CONTACT-A', 'zoho', 1)
-    `).run('DRYRUN-TEST Customer A').lastInsertRowid;
-    customerBId = db.prepare(`
+    `).run('DRYRUN-TEST Customer A')).lastInsertRowid;
+    customerBId = (await db.prepare(`
       INSERT INTO customers (name, type, zoho_contact_id, source, is_active) VALUES (?, 'credit', 'ZOHO-CONTACT-B', 'zoho', 1)
-    `).run('DRYRUN-TEST Customer B').lastInsertRowid;
-    productId = db.prepare(`
+    `).run('DRYRUN-TEST Customer B')).lastInsertRowid;
+    productId = (await db.prepare(`
       INSERT INTO products (name, sku, unit_price, stock, unit, is_active) VALUES (?, 'DRYRUNTEST-SKU-001', 100, 50, 'box', 1)
-    `).run('DRYRUN-TEST Product').lastInsertRowid;
+    `).run('DRYRUN-TEST Product')).lastInsertRowid;
 
     process.env.ZOHO_DRY_RUN = 'true';
     // Gate is deliberately pointed at Customer A, but Customer B must still
@@ -56,21 +56,21 @@ describe('ZOHO_DRY_RUN — no Zoho call, ever, and the single-TEST-customer gate
     process.env.ZOHO_TEST_CUSTOMER_ID = 'ZOHO-CONTACT-A';
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     if (originalDryRun === undefined) delete process.env.ZOHO_DRY_RUN; else process.env.ZOHO_DRY_RUN = originalDryRun;
     if (originalTestCustomer === undefined) delete process.env.ZOHO_TEST_CUSTOMER_ID; else process.env.ZOHO_TEST_CUSTOMER_ID = originalTestCustomer;
 
     for (const id of createdOrderIds) {
-      db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(id);
-      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM payments WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM zoho_sync_queue WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
-    db.prepare(`DELETE FROM customers WHERE name LIKE 'DRYRUN-TEST%'`).run();
-    db.prepare(`DELETE FROM products WHERE sku = 'DRYRUNTEST-SKU-001'`).run();
+    await db.prepare(`DELETE FROM customers WHERE name LIKE 'DRYRUN-TEST%'`).run();
+    await db.prepare(`DELETE FROM products WHERE sku = 'DRYRUNTEST-SKU-001'`).run();
   });
 
   function baseReq(customerId, overrides = {}) {

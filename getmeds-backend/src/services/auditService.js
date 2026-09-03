@@ -22,7 +22,9 @@ const insertEventStmt = db.prepare(`
  * @param {string} [params.notes] - Additional context.
  * @param {Object} [params.metadata] - Extra data to be stored as JSON.
  */
-function logEvent({ orderId, eventType, oldStatus, newStatus, actorId, actorName, notes, metadata }) {
+async function logEvent(
+  { orderId, eventType, oldStatus, newStatus, actorId, actorName, notes, metadata }
+) {
   // 2. Validate required fields
   if (!orderId || !eventType) {
     throw new Error('orderId and eventType are required to log an event.');
@@ -31,7 +33,7 @@ function logEvent({ orderId, eventType, oldStatus, newStatus, actorId, actorName
   try {
     // 3. Execute the cached statement
     // 4. Use '??' instead of '||' to preserve falsy values like 0 or ""
-    insertEventStmt.run(
+    await insertEventStmt.run(
       orderId,
       eventType,
       oldStatus ?? null,
@@ -64,7 +66,7 @@ const SEEDED_ROLES = {
  * verifying payment, dispatching), the actor is dynamically mapped to the seeded user
  * of that domain so the audit trail faithfully records the proper operational role.
  */
-function resolveActor(user, targetRole) {
+async function resolveActor(user, targetRole) {
   if (!user) return { id: null, name: 'System', role: targetRole || 'system' };
   
   const userRole = (user.role || '').toLowerCase();
@@ -74,11 +76,11 @@ function resolveActor(user, targetRole) {
   if (isTestModeEnabled() && userRole === 'admin' && normalizedTarget && userRole !== normalizedTarget) {
     const seeded = SEEDED_ROLES[normalizedTarget];
     if (seeded) {
-      const seededUser = db.prepare('SELECT id, name, email, role FROM users WHERE email = ?').get(seeded.email);
+      const seededUser = await db.prepare('SELECT id, name, email, role FROM users WHERE email = ?').get(seeded.email);
       if (seededUser) {
         return seededUser;
       }
-      const fallbackUser = db.prepare('SELECT id, name, email, role FROM users WHERE role = ? AND is_active = 1 LIMIT 1').get(normalizedTarget);
+      const fallbackUser = await db.prepare('SELECT id, name, email, role FROM users WHERE role = ? AND is_active = 1 LIMIT 1').get(normalizedTarget);
       if (fallbackUser) {
         return fallbackUser;
       }

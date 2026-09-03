@@ -39,16 +39,16 @@ function backoffDelayMs(attempts) {
  * db.transaction() — this is a plain synchronous statement on the same
  * connection, not a new transaction.
  */
-function enqueue({ orderId, payload, error }) {
+async function enqueue({ orderId, payload, error }) {
   const now = new Date().toISOString();
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO zoho_sync_queue (order_id, payload, status, attempts, last_error, next_attempt_at, created_at, updated_at)
     VALUES (?, ?, 'pending', 0, ?, ?, ?, ?)
   `).run(orderId, JSON.stringify(payload), error || null, now, now, now);
 }
 
-function listQueue() {
-  return db.prepare(`
+async function listQueue() {
+  return await db.prepare(`
     SELECT q.*, o.getmeds_order_id, o.status as order_status
     FROM zoho_sync_queue q
     LEFT JOIN orders o ON o.id = q.order_id
@@ -67,33 +67,33 @@ async function processOne(row) {
     // would still resend the original, already-corrected-away item. See
     // zohoPayloadBuilder.js for the full story. row.payload is left in the
     // table only as a historical record of what the very first attempt sent.
-    const payload = buildZohoSalesOrderPayload(row.order_id);
+    const payload = await buildZohoSalesOrderPayload(row.order_id);
     if (!payload) {
       throw new Error(`Order ${row.order_id} no longer exists — cannot retry Zoho sync.`);
     }
     const zohoResult = await zoho.createSalesOrder(payload);
     const now = new Date().toISOString();
 
-    const txn = db.transaction(() => {
-      db.prepare(`
+    const txn = db.transaction(async () => {
+      await db.prepare(`
         UPDATE orders SET zoho_so_id = ?, zoho_so_number = ?, zoho_sync_status = 'synced', updated_at = ?
         WHERE id = ?
       `).run(zohoResult.salesorder.salesorder_id, zohoResult.salesorder.salesorder_number, now, row.order_id);
 
-      db.prepare(`UPDATE zoho_sync_queue SET status = 'succeeded', updated_at = ? WHERE id = ?`).run(now, row.id);
+      await db.prepare(`UPDATE zoho_sync_queue SET status = 'succeeded', updated_at = ? WHERE id = ?`).run(now, row.id);
 
-      logEvent({
+      await logEvent({
         orderId: row.order_id,
         eventType: 'ZOHO_SYNC_RECOVERED',
         actorName: 'System (Zoho Retry Job)',
         notes: `Zoho SO created on retry attempt #${row.attempts + 1}: ${zohoResult.salesorder.salesorder_number}`
       });
     });
-    txn();
+    await txn();
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(row.order_id);
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(row.order_id);
     if (order && order.medrep_id) {
-      notify({
+      await notify({
         orderId: row.order_id,
         recipientIds: [order.medrep_id],
         message: `Order ${order.getmeds_order_id}'s Zoho Sales Order sync recovered automatically.`,
@@ -108,22 +108,22 @@ async function processOne(row) {
     const now = new Date().toISOString();
 
     if (attempts >= MAX_ATTEMPTS) {
-      db.prepare(`
+      await db.prepare(`
         UPDATE zoho_sync_queue SET status = 'failed_permanent', attempts = ?, last_error = ?, updated_at = ?
         WHERE id = ?
       `).run(attempts, err.message, now, row.id);
 
-      logEvent({
+      await logEvent({
         orderId: row.order_id,
         eventType: 'ZOHO_SYNC_FAILED_PERMANENT',
         actorName: 'System (Zoho Retry Job)',
         notes: `Gave up after ${attempts} attempts: ${err.message}`
       });
 
-      const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(row.order_id);
-      const mgmtIds = getUserIdsByRole('management', 'admin');
+      const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(row.order_id);
+      const mgmtIds = await getUserIdsByRole('management', 'admin');
       if (order && mgmtIds.length) {
-        notify({
+        await notify({
           orderId: row.order_id,
           recipientIds: mgmtIds,
           message: `Order ${order.getmeds_order_id} could not be synced to Zoho after ${attempts} attempts. Manual intervention required.`,
@@ -136,12 +136,12 @@ async function processOne(row) {
     }
 
     const nextAttemptAt = new Date(Date.now() + backoffDelayMs(attempts)).toISOString();
-    db.prepare(`
+    await db.prepare(`
       UPDATE zoho_sync_queue SET attempts = ?, last_error = ?, next_attempt_at = ?, updated_at = ?
       WHERE id = ?
     `).run(attempts, err.message, nextAttemptAt, now, row.id);
 
-    logEvent({
+    await logEvent({
       orderId: row.order_id,
       eventType: 'ZOHO_SYNC_RETRY_FAILED',
       actorName: 'System (Zoho Retry Job)',
@@ -159,8 +159,8 @@ async function processOne(row) {
 async function processQueue({ force = false } = {}) {
   const now = new Date().toISOString();
   const rows = force
-    ? db.prepare(`SELECT * FROM zoho_sync_queue WHERE status = 'pending' ORDER BY created_at ASC`).all()
-    : db.prepare(`SELECT * FROM zoho_sync_queue WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY created_at ASC`).all(now);
+    ? await db.prepare(`SELECT * FROM zoho_sync_queue WHERE status = 'pending' ORDER BY created_at ASC`).all()
+    : await db.prepare(`SELECT * FROM zoho_sync_queue WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY created_at ASC`).all(now);
 
   const results = [];
   for (const row of rows) {
@@ -175,8 +175,8 @@ let intervalHandle = null;
 /** Start the background polling loop. No-op if already started. */
 function start(intervalMs = parseInt(process.env.ZOHO_RETRY_INTERVAL_MS, 10) || 30000) {
   if (intervalHandle) return intervalHandle;
-  intervalHandle = setInterval(() => {
-    processQueue().catch((err) => console.error('[ZOHO_RETRY] queue processing error:', err.message));
+  intervalHandle = setInterval(async () => {
+    (await processQueue()).catch((err) => console.error('[ZOHO_RETRY] queue processing error:', err.message));
   }, intervalMs);
   if (intervalHandle.unref) intervalHandle.unref();
   return intervalHandle;

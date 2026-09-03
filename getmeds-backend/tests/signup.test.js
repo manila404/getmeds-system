@@ -32,8 +32,8 @@ const validSignup = (overrides = {}) => ({
   ...overrides
 });
 
-afterAll(() => {
-  db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${EMAIL_PREFIX}%`);
+afterAll(async () => {
+  await db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${EMAIL_PREFIX}%`);
 });
 
 describe('POST /api/auth/register', () => {
@@ -65,7 +65,7 @@ describe('POST /api/auth/register', () => {
     expect(me.status).toBe(200);
     expect(me.body.data.user.email).toBe(body.email);
 
-    const row = db.prepare('SELECT role, is_active FROM users WHERE email = ?').get(body.email);
+    const row = await db.prepare('SELECT role, is_active FROM users WHERE email = ?').get(body.email);
     expect(row.role).toBe('medrep');
     expect(row.is_active).toBe(1);
   });
@@ -77,7 +77,7 @@ describe('POST /api/auth/register', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.data.user.salesperson).toBe('TEST | Aaron Manila');
-      expect(db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email).salesperson)
+      expect((await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email)).salesperson)
         .toBe('TEST | Aaron Manila');
     });
 
@@ -87,12 +87,12 @@ describe('POST /api/auth/register', () => {
       const body = validSignup();
       await request(app).post('/api/auth/register').send(body);
 
-      db.prepare('UPDATE users SET division = ? WHERE email = ?').run('NORTH', body.email);
-      expect(db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email).salesperson)
+      await db.prepare('UPDATE users SET division = ? WHERE email = ?').run('NORTH', body.email);
+      expect((await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email)).salesperson)
         .toBe('NORTH | Aaron Manila');
 
-      db.prepare('UPDATE users SET display_name = ? WHERE email = ?').run('A. Manila', body.email);
-      expect(db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email).salesperson)
+      await db.prepare('UPDATE users SET display_name = ? WHERE email = ?').run('A. Manila', body.email);
+      expect((await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email)).salesperson)
         .toBe('NORTH | A. Manila');
     });
 
@@ -116,23 +116,23 @@ describe('POST /api/auth/register', () => {
       expect(me.body.data.user.salesperson).toBe('TEST | Aaron Manila');
     });
 
-    test('is NULL for an account with no division', () => {
+    test('is NULL for an account with no division', async () => {
       // Sep 2, 2026 (2): this used to point at the seeded logins, which
       // carried no mapping because they predated these fields. seed.js now
       // gives all six one — an account without a mapping cannot place an
       // order, since Salesperson is mandatory in this Zoho org. The case
       // still needs covering, so it is made here rather than assumed.
-      const id = db
+      const id = (await db
         .prepare(
           `INSERT INTO users (name, email, password_hash, role)
            VALUES ('No Mapping', 'signup-test-no-division@getmeds.ph', 'x', 'medrep')`
         )
-        .run().lastInsertRowid;
+        .run()).lastInsertRowid;
       try {
-        const row = db.prepare('SELECT salesperson FROM users WHERE id = ?').get(id);
+        const row = await db.prepare('SELECT salesperson FROM users WHERE id = ?').get(id);
         expect(row.salesperson).toBeNull();
       } finally {
-        db.prepare('DELETE FROM users WHERE id = ?').run(id);
+        await db.prepare('DELETE FROM users WHERE id = ?').run(id);
       }
     });
 
@@ -170,7 +170,7 @@ describe('POST /api/auth/register', () => {
       const body = validSignup({ display_name: 'Bong Manila' });
       await request(app).post('/api/auth/register').send(body);
 
-      expect(db.prepare('SELECT name FROM users WHERE email = ?').get(body.email).name).toBe('Bong Manila');
+      expect((await db.prepare('SELECT name FROM users WHERE email = ?').get(body.email)).name).toBe('Bong Manila');
     });
 
     test('middle_name and sub_division are optional and stored as NULL when blank', async () => {
@@ -178,7 +178,7 @@ describe('POST /api/auth/register', () => {
       const res = await request(app).post('/api/auth/register').send(body);
 
       expect(res.status).toBe(201);
-      const row = db.prepare('SELECT middle_name, sub_division FROM users WHERE email = ?').get(body.email);
+      const row = await db.prepare('SELECT middle_name, sub_division FROM users WHERE email = ?').get(body.email);
       expect(row.middle_name).toBeNull();
       expect(row.sub_division).toBeNull();
       // A missing sub-division must not break the salesperson string.
@@ -202,7 +202,7 @@ describe('POST /api/auth/register', () => {
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe('VALIDATION_ERROR');
       expect(res.body.error.message).toContain(label);
-      expect(db.prepare('SELECT id FROM users WHERE email = ?').get(email)).toBeUndefined();
+      expect(await db.prepare('SELECT id FROM users WHERE email = ?').get(email)).toBeUndefined();
     });
 
     // Dropping both name parts leaves nothing for display_name to fall back to.
@@ -234,7 +234,7 @@ describe('POST /api/auth/register', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.data.user.role).toBe('medrep');
-    expect(db.prepare('SELECT role FROM users WHERE email = ?').get(body.email).role).toBe('medrep');
+    expect((await db.prepare('SELECT role FROM users WHERE email = ?').get(body.email)).role).toBe('medrep');
   });
 
   test('a salesperson in the request body is ignored — it is derived, not accepted', async () => {
@@ -252,7 +252,7 @@ describe('POST /api/auth/register', () => {
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('EMAIL_DOMAIN_NOT_ALLOWED');
     expect(res.body.error.message).toContain('@getmeds.ph');
-    expect(db.prepare('SELECT id FROM users WHERE email = ?').get(email)).toBeUndefined();
+    expect(await db.prepare('SELECT id FROM users WHERE email = ?').get(email)).toBeUndefined();
   });
 
   test('rejects a password shorter than 8 characters and creates nothing', async () => {
@@ -261,7 +261,7 @@ describe('POST /api/auth/register', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
-    expect(db.prepare('SELECT id FROM users WHERE email = ?').get(body.email)).toBeUndefined();
+    expect(await db.prepare('SELECT id FROM users WHERE email = ?').get(body.email)).toBeUndefined();
   });
 
   test('rejects a malformed email', async () => {
@@ -282,9 +282,9 @@ describe('POST /api/auth/register', () => {
     expect(second.status).toBe(409);
     expect(second.body.error.code).toBe('EMAIL_IN_USE');
 
-    expect(db.prepare('SELECT COUNT(*) c FROM users WHERE email = ?').get(body.email).c).toBe(1);
+    expect((await db.prepare('SELECT COUNT(*) c FROM users WHERE email = ?').get(body.email)).c).toBe(1);
     // The first sign-up's details survive — the second did not overwrite them.
-    expect(db.prepare('SELECT display_name FROM users WHERE email = ?').get(body.email).display_name)
+    expect((await db.prepare('SELECT display_name FROM users WHERE email = ?').get(body.email)).display_name)
       .toBe('Aaron Manila');
   });
 
@@ -309,7 +309,7 @@ describe('POST /api/auth/register', () => {
 
       expect(res.status).toBe(403);
       expect(res.body.error.code).toBe('SIGNUP_DISABLED');
-      expect(db.prepare('SELECT id FROM users WHERE email = ?').get(body.email)).toBeUndefined();
+      expect(await db.prepare('SELECT id FROM users WHERE email = ?').get(body.email)).toBeUndefined();
     } finally {
       if (previous === undefined) delete process.env.SIGNUP_ENABLED;
       else process.env.SIGNUP_ENABLED = previous;

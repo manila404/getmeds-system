@@ -12,9 +12,9 @@ const db = require('../db/database');
 // Zoho) have been retired for the same reason verify-payment was retired
 // from finance.controller.js.
 
-exports.getQueue = (req, res, next) => {
+exports.getQueue = async (req, res, next) => {
   try {
-    const orders = db.prepare(`
+    const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_number,
              u.name as medrep_name,
              d.status as dispatch_status, d.courier, d.tracking_number, d.created_at as dispatch_created_at

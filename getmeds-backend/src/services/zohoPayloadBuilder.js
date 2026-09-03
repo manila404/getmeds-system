@@ -24,8 +24,8 @@ const db = require('../db/database');
  *
  * Returns null if the order no longer exists.
  */
-function buildZohoSalesOrderPayload(orderId) {
-  const order = db.prepare(`
+async function buildZohoSalesOrderPayload(orderId) {
+  const order = await db.prepare(`
     SELECT o.*, c.name as customer_name, c.type as customer_master_type, c.zoho_contact_id as customer_zoho_contact_id,
            u.salesperson as medrep_salesperson, u.division as medrep_division, u.sub_division as medrep_sub_division
     FROM orders o
@@ -36,7 +36,7 @@ function buildZohoSalesOrderPayload(orderId) {
 
   if (!order) return null;
 
-  const items = db.prepare(`
+  const items = await db.prepare(`
     SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit
     FROM order_items oi
     LEFT JOIN products p ON oi.product_id = p.id
