@@ -272,6 +272,29 @@ CREATE TABLE IF NOT EXISTS dispatch_records (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Proof of payment (Sep 4, 2026). Kept in step with schema.pg.sql, which is
+-- what production and the test suite actually run; this file is the SQLite
+-- copy migrate.js still supports. See the longer note in schema.pg.sql for
+-- why a proof of payment is a record rather than a pipeline status, and why
+-- it is not the same thing as the `payments` table.
+CREATE TABLE IF NOT EXISTS payment_proofs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER UNIQUE NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified','rejected')),
+  storage_path TEXT NOT NULL,
+  file_name TEXT,
+  content_type TEXT,
+  file_size INTEGER CHECK(file_size IS NULL OR file_size >= 0),
+  uploaded_by INTEGER REFERENCES users(id),
+  uploaded_at TEXT,
+  verified_by INTEGER REFERENCES users(id),
+  verified_at TEXT,
+  rejection_reason TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_proofs_status ON payment_proofs(status, uploaded_at ASC);
+
 CREATE TABLE IF NOT EXISTS order_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,

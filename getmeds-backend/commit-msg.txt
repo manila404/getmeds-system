@@ -1,0 +1,28 @@
+﻿add proof of payment, checked by Finance before invoicing
+
+A deposit slip or receipt the MedRep attaches to an order, shown to Finance on
+the ready_for_finance_verified row and approved by the account check that
+already gates invoicing.
+
+That gate already existed, so this adds evidence to a decision rather than a
+decision of its own. verifyAccount now marks a pending proof verified in the
+same transaction that moves the order, so the two can never disagree. Rejecting
+a proof is separate: a wrong slip should not put the whole order on hold while
+a correct one is fetched.
+
+The file never passes through the API. Vercel caps request bodies at 4.5 MB and
+a phone photo is routinely larger, so the browser PUTs straight to Supabase
+Storage against a signed URL and the API only ever handles the object key.
+A fixture image in a test would never have caught that.
+
+Not a pipeline stage: orders.status, workflow/stateMachine.js and
+services/orderCompletionService.js are untouched. Not "paid" either - payments
+is Zoho's Customer Payment record and is what completion means by paid, while
+this is the customer's claim to have paid. Both asserted by tests.
+
+Built first as proof of delivery and corrected; pod_records was renamed to
+payment_proofs in Supabase by hand, nine statements, because RENAME TO does not
+carry constraints, indexes or the identity sequence with it.
+
+443 tests, 25 suites (+22).
+

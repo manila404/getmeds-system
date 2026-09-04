@@ -2,12 +2,13 @@ import React, { useState } from 'react';
 import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw, Pencil, Trash2 } from 'lucide-react';
+import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw, Pencil, Trash2, Receipt } from 'lucide-react';
 import client from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPHT } from '../utils/dateUtils';
 import { useProducts } from '../hooks/useOrderData';
 import ProductAutocomplete from '../components/orders/ProductAutocomplete';
+import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 
 const STATUS_COLORS = {
   draft: 'bg-slate-100 text-slate-700 border border-slate-300',
@@ -54,6 +55,12 @@ const EVENT_LABELS = {
   // app rather than from Zoho reporting something.
   FINANCE_VERIFIED: 'FINANCE VERIFIED',
   FINANCE_REJECTED: 'FINANCE REJECTED',
+  // Sep 4, 2026: the proof of payment. Note there is no PAYMENT_PROOF_VERIFIED
+  // — approving a proof happens inside the FINANCE_VERIFIED decision above,
+  // which is the one that actually clears the order to be invoiced. Only a
+  // rejection is its own event, because it is its own action.
+  PAYMENT_PROOF_UPLOADED: 'PAYMENT PROOF UPLOADED',
+  PAYMENT_PROOF_REJECTED: 'PAYMENT PROOF REJECTED',
   ZOHO_INVOICE_DRAFTED: 'INVOICE DRAFTED',
   ZOHO_INVOICE_SENT: 'INVOICE SENT',
   ZOHO_PAYMENT_VERIFIED: 'PAYMENT RECEIVED',
@@ -85,7 +92,8 @@ const EVENT_ICONS = {
   ZOHO_PAYMENT_VERIFIED: '✅', ZOHO_PACKAGE_CREATED: '📦', ZOHO_DISPATCHED: '🚚',
   ZOHO_DISPATCH_UPDATED: '🚚', ZOHO_SO_CANCELLED: '🚫', ZOHO_EVENT_RECEIVED: '🔔',
   ZOHO_SO_STATUS_CHANGED: '📄', ORDER_ITEMS_EDITED: '✏️', ZOHO_SO_DELETED: '🗑️',
-  FINANCE_VERIFIED: '🔍', FINANCE_REJECTED: '🛑'
+  FINANCE_VERIFIED: '🔍', FINANCE_REJECTED: '🛑',
+  PAYMENT_PROOF_UPLOADED: '🧾', PAYMENT_PROOF_REJECTED: '🛑'
 };
 
 const OrderDetailPage = () => {
@@ -97,7 +105,7 @@ const OrderDetailPage = () => {
   // Defaults to the timeline (see the tabs array below). ?tab=items|payment|
   // dispatch|timeline overrides it, so a link can point at a specific tab
   // without this component having to guess where the visitor came from.
-  const VALID_TABS = ['timeline', 'items', 'payment', 'dispatch'];
+  const VALID_TABS = ['timeline', 'items', 'payment', 'dispatch', 'proof'];
   const requestedTab = searchParams.get('tab');
   const [activeTab, setActiveTab] = useState(
     VALID_TABS.includes(requestedTab) ? requestedTab : 'timeline'
@@ -247,6 +255,10 @@ const OrderDetailPage = () => {
     { id: 'items', label: 'Order Items', icon: Package },
     { id: 'payment', label: 'Payment', icon: CreditCard },
     { id: 'dispatch', label: 'Dispatch', icon: Truck },
+    // Sep 4, 2026: the deposit slip or receipt Finance checks before
+    // invoicing. Next to Payment because that is what it is evidence about —
+    // that tab is Zoho's record of the money, this one is the claim to it.
+    { id: 'proof', label: 'Proof of Payment', icon: Receipt },
   ];
 
   return (
@@ -572,6 +584,9 @@ const OrderDetailPage = () => {
               )}
             </div>
           )}
+
+          {/* Proof of Payment Tab */}
+          {activeTab === 'proof' && <PaymentProofPanel orderId={id} order={order} />}
 
           {/* Timeline Tab */}
           {activeTab === 'timeline' && (

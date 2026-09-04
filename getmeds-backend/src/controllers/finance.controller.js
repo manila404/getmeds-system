@@ -3,6 +3,7 @@ const stateMachine = require('../workflow/stateMachine');
 const { setOrderStatus } = require('../services/orderStatusService');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
+const { markVerifiedWithOrder } = require('./paymentProof.controller');
 
 
 // ─── Finance visibility (read-only) ────────────────────────────────────────
@@ -34,11 +35,22 @@ exports.getQueue = async (req, res, next) => {
     const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_number,
              u.name as medrep_name, u.email as medrep_email,
-             p.status as payment_status, p.payment_reference, p.amount as payment_amount
+             p.status as payment_status, p.payment_reference, p.amount as payment_amount,
+             -- Sep 4, 2026: the proof of payment rides along, so a row at
+             -- ready_for_finance_verified can show it beside the Verify button
+             -- without a second request per row. NULL simply means none was
+             -- attached — a proof is optional, and Finance decides either way.
+             pp.status as payment_proof_status,
+             pp.uploaded_at as payment_proof_uploaded_at,
+             pp.file_name as payment_proof_file_name,
+             pp.content_type as payment_proof_content_type,
+             ppu.name as payment_proof_uploaded_by_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
       LEFT JOIN payments p ON o.id = p.order_id
+      LEFT JOIN payment_proofs pp ON o.id = pp.order_id
+      LEFT JOIN users ppu ON pp.uploaded_by = ppu.id
       WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')
       ORDER BY o.submitted_at ASC
     `).all();
@@ -126,6 +138,7 @@ exports.verifyAccount = async (req, res, next) => {
     const actor = await resolveActor(req.user, 'finance');
     const now = new Date().toISOString();
     let newStatus = order.status;
+    let verifiedProof = null;
 
     await db.transaction(async () => {
       const moved = await setOrderStatus(order.id, order.status, target, now);
@@ -136,6 +149,23 @@ exports.verifyAccount = async (req, res, next) => {
           .run(String(reason).trim(), now, order.id);
       }
 
+      // Sep 4, 2026: the proof of payment is approved BY this decision, in
+      // this transaction — not by a second click somewhere else. Finance looks
+      // at the slip and the customer's Zoho Books account together and answers
+      // once, so the proof's status and the order's can never disagree.
+      //
+      // Only on approval. Holding an order does NOT reject its proof: the hold
+      // may be an account problem entirely unrelated to the slip, and marking
+      // a perfectly good receipt rejected would send the MedRep chasing the
+      // wrong thing. Rejecting a proof is its own action — see
+      // paymentProof.controller.js's reject.
+      //
+      // Returns null when nothing was pending, which is the normal case: a
+      // proof is optional and most orders will not have one.
+      if (approved) {
+        verifiedProof = await markVerifiedWithOrder(order.id, actor.id, now);
+      }
+
       await logEvent({
         orderId: order.id,
         eventType: approved ? 'FINANCE_VERIFIED' : 'FINANCE_REJECTED',
@@ -144,9 +174,19 @@ exports.verifyAccount = async (req, res, next) => {
         actorId: actor.id,
         actorName: actor.name,
         notes: approved
-          ? `Customer account verified in Zoho Books — cleared to invoice.${reason ? ` ${String(reason).trim()}` : ''}`
+          ? `Customer account verified in Zoho Books — cleared to invoice.` +
+            `${verifiedProof ? ` Proof of payment${verifiedProof.file_name ? ` (${verifiedProof.file_name})` : ''} verified with it.` : ''}` +
+            `${reason ? ` ${String(reason).trim()}` : ''}`
           : `Rejected by Finance: ${String(reason).trim()}`,
-        metadata: { approved, reason: reason ? String(reason).trim() : null }
+        metadata: {
+          approved,
+          reason: reason ? String(reason).trim() : null,
+          // Recorded so the trail says what evidence was on the order at the
+          // moment of the decision — including that there was none, which is
+          // the point of a soft gate.
+          paymentProofVerified: Boolean(verifiedProof),
+          paymentProofPath: verifiedProof ? verifiedProof.storage_path : null
+        }
       });
 
       const watchers = await getUserIdsByRole('management');
@@ -161,6 +201,9 @@ exports.verifyAccount = async (req, res, next) => {
       });
     })();
 
-    res.json({ success: true, data: { status: newStatus, approved } });
+    res.json({
+      success: true,
+      data: { status: newStatus, approved, paymentProofVerified: Boolean(verifiedProof) }
+    });
   } catch (err) { next(err); }
 };

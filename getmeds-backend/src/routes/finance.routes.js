@@ -22,4 +22,18 @@ router.get('/orders/:id/payment', c.getPayment);
 // made it, and it writes only to this app; nothing is pushed to Zoho.
 router.post('/orders/:id/verify', c.verifyAccount);
 
+// Sep 4, 2026: proof of payment. Reject only — there is deliberately no
+// approve here.
+//
+// A proof is the EVIDENCE for the account check above, not a decision beside
+// it. Approving it happens inside c.verifyAccount, in the same transaction
+// that moves the order to ready_for_draft_invoice, so the two can never
+// disagree and an order never has two places to get stuck.
+//
+// Rejecting IS separate, because it is a different outcome: "this slip is for
+// another invoice, send the right one" should not put the whole order on hold
+// while a correct one is fetched.
+const proof = require('../controllers/paymentProof.controller');
+router.post('/orders/:id/payment-proof/reject', proof.reject);
+
 module.exports = router;

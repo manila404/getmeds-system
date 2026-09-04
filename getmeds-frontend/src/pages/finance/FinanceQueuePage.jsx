@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle } from 'lucide-react';
+import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt } from 'lucide-react';
 import client from '../../api/client';
 
 // Almost read-only. Every stage below EXCEPT the first is reported by Zoho:
@@ -32,12 +32,51 @@ const FinanceQueuePage = () => {
   const [rejectingId, setRejectingId] = useState(null);
   const [rejectReason, setRejectReason] = useState('');
 
+  // Sep 4, 2026: proof of payment. Signed view URLs are short-lived and minted
+  // per request, so they are fetched for the row being looked at rather than
+  // for every row up front — a queue of thirty would otherwise mint thirty
+  // links that mostly expire unused.
+  const [viewingProof, setViewingProof] = useState({});
+  const [rejectingProofId, setRejectingProofId] = useState(null);
+  const [proofReason, setProofReason] = useState('');
+
+  const openProof = async (orderId) => {
+    try {
+      const res = await client.get(`/api/orders/${orderId}/payment-proof`);
+      const proof = res.data?.data?.proof;
+      if (!proof?.viewUrl) throw new Error('No document on this record');
+      setViewingProof((v) => ({ ...v, [orderId]: proof }));
+    } catch (err) {
+      toast.error(err.response?.data?.error?.message || err.message || 'Could not open that document');
+    }
+  };
+
+  // Rejecting the SLIP, not the order. "This is for another invoice, send the
+  // right one" should not put the order on hold while a correct one is
+  // fetched — that is what the Hold button is for, and it is a different
+  // judgement. There is no matching approve: verifying the order below marks a
+  // pending proof verified in the same transaction.
+  const rejectProofMutation = useMutation({
+    mutationFn: ({ id, reason }) =>
+      client.post(`/api/finance/orders/${id}/payment-proof/reject`, { reason }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Proof rejected. The MedRep has been asked to upload a replacement.');
+      setRejectingProofId(null);
+      setProofReason('');
+      setViewingProof({});
+      qc.invalidateQueries({ queryKey: ['finance-queue'] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that')
+  });
+
   const verifyMutation = useMutation({
     mutationFn: ({ id, approved, reason }) =>
       client.post(`/api/finance/orders/${id}/verify`, { approved, reason }).then(r => r.data),
     onSuccess: (res) => {
       toast.success(res?.data?.approved
-        ? 'Verified — cleared to invoice in Zoho.'
+        ? (res?.data?.paymentProofVerified
+            ? 'Verified with its proof of payment — cleared to invoice in Zoho.'
+            : 'Verified — cleared to invoice in Zoho.')
         : 'Put on hold. The reason is on the order timeline.');
       setRejectingId(null);
       setRejectReason('');
@@ -59,7 +98,7 @@ const FinanceQueuePage = () => {
   const STAGES = {
     ready_for_finance_verified: {
       label: 'Awaiting your account check',
-      hint: 'Check this customer in Zoho Books for overdue balance or account problems, then verify below.',
+      hint: 'Check the proof of payment below and this customer in Zoho Books (overdue balance, account problems), then verify.',
       icon: ShieldCheck,
       className: 'bg-purple-50 text-purple-800 border-purple-300'
     },
@@ -157,6 +196,112 @@ const FinanceQueuePage = () => {
                       <p className="opacity-90 mt-0.5">{stage.hint}</p>
                     </div>
                   </div>
+
+                  {/* Sep 4, 2026: the proof of payment, on the row where the
+                      decision is actually made. Deliberately NOT a separate
+                      queue — this is evidence for the account check, not a
+                      second verification, and a second list would be a second
+                      place to forget to look. */}
+                  {needsVerification && (() => {
+                    const proof = viewingProof[order.id];
+                    const isImage = (proof?.content_type || order.payment_proof_content_type || '').startsWith('image/');
+                    const proofBusy = rejectProofMutation.isPending && rejectProofMutation.variables?.id === order.id;
+
+                    // No proof is a normal, allowed state — it is a soft gate,
+                    // for the same reason the account check is one. Finance is
+                    // told, and decides.
+                    if (!order.payment_proof_status) {
+                      return (
+                        <div className="mt-3 flex items-start gap-2 rounded-md border border-slate-200 bg-surface px-3 py-2 text-xs text-ink-secondary">
+                          <Receipt className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                          <p>No proof of payment attached. You can still verify — the timeline will record that none was on file.</p>
+                        </div>
+                      );
+                    }
+
+                    if (order.payment_proof_status === 'rejected') {
+                      return (
+                        <div className="mt-3 flex items-start gap-2 rounded-md border border-state-error/40 bg-state-error-light px-3 py-2 text-xs text-red-800">
+                          <XCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                          <p>Proof of payment rejected — waiting for the MedRep to upload a replacement.</p>
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div className="mt-3 rounded-md border border-slate-200 bg-surface overflow-hidden">
+                        <div className="px-3 py-2 border-b border-slate-200 flex items-center justify-between gap-2">
+                          <span className="text-xs font-semibold text-ink-primary flex items-center gap-1.5">
+                            <Receipt className="w-3.5 h-3.5" />
+                            Proof of payment
+                          </span>
+                          <span className="text-xs text-ink-secondary truncate">
+                            {order.payment_proof_uploaded_by_name || '—'}
+                          </span>
+                        </div>
+
+                        {!proof ? (
+                          <button
+                            onClick={() => openProof(order.id)}
+                            className="w-full flex items-center justify-center gap-2 px-3 py-3 text-xs font-semibold text-getmeds-blue hover:bg-white"
+                          >
+                            {isImage ? <Receipt className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
+                            Show {order.payment_proof_file_name || 'the document'}
+                          </button>
+                        ) : isImage ? (
+                          <a href={proof.viewUrl} target="_blank" rel="noopener noreferrer" className="block bg-white">
+                            <img src={proof.viewUrl} alt={`Proof of payment for ${order.getmeds_order_id}`} className="max-h-80 w-auto mx-auto" />
+                          </a>
+                        ) : (
+                          <div className="p-4 text-center">
+                            <a href={proof.viewUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-semibold text-getmeds-blue underline">
+                              Open {proof.file_name || 'document'}
+                            </a>
+                          </div>
+                        )}
+
+                        {rejectingProofId === order.id ? (
+                          <div className="border-t border-slate-200 p-3 space-y-2">
+                            <label className="block text-xs font-semibold text-red-900">
+                              What is wrong with this proof?
+                            </label>
+                            <textarea
+                              autoFocus
+                              rows={2}
+                              value={proofReason}
+                              onChange={(e) => setProofReason(e.target.value)}
+                              placeholder="e.g. slip is for invoice INV-0042, not this order"
+                              className="w-full text-sm rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400"
+                            />
+                            <div className="flex gap-2">
+                              <button
+                                disabled={!proofReason.trim() || proofBusy}
+                                onClick={() => rejectProofMutation.mutate({ id: order.id, reason: proofReason.trim() })}
+                                className="px-3 py-1.5 rounded-md bg-state-error text-white text-xs font-semibold disabled:opacity-50"
+                              >
+                                {proofBusy ? 'Rejecting…' : 'Ask for a new one'}
+                              </button>
+                              <button
+                                onClick={() => { setRejectingProofId(null); setProofReason(''); }}
+                                className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs text-ink-secondary"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="border-t border-slate-200 px-3 py-2">
+                            <button
+                              onClick={() => { setRejectingProofId(order.id); setProofReason(''); }}
+                              className="text-xs font-semibold text-state-error hover:underline"
+                            >
+                              Reject this proof (without holding the order)
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {needsVerification && (
                     <div className="mt-3">

@@ -110,15 +110,14 @@ function App() {
               </ProtectedRoute>
             } 
           />
-          <Route 
-            path="/finance/history" 
+          <Route
+            path="/finance/history"
             element={
               <ProtectedRoute allowedRoles={['finance', 'management', 'admin']}>
                 <PaymentHistoryPage />
               </ProtectedRoute>
-            } 
+            }
           />
-          
           {/* Dispatch Routes */}
           <Route 
             path="/dispatch" 

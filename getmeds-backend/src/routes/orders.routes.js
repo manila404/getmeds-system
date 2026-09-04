@@ -42,4 +42,25 @@ router.patch('/:id/exception', requireRole('management', 'admin'), c.setExceptio
 // updateItems for why this only works before order.zoho_so_id is set.
 router.patch('/:id/items', c.updateItems);
 
+// ─── Proof of payment (Sep 4, 2026) ─────────────────────────────────────────
+//
+// Order-scoped, so they live here rather than on a router of their own — a
+// second router mounted at /api carrying /orders/:id/... would sit behind this
+// one and depend on requests falling through it, which is fragile for no gain.
+//
+// No requireRole: attaching a proof is gated by ORDERSHIP, not by role (the
+// MedRep the order belongs to, or an admin), which requireRole cannot express.
+// That check is in paymentProof.controller.js's canAttach.
+//
+// Upload is two calls because the file must not pass through this API —
+// Vercel caps request bodies at 4.5 MB and a phone photo is routinely larger.
+// The browser PUTs to Supabase directly against the signed URL from step 1.
+//
+// There is no verify here. Finance approves a proof by verifying the ORDER at
+// ready_for_finance_verified — see finance.routes.js.
+const proof = require('../controllers/paymentProof.controller');
+router.post('/:id/payment-proof/upload-url', proof.getUploadUrl);
+router.post('/:id/payment-proof', proof.attach);
+router.get('/:id/payment-proof', proof.get);
+
 module.exports = router;
