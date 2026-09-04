@@ -1,28 +1,29 @@
-﻿add proof of payment, checked by Finance before invoicing
+﻿require a proof of payment on the order form, or a reason there is none
 
-A deposit slip or receipt the MedRep attaches to an order, shown to Finance on
-the ready_for_finance_verified row and approved by the account check that
-already gates invoicing.
+The MedRep attaches the deposit slip while creating the order, which is where
+they already look for it. This replaces the "Attach File(s) to Sales Order"
+control that used to sit in that spot and discard whatever was dropped on it -
+`// UI-only for now - files are listed here but never uploaded anywhere` - so it
+looked like filing and was not. A rep would have believed their slip was on
+file.
 
-That gate already existed, so this adds evidence to a decision rather than a
-decision of its own. verifyAccount now marks a pending proof verified in the
-same transaction that moves the order, so the two can never disagree. Rejecting
-a proof is separate: a wrong slip should not put the whole order on hold while
-a correct one is fetched.
+Submit stays locked until there is either a file or a reason, so Finance never
+opens an order and finds a blank where the evidence should be. The reason is a
+four-value enum rather than free text, for what the division field taught on
+Sep 2: terms, on terms and w/ terms are three answers to one question and
+nothing downstream can count them. Other requires a note.
 
-The file never passes through the API. Vercel caps request bodies at 4.5 MB and
-a phone photo is routinely larger, so the browser PUTs straight to Supabase
-Storage against a signed URL and the API only ever handles the object key.
-A fixture image in a test would never have caught that.
+The upload runs AFTER create returns, because the storage path is
+orders/<id>/... and there is no id until then. It is deliberately not allowed to
+fail the mutation - the order is already in Zoho by that point, and reporting
+failure for an order that exists is worse than a missing file the rep can attach
+from the order's Proof of Payment tab. A second toast says so when it happens.
 
-Not a pipeline stage: orders.status, workflow/stateMachine.js and
-services/orderCompletionService.js are untouched. Not "paid" either - payments
-is Zoho's Customer Payment record and is what completion means by paid, while
-this is the customer's claim to have paid. Both asserted by tests.
+The requirement is a gate on the FORM, not on POST /api/orders, which still
+accepts an order with neither and has a test saying so. A server-side
+requirement would reject every order that is about to get a proof.
 
-Built first as proof of delivery and corrected; pod_records was renamed to
-payment_proofs in Supabase by hand, nine statements, because RENAME TO does not
-carry constraints, indexes or the identity sequence with it.
+Needs orders.no_payment_proof_reason and no_payment_proof_note, applied to
+Supabase by hand before deploying since create now inserts them.
 
-443 tests, 25 suites (+22).
-
+446 tests, 25 suites (+3).

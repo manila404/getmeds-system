@@ -163,7 +163,19 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // (see the mapping doc: Zoho's `documents` field needs each file already
   // uploaded to Zoho first, which isn't built yet). Kept purely so the form
   // matches the field list and the UX is ready for that later.
-  const [attachedFiles, setAttachedFiles] = useState([]);
+  // Sep 4, 2026: proof of payment, staged here and uploaded immediately AFTER
+  // the order is created. It cannot go up during the form: the storage path is
+  // orders/<id>/... and there is no id until create returns. Staging the File
+  // object in memory and uploading on success is what lets the MedRep attach it
+  // where they naturally look for it without a temp path and a move.
+  //
+  // The previous "Attach File(s) to Sales Order" control lived here and was
+  // dead — `// UI-only for now — files are listed here but never uploaded
+  // anywhere`. It sat exactly where a MedRep would put the deposit slip, so it
+  // was worse than nothing: it looked like filing and discarded the file.
+  const [paymentProofFile, setPaymentProofFile] = useState(null);
+  const [noProofReason, setNoProofReason] = useState('');
+  const [noProofNote, setNoProofNote] = useState('');
 
   // "Sales Order Date (Automatic Today)" — fixed to today, never editable.
   // The server independently stamps this the same way on save, so this is
@@ -400,13 +412,54 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     setItems(items.filter((_, idx) => idx !== index));
   };
 
-  const handleFilesSelected = (e) => {
-    const newFiles = Array.from(e.target.files || []);
-    if (newFiles.length) setAttachedFiles([...attachedFiles, ...newFiles]);
-    e.target.value = ''; // allow re-selecting the same file name later
+  const PROOF_MAX_BYTES = 15 * 1024 * 1024;
+  const PROOF_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf';
+
+  const NO_PROOF_REASONS = [
+    { value: 'on_payment_terms',  label: 'Customer is on payment terms' },
+    { value: 'payment_to_follow', label: 'Payment to follow' },
+    { value: 'paid_no_slip',      label: 'Paid — no slip issued' },
+    { value: 'other',             label: 'Other (explain below)' },
+  ];
+
+  const handleProofSelected = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // so picking the same file twice still fires onChange
+    if (!file) return;
+    if (file.size > PROOF_MAX_BYTES) {
+      toast.error(`That file is ${(file.size / 1024 / 1024).toFixed(1)} MB. The limit is 15 MB.`);
+      return;
+    }
+    setPaymentProofFile(file);
+    // Attaching a proof retires whatever reason was given for not having one.
+    setNoProofReason('');
+    setNoProofNote('');
   };
-  const handleRemoveFile = (index) => {
-    setAttachedFiles(attachedFiles.filter((_, idx) => idx !== index));
+
+  /**
+   * The three-step handshake, run once the order exists.
+   *
+   * Identical to PaymentProofPanel's: the file goes browser -> Supabase
+   * directly against a signed URL, because Vercel caps request bodies at
+   * 4.5 MB and a phone photo is routinely larger. Plain fetch, not `client`,
+   * so our API baseURL and session JWT do not get attached to a Supabase URL.
+   */
+  const uploadPaymentProof = async (orderId, file) => {
+    const { data: urlRes } = await client.post(`/api/orders/${orderId}/payment-proof/upload-url`, {
+      contentType: file.type, fileName: file.name, fileSize: file.size,
+    });
+    const { signedUrl, storagePath } = urlRes.data;
+
+    const put = await fetch(signedUrl, {
+      method: 'PUT',
+      headers: { 'content-type': file.type },
+      body: file,
+    });
+    if (!put.ok) throw new Error(`Upload to storage failed (${put.status})`);
+
+    await client.post(`/api/orders/${orderId}/payment-proof`, {
+      storagePath, fileName: file.name, contentType: file.type, fileSize: file.size,
+    });
   };
 
   // Step 3: Dynamic totals — Subtotal / Discount / Tax / Grand Total, each
@@ -437,7 +490,14 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     orderSource &&
     invoicingFrom &&
     items.length > 0 &&
-    items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0)
+    items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0) &&
+    // Sep 4, 2026: a proof of payment, or a reason there is none. Never neither,
+    // so Finance always gets either evidence or an explanation rather than a
+    // blank. Like Source and Invoicing From above, this is a client-side UX
+    // guarantee — POST /api/orders still accepts an order without it, because
+    // the proof itself uploads after create.
+    (Boolean(paymentProofFile) ||
+      (Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim()))))
   );
 
   // Step 3: [TEST MODE: Auto-Fill] Logic
@@ -557,13 +617,31 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         terms: termsAndConditions,
         payment_terms: paymentTerms,
         invoicing_from: invoicingFrom,
+        // Only ever sent when no file was staged — attaching one clears these.
+        no_payment_proof_reason: paymentProofFile ? null : (noProofReason || null),
+        no_payment_proof_note: paymentProofFile ? null : (noProofNote.trim() || null),
         // Sep 2, 2026: only ever sent when the server said the picker is
         // allowed AND one was chosen. The server ignores it otherwise, so
         // this is belt-and-braces rather than the control itself.
         ...(canPickMedrep && actingMedrepId ? { medrep_id: parseInt(actingMedrepId) } : {})
       });
       const order = createRes.data.data.order;
-      return order;
+
+      // After the order exists, not before — see uploadPaymentProof. Deliberately
+      // NOT allowed to fail the mutation: the order is already created and
+      // synced to Zoho by this point, so throwing here would show "order
+      // failed" for an order that exists. The proof is recoverable from the
+      // order's Proof of Payment tab; a phantom failure is not.
+      let proofUploadFailed = false;
+      if (paymentProofFile) {
+        try {
+          await uploadPaymentProof(order.id, paymentProofFile);
+        } catch (err) {
+          console.error('[PAYMENT_PROOF] upload failed after order create:', err);
+          proofUploadFailed = true;
+        }
+      }
+      return { ...order, _proofUploadFailed: proofUploadFailed };
     },
     onSuccess: (order) => {
       // Invalidate queries so dashboards & orders lists refresh instantly
@@ -575,6 +653,14 @@ const OrderForm = ({ onCancel, onSuccess }) => {
 
       setIsReviewOpen(false);
       setSubmittedOrder(order);
+
+      if (order._proofUploadFailed) {
+        toast.error(
+          `Order ${order.getmeds_order_id} was created, but the proof of payment did not upload. ` +
+            `Open the order and attach it from the Proof of Payment tab.`,
+          { duration: 9000 }
+        );
+      }
 
       toast.success(
         `Order ${order.getmeds_order_id} created successfully!`,
@@ -1055,28 +1141,87 @@ const OrderForm = ({ onCancel, onSuccess }) => {
               />
             </Field>
 
+            {/* Sep 4, 2026: proof of payment, replacing the dead "Attach
+                File(s)" control that used to sit here and discard whatever was
+                dropped on it. Either a file or a reason there is none — the
+                Submit button stays locked until one of them is given, so
+                Finance never opens an order and finds a blank where the
+                evidence should be. */}
             <Field
-              label="Attach File(s) to Sales Order"
-              help="Prescriptions, purchase orders, or other supporting documents. Not yet sent anywhere — attachments are staged here for review until Zoho document upload is wired up."
+              label="Proof of Payment"
+              help="A deposit slip, transfer screenshot or official receipt. Finance checks this when they verify the order for invoicing. If there is none yet, say why below."
             >
-              <label className="flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-xl py-6 cursor-pointer hover:border-getmeds-blue hover:bg-getmeds-blue/5 transition-colors text-sm text-ink-secondary">
-                <Paperclip size={16} />
-                Click to attach file(s), or drag and drop
-                <input type="file" multiple onChange={handleFilesSelected} className="hidden" />
-              </label>
-              {attachedFiles.length > 0 && (
-                <ul className="mt-3 space-y-1.5">
-                  {attachedFiles.map((f, idx) => (
-                    <li key={idx} className="flex items-center justify-between gap-2 bg-surface border border-slate-200 rounded-lg px-3 py-1.5 text-xs">
-                      <span className="flex items-center gap-1.5 min-w-0 text-ink-primary font-medium truncate">
-                        <Paperclip size={12} className="shrink-0 text-ink-secondary" /> {f.name}
-                      </span>
-                      <button type="button" onClick={() => handleRemoveFile(idx)} className="p-0.5 text-slate-400 hover:text-state-error rounded-full shrink-0">
-                        <X size={13} />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+              {paymentProofFile ? (
+                <div className="flex items-center justify-between gap-2 bg-pharmacy-green/10 border border-pharmacy-green/40 rounded-xl px-3 py-2.5 text-sm">
+                  <span className="flex items-center gap-2 min-w-0 text-ink-primary font-medium truncate">
+                    <Paperclip size={14} className="shrink-0 text-pharmacy-green-dark" />
+                    <span className="truncate">{paymentProofFile.name}</span>
+                    <span className="text-xs text-ink-secondary shrink-0">
+                      ({(paymentProofFile.size / 1024 / 1024).toFixed(1)} MB)
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentProofFile(null)}
+                    className="p-0.5 text-slate-400 hover:text-state-error rounded-full shrink-0"
+                    title="Remove"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {/* Two inputs rather than one: `capture` opens the camera
+                      straight away, which is right at the counter and wrong
+                      when the slip was photographed earlier and is sitting in
+                      the gallery. */}
+                  <div className="flex flex-wrap gap-2">
+                    <label className="flex items-center justify-center gap-2 flex-1 min-w-[9rem] border-2 border-dashed border-slate-300 rounded-xl py-4 cursor-pointer hover:border-getmeds-blue hover:bg-getmeds-blue/5 transition-colors text-sm text-ink-secondary">
+                      <Paperclip size={16} />
+                      Take photo
+                      <input type="file" accept={PROOF_ACCEPT} capture="environment" onChange={handleProofSelected} className="hidden" />
+                    </label>
+                    <label className="flex items-center justify-center gap-2 flex-1 min-w-[9rem] border-2 border-dashed border-slate-300 rounded-xl py-4 cursor-pointer hover:border-getmeds-blue hover:bg-getmeds-blue/5 transition-colors text-sm text-ink-secondary">
+                      <Paperclip size={16} />
+                      Choose file
+                      <input type="file" accept={PROOF_ACCEPT} onChange={handleProofSelected} className="hidden" />
+                    </label>
+                  </div>
+
+                  <div className="mt-4">
+                    <label className="block text-xs font-semibold text-ink-primary mb-1.5">
+                      No proof of payment? Say why <span className="text-state-error">*</span>
+                    </label>
+                    <select
+                      value={noProofReason}
+                      onChange={(e) => setNoProofReason(e.target.value)}
+                      className={inputClass}
+                    >
+                      <option value="">Select a reason…</option>
+                      {NO_PROOF_REASONS.map(r => (
+                        <option key={r.value} value={r.value}>{r.label}</option>
+                      ))}
+                    </select>
+
+                    {noProofReason && (
+                      <textarea
+                        value={noProofNote}
+                        onChange={(e) => setNoProofNote(e.target.value)}
+                        rows={2}
+                        placeholder={noProofReason === 'other'
+                          ? 'Required — explain briefly for Finance'
+                          : 'Optional note for Finance'}
+                        className={`${inputClass} resize-y mt-2`}
+                      />
+                    )}
+
+                    {noProofReason === 'other' && !noProofNote.trim() && (
+                      <p className="mt-1.5 text-xs text-state-warning font-medium flex items-center gap-1.5">
+                        <AlertCircle size={13} /> A note is required when the reason is Other.
+                      </p>
+                    )}
+                  </div>
+                </>
               )}
             </Field>
           </div>
@@ -1203,18 +1348,21 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             </div>
           )}
 
-          {attachedFiles.length > 0 && (
-            <div>
-              <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Attached Files</h4>
-              <div className="bg-surface rounded-xl p-3 border border-slate-200 space-y-1">
-                {attachedFiles.map((f, idx) => (
-                  <div key={idx} className="flex items-center gap-1.5 text-xs text-ink-primary">
-                    <Paperclip size={11} className="text-ink-secondary" /> {f.name}
-                  </div>
-                ))}
-              </div>
+          <div>
+            <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Proof of Payment</h4>
+            <div className="bg-surface rounded-xl p-3 border border-slate-200 text-xs text-ink-primary">
+              {paymentProofFile ? (
+                <span className="flex items-center gap-1.5">
+                  <Paperclip size={11} className="text-ink-secondary" /> {paymentProofFile.name}
+                </span>
+              ) : (
+                <span>
+                  None — {(NO_PROOF_REASONS.find(r => r.value === noProofReason) || {}).label || 'no reason given'}
+                  {noProofNote.trim() && <span className="text-ink-secondary"> · {noProofNote.trim()}</span>}
+                </span>
+              )}
             </div>
-          )}
+          </div>
 
           <div>
             <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Order Line Items</h4>

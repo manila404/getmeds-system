@@ -618,6 +618,13 @@ exports.create = async (req, res, next) => {
       // a data-integrity one this endpoint should enforce by rejecting
       // requests from anything else that talks to this API.
       delivery_method, terms, invoicing_from,
+      // Sep 4, 2026: why this order has no proof of payment. The order form
+      // requires one of these OR a staged file before it will submit; this
+      // endpoint does not, because the proof uploads AFTER create (it needs
+      // the order id for its storage path) so requiring it here would reject
+      // every order that is about to get one. The CHECK constraint still
+      // rejects a value that is not one of the four.
+      no_payment_proof_reason, no_payment_proof_note,
       // Aug 30, 2026 (2): Payment Terms — mirrors the same-named field on
       // Zoho's own Sales Order screen (Net 15 / 30 days / 45 Day /
       // BPO WALLET / 60 Day / DSWD/PCSO, or a custom typed value). Same
@@ -832,10 +839,11 @@ exports.create = async (req, res, next) => {
           intake_courier, intake_doctor, intake_hospital, intake_patient, intake_mop,
           intake_receiver, intake_contact_no, intake_source, intake_pls_give,
           sales_order_date, intake_delivery_method, intake_terms, intake_payment_terms, invoicing_from,
+          no_payment_proof_reason, no_payment_proof_note,
           zoho_so_id, zoho_so_number, zoho_so_status, zoho_sync_status,
           created_at, submitted_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         getmedsOrderId,
         customer_id,
@@ -859,6 +867,8 @@ exports.create = async (req, res, next) => {
         clean(terms),
         clean(payment_terms),
         clean(invoicing_from),
+        clean(no_payment_proof_reason),
+        clean(no_payment_proof_note),
         zohoResult ? zohoResult.salesorder.salesorder_id : null,
         zohoResult ? zohoResult.salesorder.salesorder_number : null,
         // Sep 1, 2026: seed the Zoho-side status ('draft' as Zoho creates

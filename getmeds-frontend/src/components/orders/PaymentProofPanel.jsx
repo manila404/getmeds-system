@@ -62,6 +62,13 @@ const PROOF_STATUS = {
   },
 };
 
+const NO_PROOF_REASONS = {
+  on_payment_terms:  'Customer is on payment terms',
+  payment_to_follow: 'Payment to follow',
+  paid_no_slip:      'Paid — no slip issued',
+  other:             'Other',
+};
+
 const prettySize = (bytes) => {
   if (!bytes && bytes !== 0) return '—';
   if (bytes < 1024) return `${bytes} B`;
@@ -170,13 +177,37 @@ const PaymentProofPanel = ({ orderId, order }) => {
     <div className="space-y-4">
       {/* ── Nothing attached yet ───────────────────────────────────────── */}
       {!proof && (
-        <div className="text-center py-8 text-ink-secondary">
-          <Receipt className="w-10 h-10 mx-auto mb-2 text-ink-secondary/50" />
-          <p className="text-sm">No proof of payment attached yet.</p>
-          {!canUpload && (
-            <p className="text-xs mt-1">
-              Only the MedRep who raised this order can attach one.
-            </p>
+        <div className="space-y-3">
+          <div className="text-center py-6 text-ink-secondary">
+            <Receipt className="w-10 h-10 mx-auto mb-2 text-ink-secondary/50" />
+            <p className="text-sm">No proof of payment attached.</p>
+            {!canUpload && (
+              <p className="text-xs mt-1">
+                Only the MedRep who raised this order can attach one.
+              </p>
+            )}
+          </div>
+
+          {/* The reason given at order creation. The form requires a file or
+              this, so an order should never show neither — an order raised
+              before Sep 4, 2026 will, and that is what the fallback covers. */}
+          {order?.no_payment_proof_reason ? (
+            <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-surface px-3 py-2 text-xs text-ink-secondary">
+              <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <div>
+                <p className="font-semibold text-ink-primary">
+                  Reason given: {NO_PROOF_REASONS[order.no_payment_proof_reason] || order.no_payment_proof_reason}
+                </p>
+                {order.no_payment_proof_note && (
+                  <p className="mt-0.5">{order.no_payment_proof_note}</p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-surface px-3 py-2 text-xs text-ink-secondary">
+              <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <p>No reason on file — this order predates the requirement.</p>
+            </div>
           )}
         </div>
       )}

@@ -60,7 +60,7 @@ const JPEG = { contentType: 'image/jpeg', fileName: 'deposit-slip.jpg', fileSize
 
 describe('proof of payment', () => {
   let ownerToken, otherRepToken, financeToken, dispatchToken, adminToken;
-  let ownerId, customerId;
+  let ownerId, customerId, productId;
   const createdOrderIds = [];
   const createdUserIds = [];
 
@@ -83,6 +83,7 @@ describe('proof of payment', () => {
     otherRepToken = await loginAs('proof-other-rep@getmeds.ph');
 
     customerId = (await db.prepare('SELECT id FROM customers LIMIT 1').get()).id;
+    productId = (await db.prepare('SELECT id FROM products LIMIT 1').get()).id;
   });
 
   afterAll(async () => {
@@ -450,6 +451,64 @@ describe('proof of payment', () => {
     expect(row.payment_proof_status).toBe('pending');
     expect(row.payment_proof_file_name).toBe('deposit-slip.jpg');
     expect(row.payment_proof_uploaded_by_name).toEqual(expect.any(String));
+  });
+
+  // ── the reason an order has no proof ──────────────────────────────────────
+
+  test('an order can record WHY it has no proof of payment', async () => {
+    const res = await request(app)
+      .post('/api/orders')
+      .set(auth(ownerToken))
+      .send({
+        customer_id: customerId,
+        items: [{ product_id: productId, quantity: 1, rate: 10 }],
+        delivery_address: '1 Reason St',
+        customer_type: 'direct',
+        no_payment_proof_reason: 'on_payment_terms',
+        no_payment_proof_note: 'Net 30, PO on file',
+      });
+
+    expect(res.status).toBe(201);
+    const id = res.body.data.order.id;
+    createdOrderIds.push(id);
+
+    const row = await orderOf(id);
+    expect(row.no_payment_proof_reason).toBe('on_payment_terms');
+    expect(row.no_payment_proof_note).toBe('Net 30, PO on file');
+  });
+
+  test('a reason outside the allowed set is rejected by the constraint', async () => {
+    // The order form offers four values; anything else means a caller invented
+    // one, and an un-countable free-text answer is exactly what the enum exists
+    // to prevent (the division lesson from Sep 2).
+    await expect(
+      db.prepare(
+        `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type,
+                             total_amount, delivery_address, no_payment_proof_reason)
+         VALUES (?, ?, ?, 'draft', 'direct', 10, 'x', 'terms lol')`
+      ).run(`PPBAD-${Date.now()}`, customerId, ownerId)
+    ).rejects.toThrow();
+  });
+
+  test('the API still accepts an order with neither a proof nor a reason', async () => {
+    // The requirement is a gate on the FORM, not on this endpoint. It has to
+    // be: the proof uploads AFTER create because it needs the order id for its
+    // storage path, so rejecting here would refuse every order that is about
+    // to get one.
+    const res = await request(app)
+      .post('/api/orders')
+      .set(auth(ownerToken))
+      .send({
+        customer_id: customerId,
+        items: [{ product_id: productId, quantity: 1, rate: 10 }],
+        delivery_address: '2 Reason St',
+        customer_type: 'direct',
+      });
+
+    expect(res.status).toBe(201);
+    createdOrderIds.push(res.body.data.order.id);
+    const row = await orderOf(res.body.data.order.id);
+    expect(row.no_payment_proof_reason).toBeNull();
   });
 
   // ── the design claim ──────────────────────────────────────────────────────

@@ -146,6 +146,21 @@ CREATE TABLE IF NOT EXISTS orders (
   zoho_sync_status TEXT DEFAULT 'pending' CHECK(zoho_sync_status IN ('pending','synced','failed','skipped')),
   last_reconciled_at TEXT,
   exception_reason TEXT,
+  -- Sep 4, 2026: why this order has NO proof of payment attached.
+  --
+  -- Required by the order form when no file is staged — see OrderForm.jsx. It
+  -- is a gate on the FORM, not on Finance: the API still accepts an order with
+  -- neither, because the proof itself uploads AFTER create (it needs the order
+  -- id for its storage path) and a server-side requirement would reject every
+  -- order that is about to get one.
+  --
+  -- An enum rather than free text, for the reason the division field taught on
+  -- Sep 2: 'terms', 'on terms', 'Terms' and 'w/ terms' are four answers to the
+  -- same question, and nothing downstream can count them.
+  no_payment_proof_reason TEXT CHECK(no_payment_proof_reason IS NULL OR no_payment_proof_reason IN (
+    'on_payment_terms', 'payment_to_follow', 'paid_no_slip', 'other'
+  )),
+  no_payment_proof_note TEXT,
   created_at TEXT DEFAULT iso_now(),
   submitted_at TEXT,
   updated_at TEXT DEFAULT iso_now()

@@ -18,6 +18,13 @@ import client from '../../api/client';
 // is nothing in Zoho that represents "Finance looked at this customer's
 // account and it's fine to invoice them". It's a human judgement, so it is
 // recorded here, against the person who made it.
+const NO_PROOF_REASONS = {
+  on_payment_terms:  'Customer is on payment terms',
+  payment_to_follow: 'Payment to follow',
+  paid_no_slip:      'Paid — no slip issued',
+  other:             'Other',
+};
+
 const FinanceQueuePage = () => {
   const qc = useQueryClient();
   const { data, isLoading, refetch, isFetching } = useQuery({
@@ -214,7 +221,19 @@ const FinanceQueuePage = () => {
                       return (
                         <div className="mt-3 flex items-start gap-2 rounded-md border border-slate-200 bg-surface px-3 py-2 text-xs text-ink-secondary">
                           <Receipt className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                          <p>No proof of payment attached. You can still verify — the timeline will record that none was on file.</p>
+                          <div>
+                            {order.no_payment_proof_reason ? (
+                              <>
+                                <p className="font-semibold text-ink-primary">
+                                  No proof — {NO_PROOF_REASONS[order.no_payment_proof_reason] || order.no_payment_proof_reason}
+                                </p>
+                                {order.no_payment_proof_note && <p className="mt-0.5">{order.no_payment_proof_note}</p>}
+                              </>
+                            ) : (
+                              <p className="font-semibold text-ink-primary">No proof of payment attached, and no reason on file.</p>
+                            )}
+                            <p className="mt-0.5">You can still verify — the timeline records that none was attached.</p>
+                          </div>
                         </div>
                       );
                     }
