@@ -51,11 +51,18 @@ const create = async (req, res, next) => {
     if (!valid_roles.includes(role.toLowerCase())) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `role must be one of: ${valid_roles.join(', ')}` } });
     }
-    const existing = await db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    // Sep 5, 2026: normalize to lowercase before storing — seed.js,
+    // create-user.js and the public sign-up endpoint all already do this;
+    // this was the one path that didn't, so an admin-created account could
+    // carry a mixed-case email that then could never log in (see the fix in
+    // auth.controller.js's login — LOWER() there covers accounts already
+    // created with mixed case, but new ones should just be stored correctly).
+    const normalizedEmail = email.trim().toLowerCase();
+    const existing = await db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(normalizedEmail);
     if (existing) return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'Email already in use' } });
 
     const hash = bcrypt.hashSync(password, 10);
-    const result = await db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)').run(name, email, hash, role.toLowerCase());
+    const result = await db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)').run(name, normalizedEmail, hash, role.toLowerCase());
     const user = await db.prepare('SELECT id, name, email, role, is_active, created_at FROM users WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json({ success: true, data: { user } });
   } catch (err) {

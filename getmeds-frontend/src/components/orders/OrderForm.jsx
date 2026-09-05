@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -61,7 +61,8 @@ const SOURCE_OPTIONS = [
 // here AND server-side (orders.controller.js create()).
 const INVOICING_FROM_OPTIONS = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 
-// Common delivery methods — offered as suggestions via a native <datalist>,
+// Common delivery methods — offered as suggestions via SuggestField below
+// (a native <datalist> before Sep 5, 2026 — see that component's comment),
 // not a locked dropdown, since Zoho's own delivery_method field is free
 // text (see the mapping doc).
 const DELIVERY_METHOD_SUGGESTIONS = [
@@ -75,17 +76,43 @@ const DELIVERY_METHOD_SUGGESTIONS = [
 ];
 
 // Payment Terms — mirrors the exact list configured on Zoho's own Sales
-// Order screen (pulled directly from Zoho's Payment Terms dropdown, Aug 30,
-// 2026). Same pattern as Delivery Method above: suggestions via a native
-// <datalist>, not a locked dropdown, since Zoho's own field accepts a
-// custom typed value too (not just one of these presets).
+// Order screen. Same pattern as Delivery Method above: suggestions via
+// SuggestField, not a locked dropdown, since Zoho's own field accepts a
+// custom typed value too (not just one of these presets) — there's no
+// Zoho Inventory API to read this list live (checked Sep 5, 2026: only an
+// undocumented, Books-only settings endpoint exists, not guaranteed to work
+// or stay working), and a typed field with suggestions is exactly how Zoho
+// itself behaves here, so hardcoding stays the right call. Refreshed Sep 5,
+// 2026 against the org's current dropdown (grew from 6 to 24 entries since
+// the Aug 30 list below was captured) — kept in Zoho's own display order.
+// 'net' (lowercase) is listed twice in Zoho itself, alongside 'Net' — kept
+// as two separate suggestions since that's genuinely what's configured
+// there, not a typo on this end.
 const PAYMENT_TERMS_SUGGESTIONS = [
+  'Due end of next month',
+  'Due end of the month',
+  'Paid',
+  'Advanced Payment',
+  'Advanced Payment - Partial',
+  'Donation/Charity',
+  'Samples',
+  'Due on Receipt',
+  '60% DP 40% UPON DEL',
+  'CASH',
+  'COD',
+  'Net',
   'Net 15',
   '30 days',
   '45 Day',
   'BPO WALLET',
   '60 Day',
-  'DSWD/PCSO'
+  'DSWD/PCSO',
+  'net',
+  'OP',
+  '90 Day',
+  'INITIAL STOCKING',
+  '120 Day',
+  '180 Day'
 ];
 
 // Simple flat-rate tax presets for the per-line Tax column. Zero-Rated and
@@ -131,6 +158,77 @@ const readOnlyPillClass =
   'w-full bg-surface border border-slate-200 rounded-lg px-3 py-2 text-sm font-semibold text-ink-primary flex items-center gap-2';
 
 /**
+ * A free-text input with a styled suggestions dropdown underneath it —
+ * Delivery Method, Payment Terms, and Doctor Name all need "type anything,
+ * but here's what's common" rather than a locked picklist (Zoho's own
+ * fields behave the same way).
+ *
+ * Sep 5, 2026: replaces the native `<input list="...">` + `<datalist>`
+ * pattern those three fields used before. A native datalist's dropdown
+ * panel is painted entirely by the browser/OS, not by this app — it
+ * ignores every bit of our CSS. On Windows with a dark OS theme, Chrome and
+ * Edge render that panel dark-on-dark-background regardless of how the
+ * page around it looks, which is exactly the mismatch a MedRep/management
+ * user reported seeing. This is a small custom combobox instead, built the
+ * same way ProductAutocomplete/CustomerAutocomplete already are (styled
+ * list, click-outside-to-close) — the field is still fully free-typed,
+ * never locked to one of these suggestions.
+ */
+const SuggestField = ({ value, onChange, suggestions = [], placeholder, className = inputClass }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const term = (value || '').trim().toLowerCase();
+  const filtered = term
+    ? suggestions.filter((s) => s.toLowerCase().includes(term))
+    : suggestions;
+
+  const handleSelect = (s) => {
+    onChange(s);
+    setIsOpen(false);
+  };
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setIsOpen(true); }}
+        onFocus={() => setIsOpen(true)}
+        placeholder={placeholder}
+        className={className}
+        autoComplete="off"
+      />
+      {isOpen && filtered.length > 0 && (
+        <ul className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 shadow-lg rounded-lg z-20 max-h-52 overflow-y-auto divide-y divide-slate-100">
+          {filtered.map((s) => (
+            <li key={s}>
+              <button
+                type="button"
+                onClick={() => handleSelect(s)}
+                className="w-full text-left px-3 py-2 text-sm text-ink-primary hover:bg-surface focus:bg-surface focus:outline-none transition-colors"
+              >
+                {s}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
+
+/**
  * OrderForm Component
  *
  * Implements:
@@ -173,9 +271,22 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // dead — `// UI-only for now — files are listed here but never uploaded
   // anywhere`. It sat exactly where a MedRep would put the deposit slip, so it
   // was worse than nothing: it looked like filing and discarded the file.
-  const [paymentProofFile, setPaymentProofFile] = useState(null);
+  //
+  // Sep 5, 2026: generalized to Zoho's own shape — "Attach File(s) to Sales
+  // Order" — any number of files, each tagged with a type. `stagedAttachments`
+  // is `[{ localId, file, fileType }]`; `localId` is a client-only key (React
+  // list key + removal target) that never leaves the browser. Every file still
+  // uploads AFTER order creation, same reason as before (no order id yet).
+  const [stagedAttachments, setStagedAttachments] = useState([]);
   const [noProofReason, setNoProofReason] = useState('');
   const [noProofNote, setNoProofNote] = useState('');
+
+  // Does the staged list contain at least one 'payment_proof'-type file? Used
+  // wherever the old code asked "is there a proof file" — the "no proof, say
+  // why" reason is specifically about the ABSENCE of a payment_proof, not
+  // about attachments in general, so an 'other'-only staged list still needs
+  // a reason.
+  const hasStagedProof = stagedAttachments.some(a => a.fileType === 'payment_proof');
 
   // "Sales Order Date (Automatic Today)" — fixed to today, never editable.
   // The server independently stamps this the same way on save, so this is
@@ -240,6 +351,13 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const actingMedrep = canPickMedrep
     ? medrepOptions.find(m => String(m.id) === String(actingMedrepId)) || null
     : null;
+  // Sep 5, 2026: the picker also appears for management (production pilot
+  // use), not just TEST_MODE admin — see /api/orders/meta/medreps. Unlike
+  // admin's test affordance, management has no "default" to fall back to
+  // (resolveOrderMedrep on the backend now refuses to create the order
+  // without a medrep_id from management), so the copy and required-ness
+  // below both key off this.
+  const isManagementUser = (user?.role || '').toLowerCase() === 'management';
 
   // Aug 30, 2026: the backend stamps every live Zoho Sales Order created
   // while the TEST-customer gate is on with a fixed "TEST | MEDREP"
@@ -412,8 +530,19 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     setItems(items.filter((_, idx) => idx !== index));
   };
 
+  // Sep 5, 2026: matches the backend's ALLOWED_TYPES in paymentProofStorage.js
+  // — widened beyond photos/PDF so an 'other' attachment (a PO, a signed
+  // contract) can be a Word or Excel file too.
   const PROOF_MAX_BYTES = 15 * 1024 * 1024;
-  const PROOF_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf';
+  const PROOF_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf,' +
+    'application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,' +
+    'application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+  const ATTACHMENT_TYPES = [
+    { value: 'payment_proof',  label: 'Proof of Payment' },
+    { value: 'purchase_order', label: 'Purchase Order' },
+    { value: 'other',          label: 'Other' },
+  ];
 
   const NO_PROOF_REASONS = [
     { value: 'on_payment_terms',  label: 'Customer is on payment terms' },
@@ -422,44 +551,110 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     { value: 'other',             label: 'Other (explain below)' },
   ];
 
-  const handleProofSelected = (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = ''; // so picking the same file twice still fires onChange
-    if (!file) return;
-    if (file.size > PROOF_MAX_BYTES) {
-      toast.error(`That file is ${(file.size / 1024 / 1024).toFixed(1)} MB. The limit is 15 MB.`);
-      return;
+  // Sep 5, 2026: one handler for the "Take photo" / "Choose file" buttons
+  // (mobile), the drag-and-drop zone (desktop), and any number of files —
+  // each newly picked file is appended to the staged list, defaulted to
+  // 'payment_proof' (the common case; the MedRep re-tags it with the
+  // dropdown next to it if it's actually something else).
+  //
+  // Sep 5, 2026 (2): pulled out of the <input onChange> handler so the same
+  // logic can run from a drop event too (FileList in both cases, but a drop
+  // event has no `target` to clear).
+  const processFiles = (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+
+    const accepted = [];
+    for (const file of files) {
+      if (file.size > PROOF_MAX_BYTES) {
+        toast.error(`"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB. The limit is 15 MB.`);
+        continue;
+      }
+      accepted.push({ localId: `${Date.now()}-${Math.random().toString(36).slice(2)}`, file, fileType: 'payment_proof' });
     }
-    setPaymentProofFile(file);
-    // Attaching a proof retires whatever reason was given for not having one.
+    if (!accepted.length) return;
+
+    setStagedAttachments(prev => [...prev, ...accepted]);
+    // A newly-staged proof retires whatever reason was given for not having
+    // one — the reason and the file are mutually exclusive states, and the
+    // reason only applies again if every proof-type file is removed.
     setNoProofReason('');
     setNoProofNote('');
   };
 
+  const handleFilesSelected = (e) => {
+    processFiles(e.target.files);
+    e.target.value = ''; // so picking the same file twice still fires onChange
+  };
+
+  // Sep 5, 2026 (2): drag-and-drop for desktop — the click-to-choose
+  // buttons stay as the mobile affordance (a touch screen has no drag
+  // gesture between apps in the same way), this is the PC-only addition
+  // sitting alongside them. `isDragActive` only drives the highlight style;
+  // drop still goes through the same processFiles as every other path.
+  const [isDragActive, setIsDragActive] = useState(false);
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragActive(true);
+  };
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    setIsDragActive(false);
+  };
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragActive(false);
+    processFiles(e.dataTransfer.files);
+  };
+
+  const handleRemoveAttachment = (localId) => {
+    setStagedAttachments(prev => prev.filter(a => a.localId !== localId));
+  };
+
+  const handleAttachmentTypeChange = (localId, fileType) => {
+    setStagedAttachments(prev => prev.map(a => (a.localId === localId ? { ...a, fileType } : a)));
+  };
+
   /**
-   * The three-step handshake, run once the order exists.
+   * The three-step handshake, run once the order exists, for every staged
+   * file in turn.
    *
-   * Identical to PaymentProofPanel's: the file goes browser -> Supabase
+   * Identical to PaymentProofPanel's: each file goes browser -> Supabase
    * directly against a signed URL, because Vercel caps request bodies at
    * 4.5 MB and a phone photo is routinely larger. Plain fetch, not `client`,
    * so our API baseURL and session JWT do not get attached to a Supabase URL.
+   *
+   * Sep 5, 2026: renamed from uploadPaymentProof (singular) — now uploads the
+   * whole staged list against the generalized /attachments endpoints. Returns
+   * the file names that failed, so the caller can tell the MedRep exactly
+   * which ones to re-attach from the order's Attachments tab rather than a
+   * blanket "something failed".
    */
-  const uploadPaymentProof = async (orderId, file) => {
-    const { data: urlRes } = await client.post(`/api/orders/${orderId}/payment-proof/upload-url`, {
-      contentType: file.type, fileName: file.name, fileSize: file.size,
-    });
-    const { signedUrl, storagePath } = urlRes.data;
+  const uploadAttachments = async (orderId, attachments) => {
+    const failed = [];
+    for (const { file, fileType } of attachments) {
+      try {
+        const { data: urlRes } = await client.post(`/api/orders/${orderId}/attachments/upload-url`, {
+          contentType: file.type, fileName: file.name, fileSize: file.size, file_type: fileType,
+        });
+        const { signedUrl, storagePath } = urlRes.data;
 
-    const put = await fetch(signedUrl, {
-      method: 'PUT',
-      headers: { 'content-type': file.type },
-      body: file,
-    });
-    if (!put.ok) throw new Error(`Upload to storage failed (${put.status})`);
+        const put = await fetch(signedUrl, {
+          method: 'PUT',
+          headers: { 'content-type': file.type },
+          body: file,
+        });
+        if (!put.ok) throw new Error(`Upload to storage failed (${put.status})`);
 
-    await client.post(`/api/orders/${orderId}/payment-proof`, {
-      storagePath, fileName: file.name, contentType: file.type, fileSize: file.size,
-    });
+        await client.post(`/api/orders/${orderId}/attachments`, {
+          storagePath, fileName: file.name, contentType: file.type, fileSize: file.size, file_type: fileType,
+        });
+      } catch (err) {
+        console.error(`[ATTACHMENTS] upload failed for "${file.name}":`, err);
+        failed.push(file.name);
+      }
+    }
+    return failed;
   };
 
   // Step 3: Dynamic totals — Subtotal / Discount / Tax / Grand Total, each
@@ -496,8 +691,20 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     // blank. Like Source and Invoicing From above, this is a client-side UX
     // guarantee — POST /api/orders still accepts an order without it, because
     // the proof itself uploads after create.
-    (Boolean(paymentProofFile) ||
-      (Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim()))))
+    // Sep 5, 2026: "a proof of payment" now means "at least one staged file
+    // tagged payment_proof" — an 'other'-only staged list still needs a
+    // reason, same as an empty one.
+    // Sep 5, 2026 (2): management is exempt from this entirely — the "no
+    // proof, say why" field is not shown to them at all (see isManagementUser
+    // below and the Field it gates), so there is nothing here for them to
+    // fill in and this requirement must not block their submission.
+    (isManagementUser || hasStagedProof ||
+      (Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim())))) &&
+    // Sep 5, 2026: management must pick a MedRep — there is no default to
+    // fall back to (see isManagementUser above; the backend now rejects a
+    // management order with no medrep_id rather than silently attributing
+    // it to the management account itself).
+    (!isManagementUser || Boolean(actingMedrepId))
   );
 
   // Step 3: [TEST MODE: Auto-Fill] Logic
@@ -617,9 +824,10 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         terms: termsAndConditions,
         payment_terms: paymentTerms,
         invoicing_from: invoicingFrom,
-        // Only ever sent when no file was staged — attaching one clears these.
-        no_payment_proof_reason: paymentProofFile ? null : (noProofReason || null),
-        no_payment_proof_note: paymentProofFile ? null : (noProofNote.trim() || null),
+        // Only ever sent when no proof-type file was staged — staging one
+        // clears these (see handleFilesSelected).
+        no_payment_proof_reason: hasStagedProof ? null : (noProofReason || null),
+        no_payment_proof_note: hasStagedProof ? null : (noProofNote.trim() || null),
         // Sep 2, 2026: only ever sent when the server said the picker is
         // allowed AND one was chosen. The server ignores it otherwise, so
         // this is belt-and-braces rather than the control itself.
@@ -627,21 +835,16 @@ const OrderForm = ({ onCancel, onSuccess }) => {
       });
       const order = createRes.data.data.order;
 
-      // After the order exists, not before — see uploadPaymentProof. Deliberately
+      // After the order exists, not before — see uploadAttachments. Deliberately
       // NOT allowed to fail the mutation: the order is already created and
       // synced to Zoho by this point, so throwing here would show "order
-      // failed" for an order that exists. The proof is recoverable from the
-      // order's Proof of Payment tab; a phantom failure is not.
-      let proofUploadFailed = false;
-      if (paymentProofFile) {
-        try {
-          await uploadPaymentProof(order.id, paymentProofFile);
-        } catch (err) {
-          console.error('[PAYMENT_PROOF] upload failed after order create:', err);
-          proofUploadFailed = true;
-        }
+      // failed" for an order that exists. Each file is recoverable from the
+      // order's Attachments tab; a phantom failure is not.
+      let failedAttachments = [];
+      if (stagedAttachments.length) {
+        failedAttachments = await uploadAttachments(order.id, stagedAttachments);
       }
-      return { ...order, _proofUploadFailed: proofUploadFailed };
+      return { ...order, _failedAttachments: failedAttachments };
     },
     onSuccess: (order) => {
       // Invalidate queries so dashboards & orders lists refresh instantly
@@ -654,10 +857,10 @@ const OrderForm = ({ onCancel, onSuccess }) => {
       setIsReviewOpen(false);
       setSubmittedOrder(order);
 
-      if (order._proofUploadFailed) {
+      if (order._failedAttachments?.length) {
         toast.error(
-          `Order ${order.getmeds_order_id} was created, but the proof of payment did not upload. ` +
-            `Open the order and attach it from the Proof of Payment tab.`,
+          `Order ${order.getmeds_order_id} was created, but ${order._failedAttachments.length > 1 ? 'these files' : 'this file'} ` +
+            `did not upload: ${order._failedAttachments.join(', ')}. Open the order and attach ${order._failedAttachments.length > 1 ? 'them' : 'it'} from the Attachments tab.`,
           { duration: 9000 }
         );
       }
@@ -796,22 +999,33 @@ const OrderForm = ({ onCancel, onSuccess }) => {
               )}
             </Field>
 
-            {/* Sep 2, 2026: Test Mode only, and only for an admin — see the
-                note beside `canPickMedrep` above. Sits directly over the
+            {/* Sep 2, 2026: originally TEST_MODE + admin only.
+                Sep 5, 2026: also shown to management for the real (non-test)
+                pilot — see isManagementUser above and resolveOrderMedrep on
+                the backend. Copy and the empty "default" option below both
+                branch on which case this is, since management has no
+                fallback account to default to. Sits directly over the
                 Salesperson field because that is what it changes. */}
             {canPickMedrep && (
-              <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 flex items-start gap-3">
-                <FlaskConical size={16} className="text-amber-700 shrink-0 mt-0.5" />
+              <div className={`rounded-lg border px-4 py-3 flex items-start gap-3 ${
+                isManagementUser
+                  ? 'border-getmeds-blue/30 bg-getmeds-blue/5'
+                  : 'border-amber-300 bg-amber-50'
+              }`}>
+                <FlaskConical size={16} className={`shrink-0 mt-0.5 ${isManagementUser ? 'text-getmeds-blue-dark' : 'text-amber-700'}`} />
                 <div className="flex-1 min-w-0">
-                  <label className="block text-xs font-bold uppercase tracking-wide text-amber-900 mb-1.5">
-                    Raise this order as
+                  <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isManagementUser ? 'text-getmeds-blue-dark' : 'text-amber-900'}`}>
+                    {isManagementUser ? 'Create this order for' : 'Raise this order as'}
                   </label>
                   <select
                     value={actingMedrepId}
                     onChange={e => setActingMedrepId(e.target.value)}
                     className={inputClass}
+                    required={isManagementUser}
                   >
-                    <option value="">Default — the seeded MedRep account</option>
+                    <option value="">
+                      {isManagementUser ? '— Select a MedRep —' : 'Default — the seeded MedRep account'}
+                    </option>
                     {medrepOptions.map(m => (
                       <option key={m.id} value={m.id}>
                         {(m.display_name || m.name)}
@@ -819,9 +1033,10 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                       </option>
                     ))}
                   </select>
-                  <p className="text-[11px] text-amber-900/80 mt-1.5">
-                    Test Mode only. The order is attributed to the MedRep you pick and carries
-                    their Salesperson to Zoho — the audit trail still records that you raised it.
+                  <p className={`text-[11px] mt-1.5 ${isManagementUser ? 'text-getmeds-blue-dark/80' : 'text-amber-900/80'}`}>
+                    {isManagementUser
+                      ? 'Required. The order is attributed to the MedRep you pick and carries their Salesperson to Zoho — the audit trail records that you created it on their behalf.'
+                      : 'Test Mode only. The order is attributed to the MedRep you pick and carries their Salesperson to Zoho — the audit trail still records that you raised it.'}
                   </p>
                 </div>
               </div>
@@ -852,17 +1067,12 @@ const OrderForm = ({ onCancel, onSuccess }) => {
               </Field>
 
               <Field label="Delivery Method" help="Type to see suggestions, or enter your own.">
-                <input
-                  type="text"
-                  list="delivery-method-suggestions"
+                <SuggestField
                   value={deliveryMethod}
-                  onChange={e => setDeliveryMethod(e.target.value)}
+                  onChange={setDeliveryMethod}
+                  suggestions={DELIVERY_METHOD_SUGGESTIONS}
                   placeholder="e.g. LBC, Grab Express, Own Rider"
-                  className={inputClass}
                 />
-                <datalist id="delivery-method-suggestions">
-                  {DELIVERY_METHOD_SUGGESTIONS.map(opt => <option key={opt} value={opt} />)}
-                </datalist>
               </Field>
 
               {/* Sep 2, 2026: read-only, like Salesperson — all three come
@@ -894,31 +1104,21 @@ const OrderForm = ({ onCancel, onSuccess }) => {
               </Field>
 
               <Field label="Payment Terms" help="Type to see suggestions (matches Zoho's list), or enter your own.">
-                <input
-                  type="text"
-                  list="payment-terms-suggestions"
+                <SuggestField
                   value={paymentTerms}
-                  onChange={e => setPaymentTerms(e.target.value)}
+                  onChange={setPaymentTerms}
+                  suggestions={PAYMENT_TERMS_SUGGESTIONS}
                   placeholder="e.g. Net 15, 30 days"
-                  className={inputClass}
                 />
-                <datalist id="payment-terms-suggestions">
-                  {PAYMENT_TERMS_SUGGESTIONS.map(opt => <option key={opt} value={opt} />)}
-                </datalist>
               </Field>
 
               <Field label="Doctor Name" help="Manual entry — suggestions pulled from customers tagged as doctors.">
-                <input
-                  type="text"
-                  list="doctor-suggestions"
+                <SuggestField
                   value={doctorName}
-                  onChange={e => setDoctorName(e.target.value)}
+                  onChange={setDoctorName}
+                  suggestions={doctorSuggestions}
                   placeholder="Referring / prescribing doctor"
-                  className={inputClass}
                 />
-                <datalist id="doctor-suggestions">
-                  {doctorSuggestions.map(name => <option key={name} value={name} />)}
-                </datalist>
               </Field>
 
               <Field label="Source" required>
@@ -1143,85 +1343,136 @@ const OrderForm = ({ onCancel, onSuccess }) => {
 
             {/* Sep 4, 2026: proof of payment, replacing the dead "Attach
                 File(s)" control that used to sit here and discard whatever was
-                dropped on it. Either a file or a reason there is none — the
-                Submit button stays locked until one of them is given, so
+                dropped on it.
+                Sep 5, 2026: generalized to match Zoho's own "Attach File(s) to
+                Sales Order" — any number of files, each tagged with a type.
+                The Submit button still stays locked until there is at least
+                one Proof of Payment file OR a reason there is none, so
                 Finance never opens an order and finds a blank where the
-                evidence should be. */}
+                evidence should be; an 'Other' file never satisfies that on
+                its own. */}
             <Field
-              label="Proof of Payment"
-              help="A deposit slip, transfer screenshot or official receipt. Finance checks this when they verify the order for invoicing. If there is none yet, say why below."
+              label="Attach File(s) to Sales Order"
+              help={isManagementUser
+                ? "A deposit slip, transfer screenshot, purchase order, or any other file worth attaching. Tag each as Proof of Payment, Purchase Order, or Other — Finance only reviews Proof of Payment files when they verify the order for invoicing."
+                : "A deposit slip, transfer screenshot, purchase order, or any other file worth attaching. Tag each as Proof of Payment, Purchase Order, or Other — Finance only reviews Proof of Payment files when they verify the order for invoicing. If there's no proof of payment yet, say why below."}
             >
-              {paymentProofFile ? (
-                <div className="flex items-center justify-between gap-2 bg-pharmacy-green/10 border border-pharmacy-green/40 rounded-xl px-3 py-2.5 text-sm">
-                  <span className="flex items-center gap-2 min-w-0 text-ink-primary font-medium truncate">
-                    <Paperclip size={14} className="shrink-0 text-pharmacy-green-dark" />
-                    <span className="truncate">{paymentProofFile.name}</span>
-                    <span className="text-xs text-ink-secondary shrink-0">
-                      ({(paymentProofFile.size / 1024 / 1024).toFixed(1)} MB)
-                    </span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setPaymentProofFile(null)}
-                    className="p-0.5 text-slate-400 hover:text-state-error rounded-full shrink-0"
-                    title="Remove"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              ) : (
-                <>
-                  {/* Two inputs rather than one: `capture` opens the camera
-                      straight away, which is right at the counter and wrong
-                      when the slip was photographed earlier and is sitting in
-                      the gallery. */}
-                  <div className="flex flex-wrap gap-2">
-                    <label className="flex items-center justify-center gap-2 flex-1 min-w-[9rem] border-2 border-dashed border-slate-300 rounded-xl py-4 cursor-pointer hover:border-getmeds-blue hover:bg-getmeds-blue/5 transition-colors text-sm text-ink-secondary">
-                      <Paperclip size={16} />
-                      Take photo
-                      <input type="file" accept={PROOF_ACCEPT} capture="environment" onChange={handleProofSelected} className="hidden" />
-                    </label>
-                    <label className="flex items-center justify-center gap-2 flex-1 min-w-[9rem] border-2 border-dashed border-slate-300 rounded-xl py-4 cursor-pointer hover:border-getmeds-blue hover:bg-getmeds-blue/5 transition-colors text-sm text-ink-secondary">
-                      <Paperclip size={16} />
-                      Choose file
-                      <input type="file" accept={PROOF_ACCEPT} onChange={handleProofSelected} className="hidden" />
-                    </label>
-                  </div>
-
-                  <div className="mt-4">
-                    <label className="block text-xs font-semibold text-ink-primary mb-1.5">
-                      No proof of payment? Say why <span className="text-state-error">*</span>
-                    </label>
-                    <select
-                      value={noProofReason}
-                      onChange={(e) => setNoProofReason(e.target.value)}
-                      className={inputClass}
+              {stagedAttachments.length > 0 && (
+                <div className="space-y-2 mb-3">
+                  {stagedAttachments.map((a) => (
+                    <div
+                      key={a.localId}
+                      className="flex items-center justify-between gap-2 bg-pharmacy-green/10 border border-pharmacy-green/40 rounded-xl px-3 py-2.5 text-sm"
                     >
-                      <option value="">Select a reason…</option>
-                      {NO_PROOF_REASONS.map(r => (
-                        <option key={r.value} value={r.value}>{r.label}</option>
-                      ))}
-                    </select>
+                      <span className="flex items-center gap-2 min-w-0 text-ink-primary font-medium truncate">
+                        <Paperclip size={14} className="shrink-0 text-pharmacy-green-dark" />
+                        <span className="truncate">{a.file.name}</span>
+                        <span className="text-xs text-ink-secondary shrink-0">
+                          ({(a.file.size / 1024 / 1024).toFixed(1)} MB)
+                        </span>
+                      </span>
+                      <span className="flex items-center gap-2 shrink-0">
+                        <select
+                          value={a.fileType}
+                          onChange={(e) => handleAttachmentTypeChange(a.localId, e.target.value)}
+                          className="text-xs border border-slate-300 rounded-lg px-2 py-1 bg-white text-ink-primary"
+                        >
+                          {ATTACHMENT_TYPES.map(t => (
+                            <option key={t.value} value={t.value}>{t.label}</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveAttachment(a.localId)}
+                          className="p-0.5 text-slate-400 hover:text-state-error rounded-full"
+                          title="Remove"
+                        >
+                          <X size={14} />
+                        </button>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
-                    {noProofReason && (
-                      <textarea
-                        value={noProofNote}
-                        onChange={(e) => setNoProofNote(e.target.value)}
-                        rows={2}
-                        placeholder={noProofReason === 'other'
-                          ? 'Required — explain briefly for Finance'
-                          : 'Optional note for Finance'}
-                        className={`${inputClass} resize-y mt-2`}
-                      />
-                    )}
+              {/* Sep 5, 2026 (2): desktop gets a drag-and-drop zone; mobile
+                  keeps the original click-to-choose pair. A touch device has
+                  no "drag a file in from the OS" gesture the way a desktop
+                  does, so the two affordances are genuinely different tools
+                  for their platforms rather than one being a fallback for
+                  the other — shown/hidden with Tailwind's `sm:` breakpoint
+                  rather than any device sniffing. */}
+              <label
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`hidden sm:flex flex-col items-center justify-center gap-1.5 border-2 border-dashed rounded-xl py-8 px-4 text-center cursor-pointer transition-colors ${
+                  isDragActive
+                    ? 'border-getmeds-blue bg-getmeds-blue/10'
+                    : 'border-slate-300 hover:border-getmeds-blue hover:bg-getmeds-blue/5'
+                }`}
+              >
+                <Paperclip size={18} className="text-ink-secondary" />
+                <p className="text-sm text-ink-secondary">
+                  <span className="font-semibold text-getmeds-blue">Drag & drop files here</span>, or click to browse
+                </p>
+                <p className="text-[11px] text-ink-secondary/70">Photos, PDFs, Word or Excel files — up to 15 MB each</p>
+                <input type="file" accept={PROOF_ACCEPT} multiple onChange={handleFilesSelected} className="hidden" />
+              </label>
 
-                    {noProofReason === 'other' && !noProofNote.trim() && (
-                      <p className="mt-1.5 text-xs text-state-warning font-medium flex items-center gap-1.5">
-                        <AlertCircle size={13} /> A note is required when the reason is Other.
-                      </p>
-                    )}
-                  </div>
-                </>
+              {/* Two inputs rather than one: `capture` opens the camera
+                  straight away, which is right at the counter and wrong
+                  when the slip was photographed earlier and is sitting in
+                  the gallery. `multiple` lets several files be picked in one
+                  go from a gallery/file browser; each lands as its own
+                  staged row above, defaulted to Proof of Payment. */}
+              <div className="flex sm:hidden flex-wrap gap-2">
+                <label className="flex items-center justify-center gap-2 flex-1 min-w-[9rem] border-2 border-dashed border-slate-300 rounded-xl py-4 cursor-pointer hover:border-getmeds-blue hover:bg-getmeds-blue/5 transition-colors text-sm text-ink-secondary">
+                  <Paperclip size={16} />
+                  Take photo
+                  <input type="file" accept={PROOF_ACCEPT} capture="environment" onChange={handleFilesSelected} className="hidden" />
+                </label>
+                <label className="flex items-center justify-center gap-2 flex-1 min-w-[9rem] border-2 border-dashed border-slate-300 rounded-xl py-4 cursor-pointer hover:border-getmeds-blue hover:bg-getmeds-blue/5 transition-colors text-sm text-ink-secondary">
+                  <Paperclip size={16} />
+                  Choose file(s)
+                  <input type="file" accept={PROOF_ACCEPT} multiple onChange={handleFilesSelected} className="hidden" />
+                </label>
+              </div>
+
+              {!hasStagedProof && !isManagementUser && (
+                <div className="mt-4">
+                  <label className="block text-xs font-semibold text-ink-primary mb-1.5">
+                    No proof of payment? Say why <span className="text-state-error">*</span>
+                  </label>
+                  <select
+                    value={noProofReason}
+                    onChange={(e) => setNoProofReason(e.target.value)}
+                    className={inputClass}
+                  >
+                    <option value="">Select a reason…</option>
+                    {NO_PROOF_REASONS.map(r => (
+                      <option key={r.value} value={r.value}>{r.label}</option>
+                    ))}
+                  </select>
+
+                  {noProofReason && (
+                    <textarea
+                      value={noProofNote}
+                      onChange={(e) => setNoProofNote(e.target.value)}
+                      rows={2}
+                      placeholder={noProofReason === 'other'
+                        ? 'Required — explain briefly for Finance'
+                        : 'Optional note for Finance'}
+                      className={`${inputClass} resize-y mt-2`}
+                    />
+                  )}
+
+                  {noProofReason === 'other' && !noProofNote.trim() && (
+                    <p className="mt-1.5 text-xs text-state-warning font-medium flex items-center gap-1.5">
+                      <AlertCircle size={13} /> A note is required when the reason is Other.
+                    </p>
+                  )}
+                </div>
               )}
             </Field>
           </div>
@@ -1349,15 +1600,23 @@ const OrderForm = ({ onCancel, onSuccess }) => {
           )}
 
           <div>
-            <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Proof of Payment</h4>
-            <div className="bg-surface rounded-xl p-3 border border-slate-200 text-xs text-ink-primary">
-              {paymentProofFile ? (
+            <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">Attachments</h4>
+            <div className="bg-surface rounded-xl p-3 border border-slate-200 text-xs text-ink-primary space-y-1.5">
+              {stagedAttachments.length > 0 ? (
+                stagedAttachments.map(a => (
+                  <span key={a.localId} className="flex items-center gap-1.5">
+                    <Paperclip size={11} className="text-ink-secondary shrink-0" />
+                    <span className="truncate">{a.file.name}</span>
+                    <span className="text-ink-secondary shrink-0">
+                      ({(ATTACHMENT_TYPES.find(t => t.value === a.fileType) || {}).label || a.fileType})
+                    </span>
+                  </span>
+                ))
+              ) : null}
+              {!hasStagedProof && !isManagementUser && (
                 <span className="flex items-center gap-1.5">
-                  <Paperclip size={11} className="text-ink-secondary" /> {paymentProofFile.name}
-                </span>
-              ) : (
-                <span>
-                  None — {(NO_PROOF_REASONS.find(r => r.value === noProofReason) || {}).label || 'no reason given'}
+                  {stagedAttachments.length > 0 && <Paperclip size={11} className="text-transparent shrink-0" />}
+                  No proof of payment — {(NO_PROOF_REASONS.find(r => r.value === noProofReason) || {}).label || 'no reason given'}
                   {noProofNote.trim() && <span className="text-ink-secondary"> · {noProofNote.trim()}</span>}
                 </span>
               )}

@@ -85,6 +85,10 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       badgeClass: 'bg-purple-100 text-purple-800',
       links: [
         { to: '/management', icon: <BarChart3 size={18} />, label: 'Global Dashboard', exact: true },
+        // Sep 5, 2026: management can raise an order on a MedRep's behalf
+        // (see OrderForm.jsx's medrep picker) — this was the only role with
+        // that ability but no sidebar entry to reach it.
+        { to: '/orders/new', icon: <PlusCircle size={18} />, label: 'Create New Order', primaryAction: true },
         { to: '/management/exceptions', icon: <AlertTriangle size={18} />, label: 'Exception Hub' },
         { to: '/inventory', icon: <Package size={18} />, label: 'Inventory & Stock Sync' },
         { to: '/management/clients', icon: <Users size={18} />, label: 'Clients Directory' }
@@ -131,6 +135,11 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   } else if (role === 'management') {
     mainLinks.push(
       { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
+      // Sep 5, 2026: management can raise an order on a MedRep's behalf (see
+      // OrderForm.jsx's medrep picker + orders.controller.js's
+      // resolveOrderMedrep) — that was built without a way to reach it from
+      // here, so management had the access but no link to it.
+      { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
       { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
       { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' }

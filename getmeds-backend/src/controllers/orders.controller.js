@@ -26,37 +26,52 @@ const { isTestModeEnabled } = require('../middleware/testMode');
 /**
  * Which MedRep is this order actually FOR?
  *
- * Sep 2, 2026. Normally: whoever is logged in. In TEST_MODE an admin passes
- * every role gate (see middleware/auth.js's requireRole), and `resolveActor`
- * has always quietly attributed their order to the one seeded
- * medrep@getmeds.ph account — fine when there was one MedRep and no
- * per-MedRep anything, useless now that each carries their own Zoho
- * Salesperson. Testing "does an order from Aaron reach Zoho as
- * TEST | Aaron Manila" needs to be possible without logging out.
+ * Sep 2, 2026. Normally: whoever is logged in.
  *
- * So an admin may name the MedRep with `medrep_id` in the body. Four
- * conditions, all required, none of them skippable:
- *   - TEST_MODE is on;
- *   - the caller is an admin;
+ * Sep 5, 2026: Management role (production) can name a MedRep with
+ * `medrep_id` in the body. In TEST_MODE, admin can also do this for
+ * testing. Both require three conditions (in addition to the role check):
  *   - the id names a real, active user;
- *   - whose role is medrep.
+ *   - whose role is medrep;
+ *   - valid format (not null, not empty string).
  *
- * Outside TEST_MODE, or for anyone who is not an admin, `medrep_id` is
- * IGNORED rather than refused — it is a test affordance, and a stray field
- * from an old client must never silently move an order onto someone else's
- * name in normal operation. A bad id from an admin who IS allowed to use it
- * is a 400, because there the caller meant something specific and got it
- * wrong.
+ * For anyone else, `medrep_id` is IGNORED rather than refused — a stray
+ * field from an old client must never silently move an order onto someone
+ * else's name. A bad id from someone who IS allowed to use it is a 400,
+ * because there the caller meant something specific and got it wrong.
  *
  * Returns { actor, onBehalf } or { error }.
  */
 async function resolveOrderMedrep(user, requestedMedrepId) {
   const fallback = await resolveActor(user, 'medrep');
   const asked = requestedMedrepId !== undefined && requestedMedrepId !== null && requestedMedrepId !== '';
-  if (!asked) return { actor: fallback, onBehalf: false };
 
   const isAdmin = (user.role || '').toLowerCase() === 'admin';
-  if (!isTestModeEnabled() || !isAdmin) return { actor: fallback, onBehalf: false };
+  const isManagement = (user.role || '').toLowerCase() === 'management';
+
+  // Sep 5, 2026 (2): management MUST name a MedRep. resolveActor (above)
+  // only ever remaps an ADMIN's actor onto a seeded stand-in — for anyone
+  // else, including management, it just returns `user` unchanged. Without
+  // this check, a management order submitted with no medrep_id would
+  // silently set orders.medrep_id to the management account itself, and
+  // salespersonService would read ITS (absent, or wrong) division/
+  // display_name onto the Zoho Sales Order instead of a real MedRep's.
+  // Fail loudly here rather than mis-attribute a real order.
+  if (isManagement && !asked) {
+    return {
+      error: {
+        code: 'MEDREP_REQUIRED',
+        message: 'Select which MedRep this order is for.'
+      }
+    };
+  }
+
+  if (!asked) return { actor: fallback, onBehalf: false };
+
+  // Management can always select a medrep (production use for pilot).
+  // Admin can do it only in TEST_MODE (testing use). Anyone else: ignore medrep_id.
+  const canSelectMedrep = isManagement || (isTestModeEnabled() && isAdmin);
+  if (!canSelectMedrep) return { actor: fallback, onBehalf: false };
 
   const target = await db
     .prepare('SELECT id, name, email, role, salesperson FROM users WHERE id = ? AND is_active = 1')
@@ -295,7 +310,11 @@ exports.getProducts = async (req, res, next) => {
 exports.getMedreps = async (req, res, next) => {
   try {
     const isAdmin = (req.user.role || '').toLowerCase() === 'admin';
-    if (!isTestModeEnabled() || !isAdmin) {
+    const isManagement = (req.user.role || '').toLowerCase() === 'management';
+    // Sep 5, 2026: Management role (production) can pick a medrep.
+    // Admin can only do this in TEST_MODE (testing). Other roles: disabled.
+    const enabled = isManagement || (isTestModeEnabled() && isAdmin);
+    if (!enabled) {
       return res.json({ success: true, data: { enabled: false, medreps: [] } });
     }
     const medreps = await db
@@ -329,7 +348,8 @@ exports.getAll = async (req, res, next) => {
     let where = [];
     let params = [];
 
-    // MedReps only see their own orders
+    // Sep 5, 2026: MedReps only see their own orders. Management sees all.
+    // Other roles (finance, dispatch, admin) already see all (no filter).
     if (req.user.role === 'medrep') {
       where.push('o.medrep_id = ?');
       params.push(req.user.id);
@@ -388,7 +408,8 @@ exports.getById = async (req, res, next) => {
 
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
 
-    // MedRep can only see their own orders
+    // Sep 5, 2026: MedReps can only see their own orders. Management can
+    // see any medrep's order. Other roles can see all orders.
     if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
@@ -500,6 +521,7 @@ exports.syncFromZoho = async (req, res, next) => {
     // genuinely HTTP: who is allowed to ask, and what the response looks like.
     const owner = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(req.params.id);
     if (!owner) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    // Sep 5, 2026: MedReps can sync only their own orders. Management can sync any.
     if (req.user.role === 'medrep' && owner.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
@@ -549,6 +571,7 @@ exports.retryZohoSync = async (req, res, next) => {
     `).get(req.params.id);
 
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    // Sep 5, 2026: MedReps can retry only their own orders. Management can retry any.
     if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
@@ -1002,6 +1025,7 @@ exports.submit = async (req, res, next) => {
     `).get(req.params.id);
 
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    // Sep 5, 2026: MedReps can submit only their own orders. Management can submit any.
     if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
@@ -1250,6 +1274,7 @@ exports.updateItems = async (req, res, next) => {
   try {
     const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    // Sep 5, 2026: MedReps can edit only their own orders. Management can edit any.
     if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }

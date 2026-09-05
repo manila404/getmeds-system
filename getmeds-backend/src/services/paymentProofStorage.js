@@ -53,6 +53,15 @@ const ALLOWED_TYPES = [
   'image/heic',
   'image/heif',
   'application/pdf',
+  // Sep 5, 2026: widened for the 'other' attachment type (a PO, a signed
+  // contract, an authorization letter) — a proof of payment is realistically
+  // always a photo or a PDF, but "any other file worth attaching to the
+  // order" is not. Applies to both types; nothing here distinguishes by
+  // file_type, since a scanned Word doc is a perfectly normal proof too.
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ];
 
 /** How long a view URL stays valid. Re-minted on every read; never stored. */
@@ -91,6 +100,10 @@ const EXT_BY_TYPE = {
   'image/heic': 'heic',
   'image/heif': 'heif',
   'application/pdf': 'pdf',
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
 };
 
 function extensionFor(contentType, fileName) {
@@ -105,10 +118,20 @@ function extensionFor(contentType, fileName) {
  * upload at another order's folder or walk out of the bucket. The controller
  * re-checks the prefix on the way back in, because the signed URL is the only
  * thing standing between the two calls.
+ *
+ * Sep 5, 2026: `fileType` sorts the object into a subfolder
+ * (orders/{id}/payment_proof/..., orders/{id}/other/..., or
+ * orders/{id}/purchase_order/... — the latter added Sep 5, 2026 (2)) purely
+ * for a human browsing the bucket directly — pathPrefixFor still matches on
+ * `orders/{id}/` alone, so the ownership check in the controller is
+ * unaffected by which subfolder a file lands in.
  */
-function buildPath(orderId, getmedsOrderId, contentType, fileName) {
+const KNOWN_FILE_TYPES = ['payment_proof', 'other', 'purchase_order'];
+
+function buildPath(orderId, getmedsOrderId, contentType, fileName, fileType) {
   const safeOrderRef = String(getmedsOrderId || 'order').replace(/[^A-Za-z0-9._-]/g, '');
-  return `orders/${orderId}/${safeOrderRef}-${Date.now()}.${extensionFor(contentType, fileName)}`;
+  const safeType = KNOWN_FILE_TYPES.includes(fileType) ? fileType : 'payment_proof';
+  return `orders/${orderId}/${safeType}/${safeOrderRef}-${Date.now()}.${extensionFor(contentType, fileName)}`;
 }
 
 /** The prefix every path for this order must start with. */

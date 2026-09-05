@@ -292,9 +292,15 @@ CREATE TABLE IF NOT EXISTS dispatch_records (
 -- copy migrate.js still supports. See the longer note in schema.pg.sql for
 -- why a proof of payment is a record rather than a pipeline status, and why
 -- it is not the same thing as the `payments` table.
+-- Sep 5, 2026: kept in sync with schema.pg.sql, the schema that actually
+-- runs (see database.js — this app has been Postgres-only since Sep 2-3;
+-- this file is retained for reference). Generalized from one row per order
+-- into a typed, multi-row attachment table — see schema.pg.sql's comment
+-- for the full reasoning on file_type ('payment_proof' vs 'other').
 CREATE TABLE IF NOT EXISTS payment_proofs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_id INTEGER UNIQUE NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  file_type TEXT NOT NULL DEFAULT 'payment_proof' CHECK(file_type IN ('payment_proof','other','purchase_order')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified','rejected')),
   storage_path TEXT NOT NULL,
   file_name TEXT,
@@ -309,6 +315,7 @@ CREATE TABLE IF NOT EXISTS payment_proofs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_payment_proofs_status ON payment_proofs(status, uploaded_at ASC);
+CREATE INDEX IF NOT EXISTS idx_payment_proofs_order_id ON payment_proofs(order_id);
 
 CREATE TABLE IF NOT EXISTS order_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

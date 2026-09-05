@@ -1,29 +1,106 @@
-﻿require a proof of payment on the order form, or a reason there is none
+﻿add management order pilot, typed order attachments, and order form UX fixes
 
-The MedRep attaches the deposit slip while creating the order, which is where
-they already look for it. This replaces the "Attach File(s) to Sales Order"
-control that used to sit in that spot and discard whatever was dropped on it -
-`// UI-only for now - files are listed here but never uploaded anywhere` - so it
-looked like filing and was not. A rep would have believed their slip was on
-file.
+Management (production pilot) can now create, view, and submit orders on
+behalf of a MedRep, and several bugs/gaps surfaced while building and
+testing that pilot today are fixed alongside it. See
+claude/2026-09-05-management-account.md (Rounds 1-8) for full narrative
+detail on each of the below, including two incidents and how they were
+caught and recovered.
 
-Submit stays locked until there is either a file or a reason, so Finance never
-opens an order and finds a blank where the evidence should be. The reason is a
-four-value enum rather than free text, for what the division field taught on
-Sep 2: terms, on terms and w/ terms are three answers to one question and
-nothing downstream can count them. Other requires a note.
+Management order access (orders.controller.js, orders.routes.js, App.jsx,
+OrderForm.jsx):
+- resolveOrderMedrep() lets management (and admin+TEST_MODE) pass
+  medrep_id; refuses a management order with none rather than silently
+  attributing it to the management account itself, since resolveActor()
+  has no stand-in mapping for management the way it does for admin.
+- getMedreps()/getAll() opened to management; access checks in getById,
+  syncFromZoho, retryZohoSync, submit, updateItems updated to match.
+- /orders/new route and its ProtectedRoute now allow management, fixing a
+  silent redirect to /dashboard that made "+ New Order" appear to do
+  nothing for that role.
+- Medrep picker on the order form branches by role: management gets a
+  required "Create this order for" picker with no default, distinct from
+  admin's optional TEST_MODE stand-in.
 
-The upload runs AFTER create returns, because the storage path is
-orders/<id>/... and there is no id until then. It is deliberately not allowed to
-fail the mutation - the order is already in Zoho by that point, and reporting
-failure for an order that exists is worse than a missing file the rep can attach
-from the order's Proof of Payment tab. A second toast says so when it happens.
+Fix case-sensitive login (auth.controller.js, admin.controller.js):
+Accounts created via public sign-up/seed/create-user always lowercased
+email before insert; accounts created via the admin panel did not. Login
+matched with a case-sensitive WHERE, so any casing mismatch against a real,
+active account silently returned INVALID_CREDENTIALS. Login now matches on
+LOWER(email); admin-created accounts are normalized the same way the other
+creation paths already were.
 
-The requirement is a gate on the FORM, not on POST /api/orders, which still
-accepts an order with neither and has a test saying so. A server-side
-requirement would reject every order that is about to get a proof.
+Generalize Proof of Payment into typed, multi-file order attachments
+(schema.pg.sql, schema.sql, migrate.pg.js, paymentProofStorage.js,
+paymentProof.controller.js, finance.controller.js, orders.routes.js,
+OrderForm.jsx, PaymentProofPanel.jsx, OrderDetailPage.jsx):
+payment_proofs goes from a single-slot table (order_id UNIQUE) to a typed,
+multi-row table (file_type: payment_proof / other / purchase_order,
+UNIQUE dropped), matching Zoho's own "Attach File(s) to Sales Order"
+control instead of the app's old one-slot upload that only handled a
+single deposit slip. Finance's verify/reject flow still only ever acts on
+payment_proof-type rows; other/purchase_order rows are purely
+informational and never gate anything. Two endpoints (GET
+.../payment-proof, POST .../payment-proof/reject) kept their old
+single-object response shape so FinanceQueuePage needed no changes.
+migrate.pg.js gained reconcilePaymentProofs() (adds file_type on an
+existing database, widens its CHECK, drops the old UNIQUE) using the same
+conkey-matching technique as the existing reconcileStatusCheck, rather
+than text-matching the constraint definition — a documented near-miss
+showed a text match on the pipeline's own status CHECK would also grab
+zoho_sync_status's unrelated CHECK.
 
-Needs orders.no_payment_proof_reason and no_payment_proof_note, applied to
-Supabase by hand before deploying since create now inserts them.
+Add "Purchase Order" as a third attachment type (schema.pg.sql,
+schema.sql, migrate.pg.js, paymentProof.controller.js,
+paymentProofStorage.js, OrderForm.jsx, PaymentProofPanel.jsx):
+Same informational treatment as "Other". Required a second CHECK widening
+on top of Round 4's, so migrate.pg.js gained fileTypeCheckConstraint() and
+a matching reconcile step, again by conkey rather than text match.
+PaymentProofPanel's attachment card used to hard-code "Other attachment"
+for any non-proof file; it now looks up the real label so a Purchase
+Order attachment does not misleadingly read as "Other".
 
-446 tests, 25 suites (+3).
+Remove the "No proof of payment? Say why" requirement for management only
+(OrderForm.jsx): management creates orders on a MedRep's behalf and is not
+positioned to explain an absent proof the way the MedRep who took the
+order is. The field, its required-ness in isFormValid, its line in the
+submit-review summary, and the section help text are now all gated on
+role; MedRep's own requirement is unchanged.
+
+Add desktop drag-and-drop for order attachments, keep mobile's
+click-to-choose (OrderForm.jsx, PaymentProofPanel.jsx): file-processing
+logic was pulled out of the <input onChange> handlers into a shared
+function so a drop event reuses the same validation/staging path as the
+existing file pickers. The new drop zone shows only at the sm: breakpoint
+and up; the original Take Photo / Choose File(s) controls are hidden
+(not removed) below it, since a touch device has no equivalent
+drag-a-file-in gesture.
+
+Add "Create New Order" to the management sidebar (Sidebar.jsx): the link
+was missing from both the standard and test-mode sidebar sections even
+though management already had full backend/route access to that page.
+
+Refresh Payment Terms suggestions and replace native <datalist> dropdowns
+(OrderForm.jsx): PAYMENT_TERMS_SUGGESTIONS expanded from 6 to the current
+24 entries from the user's live Zoho org. Looked into live-syncing this
+list from Zoho instead of hardcoding it; there is no reliable Zoho
+Inventory API for it (checked Sep 5, 2026 - only an undocumented,
+Books-only settings endpoint exists), and the field is genuinely free text
+in Zoho itself, so hardcoding with suggestions was kept, matching how
+Delivery Method already worked. Separately, Delivery Method/Payment
+Terms/Doctor Name all used native <input list>+<datalist>, whose dropdown
+panel is painted by the OS/browser rather than this app's CSS - on this
+user's Windows + Chrome/Edge with a dark OS theme it rendered dark-on-dark
+regardless of page styling, and no CSS fix exists for that. Replaced with
+a small custom SuggestField combobox (styled the same as the existing
+ProductAutocomplete/CustomerAutocomplete lists), still fully free-typed.
+
+No automated tests were added this session for the new management/
+attachment behavior (tracked as outstanding). Every change was validated
+with `node --check` (backend) or `esbuild --loader:.jsx=jsx` (frontend)
+before and after committing to this machine, and file content was
+verified byte-for-byte (md5sum) against what actually landed on disk
+rather than trusting tool-reported success alone - see the Round 7 and
+Round 8 incident notes in the project doc for why that became standard
+practice here.
+

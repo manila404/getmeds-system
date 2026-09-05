@@ -43,7 +43,16 @@ exports.login = async (req, res, next) => {
     if (!email || !password) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Email and password required' } });
     }
-    const user = await db.prepare('SELECT * FROM users WHERE email = ? AND is_active = 1').get(email);
+    // Sep 5, 2026: case-insensitive match on both sides. seed.js/create-user.js/
+    // register() all lowercase the email before INSERT, but POST /api/admin/users
+    // does not (see admin.controller.js) — so a mixed-case stored email is a real
+    // possibility, not just a hypothetical. Postgres `=` on text is
+    // case-sensitive (this app ran on SQLite until Sep 2-3, where the same exact
+    // mismatch could already occur depending on collation), so a login typed
+    // with different casing than what's stored silently failed as
+    // INVALID_CREDENTIALS for a perfectly real account. LOWER() on both sides
+    // is correct regardless of which side (or neither) happens to be normalized.
+    const user = await db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?) AND is_active = 1').get((email || '').trim());
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
       return res.status(401).json({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'Invalid email or password' } });
     }

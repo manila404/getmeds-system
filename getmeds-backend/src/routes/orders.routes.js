@@ -22,10 +22,13 @@ router.get('/meta/medreps', c.getMedreps);
 
 // Order CRUD
 router.get('/', c.getAll);
-router.post('/', requireRole('medrep'), c.create);
+// Sep 5, 2026: Both medreps and management can create orders.
+// MedReps create their own. Management specifies via medrep_id.
+router.post('/', requireRole('medrep', 'management'), c.create);
 router.get('/:id', c.getById);
 router.get('/:id/events', c.getEvents);
-router.post('/:id/submit', requireRole('medrep'), c.submit);
+// Sep 5, 2026: Both medreps and management can submit orders.
+router.post('/:id/submit', requireRole('medrep', 'management'), c.submit);
 // Manual fallback: pull this order's current Sales Order status straight
 // from Zoho and backfill the audit trail if a webhook was missed (backend
 // or ngrok not running at the moment Finance confirmed it in Zoho).
@@ -42,23 +45,36 @@ router.patch('/:id/exception', requireRole('management', 'admin'), c.setExceptio
 // updateItems for why this only works before order.zoho_so_id is set.
 router.patch('/:id/items', c.updateItems);
 
-// ─── Proof of payment (Sep 4, 2026) ─────────────────────────────────────────
+// ─── Attachments: proof of payment, and everything else (Sep 4, generalized Sep 5, 2026) ──
 //
 // Order-scoped, so they live here rather than on a router of their own — a
 // second router mounted at /api carrying /orders/:id/... would sit behind this
 // one and depend on requests falling through it, which is fragile for no gain.
 //
-// No requireRole: attaching a proof is gated by ORDERSHIP, not by role (the
-// MedRep the order belongs to, or an admin), which requireRole cannot express.
-// That check is in paymentProof.controller.js's canAttach.
+// No requireRole: attaching a file is gated by ORDERSHIP, not by role (the
+// MedRep the order belongs to, an admin, or management), which requireRole
+// cannot express. That check is in paymentProof.controller.js's canAttach.
 //
 // Upload is two calls because the file must not pass through this API —
 // Vercel caps request bodies at 4.5 MB and a phone photo is routinely larger.
 // The browser PUTs to Supabase directly against the signed URL from step 1.
 //
-// There is no verify here. Finance approves a proof by verifying the ORDER at
-// ready_for_finance_verified — see finance.routes.js.
+// There is no verify here. Finance approves a proof-type attachment by
+// verifying the ORDER at ready_for_finance_verified — see finance.routes.js.
+//
+// Sep 5, 2026: generalized from a single proof-of-payment slot to a typed,
+// multi-file "Attach File(s) to Sales Order" list (mirrors Zoho's Sales Order
+// screen). New callers should use /attachments*; the old /payment-proof
+// paths are kept below, unchanged, as aliases onto the SAME handlers so
+// FinanceQueuePage.jsx and anything else written against the old shape keeps
+// working with zero changes.
 const proof = require('../controllers/paymentProof.controller');
+router.post('/:id/attachments/upload-url', proof.getUploadUrl);
+router.post('/:id/attachments', proof.attach);
+router.get('/:id/attachments', proof.list);
+
+// Legacy aliases — do not remove without checking FinanceQueuePage.jsx and
+// finance.routes.js's reject route, both of which still call these paths.
 router.post('/:id/payment-proof/upload-url', proof.getUploadUrl);
 router.post('/:id/payment-proof', proof.attach);
 router.get('/:id/payment-proof', proof.get);

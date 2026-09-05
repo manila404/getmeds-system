@@ -40,17 +40,41 @@ exports.getQueue = async (req, res, next) => {
              -- ready_for_finance_verified can show it beside the Verify button
              -- without a second request per row. NULL simply means none was
              -- attached — a proof is optional, and Finance decides either way.
-             pp.status as payment_proof_status,
-             pp.uploaded_at as payment_proof_uploaded_at,
-             pp.file_name as payment_proof_file_name,
-             pp.content_type as payment_proof_content_type,
-             ppu.name as payment_proof_uploaded_by_name
+             --
+             -- Sep 5, 2026: payment_proofs can now hold more than one row per
+             -- order (it went from a single UNIQUE-order_id slot to a typed,
+             -- multi-row attachment table — see paymentProof.controller.js).
+             -- A plain LEFT JOIN here would duplicate the order row once per
+             -- matching payment_proof, which is wrong for a queue that must
+             -- list each order exactly once. The subquery below aggregates
+             -- 'payment_proof'-type rows per order FIRST, then joins once, so
+             -- the columns below carry the SAME NAMES and the SAME MEANING
+             -- (the most recently uploaded proof) that FinanceQueuePage.jsx
+             -- already reads — that page needed no changes for this.
+             pp.pending_count as payment_proof_pending_count,
+             pp.latest_status as payment_proof_status,
+             pp.latest_uploaded_at as payment_proof_uploaded_at,
+             pp.latest_file_name as payment_proof_file_name,
+             pp.latest_content_type as payment_proof_content_type,
+             pp.latest_uploaded_by_name as payment_proof_uploaded_by_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
       LEFT JOIN payments p ON o.id = p.order_id
-      LEFT JOIN payment_proofs pp ON o.id = pp.order_id
-      LEFT JOIN users ppu ON pp.uploaded_by = ppu.id
+      LEFT JOIN (
+        SELECT
+          proofs.order_id,
+          COUNT(*) FILTER (WHERE proofs.status = 'pending') AS pending_count,
+          (ARRAY_AGG(proofs.status ORDER BY proofs.uploaded_at DESC))[1] AS latest_status,
+          (ARRAY_AGG(proofs.uploaded_at ORDER BY proofs.uploaded_at DESC))[1] AS latest_uploaded_at,
+          (ARRAY_AGG(proofs.file_name ORDER BY proofs.uploaded_at DESC))[1] AS latest_file_name,
+          (ARRAY_AGG(proofs.content_type ORDER BY proofs.uploaded_at DESC))[1] AS latest_content_type,
+          (ARRAY_AGG(ppu2.name ORDER BY proofs.uploaded_at DESC))[1] AS latest_uploaded_by_name
+        FROM payment_proofs proofs
+        LEFT JOIN users ppu2 ON proofs.uploaded_by = ppu2.id
+        WHERE proofs.file_type = 'payment_proof'
+        GROUP BY proofs.order_id
+      ) pp ON pp.order_id = o.id
       WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')
       ORDER BY o.submitted_at ASC
     `).all();
@@ -138,7 +162,12 @@ exports.verifyAccount = async (req, res, next) => {
     const actor = await resolveActor(req.user, 'finance');
     const now = new Date().toISOString();
     let newStatus = order.status;
-    let verifiedProof = null;
+    // Sep 5, 2026: markVerifiedWithOrder now returns an ARRAY — an order can
+    // carry more than one pending proof of payment (unusual, but possible:
+    // two slips for a split payment, or a rejected one plus its
+    // replacement uploaded again before this decision). Empty array is the
+    // normal case, same as the old `null`.
+    let verifiedProofs = [];
 
     await db.transaction(async () => {
       const moved = await setOrderStatus(order.id, order.status, target, now);
@@ -160,11 +189,16 @@ exports.verifyAccount = async (req, res, next) => {
       // wrong thing. Rejecting a proof is its own action — see
       // paymentProof.controller.js's reject.
       //
-      // Returns null when nothing was pending, which is the normal case: a
+      // Returns [] when nothing was pending, which is the normal case: a
       // proof is optional and most orders will not have one.
       if (approved) {
-        verifiedProof = await markVerifiedWithOrder(order.id, actor.id, now);
+        verifiedProofs = await markVerifiedWithOrder(order.id, actor.id, now);
       }
+
+      const proofNames = verifiedProofs.map((p) => p.file_name).filter(Boolean);
+      const proofNote = verifiedProofs.length
+        ? ` Proof of payment${verifiedProofs.length > 1 ? 's' : ''}${proofNames.length ? ` (${proofNames.join(', ')})` : ''} verified with it.`
+        : '';
 
       await logEvent({
         orderId: order.id,
@@ -174,9 +208,7 @@ exports.verifyAccount = async (req, res, next) => {
         actorId: actor.id,
         actorName: actor.name,
         notes: approved
-          ? `Customer account verified in Zoho Books — cleared to invoice.` +
-            `${verifiedProof ? ` Proof of payment${verifiedProof.file_name ? ` (${verifiedProof.file_name})` : ''} verified with it.` : ''}` +
-            `${reason ? ` ${String(reason).trim()}` : ''}`
+          ? `Customer account verified in Zoho Books — cleared to invoice.${proofNote}${reason ? ` ${String(reason).trim()}` : ''}`
           : `Rejected by Finance: ${String(reason).trim()}`,
         metadata: {
           approved,
@@ -184,8 +216,8 @@ exports.verifyAccount = async (req, res, next) => {
           // Recorded so the trail says what evidence was on the order at the
           // moment of the decision — including that there was none, which is
           // the point of a soft gate.
-          paymentProofVerified: Boolean(verifiedProof),
-          paymentProofPath: verifiedProof ? verifiedProof.storage_path : null
+          paymentProofVerified: verifiedProofs.length > 0,
+          paymentProofPaths: verifiedProofs.map((p) => p.storage_path)
         }
       });
 
@@ -203,7 +235,7 @@ exports.verifyAccount = async (req, res, next) => {
 
     res.json({
       success: true,
-      data: { status: newStatus, approved, paymentProofVerified: Boolean(verifiedProof) }
+      data: { status: newStatus, approved, paymentProofVerified: verifiedProofs.length > 0 }
     });
   } catch (err) { next(err); }
 };

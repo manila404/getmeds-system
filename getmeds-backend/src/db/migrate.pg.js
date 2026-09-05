@@ -40,6 +40,18 @@ const REQUIRED_STATUSES = [
   'completed', 'on_hold', 'exception', 'cancelled', 'deleted',
 ];
 
+/**
+ * The file types payment_proofs.file_type may hold. Kept in the same order
+ * as schema.pg.sql and schema.sql so the three can be eyeballed against each
+ * other, same convention as REQUIRED_STATUSES above.
+ *
+ * Sep 5, 2026 (2): 'purchase_order' added — a third, purely informational
+ * attachment type alongside 'other' (the file-type CHECK on payment_proofs
+ * needs widening on any database created before this, same reasoning as
+ * reconcileStatusCheck below).
+ */
+const REQUIRED_FILE_TYPES = ['payment_proof', 'other', 'purchase_order'];
+
 function connectionString() {
   const url = process.env.DATABASE_URL;
   if (!url) {
@@ -157,6 +169,125 @@ async function reconcileStatusCheck(client) {
   }
 }
 
+/**
+ * Sep 5, 2026: payment_proofs went from "one row per order" (order_id
+ * UNIQUE) to a typed, multi-row attachment table (file_type: 'payment_proof'
+ * | 'other', no UNIQUE). `CREATE TABLE IF NOT EXISTS` in schema.pg.sql only
+ * ever applies to a table that does not exist yet — it is a no-op against a
+ * database that already has payment_proofs from before this change, exactly
+ * like reconcileStatusCheck above exists because widening a CHECK has the
+ * same problem. This does the two ALTERs an existing database needs:
+ *   1. add file_type, defaulting existing rows to 'payment_proof' (the only
+ *      kind that existed before this column did — correct for every row
+ *      already in the table);
+ *   2. drop the UNIQUE constraint on order_id, replaced by a plain index.
+ * Both steps are written to be safe to run again: the column add is guarded
+ * by information_schema, and the constraint drop looks up its real name
+ * first (Postgres's default naming — payment_proofs_order_id_key — is not
+ * guaranteed, so this does not hard-code it).
+ *
+ * Sep 5, 2026 (2): a third ALTER — widening the file_type CHECK itself —
+ * added for 'purchase_order'. Postgres cannot add a value to an
+ * existing CHECK constraint, only DROP and re-ADD it with the full list, so
+ * this mirrors reconcileStatusCheck's approach exactly: find the constraint
+ * by matching conkey against file_type's attnum (never by text-matching the
+ * constraint definition — see statusCheckConstraint's comment on why that is
+ * unsafe), compute what's missing, and replace it transactionally.
+ */
+async function fileTypeCheckConstraint(client) {
+  const { rows } = await client.query(
+    `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+       FROM pg_constraint c
+       JOIN pg_class     t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE t.relname = 'payment_proofs'
+        AND n.nspname = current_schema()
+        AND c.contype = 'c'
+        AND c.conkey = ARRAY[
+              (SELECT a.attnum FROM pg_attribute a
+                WHERE a.attrelid = t.oid AND a.attname = 'file_type' AND NOT a.attisdropped)
+            ]::smallint[]`
+  );
+  if (!rows.length) return null;
+  if (rows.length > 1) {
+    throw new Error(
+      `payment_proofs has ${rows.length} CHECK constraints on file_type alone: ` +
+        rows.map((r) => r.conname).join(', ') +
+        '. Resolve by hand — this script will not guess which to replace.'
+    );
+  }
+  const types = new Set();
+  for (const m of rows[0].def.matchAll(/'([a-z_]+)'::text/g)) types.add(m[1]);
+  return { name: rows[0].conname, def: rows[0].def, types };
+}
+
+async function reconcilePaymentProofs(client) {
+  const { rows: cols } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'payment_proofs' AND column_name = 'file_type'`
+  );
+  if (!cols.length) {
+    console.log('  ↻ payment_proofs.file_type is missing — adding (existing rows default to \'payment_proof\')');
+    const freshList = REQUIRED_FILE_TYPES.map((t) => `'${t}'`).join(', ');
+    await client.query(
+      `ALTER TABLE payment_proofs ADD COLUMN file_type TEXT NOT NULL DEFAULT 'payment_proof'`
+    );
+    await client.query(
+      `ALTER TABLE payment_proofs ADD CONSTRAINT payment_proofs_file_type_check CHECK (file_type IN (${freshList}))`
+    );
+    console.log('  ✔ payment_proofs.file_type added');
+  } else {
+    console.log('  ✔ payment_proofs.file_type already present');
+
+    const current = await fileTypeCheckConstraint(client);
+    if (!current) {
+      console.log('  – payment_proofs has no CHECK constraint on file_type; schema.pg.sql should have created one');
+    } else {
+      const missing = REQUIRED_FILE_TYPES.filter((t) => !current.types.has(t));
+      if (!missing.length) {
+        console.log('  ✔ payment_proofs.file_type CHECK is current');
+      } else {
+        console.log(`  ↻ widening payment_proofs.file_type CHECK — adding: ${missing.join(', ')}`);
+        const allowed = [...new Set([...REQUIRED_FILE_TYPES, ...current.types])];
+        const list = allowed.map((t) => `'${t}'`).join(', ');
+        await client.query('BEGIN');
+        try {
+          await client.query(`ALTER TABLE payment_proofs DROP CONSTRAINT ${quoteIdent(current.name)}`);
+          await client.query(
+            `ALTER TABLE payment_proofs ADD CONSTRAINT ${quoteIdent(current.name)} CHECK (file_type IN (${list}))`
+          );
+          await client.query('COMMIT');
+          console.log('  ✔ payment_proofs.file_type CHECK updated');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        }
+      }
+    }
+  }
+
+  const { rows: uniques } = await client.query(
+    `SELECT c.conname
+       FROM pg_constraint c
+       JOIN pg_class     t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE t.relname = 'payment_proofs'
+        AND n.nspname = current_schema()
+        AND c.contype = 'u'
+        AND c.conkey = ARRAY[
+              (SELECT a.attnum FROM pg_attribute a
+                WHERE a.attrelid = t.oid AND a.attname = 'order_id' AND NOT a.attisdropped)
+            ]::smallint[]`
+  );
+  if (uniques.length) {
+    console.log(`  ↻ dropping UNIQUE constraint ${uniques[0].conname} on payment_proofs.order_id — an order may now carry more than one attachment`);
+    await client.query(`ALTER TABLE payment_proofs DROP CONSTRAINT ${quoteIdent(uniques[0].conname)}`);
+    console.log('  ✔ payment_proofs.order_id is no longer UNIQUE');
+  } else {
+    console.log('  ✔ payment_proofs.order_id already allows multiple rows');
+  }
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -179,6 +310,7 @@ async function main() {
 
     console.log('\nReconciling constraints…');
     await reconcileStatusCheck(client);
+    await reconcilePaymentProofs(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

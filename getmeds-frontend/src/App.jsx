@@ -90,13 +90,18 @@ function App() {
               </ProtectedRoute>
             } 
           />
-          <Route 
-            path="/orders/new" 
+          {/* Sep 5, 2026: management can create a real order for a
+              registered MedRep (pilot use) — see orders.controller.js's
+              resolveOrderMedrep. Without 'management' here, ProtectedRoute
+              silently bounced them to /dashboard and the form never
+              rendered, even though the backend was already wired for it. */}
+          <Route
+            path="/orders/new"
             element={
-              <ProtectedRoute allowedRoles={['medrep']}>
+              <ProtectedRoute allowedRoles={['medrep', 'management']}>
                 <NewOrderPage />
               </ProtectedRoute>
-            } 
+            }
           />
           <Route path="/orders" element={<MyOrdersPage />} />
           <Route path="/orders/:id" element={<OrderDetailPage />} />

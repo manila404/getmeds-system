@@ -258,7 +258,10 @@ const OrderDetailPage = () => {
     // Sep 4, 2026: the deposit slip or receipt Finance checks before
     // invoicing. Next to Payment because that is what it is evidence about —
     // that tab is Zoho's record of the money, this one is the claim to it.
-    { id: 'proof', label: 'Proof of Payment', icon: Receipt },
+    // Sep 5, 2026: generalized beyond just the proof — this tab (id kept as
+    // 'proof' so existing links/tab-state keep working) now lists every file
+    // attached to the order, tagged Proof of Payment or Other.
+    { id: 'proof', label: 'Attachments', icon: Receipt },
   ];
 
   return (
@@ -585,7 +588,7 @@ const OrderDetailPage = () => {
             </div>
           )}
 
-          {/* Proof of Payment Tab */}
+          {/* Attachments Tab (formerly "Proof of Payment" — id kept as 'proof') */}
           {activeTab === 'proof' && <PaymentProofPanel orderId={id} order={order} />}
 
           {/* Timeline Tab */}
