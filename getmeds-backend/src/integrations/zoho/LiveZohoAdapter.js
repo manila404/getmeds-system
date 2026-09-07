@@ -334,11 +334,22 @@ class LiveZohoAdapter extends ZohoAdapter {
     }
     // Sep 2, 2026: "Division" and "Sub-division" — the two custom fields
     // sitting directly under Salesperson on this org's Sales Order screen.
-    // Ids read live from the org's own field list (Books list_custom_fields,
-    // entity=salesorder); the same call returned the three ids above
-    // unchanged, which is what makes these two trustworthy rather than
-    // guessed:
-    //   cf_division     (text) -> 2254168002003349004
+    //
+    // Sep 7, 2026: the Division id below was WRONG — '2254168002003349004'
+    // does not exist anywhere in this org's actual custom-field list (Sales
+    // Order module), confirmed live via Zoho_Books list_custom_fields
+    // (entity=salesorder, 60 fields returned, that id is not among them).
+    // Every order with a Division value was failing Zoho sync with "One or
+    // more custom field(s) does not exist" and queuing for a retry that
+    // could never succeed, since the id itself was never going to start
+    // existing. The real field is api_name `cf_division_1` (label
+    // "Division", field_id 2254168002004367051) — the "_1" suffix suggests
+    // an earlier `cf_division` field was deleted and recreated in Zoho at
+    // some point after this was first wired, silently invalidating the id
+    // this file had. Sub-division's id was re-checked the same way and IS
+    // correct (field_id 2254168002003349006, api_name cf_sub_division,
+    // present and active) — only Division's was stale:
+    //   cf_division_1   (text) -> 2254168002004367051
     //   cf_sub_division (text) -> 2254168002003349006
     // Both plain text, so the value goes across as typed.
     //
@@ -349,7 +360,7 @@ class LiveZohoAdapter extends ZohoAdapter {
     // every other custom field here: an omitted field is left alone in Zoho
     // rather than overwritten with an empty string.
     if (orderData.division) {
-      customFields.push({ customfield_id: '2254168002003349004', value: orderData.division });
+      customFields.push({ customfield_id: '2254168002004367051', value: orderData.division });
     }
     if (orderData.sub_division) {
       customFields.push({ customfield_id: '2254168002003349006', value: orderData.sub_division });
