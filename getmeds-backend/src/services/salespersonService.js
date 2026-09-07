@@ -26,7 +26,15 @@ const { normalize, findSalesperson } = require('../integrations/zoho/salesperson
 // MedRep opening the form ten times in a minute costs one Zoho read, not ten
 // — the same reasoning as the auto-sync open cooldown. In-memory and
 // per-process, like services/syncJobs.js.
-const CACHE_TTL_MS = Number(process.env.ZOHO_SALESPERSON_CACHE_MS) || 5 * 60 * 1000;
+//
+// Sep 6, 2026: dropped from 5 minutes to 30 seconds. With Division/
+// Salesperson now manually typed by Management (see orders.controller.js),
+// someone can add a Salesperson in Zoho and expect to pick it here within
+// the same minute, not wait out a 5-minute window. 30s still collapses a
+// burst of form-opens into effectively one Zoho read while keeping the
+// window short enough nobody notices it. Still overridable via
+// ZOHO_SALESPERSON_CACHE_MS for an environment that wants it longer/shorter.
+const CACHE_TTL_MS = Number(process.env.ZOHO_SALESPERSON_CACHE_MS) || 30 * 1000;
 let cache = { names: null, fetchedAt: 0 };
 
 /** The Salesperson string for a user id, or null if they have no mapping. */
@@ -125,4 +133,12 @@ async function statusForUser(userId, opts = {}) {
   return { salesperson, ...verification };
 }
 
-module.exports = { forUser, profileForUser, verify, statusForUser, clearCache, _normalize: normalize };
+// Sep 5, 2026 (4): exported so orders.controller.js's GET /api/orders/meta/medreps
+// can hand the raw Zoho Salesperson list to the frontend — Management can now
+// type a Salesperson manually (instead of picking a MedRep) when creating an
+// order, and the only safe way to let them type one is a suggestions list
+// drawn from names Zoho already recognizes (see this file's top comment and
+// verify() above). create() still independently re-verifies whatever is
+// actually submitted — this export only feeds the UI's suggestions, it is
+// not itself a trust boundary.
+module.exports = { forUser, profileForUser, verify, statusForUser, loadNames, clearCache, _normalize: normalize };
