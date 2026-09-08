@@ -1040,16 +1040,28 @@ exports.create = async (req, res, next) => {
       // Management can make the two disagree; a MedRep's own Division still
       // always comes straight from their account.
       division: effectiveDivision,
-      sub_division: effectiveSubDivision
+      sub_division: effectiveSubDivision,
+      // Sep 8, 2026: Delivery Method and Terms — collected on the form and
+      // stored locally (intake_delivery_method/intake_terms) since Aug 30,
+      // but never forwarded to Zoho until now. Both are plain top-level
+      // fields on Zoho's own Sales Order (confirmed against the live Sales
+      // Order field list, and already read back the same way by
+      // zohoEditDiffService.js's TRACKED_FIELDS for the edit trail) — no
+      // custom-field mapping needed, unlike Doctor Name/Source/Invoicing
+      // From above.
+      delivery_method: clean(delivery_method),
+      terms: clean(terms)
     };
-    // Aug 30, 2026: delivery_method, terms, and each line's discount/tax are
-    // all captured and stored below (in the orders/order_items tables) but
-    // are still NOT added to this payload — wiring each into an actual Zoho
-    // call is a deliberately separate, later piece of work (Doctor
-    // Name/Source/Invoicing From are the first fields off that list to
-    // actually get wired — see above). See
-    // ZOHO_SALES_ORDER_FIELD_MAPPING.md for exactly which Zoho Sales Order
-    // field each remaining one is meant to land on.
+    // Aug 30, 2026: each line's discount/tax and Payment Terms are still NOT
+    // added to this payload. Payment Terms specifically needs a live check
+    // of this org's Sales Order field/custom-field setup before it's wired —
+    // Zoho's own `payment_terms` field is an internal day-count integer, not
+    // the free text this app collects (Net 15/30 days/45 Day/BPO WALLET/
+    // 60 Day/DSWD-PCSO/custom), so sending it as-is would either fail or
+    // silently mismap (see zohoEditDiffService.js's header comment on
+    // payment_terms_label for the same distinction, confirmed live earlier).
+    // See ZOHO_SALES_ORDER_FIELD_MAPPING.md for exactly which Zoho Sales
+    // Order field each remaining one is meant to land on.
     //
     // Only ever creates the Zoho Sales Order (as a plain Draft — nothing
     // here confirms it). Confirming, invoicing, and recording payment all
@@ -1369,7 +1381,11 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // Falls back to the account join only for a draft that predates this
     // column (`order.sub_division` is NULL on any row from before the
     // migration that added it).
-    sub_division: order.sub_division || order.medrep_sub_division || null
+    sub_division: order.sub_division || order.medrep_sub_division || null,
+    // Sep 8, 2026: same wiring as `create` above — pulled from the draft
+    // row's own intake columns, since this acts on an already-stored draft.
+    delivery_method: order.intake_delivery_method || null,
+    terms: order.intake_terms || null
   };
   let zohoResult = null;
   let zohoSyncStatus = 'pending';

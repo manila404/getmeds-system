@@ -269,6 +269,15 @@ class LiveZohoAdapter extends ZohoAdapter {
       line_items: lineItems
     };
 
+    // Sep 8, 2026: Delivery Method and Terms — plain top-level fields Zoho's
+    // Sales Order create API already accepts; they were simply never set
+    // here before, so nothing this app collected on the order form ever
+    // reached Zoho even after orders.controller.js started sending them in
+    // orderData. Omitted (left alone in Zoho) rather than sent as an empty
+    // string when not provided, same convention as the custom fields below.
+    if (orderData.delivery_method) body.delivery_method = orderData.delivery_method;
+    if (orderData.terms) body.terms = orderData.terms;
+
     // Aug 30, 2026: this Zoho org has "Salesperson" configured as a
     // mandatory field on every Sales Order — Zoho rejects creation with
     // "Salesperson cannot be empty" otherwise (confirmed live, see the

@@ -65,7 +65,12 @@ async function buildZohoSalesOrderPayload(orderId) {
     // Same row, same reason as salesperson above — a division corrected
     // after a failed sync is picked up by the retry.
     division: order.medrep_division || null,
-    sub_division: order.medrep_sub_division || null
+    sub_division: order.medrep_sub_division || null,
+    // Sep 8, 2026: Delivery Method and Terms — matches the shape create()/
+    // submit() now send on the first attempt (see orders.controller.js),
+    // so a retry sends the same fields rather than a stale, narrower shape.
+    delivery_method: order.intake_delivery_method || null,
+    terms: order.intake_terms || null
   };
 }
 
