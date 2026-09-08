@@ -278,6 +278,27 @@ class LiveZohoAdapter extends ZohoAdapter {
     if (orderData.delivery_method) body.delivery_method = orderData.delivery_method;
     if (orderData.terms) body.terms = orderData.terms;
 
+    // Sep 8, 2026 (2): Payment Terms. Confirmed live (SO-67174, this org)
+    // that Zoho's real Sales Order fields are `payment_terms` — an integer
+    // day-count — and `payment_terms_label` — the display string — sent
+    // TOGETHER; editing "Payment Terms" directly in Zoho's UI to "30 days"
+    // produced exactly payment_terms:30, payment_terms_label:"30 days" on
+    // the object. This app only ever collects one free-text value (Net 15 /
+    // 30 days / 45 Day / BPO WALLET / 60 Day / DSWD/PCSO / custom typed
+    // text), so the day-count is derived by pulling the first number out of
+    // whatever was typed or picked — covers every preset above that has one.
+    // A term with no day count at all (BPO WALLET, DSWD/PCSO, or other
+    // custom text with no digits) sends 0: a harmless placeholder for the
+    // numeric field, while `payment_terms_label` still carries the exact
+    // text through to Zoho's own Sales Order screen, same as a human typing
+    // a custom label there would produce.
+    if (orderData.payment_terms) {
+      const paymentTermsLabel = String(orderData.payment_terms).trim();
+      const dayMatch = paymentTermsLabel.match(/(\d+)/);
+      body.payment_terms = dayMatch ? parseInt(dayMatch[1], 10) : 0;
+      body.payment_terms_label = paymentTermsLabel;
+    }
+
     // Aug 30, 2026: this Zoho org has "Salesperson" configured as a
     // mandatory field on every Sales Order — Zoho rejects creation with
     // "Salesperson cannot be empty" otherwise (confirmed live, see the

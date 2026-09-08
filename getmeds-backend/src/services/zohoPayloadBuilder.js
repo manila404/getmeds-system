@@ -70,7 +70,9 @@ async function buildZohoSalesOrderPayload(orderId) {
     // submit() now send on the first attempt (see orders.controller.js),
     // so a retry sends the same fields rather than a stale, narrower shape.
     delivery_method: order.intake_delivery_method || null,
-    terms: order.intake_terms || null
+    terms: order.intake_terms || null,
+    // Sep 8, 2026 (2): Payment Terms — same reasoning, same raw-string shape.
+    payment_terms: order.intake_payment_terms || null
   };
 }
 

@@ -1050,18 +1050,21 @@ exports.create = async (req, res, next) => {
       // custom-field mapping needed, unlike Doctor Name/Source/Invoicing
       // From above.
       delivery_method: clean(delivery_method),
-      terms: clean(terms)
+      terms: clean(terms),
+      // Sep 8, 2026 (2): Payment Terms. Confirmed live on SO-67174 (created
+      // with this field unwired, then hand-edited in Zoho) that Zoho's real
+      // Sales Order shape is `payment_terms` (day-count integer) PLUS
+      // `payment_terms_label` (display string) together — that edit came
+      // back as payment_terms:30, payment_terms_label:"30 days". Sending
+      // just the raw local string here; LiveZohoAdapter.js does the
+      // label -> {payment_terms, payment_terms_label} split, same division
+      // of labor as Salesperson (name resolved to an id at the adapter
+      // layer, not here).
+      payment_terms: clean(payment_terms)
     };
-    // Aug 30, 2026: each line's discount/tax and Payment Terms are still NOT
-    // added to this payload. Payment Terms specifically needs a live check
-    // of this org's Sales Order field/custom-field setup before it's wired —
-    // Zoho's own `payment_terms` field is an internal day-count integer, not
-    // the free text this app collects (Net 15/30 days/45 Day/BPO WALLET/
-    // 60 Day/DSWD-PCSO/custom), so sending it as-is would either fail or
-    // silently mismap (see zohoEditDiffService.js's header comment on
-    // payment_terms_label for the same distinction, confirmed live earlier).
-    // See ZOHO_SALES_ORDER_FIELD_MAPPING.md for exactly which Zoho Sales
-    // Order field each remaining one is meant to land on.
+    // Aug 30, 2026: each line's discount/tax are still not added to this
+    // payload. See ZOHO_SALES_ORDER_FIELD_MAPPING.md for exactly which Zoho
+    // Sales Order field each remaining one is meant to land on.
     //
     // Only ever creates the Zoho Sales Order (as a plain Draft — nothing
     // here confirms it). Confirming, invoicing, and recording payment all
@@ -1385,7 +1388,11 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // Sep 8, 2026: same wiring as `create` above — pulled from the draft
     // row's own intake columns, since this acts on an already-stored draft.
     delivery_method: order.intake_delivery_method || null,
-    terms: order.intake_terms || null
+    terms: order.intake_terms || null,
+    // Sep 8, 2026 (2): Payment Terms — see the matching note in `create`
+    // above for why this is the raw local string, translated at the
+    // LiveZohoAdapter layer rather than here.
+    payment_terms: order.intake_payment_terms || null
   };
   let zohoResult = null;
   let zohoSyncStatus = 'pending';
