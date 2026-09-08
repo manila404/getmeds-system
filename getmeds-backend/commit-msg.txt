@@ -1,106 +1,65 @@
-﻿add management order pilot, typed order attachments, and order form UX fixes
+﻿gate medrep orders behind management approval; add per-order division/salesperson overrides
 
-Management (production pilot) can now create, view, and submit orders on
-behalf of a MedRep, and several bugs/gaps surfaced while building and
-testing that pilot today are fixed alongside it. See
-claude/2026-09-05-management-account.md (Rounds 1-8) for full narrative
-detail on each of the below, including two incidents and how they were
-caught and recovered.
+Management approval gate (see claude/2026-09-07-management-approval-gate.md):
+"When medrep creates an order, the order will not sync to zoho unless the
+management checks it." A MedRep's own order submission now stops at a new
+pending_management_approval status instead of reaching Zoho immediately —
+both entry points (create()'s single-call submit, which is what the UI
+actually uses, and submit()'s own gate) land there. Management/admin get
+three explicit outcomes, mirroring finance.controller.js's verifyAccount
+pattern: approve() (logs MANAGEMENT_APPROVED, then runs the same
+syncOrderToZohoAndFinalize() pipeline submit() always ran), reject() (reason
+required, -> on_hold, never touches Zoho), and sendBack() (reason required,
+-> draft, so the MedRep or Management can fix it via the new updateDetails()
+endpoint and resubmit through the same gate). An order Management/admin
+raises themselves is unaffected and still goes straight through.
 
-Management order access (orders.controller.js, orders.routes.js, App.jsx,
-OrderForm.jsx):
-- resolveOrderMedrep() lets management (and admin+TEST_MODE) pass
-  medrep_id; refuses a management order with none rather than silently
-  attributing it to the management account itself, since resolveActor()
-  has no stand-in mapping for management the way it does for admin.
-- getMedreps()/getAll() opened to management; access checks in getById,
-  syncFromZoho, retryZohoSync, submit, updateItems updated to match.
-- /orders/new route and its ProtectedRoute now allow management, fixing a
-  silent redirect to /dashboard that made "+ New Order" appear to do
-  nothing for that role.
-- Medrep picker on the order form branches by role: management gets a
-  required "Create this order for" picker with no default, distinct from
-  admin's optional TEST_MODE stand-in.
+New: workflow/stateMachine.js (pending_management_approval + its edges),
+orders.routes.js (approve/reject/send-back/details routes),
+pages/management/ApprovalQueuePage.jsx (Approve/Send Back/Reject queue,
+routed at /management/approvals), a sidebar entry, an OrderStatusBadge
+style, and an Order Details / Management Approval / Submit Order panel on
+OrderDetailPage.jsx for acting on a single order directly.
 
-Fix case-sensitive login (auth.controller.js, admin.controller.js):
-Accounts created via public sign-up/seed/create-user always lowercased
-email before insert; accounts created via the admin panel did not. Login
-matched with a case-sensitive WHERE, so any casing mismatch against a real,
-active account silently returned INVALID_CREDENTIALS. Login now matches on
-LOWER(email); admin-created accounts are normalized the same way the other
-creation paths already were.
+The alternative considered and rejected: gating only inside submit(). That
+was the first version built, and it didn't work — every real order actually
+goes through create() in one call (OrderForm.jsx never calls a separate
+submit()), so submit()'s gate was dead code. Fixed by adding the identical
+isMedRepDirectSubmit check to create() itself; see the doc's "Bug in the
+first version" section for the full investigation.
 
-Generalize Proof of Payment into typed, multi-file order attachments
-(schema.pg.sql, schema.sql, migrate.pg.js, paymentProofStorage.js,
-paymentProof.controller.js, finance.controller.js, orders.routes.js,
-OrderForm.jsx, PaymentProofPanel.jsx, OrderDetailPage.jsx):
-payment_proofs goes from a single-slot table (order_id UNIQUE) to a typed,
-multi-row table (file_type: payment_proof / other / purchase_order,
-UNIQUE dropped), matching Zoho's own "Attach File(s) to Sales Order"
-control instead of the app's old one-slot upload that only handled a
-single deposit slip. Finance's verify/reject flow still only ever acts on
-payment_proof-type rows; other/purchase_order rows are purely
-informational and never gate anything. Two endpoints (GET
-.../payment-proof, POST .../payment-proof/reject) kept their old
-single-object response shape so FinanceQueuePage needed no changes.
-migrate.pg.js gained reconcilePaymentProofs() (adds file_type on an
-existing database, widens its CHECK, drops the old UNIQUE) using the same
-conkey-matching technique as the existing reconcileStatusCheck, rather
-than text-matching the constraint definition — a documented near-miss
-showed a text match on the pipeline's own status CHECK would also grab
-zoho_sync_status's unrelated CHECK.
+Per-order Division/Sub-division/Salesperson overrides (see
+claude/2026-09-05-divisions-enum.md): three new orders columns
+(sub_division, division, salesperson) so a Management-raised order can
+carry its own values instead of only ever inheriting the ordering MedRep's
+account — needed because a Management account typically has no Division of
+its own. sub_division is editable by whoever raises the order (MedRep or
+Management); division/salesperson are Management-only, since a MedRep's
+own account still drives theirs and also determines their Salesperson.
+division is checked against the same 15-entry DIVISIONS list Sign
+Up/Profile Settings use; salesperson is checked live against Zoho's own
+Salesperson list, since Zoho is what actually rejects an unrecognized name
+(same reasoning as the Sep 2 incident already in working-agreements.md).
+OrderForm.jsx gains editable fields for both plus a read-only "Admin" pill
+showing who actually created the order; NewOrderPage.jsx's Salesperson
+pre-check banner is now MedRep-only, since a Management account's own
+generated salesperson string was never going to be submitted and the
+banner was warning about a value that didn't matter.
 
-Add "Purchase Order" as a third attachment type (schema.pg.sql,
-schema.sql, migrate.pg.js, paymentProof.controller.js,
-paymentProofStorage.js, OrderForm.jsx, PaymentProofPanel.jsx):
-Same informational treatment as "Other". Required a second CHECK widening
-on top of Round 4's, so migrate.pg.js gained fileTypeCheckConstraint() and
-a matching reconcile step, again by conkey rather than text match.
-PaymentProofPanel's attachment card used to hard-code "Other attachment"
-for any non-proof file; it now looks up the real label so a Purchase
-Order attachment does not misleadingly read as "Other".
+Backfill Zoho field edits outside the live webhook (see the same doc, "Sep
+7 (5)"): zohoReconcileService.js's reconcileOrder() — the shared function
+behind "Sync from Zoho", the page-open refresh, and the background poller
+— never ran the existing zohoEditDiffService field-diff that
+webhook.controller.js's salesorder.edited branch already does, so a field
+edited directly in Zoho only ever reflected here if the live webhook
+happened to reach the app at that exact moment. It now runs the same diff
+unconditionally and logs a ZOHO_SO_EDITED event when something changed,
+closing that gap for the six tracked fields.
 
-Remove the "No proof of payment? Say why" requirement for management only
-(OrderForm.jsx): management creates orders on a MedRep's behalf and is not
-positioned to explain an absent proof the way the MedRep who took the
-order is. The field, its required-ness in isFormValid, its line in the
-submit-review summary, and the section help text are now all gated on
-role; MedRep's own requirement is unchanged.
+Also removes commit-msg.txt, a leftover scratch file from an earlier
+commit that was never cleaned up.
 
-Add desktop drag-and-drop for order attachments, keep mobile's
-click-to-choose (OrderForm.jsx, PaymentProofPanel.jsx): file-processing
-logic was pulled out of the <input onChange> handlers into a shared
-function so a drop event reuses the same validation/staging path as the
-existing file pickers. The new drop zone shows only at the sm: breakpoint
-and up; the original Take Photo / Choose File(s) controls are hidden
-(not removed) below it, since a touch device has no equivalent
-drag-a-file-in gesture.
-
-Add "Create New Order" to the management sidebar (Sidebar.jsx): the link
-was missing from both the standard and test-mode sidebar sections even
-though management already had full backend/route access to that page.
-
-Refresh Payment Terms suggestions and replace native <datalist> dropdowns
-(OrderForm.jsx): PAYMENT_TERMS_SUGGESTIONS expanded from 6 to the current
-24 entries from the user's live Zoho org. Looked into live-syncing this
-list from Zoho instead of hardcoding it; there is no reliable Zoho
-Inventory API for it (checked Sep 5, 2026 - only an undocumented,
-Books-only settings endpoint exists), and the field is genuinely free text
-in Zoho itself, so hardcoding with suggestions was kept, matching how
-Delivery Method already worked. Separately, Delivery Method/Payment
-Terms/Doctor Name all used native <input list>+<datalist>, whose dropdown
-panel is painted by the OS/browser rather than this app's CSS - on this
-user's Windows + Chrome/Edge with a dark OS theme it rendered dark-on-dark
-regardless of page styling, and no CSS fix exists for that. Replaced with
-a small custom SuggestField combobox (styled the same as the existing
-ProductAutocomplete/CustomerAutocomplete lists), still fully free-typed.
-
-No automated tests were added this session for the new management/
-attachment behavior (tracked as outstanding). Every change was validated
-with `node --check` (backend) or `esbuild --loader:.jsx=jsx` (frontend)
-before and after committing to this machine, and file content was
-verified byte-for-byte (md5sum) against what actually landed on disk
-rather than trusting tool-reported success alone - see the Round 7 and
-Round 8 incident notes in the project doc for why that became standard
-practice here.
-
+No automated tests were added for any of this (tracked as outstanding in
+the approval-gate doc); the existing suite is unchanged. End-to-end
+verification is still outstanding per that doc's own test checklist —
+run it before treating this as done.

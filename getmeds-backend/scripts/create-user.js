@@ -18,7 +18,7 @@
  *
  * Non-interactive (CI, or scripted onboarding):
  *   node scripts/create-user.js --email a@getmeds.ph --name "Ana Cruz" \
- *     --role medrep --division NCR --password '...'
+ *     --role medrep --division B2B --password '...'
  *
  * Passing --password puts it in your shell history. Prefer the prompt.
  */
@@ -29,6 +29,30 @@ const bcrypt = require('bcryptjs');
 const db = require('../src/db/database');
 
 const ROLES = ['medrep', 'finance', 'dispatch', 'management', 'admin'];
+
+// Sep 5, 2026: mirrors auth.controller.js's DIVISIONS exactly — see that
+// file's comment for why division became a fixed list (a free-typed one
+// created junk Salespersons in the live Zoho org before). This CLI still
+// takes it as free-typed input rather than a picker (there's no terminal
+// UI for that here), but the value is checked against the same list once
+// entered, same as ROLES above.
+const DIVISIONS = [
+  '2MG Incorporated',
+  'GrabMart',
+  'Office of the President',
+  'PCSO',
+  'DSWD',
+  'B&B',
+  'B2B',
+  'B2C',
+  'BID',
+  'CLIDP',
+  'HOS',
+  'MSA',
+  'STC',
+  'TeleSales Anesthesia',
+  'URO',
+];
 
 // Same cost the app uses everywhere it hashes (auth, admin, seed). A different
 // cost here would still verify correctly, but keeping them equal means one
@@ -148,13 +172,16 @@ async function main() {
     const needsSalesperson = role === 'medrep';
     const division = await field(
       'division',
-      needsSalesperson ? 'Division (required for medrep, e.g. NCR): ' : 'Division (optional): '
+      needsSalesperson ? `Division (required for medrep, one of: ${DIVISIONS.join(', ')}): ` : 'Division (optional): '
     );
     if (needsSalesperson && !division) {
       throw new Error(
         'A medrep needs a division. Without one users.salesperson is NULL and\n' +
           '  their Sales Orders reach Zoho with no salesperson attached.'
       );
+    }
+    if (division && !DIVISIONS.includes(division)) {
+      throw new Error(`Division must be one of: ${DIVISIONS.join(', ')} (or blank for none).`);
     }
     const displayName = (await field('display_name', `Display name [${name}]: `, {}, name)) || name;
 

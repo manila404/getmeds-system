@@ -17,11 +17,13 @@ import PaymentHistoryPage from './pages/finance/PaymentHistoryPage';
 import DispatchQueuePage from './pages/dispatch/DispatchQueuePage';
 import DispatchHistoryPage from './pages/dispatch/DispatchHistoryPage';
 import ManagementDashboardPage from './pages/management/ManagementDashboardPage';
+import ApprovalQueuePage from './pages/management/ApprovalQueuePage';
 import ExceptionHubPage from './pages/management/ExceptionHubPage';
 import ClientsPage from './pages/management/ClientsPage';
 import UsersPage from './pages/admin/UsersPage';
 import InventoryPage from './pages/admin/InventoryPage';
 import TestModePage from './pages/TestModePage';
+import ProfilePage from './pages/ProfilePage';
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user } = useAuth();
@@ -80,7 +82,19 @@ function App() {
             }
           />
           <Route path="/dashboard" element={<DashboardPage />} />
-          
+
+          {/* Sep 5, 2026: Profile Settings — every signed-in role edits
+              their own account here, so no allowedRoles restriction: the
+              only requirement is a session, same as /test-mode above. */}
+          <Route
+            path="/profile"
+            element={
+              <ProtectedRoute>
+                <ProfilePage />
+              </ProtectedRoute>
+            }
+          />
+
           {/* MedRep Routes */}
           <Route 
             path="/medrep/dashboard" 
@@ -149,6 +163,17 @@ function App() {
                 <ManagementDashboardPage />
               </ProtectedRoute>
             } 
+          />
+          {/* Sep 7, 2026: MedRep-submitted orders wait here for Management
+              to approve/reject before syncing to Zoho — see
+              orders.controller.js's submit()/approve()/reject(). */}
+          <Route
+            path="/management/approvals"
+            element={
+              <ProtectedRoute allowedRoles={['management', 'admin']}>
+                <ApprovalQueuePage />
+              </ProtectedRoute>
+            }
           />
           <Route
             path="/management/exceptions"

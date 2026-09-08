@@ -4,6 +4,10 @@ const { logEvent } = require('./auditService');
 const { notify, getUserIdsByRole } = require('./notificationService');
 const { setOrderStatus, advanceTo } = require('./orderStatusService');
 const { evaluateCompletion } = require('./orderCompletionService');
+// Sep 7, 2026 (5): the same field-edit diff webhook.controller.js's
+// 'salesorder.edited' branch already runs — see the note where it's used
+// below for why this path needed it too.
+const { diffSalesOrderFields, summarizeChanges } = require('./zohoEditDiffService');
 
 /**
  * Pull an order's current truth out of Zoho and backfill anything this app
@@ -186,6 +190,55 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
     const now = new Date().toISOString();
     let action = 'NOTHING_NEW';
     let newStatus = order.status;
+
+    // Sep 7, 2026 (5): field-level edits made directly in Zoho (Payment Terms,
+    // Invoicing From, Doctor Name, Source, Delivery Method, Terms) — the same
+    // check webhook.controller.js's 'salesorder.edited' branch runs, now also
+    // run here so it isn't ONLY caught by a live webhook. This order's own
+    // trail already shows the live webhook missing a real event (see
+    // ZOHO_SO_CONFIRMED's "backfilled by manual sync" note above) — an edit is
+    // exactly as likely to be missed the same way, and unlike status/dispatch/
+    // invoice, there was previously NO backfill path for it at all: "Sync from
+    // Zoho" silently did nothing for a plain field edit.
+    //
+    // Reuses the `salesorder` already fetched above — no extra Zoho call.
+    // Naturally idempotent (unlike the status-transition branches below, this
+    // is NOT gated behind alreadyLogged): the diff compares Zoho's live value
+    // against the LOCAL column, and updates that column right after logging —
+    // so a second call with nothing new to report sees oldValue === newValue
+    // and produces an empty `fieldChanges`, same as the webhook branch relies
+    // on. Runs independently of (and before) the status chain below, since an
+    // edit can happen with or without a status change in the same Zoho action.
+    const fieldChanges = diffSalesOrderFields(salesorder, order);
+    if (fieldChanges.length) {
+      await db.transaction(async () => {
+        const setClause = fieldChanges.map((c) => `${c.localColumn} = ?`).join(', ');
+        const values = fieldChanges.map((c) => c.newValue);
+        await db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`).run(...values, now, order.id);
+
+        await logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_SO_EDITED',
+          oldStatus: order.status,
+          newStatus: order.status,
+          actorId,
+          actorName,
+          notes: `Sales Order edited in Zoho — ${summarizeChanges(fieldChanges)} — backfilled by manual sync; the live webhook did not reach this app when it actually happened`,
+          metadata: { changes: fieldChanges, source }
+        });
+
+        const financeIds = await getUserIdsByRole('finance');
+        await notify({
+          orderId: order.id,
+          recipientIds: Array.from(new Set([order.medrep_user_id, ...financeIds].filter(Boolean))),
+          message: `Order ${order.getmeds_order_id} — ${summarizeChanges(fieldChanges)}`,
+          eventType: 'ZOHO_SO_EDITED',
+          orderData: { ...order }
+        });
+      })();
+
+      action = 'EDIT_BACKFILLED';
+    }
 
     if (isConfirmed && !(await alreadyLogged('ZOHO_SO_CONFIRMED'))) {
       const zohoSoNumber = salesorder.salesorder_number || order.zoho_so_number;

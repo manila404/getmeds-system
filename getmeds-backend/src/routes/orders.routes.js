@@ -29,6 +29,23 @@ router.get('/:id', c.getById);
 router.get('/:id/events', c.getEvents);
 // Sep 5, 2026: Both medreps and management can submit orders.
 router.post('/:id/submit', requireRole('medrep', 'management'), c.submit);
+// Sep 7, 2026: a MedRep's submit() stops at 'pending_management_approval'
+// instead of reaching Zoho — Management approves or rejects it here before
+// it syncs. See orders.controller.js's submit()/approve()/reject(). An
+// order Management/admin submitted themselves never reaches this status, so
+// these only ever act on a MedRep-raised order.
+router.post('/:id/approve', requireRole('management', 'admin'), c.approve);
+router.post('/:id/reject', requireRole('management', 'admin'), c.reject);
+// Sep 7, 2026 (2): a third outcome — send it back to 'draft' (reason
+// required) instead of on hold, so the MedRep (or Management) can fix it
+// with updateDetails/updateItems below and resubmit through the gate again.
+router.post('/:id/send-back', requireRole('management', 'admin'), c.sendBack);
+// Sep 7, 2026 (2): edit order-level fields (delivery/intake info, Division,
+// Sub-division, Salesperson) — the non-items counterpart to PATCH
+// /:id/items below. No requireRole here either — same as that route, the
+// ownership check (MedRep can only edit their own order) lives inside the
+// controller, and the "only before Zoho exists" precondition does too.
+router.patch('/:id/details', c.updateDetails);
 // Manual fallback: pull this order's current Sales Order status straight
 // from Zoho and backfill the audit trail if a webhook was missed (backend
 // or ngrok not running at the moment Finance confirmed it in Zoho).

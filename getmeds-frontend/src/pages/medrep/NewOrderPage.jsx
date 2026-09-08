@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import OrderForm from '../../components/orders/OrderForm';
 import client from '../../api/client';
 import { AlertTriangle } from 'lucide-react';
+import { useAuth } from '../../hooks/useAuth';
 
 /**
  * Sep 2, 2026: the Salesperson pre-check.
@@ -20,20 +21,36 @@ import { AlertTriangle } from 'lucide-react';
  * is worth a warning; "we could not reach Zoho to ask" is not — treating
  * those the same would put a scary, wrong banner on the page every time the
  * network hiccuped.
+ *
+ * Sep 7, 2026 (4): MedRep only. This checks `req.user`'s OWN account —
+ * `/api/orders/meta/salesperson` reads whoever is logged in, unconditionally
+ * (see orders.controller.js's getSalespersonStatus). For a MedRep that's
+ * exactly right: their own account IS the Salesperson every order of theirs
+ * carries. For Management/admin it never was — their account has no real
+ * field-rep identity of its own (a seeded account's Division is a
+ * placeholder like "Management", not one of the real DIVISIONS Zoho
+ * recognizes; see auth.controller.js's DIVISIONS comment), and the
+ * Salesperson actually sent on THEIR order always comes from the MedRep
+ * they picked (or one they typed manually) — see OrderForm.jsx's
+ * mySalesperson. Showing this banner to Management was checking, and
+ * warning about, a value that was never going to be submitted.
  */
 const SalespersonNotice = () => {
+  const { user } = useAuth();
   const [status, setStatus] = useState(null);
+  const isMedrep = (user?.role || '').toLowerCase() === 'medrep';
 
   useEffect(() => {
+    if (!isMedrep) return; // Management/admin: nothing to check, see comment above
     let cancelled = false;
     client
       .get('/api/orders/meta/salesperson', { skipAuthRedirect: true })
       .then(({ data }) => { if (!cancelled) setStatus(data.data); })
       .catch(() => { /* never block the order form on this */ });
     return () => { cancelled = true; };
-  }, []);
+  }, [isMedrep]);
 
-  if (!status) return null;
+  if (!isMedrep || !status) return null;
 
   // No mapping at all — an account created before sign-up collected a
   // division (the seeded logins), or one an admin made directly.

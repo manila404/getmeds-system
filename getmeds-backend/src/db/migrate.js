@@ -72,7 +72,7 @@ function ensureOrderStatusValues(schema) {
   // would fail with a constraint error at runtime instead. Compare against
   // everything the app can write and this stops being a per-status edit.
   const REQUIRED_STATUSES = [
-'draft', 'submitted', 'validating', 'so_pending', 'so_created',
+'draft', 'pending_management_approval', 'submitted', 'validating', 'so_pending', 'so_created',
     'ready_for_finance_verified', 'ready_for_draft_invoice',
     'ready_for_invoice_sent', 'ready_for_dispatch',
     'picking_packing', 'dispatched', 'tracking_shared',
@@ -264,6 +264,21 @@ function migrate() {
       END
     ) VIRTUAL`
   );
+
+  // Sep 5, 2026 (3): THIS order's own Sub-division — see schema.sql's
+  // `orders` table comment and orders.controller.js's create(). Distinct
+  // from users.sub_division above: this one can be typed/picked per order
+  // by whoever raises it, and create() falls back to the account's value
+  // only when this column ends up NULL.
+  ensureColumn('orders', 'sub_division', 'TEXT');
+
+  // Sep 5, 2026 (4): THIS order's own Division/Salesperson — same idea as
+  // sub_division just above, but honored only for a Management-raised
+  // order (see orders.controller.js's create()/submit() and schema.sql's
+  // `orders` table comment). NULL means "use the ordering MedRep's own
+  // account", exactly like sub_division falls back when unset.
+  ensureColumn('orders', 'division', 'TEXT');
+  ensureColumn('orders', 'salesperson', 'TEXT');
 
   // Sep 1, 2026: run LAST, after every ensureColumn above — the rebuild
   // copies rows across on the intersection of the old and new column lists,

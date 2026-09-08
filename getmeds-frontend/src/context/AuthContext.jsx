@@ -77,8 +77,20 @@ export const AuthProvider = ({ children }) => {
     setUser(null);
   };
 
+  // Sep 5, 2026: Profile Settings needs to update what the rest of the app
+  // (Topbar's name/role display, the New Order form's Salesperson/Division
+  // fields) sees immediately after a save, without a full page reload.
+  // Re-fetching /me rather than trusting the profile-save response's user
+  // object keeps this the single source of truth for "what does the session
+  // currently look like" — the same call the initial-load effect above uses.
+  const refreshUser = async () => {
+    const { data } = await client.get('/api/auth/me');
+    setUser(data.data.user);
+    return data.data.user;
+  };
+
   return (
-    <AuthContext.Provider value={{ user, token, login, signup, quickLogin, logout, isLoading }}>
+    <AuthContext.Provider value={{ user, token, login, signup, quickLogin, logout, refreshUser, isLoading }}>
       {children}
     </AuthContext.Provider>
   );

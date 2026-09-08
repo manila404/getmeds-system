@@ -45,7 +45,22 @@
  * un-finish it — nor from 'cancelled', already closed out.
  */
 const TRANSITIONS = {
-  draft: ['submitted', 'cancelled', 'deleted'],
+  // Sep 7, 2026: a new gate ahead of 'submitted', only ever entered when a
+  // MedRep submits their own order (see orders.controller.js's submit()).
+  // The order sits here — nothing has reached Zoho yet — until Management
+  // approves it (-> 'submitted', which then runs the SAME Zoho-sync pipeline
+  // a Management/admin submission always ran) or rejects it (-> 'on_hold',
+  // with a required reason, same pattern as Finance's verifyAccount). A
+  // Management/admin submission is untouched: it still goes straight from
+  // 'draft' through the Zoho pipeline in one action and never visits this
+  // status.
+  draft: ['submitted', 'pending_management_approval', 'cancelled', 'deleted'],
+  // Sep 7, 2026 (2): 'draft' added — Management can send a pending order
+  // back to the MedRep to fix instead of approving or rejecting it outright
+  // (see orders.controller.js's sendBack). The order keeps its
+  // getmeds_order_id and goes right back through this same gate once the
+  // MedRep edits and resubmits it.
+  pending_management_approval: ['submitted', 'draft', 'on_hold', 'cancelled', 'deleted'],
   submitted: ['validating', 'exception', 'deleted'],
   validating: ['so_pending', 'exception', 'deleted'],
   so_pending: ['so_created', 'exception', 'deleted'],

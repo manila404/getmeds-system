@@ -18,6 +18,90 @@ const MIN_PASSWORD_LENGTH = 8;
 // behind requireAuth + isAdmin and is where role is a real choice.
 const SIGNUP_ROLE = 'medrep';
 
+// Sep 5, 2026: the fixed list of Divisions this org actually uses, given by
+// the user. `division` feeds `users.salesperson` — a GENERATED column
+// reading "<division> | <display name>" that LiveZohoAdapter puts on every
+// Sales Order — and a free-typed division created junk Salespersons in the
+// live Zoho org before this (see working-agreements.md's "Design defaults"
+// section: "Enums over free text ... division taught this on Sep 2").
+// Kept in the exact order given, and mirrored on SignupPage.jsx and
+// ProfilePage.jsx (both render it as a dropdown) and scripts/create-user.js
+// — enforced here AND in each of those, same pattern as
+// INVOICING_FROM_OPTIONS in orders.controller.js/OrderForm.jsx.
+//
+// Deliberately NOT a DB CHECK constraint: existing rows already hold values
+// outside this list (the seeded accounts' division is 'TEST', and
+// create-user.js's own docstring example was 'NCR') and a hard constraint
+// would refuse to migrate against them. This is enforced only at the point
+// a human TYPES A NEW value — see register() and updateProfile() below.
+const DIVISIONS = [
+  '2MG Incorporated',
+  'GrabMart',
+  'Office of the President',
+  'PCSO',
+  'DSWD',
+  'B&B',
+  'B2B',
+  'B2C',
+  'BID',
+  'CLIDP',
+  'HOS',
+  'MSA',
+  'STC',
+  'TeleSales Anesthesia',
+  'URO',
+];
+
+// Sep 5, 2026 (2): fixed Sub-division lists, given by the user, for the only
+// four Divisions that actually have named branches/sub-divisions. Every
+// other Division in DIVISIONS above has no such list — sub_division stays
+// free text there, exactly as it was before this change, since there is
+// nothing to validate it against.
+//
+// Unlike Division, sub_division does NOT feed `users.salesperson` — it is
+// its own plain-text custom field on the Zoho Sales Order
+// (LiveZohoAdapter.createSalesOrder's cf_sub_division, customfield_id
+// 2254168002003349006), so a typo here does not create a junk Salesperson.
+// It's still made an enum for the same underlying reason Division is one:
+// consistent values per branch instead of "NCL" / "N.C.L." / "ncl" all
+// meaning the same thing in Zoho's reports.
+//
+// Mirrored on SignupPage.jsx and ProfilePage.jsx (both render it as a
+// dropdown, keyed off whichever Division is currently selected, falling
+// back to free text for a Division not in this map) — same duplication
+// pattern as DIVISIONS above.
+const SUB_DIVISIONS_BY_DIVISION = {
+  'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],
+  HOS: [
+    'GENSAN',
+    'PALAWAN',
+    'BAGUIO',
+    'BICOL',
+    'CABANATUAN',
+    'CAMANAVA',
+    'CAVITE',
+    'CDO',
+    'COMMONWEALTH',
+    'DAVAO NORTH',
+    'DAVAO SOUTH',
+    'ILOILO',
+    'LAGUNA',
+    'LAS PINAS',
+    'MANILA VACANT',
+    'MARIKINA',
+    'NORTH CEBU',
+    'PAMPANGA',
+    'PARANAQUE',
+    'PASAY',
+    'QUEZON PROVINCE',
+    'SOUTH CEBU',
+    'TUGUEGARAO',
+    'ZAMBOANGA',
+  ],
+  STC: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+  URO: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+};
+
 function isSignupEnabled() {
   return (process.env.SIGNUP_ENABLED || 'true').trim().toLowerCase() !== 'false';
 }
@@ -174,6 +258,33 @@ exports.register = async (req, res, next) => {
       });
     }
 
+    // Sep 5, 2026: division must be one of the fixed list — see DIVISIONS
+    // above for why this is an enum now rather than free text.
+    if (!DIVISIONS.includes(division)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: `Division must be one of: ${DIVISIONS.join(', ')}` }
+      });
+    }
+
+    // Sep 5, 2026 (2): sub-division is only constrained for the four
+    // Divisions that have a fixed list (SUB_DIVISIONS_BY_DIVISION above).
+    // Every other Division has no list, so any non-blank value is accepted
+    // there, same as before this change. Still optional everywhere — a
+    // blank sub-division is never rejected.
+    if (subDivision) {
+      const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[division];
+      if (subDivisionOptions && !subDivisionOptions.includes(subDivision)) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `Sub-division for ${division} must be one of: ${subDivisionOptions.join(', ')}`
+          }
+        });
+      }
+    }
+
     const domains = allowedEmailDomains();
     if (domains.length) {
       const domain = email.split('@')[1];
@@ -253,6 +364,166 @@ exports.me = (req, res) => {
   res.json({ success: true, data: { user: req.user } });
 };
 
+/**
+ * PATCH /api/auth/profile — a signed-in user edits their own account.
+ *
+ * Sep 5, 2026. First piece of "Profile Settings". Deliberately scoped to
+ * just the two fields that actually drive something else in the system:
+ * `salesperson` is a GENERATED column ("<division> | <display name>", the
+ * value LiveZohoAdapter puts on every Sales Order — see the long note on
+ * register() above) and recomputes itself the instant either of these
+ * changes, with no extra code needed here. `name` is written alongside
+ * `display_name` for the same reason register() does it — most of the
+ * frontend renders `user.name`, not `display_name`.
+ *
+ * First/middle/last name (the legal name parts sign-up collects) are
+ * deliberately NOT editable here — only the display name that's actually
+ * shown and that feeds the Salesperson string. Email is not editable here
+ * either: it's the login identifier and changing it safely needs its own
+ * verification step, which is out of scope for this first pass.
+ */
+exports.updateProfile = async (req, res, next) => {
+  try {
+    const str = (v) => (typeof v === 'string' ? v.trim() : '');
+    const displayName = str(req.body.display_name);
+    const division = str(req.body.division);
+    const subDivision = str(req.body.sub_division);
+
+    const missing = [];
+    if (!displayName) missing.push('display name');
+    if (!division) missing.push('division');
+    if (missing.length) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: `Required: ${missing.join(', ')}.`, fields: missing }
+      });
+    }
+
+    // Sep 5, 2026: division must be one of the fixed list (see DIVISIONS
+    // above) UNLESS it's exactly what this account already had — an account
+    // with a legacy off-list value (e.g. the seeded accounts' 'TEST') can
+    // still save the rest of this form without being forced to pick a new
+    // division it doesn't actually have, but cannot be moved to a NEW
+    // off-list value.
+    //
+    // Sep 5, 2026 (2): one lazily-fetched row, shared with the sub-division
+    // check right below — both checks only need it when they've already
+    // found a problem, so a well-formed save (the common case) never queries
+    // for it at all.
+    let currentRow = null;
+    const getCurrentRow = async () => {
+      if (!currentRow) {
+        currentRow = (await db.prepare('SELECT division, sub_division FROM users WHERE id = ?').get(req.user.id)) || {};
+      }
+      return currentRow;
+    };
+
+    if (!DIVISIONS.includes(division)) {
+      const current = await getCurrentRow();
+      if (division !== (current.division || '')) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: `Division must be one of: ${DIVISIONS.join(', ')}` }
+        });
+      }
+    }
+
+    // Sep 5, 2026 (2): same "keep a legacy value, refuse a new off-list one"
+    // carve-out as Division, but only for the four Divisions that have a
+    // fixed sub-division list — see SUB_DIVISIONS_BY_DIVISION above.
+    if (subDivision) {
+      const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[division];
+      if (subDivisionOptions && !subDivisionOptions.includes(subDivision)) {
+        const current = await getCurrentRow();
+        if (subDivision !== (current.sub_division || '')) {
+          return res.status(400).json({
+            success: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `Sub-division for ${division} must be one of: ${subDivisionOptions.join(', ')}`
+            }
+          });
+        }
+      }
+    }
+
+    await db
+      .prepare('UPDATE users SET name = ?, display_name = ?, division = ?, sub_division = ? WHERE id = ?')
+      .run(displayName, displayName, division, subDivision || null, req.user.id);
+
+    // Same projection register() returns, so the frontend can drop this
+    // straight into its user state without a separate /me round trip if it
+    // ever wants to.
+    const user = await db
+      .prepare(
+        `SELECT id, name, email, role, first_name, middle_name, last_name,
+                display_name, division, sub_division, salesperson
+           FROM users WHERE id = ?`
+      )
+      .get(req.user.id);
+
+    res.json({ success: true, data: { user } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * PATCH /api/auth/password — a signed-in user changes their own password.
+ *
+ * Requires the current password, checked against the stored hash, so a
+ * hijacked-but-still-logged-in session cannot silently lock the real owner
+ * out by changing it to something only the attacker knows. Same
+ * MIN_PASSWORD_LENGTH as sign-up. Does not re-issue a token — the JWT only
+ * carries id/role, neither of which this touches, so the current session
+ * stays valid exactly as it was.
+ */
+exports.changePassword = async (req, res, next) => {
+  try {
+    const currentPassword = typeof req.body.current_password === 'string' ? req.body.current_password : '';
+    const newPassword = typeof req.body.new_password === 'string' ? req.body.new_password : '';
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Current password and new password are required.' }
+      });
+    }
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: `New password must be at least ${MIN_PASSWORD_LENGTH} characters.` }
+      });
+    }
+
+    // req.user (from requireAuth) never carries password_hash — fetched
+    // fresh here rather than widening what every authenticated request
+    // pulls back just for this one, rarely-used endpoint.
+    const row = await db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    if (!row || !bcrypt.compareSync(currentPassword, row.password_hash)) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'INVALID_CREDENTIALS', message: 'Current password is incorrect.' }
+      });
+    }
+    if (bcrypt.compareSync(newPassword, row.password_hash)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'New password must be different from your current password.' }
+      });
+    }
+
+    const hash = bcrypt.hashSync(newPassword, 10);
+    await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, req.user.id);
+
+    res.json({ success: true, data: { message: 'Password updated.' } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // Exported for the tests and for anything that needs to describe the policy
 // without duplicating how it is parsed.
 exports._signupPolicy = { isSignupEnabled, allowedEmailDomains, SIGNUP_ROLE, MIN_PASSWORD_LENGTH };
+exports.DIVISIONS = DIVISIONS;
+exports.SUB_DIVISIONS_BY_DIVISION = SUB_DIVISIONS_BY_DIVISION;

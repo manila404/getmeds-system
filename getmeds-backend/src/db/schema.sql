@@ -135,7 +135,7 @@ CREATE TABLE IF NOT EXISTS orders (
   -- the badge and every status filter showed them identically and only the
   -- audit trail knew the difference.
   status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN (
-'draft', 'submitted', 'validating', 'so_pending', 'so_created',
+'draft', 'pending_management_approval', 'submitted', 'validating', 'so_pending', 'so_created',
     'ready_for_finance_verified', 'ready_for_draft_invoice',
     'ready_for_invoice_sent', 'ready_for_dispatch',
     'picking_packing', 'dispatched', 'tracking_shared',
@@ -229,6 +229,30 @@ CREATE TABLE IF NOT EXISTS orders (
     'on_payment_terms', 'payment_to_follow', 'paid_no_slip', 'other'
   )),
   no_payment_proof_note TEXT,
+  -- Sep 5, 2026 (3): THIS order's Sub-division — editable at order creation
+  -- by whoever raises it (medrep or management), unlike Division (which
+  -- always comes from the ordering MedRep's account, since it also drives
+  -- their Salesperson). Defaults to the account's own users.sub_division
+  -- when not explicitly sent — see orders.controller.js's create(). No
+  -- CHECK here: validated in the controller against
+  -- SUB_DIVISIONS_BY_DIVISION only for the four Divisions that have a fixed
+  -- list, same reasoning as users.division/users.sub_division never having
+  -- a DB-level constraint.
+  sub_division TEXT,
+  -- Sep 5, 2026 (4): THIS order's Division and Salesperson — like
+  -- sub_division above, editable at order creation, but ONLY by Management
+  -- (a MedRep's Division/Salesperson always come straight from their own
+  -- account; orders.controller.js's create() ignores these two fields from
+  -- anyone else). NULL is the normal case even for a Management order —
+  -- it means "use whatever the ordering MedRep's account has" (or nothing,
+  -- if none was picked); a non-NULL value here always wins over the
+  -- account join at submit() time. division is checked against the same
+  -- 15-entry DIVISIONS list Sign Up/Profile Settings use; salesperson is
+  -- checked live against Zoho's own Salesperson list (never a fixed local
+  -- one — see salespersonService.js), since Zoho itself is what rejects an
+  -- unrecognized name.
+  division TEXT,
+  salesperson TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   submitted_at TEXT,
   updated_at TEXT DEFAULT (datetime('now'))

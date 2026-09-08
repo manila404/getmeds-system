@@ -33,7 +33,7 @@ const { Pool } = require('pg');
  * other.
  */
 const REQUIRED_STATUSES = [
-  'draft', 'submitted', 'validating', 'so_pending', 'so_created',
+  'draft', 'pending_management_approval', 'submitted', 'validating', 'so_pending', 'so_created',
   'ready_for_finance_verified', 'ready_for_draft_invoice',
   'ready_for_invoice_sent', 'ready_for_dispatch',
   'picking_packing', 'dispatched', 'tracking_shared',
@@ -288,6 +288,62 @@ async function reconcilePaymentProofs(client) {
   }
 }
 
+/**
+ * Sep 5, 2026 (3): `orders.sub_division` — the per-order Sub-division
+ * override (see schema.pg.sql's `orders` table comment and
+ * orders.controller.js's create()). `CREATE TABLE IF NOT EXISTS` in
+ * schema.pg.sql is a no-op against a database that already has an `orders`
+ * table from before this column existed, exactly like reconcilePaymentProofs
+ * above — so an existing database needs this explicit ADD COLUMN. No CHECK
+ * constraint (same reasoning as users.division/users.sub_division): the
+ * fixed Sub-division lists only apply to four of the fifteen Divisions, and
+ * that mapping is enforced in the controller, not the database. Plain text,
+ * nullable, so it's safe to add with no default — existing rows read NULL,
+ * and orders.controller.js's submit() already falls back to the account's
+ * value when this column is NULL on an older draft.
+ */
+async function reconcileOrdersSubDivision(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'orders' AND column_name = 'sub_division'`
+  );
+  if (rows.length) {
+    console.log('  ✔ orders.sub_division already present');
+    return;
+  }
+  console.log('  ↻ orders.sub_division is missing — adding (existing rows default to NULL)');
+  await client.query('ALTER TABLE orders ADD COLUMN sub_division TEXT');
+  console.log('  ✔ orders.sub_division added');
+}
+
+// Sep 5, 2026 (4): orders.division / orders.salesperson — Management's
+// manual per-order override of Division/Salesperson (see orders.controller.js's
+// create()/submit() and schema.pg.sql's orders table comment). Same
+// "existing rows default to NULL" reconciliation as sub_division above.
+async function reconcileOrdersDivisionSalesperson(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'orders' AND column_name IN ('division', 'salesperson')`
+  );
+  const present = new Set(rows.map((r) => r.column_name));
+
+  if (!present.has('division')) {
+    console.log('  ↻ orders.division is missing — adding (existing rows default to NULL)');
+    await client.query('ALTER TABLE orders ADD COLUMN division TEXT');
+    console.log('  ✔ orders.division added');
+  } else {
+    console.log('  ✔ orders.division already present');
+  }
+
+  if (!present.has('salesperson')) {
+    console.log('  ↻ orders.salesperson is missing — adding (existing rows default to NULL)');
+    await client.query('ALTER TABLE orders ADD COLUMN salesperson TEXT');
+    console.log('  ✔ orders.salesperson added');
+  } else {
+    console.log('  ✔ orders.salesperson already present');
+  }
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -311,6 +367,8 @@ async function main() {
     console.log('\nReconciling constraints…');
     await reconcileStatusCheck(client);
     await reconcilePaymentProofs(client);
+    await reconcileOrdersSubDivision(client);
+    await reconcileOrdersDivisionSalesperson(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

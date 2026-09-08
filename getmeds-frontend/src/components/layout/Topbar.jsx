@@ -3,15 +3,17 @@ import { useAuth } from '../../hooks/useAuth';
 import { useNotifications } from '../../hooks/useNotifications';
 import NotificationBell from '../ui/NotificationBell';
 import ConfirmDialog from '../ui/ConfirmDialog';
-import { 
-  LogOut, 
-  User, 
-  CheckCheck, 
-  Package, 
-  Clock, 
-  AlertTriangle, 
+import {
+  LogOut,
+  User,
+  CheckCheck,
+  Package,
+  Clock,
+  AlertTriangle,
   Menu,
-  Search
+  Search,
+  Settings,
+  ChevronDown
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { formatPHT } from '../../utils/dateUtils';
@@ -29,7 +31,12 @@ const Topbar = ({ onToggleSidebar }) => {
   const { notifications, unreadCount, markAsRead, markAllAsRead } = useNotifications();
   const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  // Sep 5, 2026: the user identity block became a dropdown (Profile
+  // Settings + Sign Out) rather than a standalone logout icon — see the
+  // render below.
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const dropdownRef = useRef(null);
+  const userMenuRef = useRef(null);
   const navigate = useNavigate();
 
   // Close notification popover on outside click
@@ -44,6 +51,20 @@ const Topbar = ({ onToggleSidebar }) => {
     }
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isNotificationsOpen]);
+
+  // Same click-outside pattern as the notifications popover above, scoped
+  // to its own ref so opening one never closes the other.
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
+        setIsUserMenuOpen(false);
+      }
+    };
+    if (isUserMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isUserMenuOpen]);
 
   const handleNotificationClick = (n) => {
     if (!n.is_read) {
@@ -169,29 +190,64 @@ const Topbar = ({ onToggleSidebar }) => {
           )}
         </div>
         
-        {/* User Identity Display */}
-        <div className="flex items-center space-x-2 sm:space-x-3 border-l pl-3 sm:pl-4 border-slate-200">
-          <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-getmeds-blue/15 border border-getmeds-blue/30 flex items-center justify-center text-getmeds-blue flex-shrink-0">
-            <User size={16} />
-          </div>
-          <div className="flex flex-col">
-            <span className="text-xs sm:text-sm font-medium text-ink-primary leading-tight truncate max-w-[100px] sm:max-w-[160px]">
-              {user?.name}
-            </span>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className={`inline-flex items-center px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-bold uppercase tracking-wider border ${roleBadgeStyle}`}>
-                {user?.role}
-              </span>
-            </div>
-          </div>
-
-          <button 
-            onClick={() => setIsLogoutDialogOpen(true)}
-            className="p-1.5 sm:p-2 text-ink-secondary hover:text-state-error rounded-full hover:bg-slate-100 transition-colors"
-            title="Sign Out"
+        {/* User Identity Display — click to open Profile Settings / Sign Out */}
+        <div className="relative border-l pl-3 sm:pl-4 border-slate-200" ref={userMenuRef}>
+          <button
+            type="button"
+            onClick={() => setIsUserMenuOpen((v) => !v)}
+            aria-haspopup="true"
+            aria-expanded={isUserMenuOpen}
+            className="flex items-center space-x-2 sm:space-x-3 rounded-lg py-1 pr-1.5 hover:bg-surface transition-colors focus:outline-none focus:ring-2 focus:ring-getmeds-blue/40"
           >
-            <LogOut size={16} />
+            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-getmeds-blue/15 border border-getmeds-blue/30 flex items-center justify-center text-getmeds-blue flex-shrink-0">
+              <User size={16} />
+            </div>
+            <div className="flex flex-col items-start">
+              <span className="text-xs sm:text-sm font-medium text-ink-primary leading-tight truncate max-w-[100px] sm:max-w-[160px]">
+                {user?.name}
+              </span>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <span className={`inline-flex items-center px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-bold uppercase tracking-wider border ${roleBadgeStyle}`}>
+                  {user?.role}
+                </span>
+              </div>
+            </div>
+            <ChevronDown
+              size={14}
+              className={`text-ink-secondary shrink-0 transition-transform ${isUserMenuOpen ? 'rotate-180' : ''}`}
+            />
           </button>
+
+          {isUserMenuOpen && (
+            <div className="absolute top-full right-0 mt-1.5 w-56 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
+              <div className="px-3.5 py-2 border-b border-slate-100">
+                <p className="text-sm font-semibold text-ink-primary truncate">{user?.name}</p>
+                <p className="text-xs text-ink-secondary truncate">{user?.email}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsUserMenuOpen(false);
+                  navigate('/profile');
+                }}
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink-primary hover:bg-surface transition-colors"
+              >
+                <Settings size={15} className="text-ink-secondary" />
+                Profile Settings
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsUserMenuOpen(false);
+                  setIsLogoutDialogOpen(true);
+                }}
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm text-state-error hover:bg-state-error-light transition-colors"
+              >
+                <LogOut size={15} />
+                Sign Out
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

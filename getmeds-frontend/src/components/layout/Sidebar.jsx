@@ -11,6 +11,7 @@ import {
   Truck,
   MapPin,
   AlertTriangle,
+  ClipboardCheck,
   Users,
   Package,
   X,
@@ -89,6 +90,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         // (see OrderForm.jsx's medrep picker) — this was the only role with
         // that ability but no sidebar entry to reach it.
         { to: '/orders/new', icon: <PlusCircle size={18} />, label: 'Create New Order', primaryAction: true },
+        // Sep 7, 2026: MedRep orders wait here for Management approval
+        // before they sync to Zoho — see orders.controller.js's submit().
+        { to: '/management/approvals', icon: <ClipboardCheck size={18} />, label: 'Approval Queue' },
         { to: '/management/exceptions', icon: <AlertTriangle size={18} />, label: 'Exception Hub' },
         { to: '/inventory', icon: <Package size={18} />, label: 'Inventory & Stock Sync' },
         { to: '/management/clients', icon: <Users size={18} />, label: 'Clients Directory' }
@@ -140,6 +144,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       // resolveOrderMedrep) — that was built without a way to reach it from
       // here, so management had the access but no link to it.
       { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
+      // Sep 7, 2026: MedRep orders wait here for Management approval before
+      // they sync to Zoho — see orders.controller.js's submit().
+      { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
       { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
       { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' }
@@ -150,6 +157,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   } else if (role === 'admin') {
     mainLinks.push(
       { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
+      { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
       { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
       { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' },

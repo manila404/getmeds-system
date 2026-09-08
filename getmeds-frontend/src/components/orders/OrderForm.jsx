@@ -22,7 +22,8 @@ import {
   CalendarDays,
   UserRound,
   FlaskConical,
-  Building2
+  Building2,
+  ShieldCheck
 } from 'lucide-react';
 import { useDebug } from '../../context/DebugContext';
 import { useAuth } from '../../hooks/useAuth';
@@ -60,6 +61,67 @@ const SOURCE_OPTIONS = [
 // Exactly the two legal entities orders may be invoiced under — enforced
 // here AND server-side (orders.controller.js create()).
 const INVOICING_FROM_OPTIONS = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
+
+// Sep 5, 2026 (3): mirrors auth.controller.js's / orders.controller.js's
+// SUB_DIVISIONS_BY_DIVISION exactly — see auth.controller.js's comment for
+// why only these four Divisions have a fixed list. Division itself stays
+// read-only here (it drives Salesperson and is not editable per order — see
+// myDivision below); Sub-division is the one field of the three that can be
+// typed/picked per order, keyed off whichever Division the ordering
+// MedRep's account actually has.
+const SUB_DIVISIONS_BY_DIVISION = {
+  'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],
+  HOS: [
+    'GENSAN',
+    'PALAWAN',
+    'BAGUIO',
+    'BICOL',
+    'CABANATUAN',
+    'CAMANAVA',
+    'CAVITE',
+    'CDO',
+    'COMMONWEALTH',
+    'DAVAO NORTH',
+    'DAVAO SOUTH',
+    'ILOILO',
+    'LAGUNA',
+    'LAS PINAS',
+    'MANILA VACANT',
+    'MARIKINA',
+    'NORTH CEBU',
+    'PAMPANGA',
+    'PARANAQUE',
+    'PASAY',
+    'QUEZON PROVINCE',
+    'SOUTH CEBU',
+    'TUGUEGARAO',
+    'ZAMBOANGA',
+  ],
+  STC: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+  URO: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+};
+
+// Sep 5, 2026 (4): mirrors auth.controller.js's / orders.controller.js's
+// DIVISIONS exactly. Only used for Management's manual Division override
+// below (myDivision/divisionOverride) — a MedRep never sees this list,
+// their Division stays a read-only mirror of their own account.
+const DIVISIONS = [
+  '2MG Incorporated',
+  'GrabMart',
+  'Office of the President',
+  'PCSO',
+  'DSWD',
+  'B&B',
+  'B2B',
+  'B2C',
+  'BID',
+  'CLIDP',
+  'HOS',
+  'MSA',
+  'STC',
+  'TeleSales Anesthesia',
+  'URO',
+];
 
 // Common delivery methods — offered as suggestions via SuggestField below
 // (a native <datalist> before Sep 5, 2026 — see that component's comment),
@@ -352,12 +414,18 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     ? medrepOptions.find(m => String(m.id) === String(actingMedrepId)) || null
     : null;
   // Sep 5, 2026: the picker also appears for management (production pilot
-  // use), not just TEST_MODE admin — see /api/orders/meta/medreps. Unlike
-  // admin's test affordance, management has no "default" to fall back to
-  // (resolveOrderMedrep on the backend now refuses to create the order
-  // without a medrep_id from management), so the copy and required-ness
-  // below both key off this.
+  // use), not just TEST_MODE admin — see /api/orders/meta/medreps.
+  //
+  // Sep 5, 2026 (4): selecting a MedRep here is OPTIONAL again for
+  // Management (it was briefly required — see resolveOrderMedrep's Sep 5
+  // (4) note on the backend). Left blank, the order is attributed to the
+  // Management account itself, and Division/Salesperson below become
+  // manual fields instead of a read-only mirror of an account.
   const isManagementUser = (user?.role || '').toLowerCase() === 'management';
+  // Sep 5, 2026 (4): Zoho's own known Salesperson names, for the manual
+  // Salesperson field below — same gate as medrepOptions above (server
+  // decides via `enabled`), so this is empty for anyone who can't use it.
+  const salespersonSuggestions = medrepPicker?.salespersons || [];
 
   // Aug 30, 2026: the backend stamps every live Zoho Sales Order created
   // while the TEST-customer gate is on with a fixed "TEST | MEDREP"
@@ -391,8 +459,20 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // When an admin has picked a MedRep to raise the order as (above), it is
   // THAT rep's Salesperson that goes to Zoho — same row the backend reads —
   // so it is theirs that belongs on screen.
+  //
+  // Sep 7, 2026 (4): the "otherwise the logged-in account" fallback below is
+  // now MedRep-only. A Management/admin account is not a field rep and has
+  // no real Salesperson of its own — a seeded account's Division is a
+  // placeholder (e.g. "Management"), not one of the real DIVISIONS Zoho
+  // recognizes, so `user.salesperson` for Management is guaranteed junk
+  // ("Management | Test Manager", say). Falling back to it here used to
+  // silently pre-fill the Salesperson override with that junk value
+  // whenever Management left "Create this order for" blank — this account
+  // is the "Admin" who created the order (see orders.controller.js's
+  // onBehalfOf audit note), never the Salesperson; the Salesperson is
+  // always the picked MedRep, or one Management types manually below.
   const isTestCustomerSelected = !!selectedCustomer && testCustomerGateEnabled;
-  const mySalesperson = ((actingMedrep ? actingMedrep.salesperson : user?.salesperson) || '').trim();
+  const mySalesperson = ((actingMedrep ? actingMedrep.salesperson : (isManagementUser ? '' : user?.salesperson)) || '').trim();
   const displaySalesPerson =
     mySalesperson || (isTestCustomerSelected ? 'TEST | MEDREP' : 'Not set');
 
@@ -400,11 +480,54 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // this org's Sales Order (cf_division / cf_sub_division) and are sent with
   // every order, so they are shown rather than left invisible. Read from the
   // SAME source as the Salesperson above — the acting MedRep when an admin
-  // has picked one, otherwise the logged-in account — because the backend
-  // reads all three from one user row and the screen must not imply
-  // otherwise.
-  const myDivision = ((actingMedrep ? actingMedrep.division : user?.division) || '').trim();
-  const mySubDivision = ((actingMedrep ? actingMedrep.sub_division : user?.sub_division) || '').trim();
+  // has picked one, otherwise the logged-in account (MedRep only — see the
+  // Sep 7 (4) note above) — because the backend reads all three from one
+  // user row and the screen must not imply otherwise.
+  const myDivision = ((actingMedrep ? actingMedrep.division : (isManagementUser ? '' : user?.division)) || '').trim();
+  const mySubDivision = ((actingMedrep ? actingMedrep.sub_division : (isManagementUser ? '' : user?.sub_division)) || '').trim();
+
+  // Sep 5, 2026 (4): Division and Salesperson, manually typed — Management
+  // ONLY (a MedRep's own account values above are never overridden; these
+  // two inputs simply aren't rendered for them — see the Fields below).
+  // Starts out equal to whatever myDivision/mySalesperson already show
+  // (the picked MedRep's own account, or blank when none is picked) and
+  // resets whenever that changes, same reasoning as subDivisionInput below
+  // — switching MedRep should not silently carry over an override that was
+  // typed for someone else. From there Management can freely edit either
+  // one, or leave it blank to fall back to the account value (or nothing).
+  const [divisionOverride, setDivisionOverride] = useState(myDivision);
+  useEffect(() => {
+    setDivisionOverride(myDivision);
+  }, [myDivision]);
+  const [salespersonOverride, setSalespersonOverride] = useState(mySalesperson);
+  useEffect(() => {
+    setSalespersonOverride(mySalesperson);
+  }, [mySalesperson]);
+  // The Division actually in effect for THIS order right now — Management's
+  // typed override when present, else the account value. Feeds the
+  // Sub-division options below exactly like the backend's effectiveDivision
+  // feeds its own Sub-division check, so the two never disagree about which
+  // branch list applies.
+  const effectiveDivision = isManagementUser ? (divisionOverride || myDivision) : myDivision;
+
+  // Sep 5, 2026 (3): Sub-division is editable ON THIS ORDER, by whoever is
+  // raising it — medrep or management — unlike Division and Salesperson,
+  // which stay tied to the ordering MedRep's account above. Starts out
+  // equal to the account's own default (`mySubDivision`) and resets to it
+  // whenever that default changes — i.e. when the account loads, or when
+  // management switches which MedRep they're raising the order for — so
+  // switching MedRep never silently carries over a Sub-division that
+  // belonged to a different Division. From there the field can be freely
+  // edited before submitting.
+  const [subDivisionInput, setSubDivisionInput] = useState(mySubDivision);
+  useEffect(() => {
+    setSubDivisionInput(mySubDivision);
+  }, [mySubDivision]);
+
+  // null when the Division in effect (see effectiveDivision above) has no
+  // fixed Sub-division list — the field renders free text in that case,
+  // same as Sign Up/Profile Settings.
+  const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[effectiveDivision] || null;
 
   // Doctor Name is manual free text, but pre-filled with suggestions drawn
   // from customers already tagged category='doctor' (populated by
@@ -699,12 +822,12 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     // below and the Field it gates), so there is nothing here for them to
     // fill in and this requirement must not block their submission.
     (isManagementUser || hasStagedProof ||
-      (Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim())))) &&
-    // Sep 5, 2026: management must pick a MedRep — there is no default to
-    // fall back to (see isManagementUser above; the backend now rejects a
-    // management order with no medrep_id rather than silently attributing
-    // it to the management account itself).
-    (!isManagementUser || Boolean(actingMedrepId))
+      (Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim()))))
+    // Sep 5, 2026 (4): management picking a MedRep here used to be
+    // required (see the Sep 5 removal note on resolveOrderMedrep on the
+    // backend) — it's optional again now that Division/Salesperson can be
+    // typed manually instead, so there is no client-side requirement left
+    // to enforce here.
   );
 
   // Step 3: [TEST MODE: Auto-Fill] Logic
@@ -824,6 +947,11 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         terms: termsAndConditions,
         payment_terms: paymentTerms,
         invoicing_from: invoicingFrom,
+        // Sep 5, 2026 (3): editable per order now — see subDivisionInput
+        // above. Blank is treated the same as "not sent" server-side
+        // (orders.controller.js falls back to the account default), so
+        // there is no separate "clear it" affordance needed here.
+        sub_division: subDivisionInput,
         // Only ever sent when no proof-type file was staged — staging one
         // clears these (see handleFilesSelected).
         no_payment_proof_reason: hasStagedProof ? null : (noProofReason || null),
@@ -831,7 +959,14 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         // Sep 2, 2026: only ever sent when the server said the picker is
         // allowed AND one was chosen. The server ignores it otherwise, so
         // this is belt-and-braces rather than the control itself.
-        ...(canPickMedrep && actingMedrepId ? { medrep_id: parseInt(actingMedrepId) } : {})
+        ...(canPickMedrep && actingMedrepId ? { medrep_id: parseInt(actingMedrepId) } : {}),
+        // Sep 5, 2026 (4): Division/Salesperson manual override — only ever
+        // sent by Management (the backend independently ignores these two
+        // from anyone else, same belt-and-braces reasoning as medrep_id
+        // above). Blank is treated the same as "not sent" server-side, so
+        // there's no separate "clear it" affordance needed here either.
+        ...(isManagementUser && divisionOverride.trim() ? { division: divisionOverride.trim() } : {}),
+        ...(isManagementUser && salespersonOverride.trim() ? { salesperson: salespersonOverride.trim() } : {})
       });
       const order = createRes.data.data.order;
 
@@ -1002,10 +1137,15 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             {/* Sep 2, 2026: originally TEST_MODE + admin only.
                 Sep 5, 2026: also shown to management for the real (non-test)
                 pilot — see isManagementUser above and resolveOrderMedrep on
-                the backend. Copy and the empty "default" option below both
-                branch on which case this is, since management has no
-                fallback account to default to. Sits directly over the
-                Salesperson field because that is what it changes. */}
+                the backend. Sits directly over the Salesperson field because
+                that is what it changes.
+                Sep 5, 2026 (4): no longer required for management — picking
+                a MedRep here, and the Division/Salesperson fields below,
+                are now three independently optional ways to say who/what
+                this order is for. Leaving all three blank simply attributes
+                the order to the Management account with no Division/
+                Salesperson, exactly as it would for any other role with
+                nothing set on their account. */}
             {canPickMedrep && (
               <div className={`rounded-lg border px-4 py-3 flex items-start gap-3 ${
                 isManagementUser
@@ -1021,10 +1161,9 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                     value={actingMedrepId}
                     onChange={e => setActingMedrepId(e.target.value)}
                     className={inputClass}
-                    required={isManagementUser}
                   >
                     <option value="">
-                      {isManagementUser ? '— Select a MedRep —' : 'Default — the seeded MedRep account'}
+                      {isManagementUser ? '— Select a MedRep (optional) —' : 'Default — the seeded MedRep account'}
                     </option>
                     {medrepOptions.map(m => (
                       <option key={m.id} value={m.id}>
@@ -1035,7 +1174,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   </select>
                   <p className={`text-[11px] mt-1.5 ${isManagementUser ? 'text-getmeds-blue-dark/80' : 'text-amber-900/80'}`}>
                     {isManagementUser
-                      ? 'Required. The order is attributed to the MedRep you pick and carries their Salesperson to Zoho — the audit trail records that you created it on their behalf.'
+                      ? 'Optional. Picking a MedRep attributes the order to them and carries their Salesperson to Zoho. Leave it blank to set Division and/or Salesperson manually below instead — the audit trail always records that you created it.'
                       : 'Test Mode only. The order is attributed to the MedRep you pick and carries their Salesperson to Zoho — the audit trail still records that you raised it.'}
                   </p>
                 </div>
@@ -1050,20 +1189,60 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 </span>
               </Field>
 
+              {/* Sep 7, 2026 (4): read-only, auto-filled with whoever is
+                  logged in — the same account "Create this order for" above
+                  already attributes the order to in the audit trail (see
+                  orders.controller.js's onBehalfOf note, "[Admin] created an
+                  order for [MedRep]"). Shown next to Salesperson deliberately:
+                  Admin (who raised this) and Salesperson (the MedRep it's
+                  actually for, sent to Zoho) are two different things, and
+                  this account is never itself a candidate for the
+                  Salesperson field below — see mySalesperson above. */}
+              {canPickMedrep && (
+                <Field label="Admin" help="Automatically the account you're logged in as — not sent to Zoho.">
+                  <span className={readOnlyPillClass}>
+                    <ShieldCheck size={14} className="text-getmeds-blue-dark shrink-0" />
+                    {user?.name || 'You'}
+                  </span>
+                </Field>
+              )}
+
+              {/* Sep 5, 2026 (4): editable for Management only — a typed
+                  value overrides whatever the picked MedRep's account (or
+                  Management's own account) would otherwise send. Still a
+                  read-only mirror for a MedRep, exactly as before: their own
+                  Salesperson always comes straight from their account.
+                  Suggestions are Zoho's own known Salesperson names
+                  (salespersonSuggestions above) — the field still accepts
+                  anything typed, but create() rejects a name Zoho doesn't
+                  recognize, same "type anything, but here's what's real"
+                  pattern as Delivery Method/Payment Terms, with the
+                  difference that this one IS actually checked. */}
               <Field
                 label="Salesperson"
                 help={
-                  mySalesperson
-                    ? 'From your account — sent as the Salesperson on the Zoho Sales Order.'
-                    : 'Set from your Division and Display name at sign-up.'
+                  isManagementUser
+                    ? 'Optional — must match a Salesperson Zoho already has. Blank falls back to the picked MedRep\'s own Salesperson, if any.'
+                    : mySalesperson
+                      ? 'From your account — sent as the Salesperson on the Zoho Sales Order.'
+                      : 'Set from your Division and Display name at sign-up.'
                 }
               >
-                <span className={readOnlyPillClass}>
-                  <UserRound size={14} className="text-ink-secondary shrink-0" />
-                  <span className={mySalesperson ? '' : 'text-ink-secondary'}>
-                    {displaySalesPerson}
+                {isManagementUser ? (
+                  <SuggestField
+                    value={salespersonOverride}
+                    onChange={setSalespersonOverride}
+                    suggestions={salespersonSuggestions}
+                    placeholder="Type or pick a Salesperson"
+                  />
+                ) : (
+                  <span className={readOnlyPillClass}>
+                    <UserRound size={14} className="text-ink-secondary shrink-0" />
+                    <span className={mySalesperson ? '' : 'text-ink-secondary'}>
+                      {displaySalesPerson}
+                    </span>
                   </span>
-                </span>
+                )}
               </Field>
 
               <Field label="Delivery Method" help="Type to see suggestions, or enter your own.">
@@ -1075,32 +1254,79 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 />
               </Field>
 
-              {/* Sep 2, 2026: read-only, like Salesperson — all three come
-                  from the ordering MedRep's account, not from this form.
-                  Shown because all three are sent to Zoho, and a field that
-                  reaches the Sales Order should not be invisible here. */}
+              {/* Sep 2, 2026: read-only for a MedRep — Division comes from
+                  their account, not this form, because it also drives their
+                  Salesperson, and changing it here without changing the
+                  account would let the two disagree.
+                  Sep 5, 2026 (4): editable for Management, as one of the 15
+                  DIVISIONS above (never free text — same enum Sign Up/
+                  Profile Settings enforce), since a Management account
+                  typically has no Division of its own to show. Picking one
+                  here also drives the Sub-division list right below. */}
               <Field
                 label="Division"
-                help={myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Set at sign-up.'}
+                help={
+                  isManagementUser
+                    ? 'Optional — sent as Division on the Zoho Sales Order. Blank falls back to the picked MedRep\'s own Division, if any.'
+                    : myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Set at sign-up.'
+                }
               >
-                <span className={readOnlyPillClass}>
-                  <Building2 size={14} className="text-ink-secondary shrink-0" />
-                  <span className={myDivision ? '' : 'text-ink-secondary'}>
-                    {myDivision || 'Not set'}
+                {isManagementUser ? (
+                  <select
+                    className={inputClass}
+                    value={divisionOverride}
+                    onChange={(e) => setDivisionOverride(e.target.value)}
+                  >
+                    <option value="">-- Not set --</option>
+                    {DIVISIONS.map((d) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className={readOnlyPillClass}>
+                    <Building2 size={14} className="text-ink-secondary shrink-0" />
+                    <span className={myDivision ? '' : 'text-ink-secondary'}>
+                      {myDivision || 'Not set'}
+                    </span>
                   </span>
-                </span>
+                )}
               </Field>
 
+              {/* Sep 5, 2026 (3): Sub-division, unlike Division above, is
+                  editable on THIS order — any medrep or management raising
+                  an order can set it here, defaulting to the account's own
+                  value (see subDivisionInput above). A fixed dropdown when
+                  the ordering MedRep's Division has a defined list
+                  (SUB_DIVISIONS_BY_DIVISION), otherwise free text — same
+                  fallback Sign Up/Profile Settings use. */}
               <Field
                 label="Sub-division"
-                help={mySubDivision ? 'Sent as Sub-division on the Zoho Sales Order.' : 'Optional — blank is not sent.'}
+                help={
+                  subDivisionOptions
+                    ? `Sent as Sub-division on the Zoho Sales Order — one of ${effectiveDivision}'s branches.`
+                    : 'Sent as Sub-division on the Zoho Sales Order. Optional — blank is not sent.'
+                }
               >
-                <span className={readOnlyPillClass}>
-                  <Building2 size={14} className="text-ink-secondary shrink-0" />
-                  <span className={mySubDivision ? '' : 'text-ink-secondary'}>
-                    {mySubDivision || '—'}
-                  </span>
-                </span>
+                {subDivisionOptions ? (
+                  <select
+                    className={inputClass}
+                    value={subDivisionInput}
+                    onChange={(e) => setSubDivisionInput(e.target.value)}
+                  >
+                    <option value="">-- Select sub-division --</option>
+                    {subDivisionOptions.map((sd) => (
+                      <option key={sd} value={sd}>{sd}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    className={inputClass}
+                    placeholder="Enter sub-division"
+                    value={subDivisionInput}
+                    onChange={(e) => setSubDivisionInput(e.target.value)}
+                  />
+                )}
               </Field>
 
               <Field label="Payment Terms" help="Type to see suggestions (matches Zoho's list), or enter your own.">
@@ -1547,16 +1773,18 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             </div>
             <div className="flex justify-between items-center">
               <span className="text-xs text-ink-secondary font-medium">Salesperson:</span>
-              <span className="font-medium text-ink-primary">{displaySalesPerson}</span>
+              <span className="font-medium text-ink-primary">
+                {(isManagementUser ? salespersonOverride.trim() : '') || displaySalesPerson}
+              </span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-xs text-ink-secondary font-medium">Division:</span>
-              <span className="font-medium text-ink-primary">{myDivision || '—'}</span>
+              <span className="font-medium text-ink-primary">{effectiveDivision || '—'}</span>
             </div>
-            {mySubDivision && (
+            {subDivisionInput && (
               <div className="flex justify-between items-center">
                 <span className="text-xs text-ink-secondary font-medium">Sub-division:</span>
-                <span className="font-medium text-ink-primary">{mySubDivision}</span>
+                <span className="font-medium text-ink-primary">{subDivisionInput}</span>
               </div>
             )}
             <div className="flex justify-between items-center">

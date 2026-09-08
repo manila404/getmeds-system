@@ -2,13 +2,51 @@ import React, { useState } from 'react';
 import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw, Pencil, Trash2, Receipt } from 'lucide-react';
+import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw, Pencil, Trash2, Receipt, X, ShieldCheck, Undo2, XCircle } from 'lucide-react';
 import client from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPHT } from '../utils/dateUtils';
 import { useProducts } from '../hooks/useOrderData';
 import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
+
+// Sep 7, 2026 (2): mirrors orders.controller.js's / OrderForm.jsx's exact
+// lists for the new "Edit Details" panel below — kept as a duplicate
+// on purpose, same reasoning those two files' own comments give for why
+// this list lives in more than one place: a value picked here has to
+// validate the same way it would have at order-creation time.
+const DIVISIONS = [
+  '2MG Incorporated', 'GrabMart', 'Office of the President', 'PCSO', 'DSWD',
+  'B&B', 'B2B', 'B2C', 'BID', 'CLIDP', 'HOS', 'MSA', 'STC',
+  'TeleSales Anesthesia', 'URO',
+];
+const SUB_DIVISIONS_BY_DIVISION = {
+  'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],
+  HOS: [
+    'GENSAN', 'PALAWAN', 'BAGUIO', 'BICOL', 'CABANATUAN', 'CAMANAVA', 'CAVITE',
+    'CDO', 'COMMONWEALTH', 'DAVAO NORTH', 'DAVAO SOUTH', 'ILOILO', 'LAGUNA',
+    'LAS PINAS', 'MANILA VACANT', 'MARIKINA', 'NORTH CEBU', 'PAMPANGA',
+    'PARANAQUE', 'PASAY', 'QUEZON PROVINCE', 'SOUTH CEBU', 'TUGUEGARAO', 'ZAMBOANGA',
+  ],
+  STC: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+  URO: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+};
+const SOURCE_OPTIONS = [
+  'Doctor order', 'Patient order referred by doctor', 'Patient order referred by patient',
+  'Emergency purchase', 'Hospital PO', 'Distributor order'
+];
+const INVOICING_FROM_OPTIONS = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
+const DELIVERY_METHOD_SUGGESTIONS = [
+  'Own Rider / Company Vehicle', 'LBC Express', 'Grab Express', 'J&T Express',
+  'Lalamove', 'Customer Pick-up', 'Distributor Delivery'
+];
+const PAYMENT_TERMS_SUGGESTIONS = [
+  'Due end of next month', 'Due end of the month', 'Paid', 'Advanced Payment',
+  'Advanced Payment - Partial', 'Donation/Charity', 'Samples', 'Due on Receipt',
+  '60% DP 40% UPON DEL', 'CASH', 'COD', 'Net', 'Net 15', '30 days', '45 Day',
+  'BPO WALLET', '60 Day', 'DSWD/PCSO', 'net', 'OP', '90 Day', 'INITIAL STOCKING',
+  '120 Day', '180 Day'
+];
 
 const STATUS_COLORS = {
   draft: 'bg-slate-100 text-slate-700 border border-slate-300',
@@ -118,6 +156,11 @@ const OrderDetailPage = () => {
   // Sales Order exists yet.
   const [isEditingItems, setIsEditingItems] = useState(false);
   const [draftItems, setDraftItems] = useState([]);
+  // Sep 7, 2026 (2): the order-level counterpart to isEditingItems/draftItems
+  // above — same "only before Zoho exists" gate, everything except the line
+  // items. See updateDetails on the backend.
+  const [isEditingDetails, setIsEditingDetails] = useState(false);
+  const [draftDetails, setDraftDetails] = useState(null);
   const { data: products = [] } = useProducts();
 
   const { data, isLoading, error } = useQuery({
@@ -149,6 +192,11 @@ const OrderDetailPage = () => {
       else if (action === 'SO_DELETED_BACKFILLED') toast.success('Zoho deletion added to the timeline.');
       else if (action === 'PACKAGE_BACKFILLED') toast.success('Zoho package (picking/packing) added to the timeline.');
       else if (action === 'DISPATCHED_BACKFILLED') toast.success('Zoho shipment & tracking added to the timeline.');
+      // Sep 7, 2026 (5): a field edited directly in Zoho (Payment Terms,
+      // Invoicing From, Doctor Name, Source, Delivery Method, Terms) used to
+      // have no backfill path at all outside the live webhook — see
+      // zohoReconcileService.js's reconcileOrder.
+      else if (action === 'EDIT_BACKFILLED') toast.success('Zoho edit added to the timeline.');
       else toast('Already up to date with Zoho.', { icon: 'ℹ️' });
       qc.invalidateQueries({ queryKey: ['order', id] });
     },
@@ -182,6 +230,71 @@ const OrderDetailPage = () => {
       qc.invalidateQueries({ queryKey: ['order', id] });
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not update items')
+  });
+
+  // Sep 7, 2026 (2): saves the order-level fields (see isEditingDetails
+  // above). Same "before Zoho exists" precondition as items — the backend
+  // rejects this outright once order.zoho_so_id is set.
+  const updateDetailsMutation = useMutation({
+    mutationFn: (payload) => client.patch(`/api/orders/${id}/details`, payload).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Order details updated.');
+      setIsEditingDetails(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not update order details')
+  });
+
+  // Sep 7, 2026 (2): the first UI caller of submit() — until now a draft
+  // could only ever be created (see OrderForm.jsx's Save as Draft), never
+  // sent through the gate afterward. Needed so "Send Back" actually round
+  // -trips: an order sent back lands at 'draft' and needs a way back to
+  // 'pending_management_approval'.
+  const submitMutation = useMutation({
+    mutationFn: () => client.post(`/api/orders/${id}/submit`).then(r => r.data),
+    onSuccess: (res) => {
+      toast.success(res?.data?.pending_management_approval
+        ? 'Submitted — waiting for Management approval.'
+        : 'Submitted and synced to Zoho.');
+      qc.invalidateQueries({ queryKey: ['order', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not submit this order')
+  });
+
+  // Sep 7, 2026 (2): Approve / Send Back / Reject — mirrors
+  // ApprovalQueuePage.jsx's Approve/Reject exactly, plus the new Send Back
+  // action, so acting from here or from the queue behaves identically.
+  const approveMutation = useMutation({
+    mutationFn: () => client.post(`/api/orders/${id}/approve`).then(r => r.data),
+    onSuccess: (res) => {
+      const synced = res?.data?.zoho_sync_status === 'synced' || res?.data?.zoho_sync_status === 'skipped';
+      toast.success(synced
+        ? 'Approved — Sales Order created in Zoho.'
+        : 'Approved — Zoho sync failed and was queued for automatic retry.');
+      qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not approve this order')
+  });
+
+  const sendBackMutation = useMutation({
+    mutationFn: (reason) => client.post(`/api/orders/${id}/send-back`, { reason }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Sent back to the MedRep to fix and resubmit.');
+      qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not send this order back')
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: (reason) => client.post(`/api/orders/${id}/reject`, { reason }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Rejected. The order is on hold and the MedRep has been notified.');
+      qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not reject this order')
   });
 
   const startEditingItems = (currentItems) => {
@@ -237,11 +350,65 @@ const OrderDetailPage = () => {
     })));
   };
 
+  const isManagementUser = ['management', 'admin'].includes(user?.role);
+
+  const startEditingDetails = (o) => {
+    setDraftDetails({
+      division: o.division || '',
+      sub_division: o.sub_division || '',
+      salesperson: o.salesperson || '',
+      delivery_address: o.delivery_address || '',
+      delivery_notes: o.delivery_notes || '',
+      doctor_name: o.intake_doctor || '',
+      receiver_name: o.intake_receiver || '',
+      receiver_contact_no: o.intake_contact_no || '',
+      order_source: o.intake_source || '',
+      delivery_method: o.intake_delivery_method || '',
+      terms: o.intake_terms || '',
+      payment_terms: o.intake_payment_terms || '',
+      invoicing_from: o.invoicing_from || ''
+    });
+    setIsEditingDetails(true);
+  };
+
+  const updateDraftDetail = (field, value) => setDraftDetails((d) => ({ ...d, [field]: value }));
+
+  const saveDraftDetails = () => {
+    if (!draftDetails.delivery_address.trim()) { toast.error('Delivery address cannot be blank.'); return; }
+    const payload = {
+      delivery_address: draftDetails.delivery_address,
+      delivery_notes: draftDetails.delivery_notes,
+      doctor_name: draftDetails.doctor_name,
+      receiver_name: draftDetails.receiver_name,
+      receiver_contact_no: draftDetails.receiver_contact_no,
+      order_source: draftDetails.order_source,
+      delivery_method: draftDetails.delivery_method,
+      terms: draftDetails.terms,
+      payment_terms: draftDetails.payment_terms,
+      invoicing_from: draftDetails.invoicing_from,
+      sub_division: draftDetails.sub_division
+    };
+    // Sep 7, 2026 (2): Division/Salesperson are Management-only on the
+    // backend (mirrors create()'s own rule) — only send them from a
+    // Management/admin session so the payload matches who can actually
+    // change them.
+    if (isManagementUser) {
+      payload.division = draftDetails.division;
+      payload.salesperson = draftDetails.salesperson;
+    }
+    updateDetailsMutation.mutate(payload);
+  };
+
   if (isLoading) return <div className="flex justify-center py-20"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-getmeds-blue" /></div>;
   if (error) return <div className="text-center py-20 text-red-600">Failed to load order. <button onClick={() => navigate(-1)} className="underline">Go back</button></div>;
 
   const { order, items = [], payment, dispatch, events = [] } = data?.data || {};
   if (!order) return null;
+
+  // Sep 7, 2026 (2): while editing, Management changing Division live
+  // updates which Sub-division list applies — same behavior as OrderForm.jsx.
+  const effectiveDetailDivision = (isManagementUser && draftDetails) ? (draftDetails.division || order.division) : order.division;
+  const detailSubDivisionOptions = SUB_DIVISIONS_BY_DIVISION[effectiveDetailDivision] || null;
 
   // Sep 2, 2026: Audit Timeline moved to the front and made the default.
   // Opening an order is almost always asking "what has happened to this?" —
@@ -344,6 +511,244 @@ const OrderDetailPage = () => {
           </div>
         </div>
 
+        {/* Order Details — Sep 7, 2026 (2): everything besides line items,
+            editable in place before this order reaches Zoho. Same "only
+            before Zoho exists" gate and Save/Cancel pattern as Edit Items
+            on the Items tab below. */}
+        {!order.zoho_so_id && ['draft', 'pending_management_approval'].includes(order.status) && (
+          <div className="mt-4 pt-4 border-t border-gray-100">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs font-medium text-ink-secondary uppercase">Order Details</p>
+              {!isEditingDetails && (
+                <button
+                  type="button"
+                  onClick={() => startEditingDetails(order)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-getmeds-blue/40 text-getmeds-blue-dark rounded hover:bg-getmeds-blue/10"
+                >
+                  <Pencil className="w-3.5 h-3.5" /> Edit Details
+                </button>
+              )}
+            </div>
+
+            {!isEditingDetails ? (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                {[
+                  ['Division', order.division || '—'],
+                  ['Sub-division', order.sub_division || '—'],
+                  ['Salesperson', order.salesperson || '—'],
+                  ['Doctor', order.intake_doctor || '—'],
+                  ['Receiver', order.intake_receiver || '—'],
+                  ['Receiver Contact', order.intake_contact_no || '—'],
+                  ['Source', order.intake_source || '—'],
+                  ['Delivery Method', order.intake_delivery_method || '—'],
+                  ['Payment Terms', order.intake_payment_terms || '—'],
+                  ['Invoicing From', order.invoicing_from || '—'],
+                ].map(([label, val]) => (
+                  <div key={label}>
+                    <p className="text-xs text-ink-secondary">{label}</p>
+                    <p className="text-ink-primary font-medium">{val}</p>
+                  </div>
+                ))}
+                {order.intake_terms && (
+                  <div className="md:col-span-3">
+                    <p className="text-xs text-ink-secondary">Terms / Conditions</p>
+                    <p className="text-ink-primary">{order.intake_terms}</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Delivery Address</label>
+                    <textarea rows={2} value={draftDetails.delivery_address}
+                      onChange={(e) => updateDraftDetail('delivery_address', e.target.value)}
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Delivery Notes</label>
+                    <textarea rows={2} value={draftDetails.delivery_notes}
+                      onChange={(e) => updateDraftDetail('delivery_notes', e.target.value)}
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                  </div>
+
+                  {isManagementUser && (
+                    <div>
+                      <label className="block text-xs font-medium text-ink-secondary mb-1">Division</label>
+                      <select value={draftDetails.division}
+                        onChange={(e) => updateDraftDetail('division', e.target.value)}
+                        className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+                        <option value="">-- Not set --</option>
+                        {DIVISIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+                      </select>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Sub-division</label>
+                    {detailSubDivisionOptions ? (
+                      <select value={draftDetails.sub_division}
+                        onChange={(e) => updateDraftDetail('sub_division', e.target.value)}
+                        className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+                        <option value="">-- Select sub-division --</option>
+                        {detailSubDivisionOptions.map((sd) => <option key={sd} value={sd}>{sd}</option>)}
+                      </select>
+                    ) : (
+                      <input type="text" value={draftDetails.sub_division}
+                        onChange={(e) => updateDraftDetail('sub_division', e.target.value)}
+                        placeholder="Enter sub-division"
+                        className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                    )}
+                  </div>
+
+                  {isManagementUser && (
+                    <div>
+                      <label className="block text-xs font-medium text-ink-secondary mb-1">Salesperson</label>
+                      <input type="text" value={draftDetails.salesperson}
+                        onChange={(e) => updateDraftDetail('salesperson', e.target.value)}
+                        placeholder="Must match a Salesperson Zoho recognizes"
+                        className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Doctor Name</label>
+                    <input type="text" value={draftDetails.doctor_name}
+                      onChange={(e) => updateDraftDetail('doctor_name', e.target.value)}
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Receiver Name</label>
+                    <input type="text" value={draftDetails.receiver_name}
+                      onChange={(e) => updateDraftDetail('receiver_name', e.target.value)}
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Receiver Contact No.</label>
+                    <input type="tel" value={draftDetails.receiver_contact_no}
+                      onChange={(e) => updateDraftDetail('receiver_contact_no', e.target.value)}
+                      placeholder="09XXXXXXXXX"
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Source</label>
+                    <select value={draftDetails.order_source}
+                      onChange={(e) => updateDraftDetail('order_source', e.target.value)}
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+                      <option value="">-- Select source --</option>
+                      {SOURCE_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Delivery Method</label>
+                    <input type="text" list="delivery-method-suggestions" value={draftDetails.delivery_method}
+                      onChange={(e) => updateDraftDetail('delivery_method', e.target.value)}
+                      placeholder="e.g. LBC, Grab Express, Own Rider"
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                    <datalist id="delivery-method-suggestions">
+                      {DELIVERY_METHOD_SUGGESTIONS.map((s) => <option key={s} value={s} />)}
+                    </datalist>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Payment Terms</label>
+                    <input type="text" list="payment-terms-suggestions" value={draftDetails.payment_terms}
+                      onChange={(e) => updateDraftDetail('payment_terms', e.target.value)}
+                      placeholder="e.g. Net 15, 30 days"
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                    <datalist id="payment-terms-suggestions">
+                      {PAYMENT_TERMS_SUGGESTIONS.map((s) => <option key={s} value={s} />)}
+                    </datalist>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Invoicing From</label>
+                    <select value={draftDetails.invoicing_from}
+                      onChange={(e) => updateDraftDetail('invoicing_from', e.target.value)}
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+                      <option value="">-- Select invoicing entity --</option>
+                      {INVOICING_FROM_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                    </select>
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Terms / Conditions</label>
+                    <textarea rows={2} value={draftDetails.terms}
+                      onChange={(e) => updateDraftDetail('terms', e.target.value)}
+                      placeholder="Payment terms, return policy, or any conditions attached to this order..."
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <button type="button" onClick={() => setIsEditingDetails(false)}
+                    className="px-3 py-1.5 text-xs border border-slate-300 text-ink-secondary rounded hover:bg-surface">
+                    Cancel
+                  </button>
+                  <button type="button" disabled={updateDetailsMutation.isPending} onClick={saveDraftDetails}
+                    className="px-3 py-1.5 text-xs font-semibold bg-getmeds-blue text-white rounded hover:bg-getmeds-blue-dark disabled:opacity-50">
+                    {updateDetailsMutation.isPending ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Sep 7, 2026 (2): Management's decision on a MedRep-submitted
+            order sitting at the approval gate — mirrors
+            ApprovalQueuePage.jsx's Approve/Reject exactly, plus the new
+            Send Back action, so acting from here or from the queue behaves
+            identically. */}
+        {order.status === 'pending_management_approval' && ['management', 'admin'].includes(user?.role) && (
+          <div className="mt-4 pt-4 border-t border-gray-100">
+            <p className="text-xs font-medium text-ink-secondary uppercase mb-2">Management Approval</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                disabled={approveMutation.isPending}
+                onClick={() => approveMutation.mutate()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-pharmacy-green text-white rounded hover:opacity-90 disabled:opacity-50"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" /> {approveMutation.isPending ? 'Syncing to Zoho...' : 'Approve — sync to Zoho'}
+              </button>
+              <button
+                disabled={sendBackMutation.isPending}
+                onClick={() => { const r = prompt('What does the MedRep need to fix?'); if (r) sendBackMutation.mutate(r); }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-getmeds-blue/40 text-getmeds-blue-dark rounded hover:bg-getmeds-blue/10 disabled:opacity-50"
+              >
+                <Undo2 className="w-3.5 h-3.5" /> {sendBackMutation.isPending ? 'Sending back...' : 'Resubmit (Send Back)'}
+              </button>
+              <button
+                disabled={rejectMutation.isPending}
+                onClick={() => { const r = prompt('Reason for rejecting?'); if (r) rejectMutation.mutate(r); }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-state-error text-red-700 rounded hover:bg-state-error-light disabled:opacity-50"
+              >
+                <XCircle className="w-3.5 h-3.5" /> {rejectMutation.isPending ? 'Rejecting...' : 'Reject'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Sep 7, 2026 (2): the other half of Send Back — a draft (fresh,
+            or bounced back by Management) needs a way back through the
+            gate. Same ownership rule as editing: the order's own MedRep,
+            or Management/admin. */}
+        {order.status === 'draft' && (user?.id === order.medrep_id || ['management', 'admin'].includes(user?.role)) && (
+          <div className="mt-4 pt-4 border-t border-gray-100">
+            <button
+              disabled={submitMutation.isPending}
+              onClick={() => submitMutation.mutate()}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-getmeds-blue text-white rounded hover:bg-getmeds-blue-dark disabled:opacity-50"
+            >
+              {submitMutation.isPending ? 'Submitting...' : 'Submit Order'}
+            </button>
+          </div>
+        )}
+
         {/* Management actions */}
         {['management', 'admin'].includes(user?.role) && !['completed', 'cancelled'].includes(order.status) && (
           <div className="mt-4 pt-4 border-t border-gray-100 flex gap-2">
@@ -359,7 +764,9 @@ const OrderDetailPage = () => {
         )}
         {order.exception_reason && (
           <div className="mt-3 bg-state-warning-light border border-state-warning/30 rounded p-3 text-xs text-amber-950">
-            <span className="font-semibold">Exception/Hold Reason:</span> {order.exception_reason}
+            <span className="font-semibold">
+              {order.status === 'draft' ? 'Sent Back — What To Fix:' : 'Exception/Hold Reason:'}
+            </span> {order.exception_reason}
           </div>
         )}
       </div>

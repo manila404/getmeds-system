@@ -21,6 +21,66 @@ import employeeBg from '../assets/employee.jpg';
 // database, not by this component: what you see here is a preview of it.
 const MIN_PASSWORD_LENGTH = 8;
 
+// Sep 5, 2026: mirrors the backend's DIVISIONS in auth.controller.js
+// exactly — see that file's comment for why this became a fixed dropdown
+// instead of free text (a free-typed division created junk Salespersons in
+// the live Zoho org before, since division feeds `salesperson`, the exact
+// string sent to every Zoho Sales Order). Kept in the order given.
+const DIVISIONS = [
+  '2MG Incorporated',
+  'GrabMart',
+  'Office of the President',
+  'PCSO',
+  'DSWD',
+  'B&B',
+  'B2B',
+  'B2C',
+  'BID',
+  'CLIDP',
+  'HOS',
+  'MSA',
+  'STC',
+  'TeleSales Anesthesia',
+  'URO',
+];
+
+// Sep 5, 2026 (2): mirrors the backend's SUB_DIVISIONS_BY_DIVISION in
+// auth.controller.js exactly — see that file's comment for why only these
+// four Divisions get a fixed Sub-division dropdown. Any Division not listed
+// here has no fixed sub-divisions, so the field below falls back to free
+// text for it, same as before this change.
+const SUB_DIVISIONS_BY_DIVISION = {
+  'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],
+  HOS: [
+    'GENSAN',
+    'PALAWAN',
+    'BAGUIO',
+    'BICOL',
+    'CABANATUAN',
+    'CAMANAVA',
+    'CAVITE',
+    'CDO',
+    'COMMONWEALTH',
+    'DAVAO NORTH',
+    'DAVAO SOUTH',
+    'ILOILO',
+    'LAGUNA',
+    'LAS PINAS',
+    'MANILA VACANT',
+    'MARIKINA',
+    'NORTH CEBU',
+    'PAMPANGA',
+    'PARANAQUE',
+    'PASAY',
+    'QUEZON PROVINCE',
+    'SOUTH CEBU',
+    'TUGUEGARAO',
+    'ZAMBOANGA',
+  ],
+  STC: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+  URO: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+};
+
 const buildSalesperson = (division, displayName) => {
   const d = (division || '').trim();
   const n = (displayName || '').trim();
@@ -53,6 +113,14 @@ const SignupPage = () => {
     setForm((f) => {
       const next = { ...f, [field]: value };
       if (field === 'display_name') return next;
+      // Sep 5, 2026 (2): Sub-division's own options depend on which Division
+      // is selected (see SUB_DIVISIONS_BY_DIVISION) — clear it on every
+      // Division change so a value that doesn't belong to the newly chosen
+      // Division is never silently carried over and submitted.
+      if (field === 'division') {
+        next.sub_division = '';
+        return next;
+      }
       if (!displayNameTouched && (field === 'first_name' || field === 'last_name')) {
         next.display_name = [next.first_name.trim(), next.last_name.trim()].filter(Boolean).join(' ');
       }
@@ -66,6 +134,10 @@ const SignupPage = () => {
   };
 
   const salesperson = buildSalesperson(form.division, form.display_name);
+
+  // null when the selected Division has no fixed Sub-division list — the
+  // field below renders free text in that case, same as it always has.
+  const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[form.division] || null;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -200,26 +272,38 @@ const SignupPage = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4">
                   <div>
                     <label className={labelClass}>Division</label>
-                    <input
-                      type="text"
+                    <select
                       required
-                      placeholder="Enter division"
                       className={inputClass}
                       value={form.division}
                       onChange={set('division')}
-                    />
+                    >
+                      <option value="">-- Select division --</option>
+                      {DIVISIONS.map((d) => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
                   </div>
                   <div>
                     <label className={labelClass}>
                       Sub-division <span className={optionalClass}>(optional)</span>
                     </label>
-                    <input
-                      type="text"
-                      placeholder="Enter sub-division"
-                      className={inputClass}
-                      value={form.sub_division}
-                      onChange={set('sub_division')}
-                    />
+                    {subDivisionOptions ? (
+                      <select className={inputClass} value={form.sub_division} onChange={set('sub_division')}>
+                        <option value="">-- Select sub-division --</option>
+                        {subDivisionOptions.map((sd) => (
+                          <option key={sd} value={sd}>{sd}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        placeholder="Enter sub-division"
+                        className={inputClass}
+                        value={form.sub_division}
+                        onChange={set('sub_division')}
+                      />
+                    )}
                   </div>
                 </div>
 

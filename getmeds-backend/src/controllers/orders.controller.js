@@ -23,6 +23,71 @@ const { shouldRefreshOnOpen, markRefreshed } = require('../services/zohoAutoSync
 const salespersonService = require('../services/salespersonService');
 const { isTestModeEnabled } = require('../middleware/testMode');
 
+// Sep 5, 2026 (3): mirrors auth.controller.js's SUB_DIVISIONS_BY_DIVISION
+// exactly — see that file's comment for why only these four Divisions have
+// a fixed Sub-division list. Needed here, separately from the account-level
+// version, because Sub-division is now something the person RAISING the
+// order can type/pick per order (see create() below) rather than only ever
+// being read from the ordering MedRep's account — so a value submitted on
+// an order has to be checked against the SAME list a moment before it goes
+// to Zoho, not just once at sign-up/profile-save time.
+const SUB_DIVISIONS_BY_DIVISION = {
+  'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],
+  HOS: [
+    'GENSAN',
+    'PALAWAN',
+    'BAGUIO',
+    'BICOL',
+    'CABANATUAN',
+    'CAMANAVA',
+    'CAVITE',
+    'CDO',
+    'COMMONWEALTH',
+    'DAVAO NORTH',
+    'DAVAO SOUTH',
+    'ILOILO',
+    'LAGUNA',
+    'LAS PINAS',
+    'MANILA VACANT',
+    'MARIKINA',
+    'NORTH CEBU',
+    'PAMPANGA',
+    'PARANAQUE',
+    'PASAY',
+    'QUEZON PROVINCE',
+    'SOUTH CEBU',
+    'TUGUEGARAO',
+    'ZAMBOANGA',
+  ],
+  STC: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+  URO: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
+};
+
+// Sep 5, 2026 (4): mirrors auth.controller.js's DIVISIONS exactly. Needed
+// here, separately from the account-level version, for the same reason
+// SUB_DIVISIONS_BY_DIVISION above is duplicated: Division can now also be
+// typed manually ON AN ORDER — but only by Management (see create()'s
+// effectiveDivision) — so a value submitted on an order has to be checked
+// against the same 15-item list a moment before it goes to Zoho, not just
+// once at sign-up/profile-save time.
+const DIVISIONS = [
+  '2MG Incorporated',
+  'GrabMart',
+  'Office of the President',
+  'PCSO',
+  'DSWD',
+  'B&B',
+  'B2B',
+  'B2C',
+  'BID',
+  'CLIDP',
+  'HOS',
+  'MSA',
+  'STC',
+  'TeleSales Anesthesia',
+  'URO',
+];
+
 /**
  * Which MedRep is this order actually FOR?
  *
@@ -40,6 +105,20 @@ const { isTestModeEnabled } = require('../middleware/testMode');
  * else's name. A bad id from someone who IS allowed to use it is a 400,
  * because there the caller meant something specific and got it wrong.
  *
+ * Sep 5, 2026 (4): the Sep 5 (2) requirement below — that Management MUST
+ * name a MedRep — is REVERSED. Selecting one is optional again, same as
+ * everyone else. When Management leaves it blank, `fallback` (below)
+ * already attributes the order to the MANAGEMENT ACCOUNT ITSELF —
+ * resolveActor only ever remaps an ADMIN's actor onto a seeded stand-in, so
+ * for a Management user it just returns `user` unchanged. That used to be
+ * exactly the silent mis-attribution this function guarded against; it no
+ * longer is, because Division and Salesperson can now ALSO be typed
+ * manually for that same case (see create()'s effectiveDivision /
+ * effectiveSalesperson) — Management's own account becomes a legitimate,
+ * visible owner of the order (with whatever Division/Salesperson they typed
+ * on it) rather than an accidental one with someone else's values leaking
+ * onto it.
+ *
  * Returns { actor, onBehalf } or { error }.
  */
 async function resolveOrderMedrep(user, requestedMedrepId) {
@@ -48,23 +127,6 @@ async function resolveOrderMedrep(user, requestedMedrepId) {
 
   const isAdmin = (user.role || '').toLowerCase() === 'admin';
   const isManagement = (user.role || '').toLowerCase() === 'management';
-
-  // Sep 5, 2026 (2): management MUST name a MedRep. resolveActor (above)
-  // only ever remaps an ADMIN's actor onto a seeded stand-in — for anyone
-  // else, including management, it just returns `user` unchanged. Without
-  // this check, a management order submitted with no medrep_id would
-  // silently set orders.medrep_id to the management account itself, and
-  // salespersonService would read ITS (absent, or wrong) division/
-  // display_name onto the Zoho Sales Order instead of a real MedRep's.
-  // Fail loudly here rather than mis-attribute a real order.
-  if (isManagement && !asked) {
-    return {
-      error: {
-        code: 'MEDREP_REQUIRED',
-        message: 'Select which MedRep this order is for.'
-      }
-    };
-  }
 
   if (!asked) return { actor: fallback, onBehalf: false };
 
@@ -306,6 +368,15 @@ exports.getProducts = async (req, res, next) => {
  *
  * `salesperson` comes along so the form can show what each choice would put
  * on the Zoho Sales Order without a second call per rep.
+ *
+ * Sep 5, 2026 (4): also hands back `salespersons` — Zoho's own known
+ * Salesperson names — for the same gated group. Management (or admin in
+ * Test Mode) can now type a Division/Salesperson manually instead of
+ * picking a MedRep (medrep_id is optional again — see resolveOrderMedrep),
+ * and the only safe way to let them type a Salesperson is to suggest names
+ * Zoho already recognizes (same reasoning as salespersonService's module
+ * comment) — create() independently re-verifies whatever is actually
+ * submitted, so this list is a UI convenience, not the enforcement point.
  */
 exports.getMedreps = async (req, res, next) => {
   try {
@@ -315,7 +386,7 @@ exports.getMedreps = async (req, res, next) => {
     // Admin can only do this in TEST_MODE (testing). Other roles: disabled.
     const enabled = isManagement || (isTestModeEnabled() && isAdmin);
     if (!enabled) {
-      return res.json({ success: true, data: { enabled: false, medreps: [] } });
+      return res.json({ success: true, data: { enabled: false, medreps: [], salespersons: [] } });
     }
     const medreps = await db
       .prepare(
@@ -325,7 +396,19 @@ exports.getMedreps = async (req, res, next) => {
          ORDER BY COALESCE(NULLIF(TRIM(display_name), ''), name)`
       )
       .all();
-    res.json({ success: true, data: { enabled: true, medreps } });
+
+    let salespersons = [];
+    try {
+      const names = await salespersonService.loadNames();
+      salespersons = names.map((s) => s.salesperson_name).filter(Boolean);
+    } catch (err) {
+      // Zoho unreachable — ship an empty suggestions list rather than fail
+      // the whole picker. Typing still works; create() just won't be able
+      // to confirm it matches until Zoho answers again.
+      salespersons = [];
+    }
+
+    res.json({ success: true, data: { enabled: true, medreps, salespersons } });
   } catch (err) { next(err); }
 };
 
@@ -654,6 +737,21 @@ exports.create = async (req, res, next) => {
       // "optional, free text, not wired into the Zoho payload yet" pattern
       // as delivery_method/terms above.
       payment_terms,
+      // Sep 5, 2026 (3): Sub-division is now editable AT ORDER CREATION,
+      // by whoever is raising the order (medrep or management) — see
+      // SUB_DIVISIONS_BY_DIVISION above. Optional: omitted, it falls back
+      // to the ordering MedRep's own account default exactly as it always
+      // has (see medrepProfile below), so an older client that never sends
+      // this field behaves unchanged.
+      sub_division,
+      // Sep 5, 2026 (4): Division and Salesperson, manually typed — see
+      // effectiveDivision/effectiveSalesperson below. Honored ONLY when
+      // req.user is Management (checked there, not here) — for a MedRep,
+      // these are ignored exactly like medrep_id is for a non-privileged
+      // caller: a stray field from an old client must never silently
+      // override values that already come from the ordering MedRep's own
+      // account.
+      division, salesperson,
       // Sep 2, 2026: TEST_MODE + admin only — raise this order for a named
       // MedRep instead of the seeded stand-in. See resolveOrderMedrep above
       // for the four conditions and why it is ignored rather than refused
@@ -671,6 +769,95 @@ exports.create = async (req, res, next) => {
     // Salesperson + Division + Sub-division, from the MedRep the order is
     // FOR (not whoever is clicking) — one read, so they cannot disagree.
     const medrepProfile = await salespersonService.profileForUser(effectiveActor.id);
+
+    const isManagementOrder = (req.user.role || '').toLowerCase() === 'management';
+
+    // Sep 5, 2026 (4): Division — normally always the ordering MedRep's own
+    // account value (medrepProfile.division), because it also drives their
+    // Salesperson. The ONE exception is Management: they can now type a
+    // Division manually for THIS order, since a Management account
+    // typically has no Division of its own to fall back to (see
+    // resolveOrderMedrep's Sep 5 (4) note — medrep_id is optional again).
+    // Strict against the same 15-entry list DIVISIONS validates at
+    // sign-up/Profile Settings — a BRAND NEW order has no "legacy value" to
+    // protect, same reasoning as Sub-division below.
+    const cleanDivision = (typeof division === 'string' && division.trim()) ? division.trim() : null;
+    let effectiveDivision = medrepProfile.division;
+    if (isManagementOrder && cleanDivision !== null) {
+      if (!DIVISIONS.includes(cleanDivision)) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: `division must be one of: ${DIVISIONS.join(', ')}` }
+        });
+      }
+      effectiveDivision = cleanDivision;
+    }
+
+    // Sep 5, 2026 (4): Salesperson — same exception, same reason. Unlike
+    // Division, this is checked against Zoho's LIVE Salesperson list rather
+    // than a fixed local one, because Zoho is the one that will reject an
+    // unrecognized name outright (see salespersonService's module comment
+    // and the Sep 2 incident it documents) — a typo here must be caught
+    // before it reaches Zoho, not after. Fails OPEN when Zoho itself can't
+    // be reached (verification.checked === false): we cannot confirm the
+    // name either way, and blocking order creation on a Zoho outage would
+    // be worse than letting a possibly-bad name through to the same
+    // fail-safe retry queue every other Zoho call here already has.
+    const cleanSalesperson = (typeof salesperson === 'string' && salesperson.trim()) ? salesperson.trim() : null;
+    let effectiveSalesperson = medrepProfile.salesperson;
+    if (isManagementOrder && cleanSalesperson !== null) {
+      const verification = await salespersonService.verify(cleanSalesperson);
+      if (verification.checked && !verification.exists) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `"${cleanSalesperson}" is not a Salesperson Zoho recognizes. Pick one from the suggestions list.`
+          }
+        });
+      }
+      // Send Zoho's own canonical spelling when a match was found (the
+      // comparison is case/whitespace-insensitive — see verify()'s comment)
+      // so what actually reaches Zoho always exactly matches what it has.
+      effectiveSalesperson = (verification.checked && verification.matchedName) ? verification.matchedName : cleanSalesperson;
+    }
+
+    // Sep 5, 2026 (3): resolve the Sub-division that will actually be used
+    // on THIS order.
+    //
+    // Sep 5, 2026 (4): validated against `effectiveDivision` (above), not
+    // `medrepProfile.division` — when Management has typed a Division
+    // manually, the Sub-division options on screen and the ones enforced
+    // here must agree with THAT Division, not the (likely blank) one on
+    // their own account.
+    const cleanSubDivision = (typeof sub_division === 'string' && sub_division.trim()) ? sub_division.trim() : null;
+    let effectiveSubDivision;
+    if (cleanSubDivision !== null) {
+      // Explicitly typed/picked for this order — must match the ordering
+      // MedRep's Division's fixed list, if that Division has one. Strict:
+      // unlike Profile Settings, there is no "legacy value" to protect on a
+      // BRAND NEW order.
+      const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[effectiveDivision];
+      if (subDivisionOptions && !subDivisionOptions.includes(cleanSubDivision)) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `Sub-division for ${effectiveDivision} must be one of: ${subDivisionOptions.join(', ')}`
+          }
+        });
+      }
+      effectiveSubDivision = cleanSubDivision;
+    } else {
+      // Not sent — fall back to the account's own default, exactly the
+      // behavior this endpoint had before Sub-division became editable
+      // here. Deliberately NOT re-validated: an account's stored
+      // sub_division already passed this exact check when it was saved
+      // (see auth.controller.js's updateProfile) — re-checking it here
+      // would let a legacy/grandfathered account value silently block
+      // every future order instead of just a profile edit.
+      effectiveSubDivision = medrepProfile.sub_division;
+    }
 
     const ALLOWED_INVOICING_FROM = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 
@@ -763,6 +950,18 @@ exports.create = async (req, res, next) => {
     // 1. Generate unique Getmeds Order ID (GM-YYYYMMDD-XXXX)
     const getmedsOrderId = await generateOrderId();
     const isDraft = requestedStatus === 'draft';
+    // Sep 7, 2026: THIS single call is the entire "Create New Order" flow —
+    // the frontend never calls a separate submit() (see that function's own
+    // header comment below for why, and why its own copy of this same gate
+    // is effectively unreachable from the app). So the MedRep-approval gate
+    // ("the order will not sync to zoho unless management checks it") has
+    // to live HERE too, or every MedRep order keeps reaching Zoho
+    // immediately through this path exactly as it always did — which is
+    // exactly the bug this line fixes. Management/admin — including an
+    // admin raising an order "on behalf of" a MedRep in TEST_MODE, where
+    // req.user is still admin — is unaffected: this checks req.user's OWN
+    // role, not the order's medrep_id/effectiveActor.
+    const isMedRepDirectSubmit = !isDraft && (req.user.role || '').toLowerCase() === 'medrep';
     const isCredit = resolvedCustomerType === 'credit';
     // Sep 1, 2026: same change as submit() below — a credit order stops at
     // 'so_created' until Zoho confirms the Sales Order, instead of landing
@@ -770,7 +969,9 @@ exports.create = async (req, res, next) => {
     // path (create-and-submit in one call) had its own copy of the rule, so
     // it had to be fixed in both places or the two entry points would
     // disagree about where a credit order starts.
-    const finalStatus = isDraft ? 'draft' : (isCredit ? 'so_created' : 'ready_for_draft_invoice');
+    const finalStatus = isDraft
+      ? 'draft'
+      : (isMedRepDirectSubmit ? 'pending_management_approval' : (isCredit ? 'so_created' : 'ready_for_draft_invoice'));
     const now = new Date().toISOString();
     // "Sales Order Date (Automatic Today)" on the form — always set here,
     // server-side, to today's date. There is no client override; a
@@ -818,12 +1019,28 @@ exports.create = async (req, res, next) => {
       // (the seeded logins), in which case LiveZohoAdapter falls back to
       // the TEST | MEDREP stand-in for TestGM- orders and to nothing for a
       // real one — see the note there.
-      salesperson_name: medrepProfile.salesperson,
+      //
+      // Sep 5, 2026 (4): sends `effectiveSalesperson`, not
+      // `medrepProfile.salesperson` directly — the two only differ when
+      // Management typed a Salesperson manually for this order (see above).
+      salesperson_name: effectiveSalesperson,
       // Sep 2, 2026: Division / Sub-division — this org's own Sales Order
       // custom fields (cf_division / cf_sub_division), read from the same
       // user row as the Salesperson above so all three agree.
-      division: medrepProfile.division,
-      sub_division: medrepProfile.sub_division
+      //
+      // Sep 5, 2026 (3): Sub-division sends `effectiveSubDivision` (this
+      // order's own value, whether typed on the form or defaulted from the
+      // account above) rather than the account's value directly, since it
+      // can legitimately differ from `medrepProfile.sub_division` for this
+      // one order.
+      //
+      // Sep 5, 2026 (4): Division now works the same way — sends
+      // `effectiveDivision`, which is `medrepProfile.division` unless
+      // Management typed a different one for this order (see above). Only
+      // Management can make the two disagree; a MedRep's own Division still
+      // always comes straight from their account.
+      division: effectiveDivision,
+      sub_division: effectiveSubDivision
     };
     // Aug 30, 2026: delivery_method, terms, and each line's discount/tax are
     // all captured and stored below (in the orders/order_items tables) but
@@ -837,7 +1054,13 @@ exports.create = async (req, res, next) => {
     // Only ever creates the Zoho Sales Order (as a plain Draft — nothing
     // here confirms it). Confirming, invoicing, and recording payment all
     // happen directly in Zoho by Finance now, never through this app.
-    if (!isDraft) {
+    //
+    // Sep 7, 2026: skipped entirely for isMedRepDirectSubmit — nothing
+    // reaches Zoho until Management approves it (see approve() in
+    // syncOrderToZohoAndFinalize's section below, which makes this exact
+    // call later). zohoResult stays null and zohoSyncStatus stays 'pending',
+    // which is the correct, honest state for "not sent yet".
+    if (!isDraft && !isMedRepDirectSubmit) {
       if (isDryRunMode()) {
         // ZOHO_DRY_RUN=true — no HTTP call to Zoho is made at all.
         zohoResult = buildDryRunSalesOrder(zohoPayload);
@@ -862,11 +1085,12 @@ exports.create = async (req, res, next) => {
           intake_courier, intake_doctor, intake_hospital, intake_patient, intake_mop,
           intake_receiver, intake_contact_no, intake_source, intake_pls_give,
           sales_order_date, intake_delivery_method, intake_terms, intake_payment_terms, invoicing_from,
-          no_payment_proof_reason, no_payment_proof_note,
+          no_payment_proof_reason, no_payment_proof_note, sub_division,
+          division, salesperson,
           zoho_so_id, zoho_so_number, zoho_so_status, zoho_sync_status,
           created_at, submitted_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         getmedsOrderId,
         customer_id,
@@ -892,6 +1116,9 @@ exports.create = async (req, res, next) => {
         clean(invoicing_from),
         clean(no_payment_proof_reason),
         clean(no_payment_proof_note),
+        effectiveSubDivision,
+        effectiveDivision,
+        effectiveSalesperson,
         zohoResult ? zohoResult.salesorder.salesorder_id : null,
         zohoResult ? zohoResult.salesorder.salesorder_number : null,
         // Sep 1, 2026: seed the Zoho-side status ('draft' as Zoho creates
@@ -922,7 +1149,42 @@ exports.create = async (req, res, next) => {
       }
 
       // 2. Evaluate Workflow Gate & Create Child Records
-      if (!isDraft) {
+      if (isDraft) {
+        await logEvent({
+          orderId,
+          eventType: 'ORDER_CREATED',
+          newStatus: 'draft',
+          actorId: effectiveActor.id,
+          actorName: effectiveActor.name,
+          // Sep 7, 2026 (3): Management raising an order for a named MedRep
+          // (the normal, production "Create this order for" picker — not
+          // just the admin/TEST_MODE case below) gets its own plain-English
+          // line instead of the TEST_MODE-flavored one, since it happens
+          // every day in production and "(admin, Test Mode)" is simply
+          // wrong for it.
+          notes: onBehalfOf
+            ? (isManagementOrder
+                ? `${req.user.name} created an order for ${effectiveActor.name}.`
+                : `Draft order created — raised by ${req.user.name} (admin, Test Mode) on behalf of ${effectiveActor.name}`)
+            : 'Draft order created',
+          metadata: onBehalfOf
+            ? { onBehalfOf: true, raisedByUserId: req.user.id, raisedByName: req.user.name }
+            : undefined
+        });
+      } else if (isMedRepDirectSubmit) {
+        // Sep 7, 2026: stops here — no child record, no Zoho retry queueing
+        // (nothing was sent), no ORDER_SUBMITTED. Those all happen later,
+        // inside syncOrderToZohoAndFinalize(), when Management approves.
+        await logEvent({
+          orderId,
+          eventType: 'STATUS_CHANGE',
+          oldStatus: 'draft',
+          newStatus: 'pending_management_approval',
+          actorId: effectiveActor.id,
+          actorName: effectiveActor.name,
+          notes: 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
+        });
+      } else {
         if (isCredit) {
           await db.prepare("INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'queued', datetime('now'))").run(orderId);
         } else {
@@ -937,13 +1199,21 @@ exports.create = async (req, res, next) => {
           newStatus: finalStatus,
           actorId: effectiveActor.id,
           actorName: effectiveActor.name,
-          notes:
-            `Order submitted for ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'})` +
-            // Sep 2, 2026: an order raised by an admin FOR a MedRep is
-            // attributed to that MedRep everywhere else, which is what makes
-            // the Zoho Salesperson right — so the trail has to say who
-            // actually clicked, or the attribution becomes untraceable.
-            (onBehalfOf ? ` — raised by ${req.user.name} (admin, Test Mode) on behalf of ${effectiveActor.name}` : ''),
+          // Sep 2, 2026: an order raised by an admin FOR a MedRep is
+          // attributed to that MedRep everywhere else, which is what makes
+          // the Zoho Salesperson right — so the trail has to say who
+          // actually clicked, or the attribution becomes untraceable.
+          //
+          // Sep 7, 2026 (3): Management doing this in production (the
+          // normal "Create this order for" picker) gets a plain
+          // "[Manager] created an order for [MedRep]" line instead of the
+          // "(admin, Test Mode)" phrasing, which only actually applies to
+          // the admin/TEST_MODE case.
+          notes: onBehalfOf
+            ? (isManagementOrder
+                ? `${req.user.name} created an order for ${effectiveActor.name} — ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'}).`
+                : `Order submitted for ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'}) — raised by ${req.user.name} (admin, Test Mode) on behalf of ${effectiveActor.name}`)
+            : `Order submitted for ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'})`,
           metadata: onBehalfOf
             ? { onBehalfOf: true, raisedByUserId: req.user.id, raisedByName: req.user.name }
             : undefined
@@ -960,20 +1230,6 @@ exports.create = async (req, res, next) => {
             notes: `Zoho sync failed, order proceeds normally and sync is queued for automatic retry: ${zohoError}`
           });
         }
-      } else {
-        await logEvent({
-          orderId,
-          eventType: 'ORDER_CREATED',
-          newStatus: 'draft',
-          actorId: effectiveActor.id,
-          actorName: effectiveActor.name,
-          notes:
-            'Draft order created' +
-            (onBehalfOf ? ` — raised by ${req.user.name} (admin, Test Mode) on behalf of ${effectiveActor.name}` : ''),
-          metadata: onBehalfOf
-            ? { onBehalfOf: true, raisedByUserId: req.user.id, raisedByName: req.user.name }
-            : undefined
-        });
       }
 
       return { orderId, getmedsOrderId, finalStatus, isCredit, zohoResult };
@@ -982,7 +1238,31 @@ exports.create = async (req, res, next) => {
     const { orderId } = await createOrderTxn();
 
     // Trigger Notifications outside transaction
-    if (!isDraft) {
+    if (isMedRepDirectSubmit) {
+      const orderDataForNotif = {
+        getmeds_order_id: getmedsOrderId,
+        customer_name: customer.name,
+        status: finalStatus,
+        medrep_email: req.user.email
+      };
+
+      await notify({
+        orderId,
+        recipientIds: [effectiveActor.id],
+        message: `Your order ${getmedsOrderId} for ${customer.name} has been submitted and is waiting for Management approval before it syncs to Zoho.`,
+        eventType: 'ORDER_SUBMITTED',
+        orderData: orderDataForNotif
+      });
+
+      const managementIds = await getUserIdsByRole('management');
+      await notify({
+        orderId,
+        recipientIds: managementIds,
+        message: `Order ${getmedsOrderId} from ${effectiveActor.name} needs your approval before it syncs to Zoho.`,
+        eventType: 'MANAGEMENT_APPROVAL_REQUIRED',
+        orderData: orderDataForNotif
+      });
+    } else if (!isDraft) {
       const orderDataForNotif = {
         getmeds_order_id: getmedsOrderId,
         customer_name: customer.name,
@@ -1014,6 +1294,214 @@ exports.create = async (req, res, next) => {
 
 // ─── SUBMIT ───────────────────────────────────────────────────────────────────
 
+// ─── Shared: push an order's Sales Order to Zoho and finalize its status ──
+//
+// Sep 7, 2026: extracted out of submit() (unchanged below) so the exact same
+// Zoho-sync + finalize logic can be reused by approve() further down. A
+// MedRep-submitted order no longer runs this at submit() time — it waits at
+// 'pending_management_approval' until Management approves it (see the gate
+// inside submit()), and only then does this run — exactly as it always ran
+// immediately for a Management/admin submission. Nothing about what this
+// does changed in this split, only who calls it and when.
+//
+// `pipelineActor` is who the audit-trail STATUS_CHANGE hops (submitted ->
+// validating -> so_pending -> so_created/ready_for_draft_invoice) are
+// attributed to. `notifyRecipientId` is who gets the "your order was
+// submitted" notification. For a direct Management/admin submission these
+// are both the submitting user (unchanged behavior). For an approve() call
+// they are instead the order's own MedRep — those hops represent that
+// MedRep's original submission, now released, not the Management user who
+// happened to click Approve (that action is logged separately, see
+// approve() below).
+async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipelineActor, notifyRecipientId }) {
+  const now = new Date().toISOString();
+  // If the order already has a submitted_at (set when it entered
+  // 'pending_management_approval' at the original MedRep submit), keep it —
+  // that is the real submission moment. Otherwise (a direct Management/
+  // admin submission, which never visits that gate) this is the first time
+  // submitted_at is set, exactly as before this split.
+  const submittedAt = order.submitted_at || now;
+
+  // Create Zoho SO. Done *before* opening the DB transaction below for the
+  // same reason as in `create` above — better-sqlite3 transactions can't
+  // contain an `await`, and this call is async (mock, http-mock, or live
+  // depending on ZOHO_MODE).
+  //
+  // Fail-safe, not fail-closed: a Zoho rejection here does not abort the
+  // submission or leave the order stuck — it still advances through the
+  // state machine with zoho_sync_status='failed' and gets queued for
+  // automatic background retry (see zohoRetryService).
+  const zohoPayload = {
+    getmeds_order_id: getmedsOrderId,
+    customer_name: order.customer_name,
+    customer_type: order.customer_type,
+    customer_master_type: order.customer_master_type,
+    zoho_customer_id: order.customer_zoho_contact_id || null,
+    total_amount: order.total_amount,
+    delivery_address: order.delivery_address,
+    items,
+    // Same wiring as `create` above — pulled from the draft row this
+    // order was created from rather than req.body, since this acts
+    // on an already-stored draft.
+    doctor_name: order.intake_doctor,
+    order_source: order.intake_source,
+    invoicing_from: order.invoicing_from,
+    // Sep 2, 2026: the Salesperson of the MedRep the ORDER belongs to
+    // (order.medrep_id), not whoever is submitting/approving it — an admin
+    // or Management user acting on someone's behalf must not have the
+    // Sales Order attributed to them. Comes from the users join in the
+    // caller's query.
+    //
+    // Sep 5, 2026 (4): `order.salesperson`/`order.division` (this draft
+    // row's own columns) win when set — set only when Management typed a
+    // manual override at create() (see effectiveDivision/
+    // effectiveSalesperson there) — falling back to the account join
+    // otherwise, same pattern as sub_division just below. A draft from
+    // before this column existed has it NULL, so it falls through to the
+    // account join exactly as it always did.
+    salesperson_name: order.salesperson || order.medrep_salesperson || null,
+    division: order.division || order.medrep_division || null,
+    // Sep 5, 2026 (3): Sub-division now comes from the DRAFT ROW
+    // (`order.sub_division`, set at create() — see the long note there),
+    // not from the account join, because create() already resolved
+    // whatever was typed/picked on the form (or the account default) into
+    // that column, and this must send exactly what was decided then.
+    // Falls back to the account join only for a draft that predates this
+    // column (`order.sub_division` is NULL on any row from before the
+    // migration that added it).
+    sub_division: order.sub_division || order.medrep_sub_division || null
+  };
+  let zohoResult = null;
+  let zohoSyncStatus = 'pending';
+  let zohoError = null;
+  // Only ever creates the Zoho Sales Order (as a plain Draft — nothing
+  // here confirms it). Confirming, invoicing, and recording payment all
+  // happen directly in Zoho by Finance now, never through this app.
+  if (isDryRunMode()) {
+    // ZOHO_DRY_RUN=true — no HTTP call to Zoho is made at all.
+    zohoResult = buildDryRunSalesOrder(zohoPayload);
+    zohoSyncStatus = 'skipped';
+  } else {
+    try {
+      zohoResult = await zoho.createSalesOrder(zohoPayload);
+      zohoSyncStatus = 'synced';
+    } catch (err) {
+      zohoSyncStatus = 'failed';
+      zohoError = err.message;
+      console.error(`[ZOHO] createSalesOrder failed for ${getmedsOrderId} — order will still be submitted and queued for automatic retry:`, err.message);
+    }
+  }
+
+  const submitTxn = db.transaction(async () => {
+    // Determine next status based on customer type.
+    //
+    // Sep 1, 2026: a CREDIT order now stops at 'so_created' instead of
+    // running straight through to a dispatch-ready state. All this app has
+    // done at this point is create a DRAFT Sales Order in Zoho — nobody
+    // has confirmed it, and Finance may still void or edit it. Sending it
+    // to ready_for_dispatch here put orders in the Dispatch queue that no
+    // one had approved, and it also meant the later salesorder.confirmed
+    // webhook found the order already past every status it knows how to
+    // advance, so confirming in Zoho changed nothing. Credit orders are
+    // now released by that webhook (see webhook.controller.js).
+    //
+    // A DIRECT order still goes to 'ready_for_draft_invoice' — unchanged, so
+    // the Finance queue behaves exactly as before.
+    const isCredit = (order.customer_type === 'credit' || order.customer_master_type === 'credit');
+    const finalStatus = isCredit ? 'so_created' : 'ready_for_draft_invoice';
+
+    // Seed the Zoho-side status as 'draft'. Sep 1, 2026: without this
+    // baseline, the first time anyone confirmed the SO in Zoho the
+    // "edited in Zoho" handler had a null previous value to compare
+    // against, treated it as "just learning the baseline", and logged a
+    // bland "no change detected in the fields this app tracks" instead of
+    // "Sales Order confirmed in Zoho (draft → confirmed)". It only started
+    // reading correctly from the SECOND status change onward.
+    const initialZohoStatus = zohoResult ? (zohoResult.salesorder.status || 'draft') : null;
+
+    await db.prepare(`
+      UPDATE orders SET
+        getmeds_order_id = ?, customer_type = ?, status = ?, submitted_at = ?, updated_at = ?,
+        zoho_so_id = ?, zoho_so_number = ?, zoho_so_status = ?, zoho_sync_status = ?
+      WHERE id = ?
+    `).run(getmedsOrderId, isCredit ? 'credit' : 'direct', finalStatus, submittedAt, now,
+      zohoResult ? zohoResult.salesorder.salesorder_id : null,
+      zohoResult ? zohoResult.salesorder.salesorder_number : null,
+      initialZohoStatus,
+      zohoSyncStatus,
+      order.id);
+
+    if (zohoSyncStatus === 'failed') {
+      await zohoRetryService.enqueue({ orderId: order.id, payload: zohoPayload, error: zohoError });
+    }
+
+    // If direct patient, create payment record for Finance queue
+    if (!isCredit) {
+      await db.prepare(`
+        INSERT INTO payments (order_id, status, created_at)
+        VALUES (?, 'pending', datetime('now'))
+      `).run(order.id);
+    }
+
+    // If credit customer, create dispatch record immediately
+    if (isCredit) {
+      await db.prepare(`
+        INSERT INTO dispatch_records (order_id, status, created_at)
+        VALUES (?, 'queued', datetime('now'))
+      `).run(order.id);
+    }
+
+    // Audit trail — log all status hops. Sep 1, 2026: the credit path now
+    // ends at so_created; ready_for_dispatch is logged later, by the
+    // salesorder.confirmed webhook that actually earns it.
+    const statusPath = isCredit
+      ? ['submitted', 'validating', 'so_pending', 'so_created']
+      : ['submitted', 'validating', 'so_pending', 'so_created', 'ready_for_draft_invoice'];
+
+    // Sep 7, 2026: the hop BEFORE this one is either 'draft' (a direct
+    // Management/admin submission) or 'pending_management_approval' (a
+    // MedRep order Management just approved) — logEvent's oldStatus on the
+    // first hop should say which actually happened, not always claim 'draft'.
+    let prev = order.status;
+    for (const s of statusPath) {
+      await logEvent({ orderId: order.id, eventType: 'STATUS_CHANGE', oldStatus: prev, newStatus: s, actorId: pipelineActor.id, actorName: pipelineActor.name,
+        notes: s === 'so_created'
+          ? (zohoResult ? `Zoho SO created: ${zohoResult.salesorder.salesorder_number}` : `Zoho sync failed, queued for automatic retry: ${zohoError}`)
+          : undefined });
+      prev = s;
+    }
+
+    // Notify
+    const orderDataForNotif = { getmeds_order_id: getmedsOrderId, customer_name: order.customer_name, status: finalStatus, medrep_email: order.medrep_email };
+
+    // Notify the order's MedRep
+    await notify({
+      orderId: order.id,
+      recipientIds: [notifyRecipientId],
+      message: `Your order ${getmedsOrderId} for ${order.customer_name} has been submitted (${isCredit ? 'Sales Order drafted in Zoho — awaiting confirmation' : 'Waiting for Finance Payment Verification'}).`,
+      eventType: 'ORDER_SUBMITTED',
+      orderData: orderDataForNotif
+    });
+
+    // Route notification based on customer type
+    if (order.customer_type === 'direct') {
+      const financeIds = await getUserIdsByRole('finance');
+      await notify({ orderId: order.id, recipientIds: financeIds, message: `New direct patient order ${getmedsOrderId} requires payment verification.`, eventType: 'PAYMENT_VERIFICATION_REQUIRED', orderData: orderDataForNotif });
+    } else {
+      // Sep 1, 2026: Dispatch is told the order exists, not that it's
+      // ready — it isn't until Zoho confirms the Sales Order. The
+      // ORDER_READY_FOR_DISPATCH notification now fires from the
+      // salesorder.confirmed webhook instead.
+      const dispatchIds = await getUserIdsByRole('dispatch');
+      await notify({ orderId: order.id, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} drafted in Zoho — will reach dispatch once Finance confirms the Sales Order.`, eventType: 'ORDER_SUBMITTED', orderData: orderDataForNotif });
+    }
+
+    return { getmedsOrderId, finalStatus, zohoResult, zohoSyncStatus };
+  });
+
+  return await submitTxn();
+}
+
 exports.submit = async (req, res, next) => {
   try {
     const order = await db.prepare(`
@@ -1035,174 +1523,85 @@ exports.submit = async (req, res, next) => {
     const gateError = checkTestCustomerGate({ name: order.customer_name, zoho_contact_id: order.customer_zoho_contact_id });
     if (gateError) return res.status(403).json({ success: false, error: gateError });
 
-    const items = await db.prepare(`
-      SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit FROM order_items oi
-      LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
-    `).all(order.id);
-
-    // Step 1: submitted → validating → so_pending → so_created
-    const getmedsOrderId = await generateOrderId();
-    const now = new Date().toISOString();
-
-    // Step 2: Create Zoho SO. Done *before* opening the DB transaction
-    // below for the same reason as in `create` above — better-sqlite3
-    // transactions can't contain an `await`, and this call is async
-    // (mock, http-mock, or live depending on ZOHO_MODE).
+    // ─── Sep 7, 2026: MedRep orders wait for Management approval ──────────
     //
-    // Fail-safe, not fail-closed: a Zoho rejection here does not abort the
-    // submission or leave the order stuck in `draft` — it still advances
-    // through the state machine with zoho_sync_status='failed' and gets
-    // queued for automatic background retry (see zohoRetryService).
-    const zohoPayload = {
-      getmeds_order_id: getmedsOrderId,
-      customer_name: order.customer_name,
-      customer_type: order.customer_type,
-      customer_master_type: order.customer_master_type,
-      zoho_customer_id: order.customer_zoho_contact_id || null,
-      total_amount: order.total_amount,
-      delivery_address: order.delivery_address,
-      items,
-      // Same wiring as `create` above — pulled from the draft row this
-      // order was created from rather than req.body, since submit() acts
-      // on an already-stored draft.
-      doctor_name: order.intake_doctor,
-      order_source: order.intake_source,
-      invoicing_from: order.invoicing_from,
-      // Sep 2, 2026: the Salesperson of the MedRep the ORDER belongs to
-      // (order.medrep_id), not whoever is submitting it — an admin
-      // submitting on someone's behalf must not have the Sales Order
-      // attributed to them. Comes from the users join in the query above.
-      salesperson_name: order.medrep_salesperson || null,
-      division: order.medrep_division || null,
-      sub_division: order.medrep_sub_division || null
-    };
-    let zohoResult = null;
-    let zohoSyncStatus = 'pending';
-    let zohoError = null;
-    // Only ever creates the Zoho Sales Order (as a plain Draft — nothing
-    // here confirms it). Confirming, invoicing, and recording payment all
-    // happen directly in Zoho by Finance now, never through this app.
-    if (isDryRunMode()) {
-      // ZOHO_DRY_RUN=true — no HTTP call to Zoho is made at all.
-      zohoResult = buildDryRunSalesOrder(zohoPayload);
-      zohoSyncStatus = 'skipped';
-    } else {
-      try {
-        zohoResult = await zoho.createSalesOrder(zohoPayload);
-        zohoSyncStatus = 'synced';
-      } catch (err) {
-        zohoSyncStatus = 'failed';
-        zohoError = err.message;
-        console.error(`[ZOHO] createSalesOrder failed for ${getmedsOrderId} — order will still be submitted and queued for automatic retry:`, err.message);
-      }
-    }
-
-    const submitTxn = db.transaction(async () => {
-      // Step 3: Determine next status based on customer type.
-      //
-      // Sep 1, 2026: a CREDIT order now stops at 'so_created' instead of
-      // running straight through to a dispatch-ready state. All this app has
-      // done at this point is create a DRAFT Sales Order in Zoho — nobody
-      // has confirmed it, and Finance may still void or edit it. Sending it
-      // to ready_for_dispatch here put orders in the Dispatch queue that no
-      // one had approved, and it also meant the later salesorder.confirmed
-      // webhook found the order already past every status it knows how to
-      // advance, so confirming in Zoho changed nothing. Credit orders are
-      // now released by that webhook (see webhook.controller.js).
-      //
-      // A DIRECT order still goes to 'ready_for_draft_invoice' — unchanged, so
-      // the Finance queue behaves exactly as before.
-      const isCredit = (order.customer_type === 'credit' || order.customer_master_type === 'credit');
-      const finalStatus = isCredit ? 'so_created' : 'ready_for_draft_invoice';
-
-      // Seed the Zoho-side status as 'draft'. Sep 1, 2026: without this
-      // baseline, the first time anyone confirmed the SO in Zoho the
-      // "edited in Zoho" handler had a null previous value to compare
-      // against, treated it as "just learning the baseline", and logged a
-      // bland "no change detected in the fields this app tracks" instead of
-      // "Sales Order confirmed in Zoho (draft → confirmed)". It only started
-      // reading correctly from the SECOND status change onward.
-      const initialZohoStatus = zohoResult ? (zohoResult.salesorder.status || 'draft') : null;
+    // "When medrep creates an order, the order will not sync to zoho unless
+    // the management checks it." Applies to every order a MedRep submits —
+    // credit and direct patient alike. It does NOT apply here: when
+    // Management (or admin) submits — their own order, or one raised on a
+    // MedRep's behalf via medrep_id at create() — nothing changes, the order
+    // still syncs to Zoho immediately below, exactly as it always has.
+    //
+    // The order gets its real getmeds_order_id now, at this gate, not later
+    // at approval — so it is identifiable in the Management approval queue
+    // (GET /api/management/orders?status=pending_management_approval)
+    // immediately. See approve()/reject() further down for what happens
+    // next.
+    if (req.user.role === 'medrep') {
+      // Sep 7, 2026 (2): a draft already has a getmeds_order_id — create()
+      // assigns one immediately, even to a draft (see the top of create()
+      // above). Reuse it here instead of minting a second one: without this,
+      // a resubmit after Management's Send Back (pending_management_approval
+      // -> draft -> back through this same branch) would silently orphan
+      // the order's original id from the approval-queue/audit-trail history
+      // it already accumulated under that id.
+      const getmedsOrderId = order.getmeds_order_id || await generateOrderId();
+      const now = new Date().toISOString();
 
       await db.prepare(`
-        UPDATE orders SET
-          getmeds_order_id = ?, customer_type = ?, status = ?, submitted_at = ?, updated_at = ?,
-          zoho_so_id = ?, zoho_so_number = ?, zoho_so_status = ?, zoho_sync_status = ?
-        WHERE id = ?
-      `).run(getmedsOrderId, isCredit ? 'credit' : 'direct', finalStatus, now, now,
-        zohoResult ? zohoResult.salesorder.salesorder_id : null,
-        zohoResult ? zohoResult.salesorder.salesorder_number : null,
-        initialZohoStatus,
-        zohoSyncStatus,
-        order.id);
+        UPDATE orders SET getmeds_order_id = ?, status = ?, submitted_at = ?, updated_at = ? WHERE id = ?
+      `).run(getmedsOrderId, 'pending_management_approval', now, now, order.id);
 
-      if (zohoSyncStatus === 'failed') {
-        await zohoRetryService.enqueue({ orderId: order.id, payload: zohoPayload, error: zohoError });
-      }
+      await logEvent({
+        orderId: order.id,
+        eventType: 'STATUS_CHANGE',
+        oldStatus: 'draft',
+        newStatus: 'pending_management_approval',
+        actorId: req.user.id,
+        actorName: req.user.name,
+        notes: 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
+      });
 
-      // Step 4: If direct patient, create payment record for Finance queue
-      if (!isCredit) {
-        await db.prepare(`
-          INSERT INTO payments (order_id, status, created_at)
-          VALUES (?, 'pending', datetime('now'))
-        `).run(order.id);
-      }
+      const orderDataForNotif = { getmeds_order_id: getmedsOrderId, customer_name: order.customer_name, status: 'pending_management_approval', medrep_email: order.medrep_email };
 
-      // Step 5: If credit customer, create dispatch record immediately
-      if (isCredit) {
-        await db.prepare(`
-          INSERT INTO dispatch_records (order_id, status, created_at)
-          VALUES (?, 'queued', datetime('now'))
-        `).run(order.id);
-      }
-
-      // Audit trail — log all status hops. Sep 1, 2026: the credit path now
-      // ends at so_created; ready_for_dispatch is logged later, by the
-      // salesorder.confirmed webhook that actually earns it.
-      const statusPath = isCredit
-        ? ['submitted', 'validating', 'so_pending', 'so_created']
-        : ['submitted', 'validating', 'so_pending', 'so_created', 'ready_for_draft_invoice'];
-
-      const effectiveActor = await resolveActor(req.user, 'medrep');
-
-      let prev = 'draft';
-      for (const s of statusPath) {
-        await logEvent({ orderId: order.id, eventType: 'STATUS_CHANGE', oldStatus: prev, newStatus: s, actorId: effectiveActor.id, actorName: effectiveActor.name,
-          notes: s === 'so_created'
-            ? (zohoResult ? `Zoho SO created: ${zohoResult.salesorder.salesorder_number}` : `Zoho sync failed, queued for automatic retry: ${zohoError}`)
-            : undefined });
-        prev = s;
-      }
-
-      // Step 6: Notify
-      const orderDataForNotif = { getmeds_order_id: getmedsOrderId, customer_name: order.customer_name, status: finalStatus, medrep_email: order.medrep_email };
-
-      // 6a. Notify submitting MedRep
       await notify({
         orderId: order.id,
-        recipientIds: [effectiveActor.id],
-        message: `Your order ${getmedsOrderId} for ${order.customer_name} has been submitted (${isCredit ? 'Sales Order drafted in Zoho — awaiting confirmation' : 'Waiting for Finance Payment Verification'}).`,
+        recipientIds: [req.user.id],
+        message: `Your order ${getmedsOrderId} for ${order.customer_name} has been submitted and is waiting for Management approval before it syncs to Zoho.`,
         eventType: 'ORDER_SUBMITTED',
         orderData: orderDataForNotif
       });
 
-      // 6b. Route notification based on customer type
-      if (order.customer_type === 'direct') {
-        const financeIds = await getUserIdsByRole('finance');
-        await notify({ orderId: order.id, recipientIds: financeIds, message: `New direct patient order ${getmedsOrderId} requires payment verification.`, eventType: 'PAYMENT_VERIFICATION_REQUIRED', orderData: orderDataForNotif });
-      } else {
-        // Sep 1, 2026: Dispatch is told the order exists, not that it's
-        // ready — it isn't until Zoho confirms the Sales Order. The
-        // ORDER_READY_FOR_DISPATCH notification now fires from the
-        // salesorder.confirmed webhook instead.
-        const dispatchIds = await getUserIdsByRole('dispatch');
-        await notify({ orderId: order.id, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} drafted in Zoho — will reach dispatch once Finance confirms the Sales Order.`, eventType: 'ORDER_SUBMITTED', orderData: orderDataForNotif });
-      }
+      const managementIds = await getUserIdsByRole('management');
+      await notify({
+        orderId: order.id,
+        recipientIds: managementIds,
+        message: `Order ${getmedsOrderId} from ${order.medrep_name} needs your approval before it syncs to Zoho.`,
+        eventType: 'MANAGEMENT_APPROVAL_REQUIRED',
+        orderData: orderDataForNotif
+      });
 
-      return { getmedsOrderId, finalStatus, zohoResult, zohoSyncStatus };
+      const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+      return res.json({
+        success: true,
+        data: { order: updatedOrder, zoho: null, zoho_sync_status: 'pending', pending_management_approval: true }
+      });
+    }
+
+    // Management / admin submitting: unchanged from before this gate existed.
+    const items = await db.prepare(`
+      SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit FROM order_items oi
+      LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
+    `).all(order.id);
+    const getmedsOrderId = await generateOrderId();
+    const effectiveActor = await resolveActor(req.user, 'medrep');
+
+    const result = await syncOrderToZohoAndFinalize({
+      order, items, getmedsOrderId,
+      pipelineActor: effectiveActor,
+      notifyRecipientId: effectiveActor.id
     });
 
-    const result = await submitTxn();
     const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     res.json({
       success: true,
@@ -1212,6 +1611,416 @@ exports.submit = async (req, res, next) => {
         zoho_sync_status: result.zohoSyncStatus
       }
     });
+  } catch (err) { next(err); }
+};
+
+// ─── MANAGEMENT APPROVAL (Sep 7, 2026) ─────────────────────────────────────
+//
+// "New update: When medrep creates an order, the order will not sync to
+// zoho unless the management checks it." A MedRep-submitted order stops at
+// 'pending_management_approval' (see the gate inside submit() above)
+// instead of reaching Zoho immediately. Management (or admin) approves or
+// rejects it here — mirrors finance.controller.js's verifyAccount exactly:
+// an explicit decision, with a reason required on rejection, so the trail
+// names who decided and why. Orders Management/admin submitted themselves
+// never reach this status, so these two actions only ever act on a
+// MedRep-raised order.
+exports.approve = async (req, res, next) => {
+  try {
+    const order = await db.prepare(`
+      SELECT o.*, c.name as customer_name, c.type as customer_master_type, c.contact_number, c.zoho_contact_id as customer_zoho_contact_id, u.name as medrep_name, u.email as medrep_email, u.salesperson as medrep_salesperson, u.division as medrep_division, u.sub_division as medrep_sub_division
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN users u ON o.medrep_id = u.id
+      WHERE o.id = ?
+    `).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+
+    if (order.status !== 'pending_management_approval') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_AWAITING_APPROVAL', message: `This order is at "${order.status}", not awaiting Management approval.` }
+      });
+    }
+
+    const items = await db.prepare(`
+      SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit FROM order_items oi
+      LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
+    `).all(order.id);
+
+    const approver = await resolveActor(req.user, 'management');
+
+    // Logged BEFORE the Zoho-sync pipeline runs, and separately from its own
+    // STATUS_CHANGE hops — this is the record of WHO approved it, distinct
+    // from the pipeline hops that follow (attributed to the order's own
+    // MedRep, since those represent the original submission being released,
+    // not this approval action itself).
+    await logEvent({
+      orderId: order.id,
+      eventType: 'MANAGEMENT_APPROVED',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: approver.id,
+      actorName: approver.name,
+      notes: 'Approved by Management — syncing to Zoho.'
+    });
+
+    const pipelineActor = { id: order.medrep_id, name: order.medrep_name };
+    const result = await syncOrderToZohoAndFinalize({
+      order, items,
+      getmedsOrderId: order.getmeds_order_id,
+      pipelineActor,
+      notifyRecipientId: order.medrep_id
+    });
+
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    res.json({
+      success: true,
+      data: {
+        order: updatedOrder,
+        zoho: result.zohoResult ? result.zohoResult.salesorder : null,
+        zoho_sync_status: result.zohoSyncStatus
+      }
+    });
+  } catch (err) { next(err); }
+};
+
+exports.reject = async (req, res, next) => {
+  try {
+    const { reason } = req.body || {};
+    // A rejection without a reason is useless to the MedRep who has to act
+    // on it — same rule as Finance's verifyAccount.
+    if (!String(reason || '').trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'A reason is required when rejecting — it is what the MedRep acts on.' }
+      });
+    }
+
+    const order = await db.prepare(`
+      SELECT o.*, u.name as medrep_name, u.email as medrep_email
+      FROM orders o
+      LEFT JOIN users u ON o.medrep_id = u.id
+      WHERE o.id = ?
+    `).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+
+    if (order.status !== 'pending_management_approval') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_AWAITING_APPROVAL', message: `This order is at "${order.status}", not awaiting Management approval.` }
+      });
+    }
+
+    const target = 'on_hold';
+    if (!stateMachine.canTransition(order.status, target)) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'INVALID_TRANSITION', message: `Cannot move from ${order.status} to ${target}` }
+      });
+    }
+
+    const rejecter = await resolveActor(req.user, 'management');
+    const now = new Date().toISOString();
+    let newStatus = order.status;
+
+    await db.transaction(async () => {
+      const moved = await setOrderStatus(order.id, order.status, target, now);
+      newStatus = moved.status;
+
+      await db.prepare('UPDATE orders SET exception_reason = ?, updated_at = ? WHERE id = ?')
+        .run(String(reason).trim(), now, order.id);
+
+      await logEvent({
+        orderId: order.id,
+        eventType: 'MANAGEMENT_REJECTED',
+        oldStatus: order.status,
+        newStatus,
+        actorId: rejecter.id,
+        actorName: rejecter.name,
+        notes: `Rejected by Management: ${String(reason).trim()}`,
+        metadata: { reason: String(reason).trim() }
+      });
+
+      await notify({
+        orderId: order.id,
+        recipientIds: [order.medrep_id].filter(Boolean),
+        message: `Order ${order.getmeds_order_id} was rejected by Management: ${String(reason).trim()}`,
+        eventType: 'MANAGEMENT_REJECTED',
+        orderData: { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: newStatus, medrep_email: order.medrep_email }
+      });
+    })();
+
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    res.json({ success: true, data: { order: updatedOrder, status: newStatus } });
+  } catch (err) { next(err); }
+};
+
+// ─── SEND BACK FOR RESUBMISSION (Sep 7, 2026) ──────────────────────────────
+//
+// A third outcome alongside approve()/reject() above: the order isn't wrong
+// enough to reject outright, it just needs a fix (wrong division, a typo'd
+// address, a bad line item) — so instead of putting it on hold indefinitely,
+// Management sends it back to 'draft'. The order keeps its
+// getmeds_order_id; the MedRep (or Management, via updateDetails/updateItems
+// below) edits it and resubmits, which runs it through this exact approval
+// gate again from the top. Reason is required for the same reason it's
+// required on reject() — it's what the MedRep acts on.
+exports.sendBack = async (req, res, next) => {
+  try {
+    const { reason } = req.body || {};
+    if (!String(reason || '').trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'A reason is required — it tells the MedRep what to fix.' }
+      });
+    }
+
+    const order = await db.prepare(`
+      SELECT o.*, u.name as medrep_name, u.email as medrep_email
+      FROM orders o
+      LEFT JOIN users u ON o.medrep_id = u.id
+      WHERE o.id = ?
+    `).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+
+    if (order.status !== 'pending_management_approval') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_AWAITING_APPROVAL', message: `This order is at "${order.status}", not awaiting Management approval.` }
+      });
+    }
+
+    const target = 'draft';
+    if (!stateMachine.canTransition(order.status, target)) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'INVALID_TRANSITION', message: `Cannot move from ${order.status} to ${target}` }
+      });
+    }
+
+    const sender = await resolveActor(req.user, 'management');
+    const now = new Date().toISOString();
+    let newStatus = order.status;
+
+    await db.transaction(async () => {
+      const moved = await setOrderStatus(order.id, order.status, target, now);
+      newStatus = moved.status;
+
+      // Sep 7, 2026: reuses exception_reason as the "what needs fixing" note
+      // — same column reject() writes to, same reasoning: one obvious place
+      // to look on the order for why it isn't moving forward. Cleared
+      // automatically the next time this order is submitted (see submit()'s
+      // gate and create()'s isMedRepDirectSubmit branch — neither writes
+      // exception_reason, so a resubmit doesn't carry a stale reason
+      // forward once Management approves it).
+      await db.prepare('UPDATE orders SET exception_reason = ?, updated_at = ? WHERE id = ?')
+        .run(String(reason).trim(), now, order.id);
+
+      await logEvent({
+        orderId: order.id,
+        eventType: 'MANAGEMENT_SENT_BACK',
+        oldStatus: order.status,
+        newStatus,
+        actorId: sender.id,
+        actorName: sender.name,
+        notes: `Sent back for resubmission by Management: ${String(reason).trim()}`,
+        metadata: { reason: String(reason).trim() }
+      });
+
+      await notify({
+        orderId: order.id,
+        recipientIds: [order.medrep_id].filter(Boolean),
+        message: `Order ${order.getmeds_order_id} was sent back by Management for changes: ${String(reason).trim()}`,
+        eventType: 'MANAGEMENT_SENT_BACK',
+        orderData: { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: newStatus, medrep_email: order.medrep_email }
+      });
+    })();
+
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    res.json({ success: true, data: { order: updatedOrder, status: newStatus } });
+  } catch (err) { next(err); }
+};
+
+// ─── EDIT ORDER DETAILS (Sep 7, 2026) ──────────────────────────────────────
+//
+// updateItems() above already lets the line items be corrected before Zoho
+// exists for an order — this is the same idea for everything else on the
+// order: delivery/intake fields, Division, Sub-division, Salesperson.
+// Same precondition (order.zoho_so_id must still be null — once a real Zoho
+// Sales Order exists, editing here would silently desync from it) and same
+// ownership rule as updateItems (a MedRep may edit only their own order;
+// Management/admin may edit any). Scoped to 'draft' and
+// 'pending_management_approval' — editing an order already past the gate
+// makes no sense since Zoho already has (or is about to have) the record.
+//
+// Deliberately does NOT allow changing customer_id, medrep_id, or
+// customer_type here — each has its own cascading implications (Zoho
+// contact id, Salesperson/Division resolution, the whole payment-vs-dispatch
+// branch) that this endpoint isn't the place to re-derive. Those need a
+// fresh order (cancel and recreate), not an edit.
+//
+// PATCH /api/orders/:id/details — body: any subset of the editable fields
+// below. Only fields actually present in the body are validated and
+// changed; omitted fields are left alone (partial update, not a full
+// replace) — a caller that only wants to fix the Division doesn't have to
+// resend everything else.
+exports.updateDetails = async (req, res, next) => {
+  try {
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    // Sep 7, 2026: same ownership rule as updateItems.
+    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
+    }
+    if (order.zoho_so_id) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'ALREADY_SYNCED',
+          message: 'This order already has a Zoho Sales Order (' + (order.zoho_so_number || order.zoho_so_id) +
+            ') — details can no longer be edited here, since Zoho\'s own record would then be out of date.'
+        }
+      });
+    }
+    if (!['draft', 'pending_management_approval'].includes(order.status)) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'CONFLICT', message: `Order is at "${order.status}" — details can only be edited while draft or awaiting Management approval.` }
+      });
+    }
+
+    const clean = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
+    const isManagement = ['management', 'admin'].includes((req.user.role || '').toLowerCase());
+    const ALLOWED_INVOICING_FROM = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
+    const body = req.body || {};
+
+    // Column name -> [request field name, validator-or-null]. Only fields
+    // actually present in the request body are touched.
+    const EDITABLE = {
+      delivery_address: 'delivery_address',
+      delivery_notes: 'delivery_notes',
+      intake_doctor: 'doctor_name',
+      intake_receiver: 'receiver_name',
+      intake_contact_no: 'receiver_contact_no',
+      intake_source: 'order_source',
+      intake_delivery_method: 'delivery_method',
+      intake_terms: 'terms',
+      intake_payment_terms: 'payment_terms',
+      invoicing_from: 'invoicing_from',
+      sub_division: 'sub_division'
+    };
+
+    const updates = {};
+    const changedSummary = [];
+
+    if (Object.prototype.hasOwnProperty.call(body, 'delivery_address') && !clean(body.delivery_address)) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'delivery_address cannot be blank' } });
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'invoicing_from') && clean(body.invoicing_from) && !ALLOWED_INVOICING_FROM.includes(clean(body.invoicing_from))) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: `invoicing_from must be one of: ${ALLOWED_INVOICING_FROM.join(', ')}` }
+      });
+    }
+
+    // Sep 5, 2026 (4)'s rule, unchanged here: Division/Salesperson are only
+    // ever settable by Management — a MedRep's own account still drives
+    // theirs, exactly like at create(). A MedRep sending these fields is
+    // silently ignored rather than refused, same belt-and-braces reasoning
+    // create() already uses for medrep_id/division/salesperson.
+    let effectiveDivisionForSubDivision = order.division;
+    if (isManagement && Object.prototype.hasOwnProperty.call(body, 'division')) {
+      const cleanDivision = clean(body.division);
+      if (cleanDivision !== null) {
+        if (!DIVISIONS.includes(cleanDivision)) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'VALIDATION_ERROR', message: `division must be one of: ${DIVISIONS.join(', ')}` }
+          });
+        }
+        updates.division = cleanDivision;
+        effectiveDivisionForSubDivision = cleanDivision;
+        changedSummary.push(`Division: ${order.division || '(none)'} → ${cleanDivision}`);
+      }
+    }
+
+    if (isManagement && Object.prototype.hasOwnProperty.call(body, 'salesperson')) {
+      const cleanSalesperson = clean(body.salesperson);
+      if (cleanSalesperson !== null) {
+        const verification = await salespersonService.verify(cleanSalesperson);
+        if (verification.checked && !verification.exists) {
+          return res.status(400).json({
+            success: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `"${cleanSalesperson}" is not a Salesperson Zoho recognizes. Pick one from the suggestions list.`
+            }
+          });
+        }
+        const resolvedSalesperson = (verification.checked && verification.matchedName) ? verification.matchedName : cleanSalesperson;
+        updates.salesperson = resolvedSalesperson;
+        changedSummary.push(`Salesperson: ${order.salesperson || '(none)'} → ${resolvedSalesperson}`);
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'sub_division')) {
+      const cleanSub = clean(body.sub_division);
+      if (cleanSub !== null) {
+        const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[effectiveDivisionForSubDivision];
+        if (subDivisionOptions && !subDivisionOptions.includes(cleanSub)) {
+          return res.status(400).json({
+            success: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `Sub-division for ${effectiveDivisionForSubDivision} must be one of: ${subDivisionOptions.join(', ')}`
+            }
+          });
+        }
+        updates.sub_division = cleanSub;
+        changedSummary.push(`Sub-division: ${order.sub_division || '(none)'} → ${cleanSub}`);
+      }
+    }
+
+    for (const [column, field] of Object.entries(EDITABLE)) {
+      if (column === 'invoicing_from' || column === 'sub_division') continue; // handled above
+      if (!Object.prototype.hasOwnProperty.call(body, field)) continue;
+      const value = clean(body[field]);
+      updates[column] = value;
+      changedSummary.push(`${field}: ${order[column] || '(none)'} → ${value || '(none)'}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'invoicing_from')) {
+      const value = clean(body.invoicing_from);
+      updates.invoicing_from = value;
+      changedSummary.push(`invoicing_from: ${order.invoicing_from || '(none)'} → ${value || '(none)'}`);
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'No editable fields were sent' } });
+    }
+
+    const now = new Date().toISOString();
+    const effectiveActor = await resolveActor(req.user, req.user.role === 'medrep' ? 'medrep' : 'management');
+
+    await db.transaction(async () => {
+      const setClause = Object.keys(updates).map((col) => `${col} = ?`).join(', ');
+      await db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`)
+        .run(...Object.values(updates), now, order.id);
+
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ORDER_DETAILS_EDITED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: effectiveActor.id,
+        actorName: effectiveActor.name,
+        notes: `Order details changed before this order was sent to Zoho — ${changedSummary.join('; ')}.`,
+        metadata: { changes: updates }
+      });
+    })();
+
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({ success: true, data: { order: updatedOrder } });
   } catch (err) { next(err); }
 };
 

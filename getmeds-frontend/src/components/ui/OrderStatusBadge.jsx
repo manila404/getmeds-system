@@ -5,6 +5,12 @@ const statusStyles = {
   draft: 'bg-slate-100 text-slate-700 border border-slate-300',
   DRAFT: 'bg-slate-100 text-slate-700 border border-slate-300',
 
+  // Sep 7, 2026: a MedRep-submitted order waiting on Management, before
+  // anything has reached Zoho. Deliberately the SAME purple as
+  // ready_for_finance_verified — both mean "a human decision in this app is
+  // what's blocking this order" — but distinguishable by its label.
+  pending_management_approval: 'bg-purple-50 text-purple-800 border border-purple-300 font-semibold',
+
   // Pending / Warning (Amber)
   submitted: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
   validating: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
