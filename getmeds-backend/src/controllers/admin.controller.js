@@ -1,11 +1,27 @@
 const db = require('../db/database');
 const bcrypt = require('bcryptjs');
 const zohoRetryService = require('../services/zohoRetryService');
+// Sep 9, 2026: reuse the same Division/Sub-division enums and validation
+// register() already enforces on public sign-up — see auth.controller.js's
+// DIVISIONS comment for why this is an enum (a free-typed division created
+// junk Salespersons in the live Zoho org before Sep 5).
+const { DIVISIONS, SUB_DIVISIONS_BY_DIVISION } = require('./auth.controller');
 
 // Get all users with their roles
 const getAllUsers = async (req, res, next) => {
   try {
-    const users = await db.prepare('SELECT id, name, email, role, is_active, created_at FROM users ORDER BY name').all();
+    // Sep 9, 2026: approval_status comes back too, and pending accounts sort
+    // FIRST. A list that buries three people waiting for approval among eighty
+    // alphabetised names is a queue nobody works.
+    const users = await db
+      .prepare(
+        `SELECT id, name, email, role, is_active, created_at,
+                approval_status, approved_at, approved_by,
+                display_name, division, sub_division, salesperson
+           FROM users
+          ORDER BY (approval_status = 'pending') DESC, name`
+      )
+      .all();
     const enriched = users.map(u => ({
       ...u,
       username: u.email ? u.email.split('@')[0] : `user_${u.id}`,
@@ -41,16 +57,60 @@ const deactivateUser = async (req, res, next) => {
 };
 
 // Create a new user
+//
+// Sep 9, 2026: this used to insert only (name, email, password_hash, role) —
+// no Division/Sub-division/Salesperson mapping at all. `users.salesperson`
+// is a GENERATED column ("<division> | <display name>", see
+// auth.controller.js), so an admin-created medrep account had no Salesperson
+// and Zoho rejected their very first order at submit — the same class of bug
+// this session already fixed for sign-up. Mirrors register()'s handling of
+// the same fields (first/middle/last name, display name, division,
+// sub-division), rather than inventing a second set of rules for the same
+// data.
 const create = async (req, res, next) => {
   try {
+    const str = (v) => (typeof v === 'string' ? v.trim() : '');
+
     const { name, email, password, role } = req.body;
-    if (!name || !email || !password || !role) {
+    const firstName = str(req.body.first_name);
+    const middleName = str(req.body.middle_name);
+    const lastName = str(req.body.last_name);
+    const division = str(req.body.division);
+    const subDivision = str(req.body.sub_division);
+    // Admin form may send a single `name`, or first/last like Sign-Up does —
+    // support both rather than forcing this form to change shape.
+    const displayName = str(req.body.display_name) || str(name) || [firstName, lastName].filter(Boolean).join(' ');
+
+    if (!displayName || !email || !password || !role) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'name, email, password, role required' } });
     }
     const valid_roles = ['medrep', 'finance', 'dispatch', 'management', 'admin'];
-    if (!valid_roles.includes(role.toLowerCase())) {
+    const normalizedRole = role.toLowerCase();
+    if (!valid_roles.includes(normalizedRole)) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `role must be one of: ${valid_roles.join(', ')}` } });
     }
+
+    // A medrep with no Division has no Salesperson and cannot place an
+    // order — same requirement register() enforces, since register() only
+    // ever creates medreps. Other roles never raise an order as themselves
+    // (Management orders on someone else's behalf — see orders.controller.js's
+    // gmLeadId note — Finance/Dispatch/Admin never do), so Division stays
+    // optional for them; validated below if given, but not required.
+    if (normalizedRole === 'medrep' && !division) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'division is required for a medrep account' } });
+    }
+
+    // Same fixed-list validation register() applies — see DIVISIONS'
+    // comment in auth.controller.js. Only checked when a division was
+    // actually given, so non-medrep accounts created without one aren't
+    // refused for omitting a field they don't need.
+    if (division && !DIVISIONS.includes(division)) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `Division must be one of: ${DIVISIONS.join(', ')}` } });
+    }
+    // Sep 9, 2026: sub-division is NOT validated — it is free text and may
+    // name more than one, matching sign-up, Profile Settings and the order
+    // form. See auth.controller.js's register() for why.
+
     // Sep 5, 2026: normalize to lowercase before storing — seed.js,
     // create-user.js and the public sign-up endpoint all already do this;
     // this was the one path that didn't, so an admin-created account could
@@ -62,8 +122,34 @@ const create = async (req, res, next) => {
     if (existing) return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'Email already in use' } });
 
     const hash = bcrypt.hashSync(password, 10);
-    const result = await db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)').run(name, normalizedEmail, hash, role.toLowerCase());
-    const user = await db.prepare('SELECT id, name, email, role, is_active, created_at FROM users WHERE id = ?').get(result.lastInsertRowid);
+    // `salesperson` is absent from this INSERT on purpose — it is a
+    // GENERATED column and the database refuses to be told what it should
+    // contain (see the identical note on register()'s INSERT).
+    const result = await db
+      .prepare(
+        `INSERT INTO users
+           (name, email, password_hash, role, first_name, middle_name, last_name, display_name, division, sub_division)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        displayName,
+        normalizedEmail,
+        hash,
+        normalizedRole,
+        firstName || null,
+        middleName || null,
+        lastName || null,
+        displayName,
+        division || null,
+        subDivision || null
+      );
+    const user = await db
+      .prepare(
+        `SELECT id, name, email, role, is_active, approval_status, created_at, first_name, middle_name,
+                last_name, display_name, division, sub_division, salesperson
+         FROM users WHERE id = ?`
+      )
+      .get(result.lastInsertRowid);
     res.status(201).json({ success: true, data: { user } });
   } catch (err) {
     if (next) next(err);
@@ -81,7 +167,7 @@ const update = async (req, res, next) => {
     if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
     if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
 
-    const updated = await db.prepare('SELECT id, name, email, role, is_active, created_at FROM users WHERE id = ?').get(user.id);
+    const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at FROM users WHERE id = ?').get(user.id);
     res.json({ success: true, data: { user: updated } });
   } catch (err) {
     if (next) next(err);
@@ -121,10 +207,98 @@ const retryZohoQueue = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/admin/users/:id/approve — let a self-service sign-up in.
+ *
+ * Sep 9, 2026. POST /api/auth/register now creates an account with
+ * approval_status 'pending' and issues no token, so nobody who signs up can do
+ * anything until this runs. See schema.pg.sql for why approval_status is its
+ * own column rather than a reuse of is_active.
+ *
+ * Idempotent: approving an already-approved account is a reported no-op, not a
+ * 409. An admin double-clicking a button is not an error, and the outcome they
+ * wanted is already true.
+ */
+const approveUser = async (req, res, next) => {
+  try {
+    const user = await db
+      .prepare('SELECT id, name, email, approval_status FROM users WHERE id = ?')
+      .get(req.params.id);
+    if (!user) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
+    }
+
+    if (user.approval_status === 'approved') {
+      return res.json({ success: true, data: { user, changed: false } });
+    }
+
+    await db
+      .prepare("UPDATE users SET approval_status = 'approved', approved_at = ?, approved_by = ? WHERE id = ?")
+      .run(new Date().toISOString(), req.user.id, user.id);
+
+    const updated = await db
+      .prepare('SELECT id, name, email, role, is_active, approval_status, approved_at, approved_by FROM users WHERE id = ?')
+      .get(user.id);
+
+    res.json({ success: true, data: { user: updated, changed: true } });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/admin/users/:id/reject — refuse a sign-up.
+ *
+ * Sep 9, 2026. Distinct from Deactivate, which switches off an account that
+ * WAS approved. Both block the login; only this one records that the sign-up
+ * was never accepted, which is what an admin reading the list a month later
+ * needs to be able to tell.
+ *
+ * The row is kept rather than deleted, on purpose. The email stays taken, so
+ * the same person signing up again gets "an account with that email already
+ * exists" rather than quietly creating a second pending account — and the
+ * decision stays on the record.
+ *
+ * Refuses to reject an ALREADY-APPROVED account: that is a Deactivate, and
+ * doing something adjacent to what was asked is how an admin ends up surprised
+ * by their own user list.
+ */
+const rejectUser = async (req, res, next) => {
+  try {
+    const user = await db
+      .prepare('SELECT id, name, email, approval_status FROM users WHERE id = ?')
+      .get(req.params.id);
+    if (!user) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
+    }
+
+    if (user.approval_status === 'approved') {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'ALREADY_APPROVED',
+          message: 'This account has already been approved — use Deactivate to switch it off instead.'
+        }
+      });
+    }
+
+    await db
+      .prepare("UPDATE users SET approval_status = 'rejected', approved_at = ?, approved_by = ? WHERE id = ?")
+      .run(new Date().toISOString(), req.user.id, user.id);
+
+    const updated = await db
+      .prepare('SELECT id, name, email, role, is_active, approval_status, approved_at, approved_by FROM users WHERE id = ?')
+      .get(user.id);
+
+    res.json({ success: true, data: { user: updated } });
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   getAllUsers,
   getAll: getAllUsers,
   deactivateUser,
+  // Sep 9, 2026: the sign-up approval queue — see the handlers above.
+  approveUser,
+  rejectUser,
   create,
   update,
   getZohoQueue,

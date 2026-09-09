@@ -395,8 +395,30 @@ class LiveZohoAdapter extends ZohoAdapter {
     if (orderData.sub_division) {
       customFields.push({ customfield_id: '2254168002003349006', value: orderData.sub_division });
     }
+    // Sep 8, 2026 (3): "GM Lead ID" — confirmed live via Zoho_Books
+    // list_custom_fields (entity=salesorder) that this org already has
+    // cf_gm_lead_id configured (field_id 2254168000497964391, plain text,
+    // not mandatory). Carries the identity of whichever admin/management
+    // account created this order on someone's behalf — the same value the
+    // order form's "Admin" field shows, previously never sent to Zoho at
+    // all (see orders.controller.js's gmLeadId note). Blank/omitted for an
+    // order a MedRep created themselves, same "don't send an empty
+    // overwrite" convention as every other custom field here.
+    if (orderData.gm_lead_id) {
+      customFields.push({ customfield_id: '2254168000497964391', value: orderData.gm_lead_id });
+    }
     if (customFields.length) {
       body.custom_fields = customFields;
+    }
+
+    // Sep 9, 2026: Expected Shipment Date. `shipment_date` is a standard
+    // top-level Sales Order field in Zoho Books — it is even returned by the
+    // List Sales Orders endpoint — so no custom field is involved. Omitted
+    // entirely when blank, the same convention as every optional field here:
+    // an omitted field leaves Zoho's own default alone rather than writing an
+    // empty string over it.
+    if (orderData.expected_shipment_date) {
+      body.shipment_date = orderData.expected_shipment_date;
     }
 
     const result = await this._request('POST', '/salesorders', { body });
@@ -421,9 +443,41 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorders: (result.salesorders || []).slice(0, perPage) };
   }
 
-  async listSalesOrders(params = {}) {
-    const result = await this._request('GET', '/salesorders', { query: params });
-    return { code: 0, message: 'success', salesorders: result.salesorders || [] };
+  /**
+   * Every Sales Order in the org.
+   *
+   * Sep 9, 2026: this used to be a single un-paginated GET — one page, so at
+   * most 200 Sales Orders however many the org actually has, with nothing to
+   * say the rest existed. That is the same bug _paginatedList was written for
+   * on Aug 27 for contacts and items (see its doc comment); listSalesOrders
+   * simply never got the same treatment, because until the bulk import
+   * arrived its only caller was a demo script that read five.
+   *
+   * Now it goes through the same walk as contacts and items, which also gets
+   * it the stable created_time ordering, the onPage progress callback and the
+   * sinceWatermark Quick Sync mode for free.
+   */
+  async listSalesOrders(params = {}, opts = {}) {
+    const { records: salesorders, truncated, newWatermark, stoppedEarly } = await this._paginatedList(
+      '/salesorders',
+      'salesorders',
+      params,
+      opts
+    );
+    return { code: 0, message: 'success', salesorders, truncated, newWatermark, stoppedEarly };
+  }
+
+  /**
+   * GET /salesorders/{id}/comments — Zoho's own "Comments & History" log for
+   * one Sales Order. See ZohoAdapter.listSalesOrderComments for why this
+   * exists and why it is still not a write.
+   *
+   * Not run through _paginatedList: this is one order's history, tens of
+   * entries at the very most, and Zoho returns it whole.
+   */
+  async listSalesOrderComments(salesorderId) {
+    const result = await this._request('GET', `/salesorders/${salesorderId}/comments`);
+    return { code: 0, message: 'success', comments: result.comments || [] };
   }
 
   /**
@@ -571,7 +625,11 @@ class LiveZohoAdapter extends ZohoAdapter {
     const seen = new Set();
     const deduped = [];
     for (const record of all) {
-      const id = record.contact_id || record.item_id || record.id;
+      // Sep 9, 2026: salesorder_id added when listSalesOrders started
+      // going through this walk — without it every Sales Order fell to the
+      // `record.id` fallback, which Zoho's Sales Order objects do not have,
+      // so the de-duplication silently did nothing for them.
+      const id = record.contact_id || record.item_id || record.salesorder_id || record.id;
       if (id && seen.has(id)) continue;
       if (id) seen.add(id);
       deduped.push(record);
@@ -657,6 +715,101 @@ class LiveZohoAdapter extends ZohoAdapter {
     const result = await this._request('GET', '/salespersons');
     const salespersons = result.data || result.salespersons || [];
     return { code: 0, message: 'success', salespersons };
+  }
+
+  /**
+   * Write EXACTLY ONE custom field — `cf_tin` — on an existing Zoho
+   * contact. See ZohoAdapter.js's Sep 8, 2026 note for why this narrow
+   * exception to the create-only policy exists.
+   *
+   * `customfield_id` 2254168001928321297 is the TIN field on this exact
+   * org, confirmed live via Zoho_Books list_custom_fields (entity=contact):
+   * api_name `cf_tin`, label "TIN", data_type string. The request body
+   * below carries `custom_fields` with only that one entry — Zoho's Update
+   * a Contact API only touches the fields present in the body, so nothing
+   * else about the contact (name, address, type, ...) is ever sent or
+   * changed by this call.
+   */
+  async updateContactTin(contactId, tin) {
+    if (!contactId) throw new Error('updateContactTin requires a Zoho contact id');
+    const value = String(tin || '').trim();
+    if (!value) throw new Error('updateContactTin requires a non-empty tin value');
+
+    const body = {
+      custom_fields: [{ customfield_id: '2254168001928321297', value }]
+    };
+    const result = await this._request('PUT', `/contacts/${contactId}`, { body });
+    return { code: 0, message: 'Contact TIN updated successfully', contact: result.contact };
+  }
+
+  /**
+   * Add ONE file to an existing Zoho Sales Order's "Attach File(s)"
+   * section. See ZohoAdapter.js's Sep 8, 2026 (2) note for why this narrow,
+   * add-only exception exists.
+   *
+   * POST /salesorders/{salesorder_id}/attachment, multipart/form-data with
+   * field name "attachment" — Zoho's Sales Order attachment endpoint isn't
+   * fully documented publicly, but this exact path/field-name shape is
+   * confirmed against Zoho's documented Invoice attachment endpoint
+   * (POST /invoices/{invoice_id}/attachment), and Zoho's attachment API is
+   * consistent across Books/Inventory modules. NOT yet confirmed live
+   * against an image file on THIS org — do that before relying on this in
+   * production (see the doc this shipped with for the exact test to run).
+   *
+   * Bypasses this._request() deliberately: that helper always sends
+   * Content-Type: application/json, which is wrong for a multipart upload
+   * — fetch needs to set its own boundary header from the FormData body.
+   */
+  async addSalesOrderAttachment(salesorderId, file) {
+    if (!salesorderId) throw new Error('addSalesOrderAttachment requires a Zoho Sales Order id');
+    const { buffer, filename, contentType } = file || {};
+    if (!buffer || !buffer.length) throw new Error('addSalesOrderAttachment requires non-empty file data');
+
+    this._assertOrgAllowed();
+    const token = await this.getAccessToken();
+    const params = new URLSearchParams({ organization_id: this.organizationId });
+    const url = `${this.baseUrl}/salesorders/${salesorderId}/attachment?${params.toString()}`;
+
+    const form = new FormData();
+    form.append(
+      'attachment',
+      new Blob([buffer], { type: contentType || 'application/octet-stream' }),
+      filename || 'attachment'
+    );
+
+    this._log(
+      `[ZOHO_${this._modeLabel.toUpperCase()}] POST /salesorders/${salesorderId}/attachment ` +
+        `(org=${this.organizationId}, file=${filename || 'attachment'})`
+    );
+
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        // No Content-Type here on purpose — fetch derives the multipart
+        // boundary from the FormData body itself; setting it manually
+        // would break the boundary and Zoho would reject the upload.
+        headers: { Authorization: `Zoho-oauthtoken ${token}` },
+        body: form,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      });
+    } catch (err) {
+      // Not retried, same reasoning as createSalesOrder's POST: a network
+      // error here doesn't say whether Zoho received the file, and this is
+      // a soft-gated best-effort call from the caller's side anyway (see
+      // paymentProof.controller.js) — a human can just re-open the order
+      // and the local attachment is never lost either way.
+      throw describeNetworkError(err, url, 'POST');
+    }
+
+    const json = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const err = new Error(json.message || `Zoho API error (HTTP ${resp.status})`);
+      err.zohoResponse = json;
+      err.httpStatus = resp.status;
+      throw err;
+    }
+    return { code: 0, message: 'Attachment added successfully', document: json.document || json };
   }
 }
 

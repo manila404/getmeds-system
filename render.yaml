@@ -1,22 +1,47 @@
 # Render Blueprint for the Getmeds backend.
 #
-# Render reads this on "New > Blueprint" and provisions the service, the disk
-# and the environment for you — the browser equivalent of the Oracle setup
-# script, without the Linux administration.
+# Render reads this on "New > Blueprint" and provisions the service and the
+# environment for you.
 #
-# Two settings here are load-bearing and easy to get wrong by hand:
+# Sep 9, 2026: rewritten for the current architecture. The previous version
+# of this file predates the Postgres port (Sep 2) — it mounted a persistent
+# disk for a SQLite file that no longer exists in production and ran
+# `npm run migrate`, the SQLite migration runner. The database is now
+# Supabase Postgres, reached over the network like from Vercel, so there is
+# no disk to provision here; `npm run migrate:pg` is the correct migration
+# runner.
 #
-#   plan: starter    The free plan has NO persistent disk and spins down after
-#                    15 minutes idle. Both are fatal here: the database is a
-#                    file, and zohoAutoSyncService is a setInterval that dies
-#                    with the process. $7/month buys a disk and a process that
-#                    stays alive.
+# Why move off Vercel at all, when Vercel already talks to the same Supabase
+# database: `server.js` starts two `setInterval` loops after `app.listen()`
+# (zohoAutoSyncService, zohoRetryService), and Vercel's serverless functions
+# never call `app.listen()` — there is no long-lived process for a loop to
+# run in. That's also why Vercel Hobby's cron is capped at once a day and
+# `.github/workflows/getmeds-cron.yml` exists as a 15-minute external
+# workaround. Render's `type: web` service is a real, persistent process:
+# once this is live, `node server.js` runs the original 5-minute in-process
+# auto-sync loop for real, and the GitHub Actions cron workaround becomes a
+# redundant safety net rather than the primary mechanism — safe to leave
+# running (the endpoints take a DB-backed lease, see cronLock.js, so calling
+# them while the in-process loop is also running never double-reconciles),
+# or retire once this has been live for a few days without incident.
 #
-#   numInstances: 1  Not a cost decision. zohoAutoSyncService's overlap guard,
-#                    the signup rate limiter and the salesperson cache are all
-#                    in-memory and per-process. A second instance means two
-#                    sync loops walking the same orders and double the Zoho API
-#                    budget, with no guard between them.
+# One setting here is still load-bearing and easy to get wrong by hand:
+#
+#   plan: starter    Render's free plan spins the process down after 15
+#                    minutes idle. That silently kills both background
+#                    loops above, and the next request pays a cold-start
+#                    delay besides. $7/month buys a process that stays
+#                    alive, same reasoning as the old SQLite-era comment
+#                    here, just no disk needed for it now.
+#
+#   numInstances: 1  Not a cost decision. zohoAutoSyncService's overlap
+#                    guard and the signup rate limiter are in-memory and
+#                    per-process. A second instance means two sync loops
+#                    walking the same orders and double the Zoho API
+#                    budget, with no guard between them (unlike the
+#                    GitHub Actions cron path, which is safe to run
+#                    concurrently only because of cronLock.js's DB lease —
+#                    the in-process loop has no such lease).
 services:
   - type: web
     name: getmeds-api
@@ -29,31 +54,41 @@ services:
 
     buildCommand: npm ci --omit=dev
 
-    # Migrate on every boot rather than at build time: the disk is mounted at
-    # runtime, not during the build, so a build-time migration would write to
-    # ephemeral storage and be thrown away. migrate.js is idempotent — it adds
-    # only what is missing — so running it each start is safe and means a
-    # deploy can never come up against an un-migrated database.
-    startCommand: npm run migrate && node server.js
+    # migrate:pg is idempotent — it adds only what is missing — so running it
+    # on every boot is safe and means a deploy can never come up against an
+    # un-migrated database. It talks to Postgres over the network, so unlike
+    # the old SQLite `disk:` setup there is nothing here that depends on
+    # *when* it runs relative to a disk being mounted.
+    startCommand: npm run migrate:pg && node server.js
 
     healthCheckPath: /api/health
-
-    disk:
-      name: getmeds-data
-      # Mounted somewhere neutral and pointed at with GETMEDS_DB_DIR, rather
-      # than mounted over the repo's own data/ directory. That variable exists
-      # already (db/database.js honours it), and this way the mount path does
-      # not depend on where Render happens to check the repo out.
-      mountPath: /var/data
-      sizeGB: 1
 
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 4000
-      - key: GETMEDS_DB_DIR
-        value: /var/data
+
+      # sync: false means "ask me in the dashboard, never store it in git".
+      #
+      # IMPORTANT — use the SESSION pooler connection string here
+      # (aws-<region>.pooler.supabase.com:5432), NOT the transaction pooler
+      # (:6543) that Vercel's DATABASE_URL uses. Transaction mode is for
+      # serverless specifically (one connection per function instance) and
+      # does not support every statement type; migrate.pg.js warns if it
+      # sees :6543. Render is a persistent process, so it should connect the
+      # same way `migrate:pg` and `pg_dump` already do — see
+      # SUPABASE_MIGRATION.md's connection-string table if this needs
+      # re-deriving later. Reuse the SAME Supabase project Vercel already
+      # points at; this only changes which host talks to it, not the data.
+      #
+      # Deliberately NOT setting PGPOOL_MAX here — src/db/pg.js defaults it
+      # to 10 whenever process.env.VERCEL is unset (true on Render), which
+      # is the right pool size for one persistent process. The Vercel side's
+      # PGPOOL_MAX=1 is a serverless-specific workaround and should stay
+      # only in Vercel's own env vars, not copied here.
+      - key: DATABASE_URL
+        sync: false
 
       - key: ZOHO_MODE
         value: live
@@ -73,18 +108,22 @@ services:
       - key: SIGNUP_ALLOWED_EMAIL_DOMAINS
         value: getmeds.ph
 
-      # Exact-match allowlist. Set this to your Vercel production URL with no
-      # trailing slash. Preview deployments get their own URLs and will be
-      # refused unless added — intentional; a wildcard on a public API is what
-      # we removed.
+      # Exact-match allowlist. Set this to your frontend's production URL
+      # (Vercel, wherever it ends up living) with no trailing slash. Preview
+      # deployments get their own URLs and will be refused unless added —
+      # intentional; a wildcard on a public API is what was removed.
       - key: CORS_ALLOWED_ORIGINS
         sync: false
 
-      # sync: false means "ask me in the dashboard, never store it in git".
-      # Generate JWT_SECRET and ZOHO_WEBHOOK_SECRET fresh for production
-      # rather than reusing the laptop's — a secret that has lived on a
-      # development machine is a weaker secret. `npm run secrets:init` locally
-      # will print a pair you can paste, or use any CSPRNG.
+      # Generate JWT_SECRET and ZOHO_WEBHOOK_SECRET fresh for this service
+      # rather than reusing Vercel's or the laptop's — a secret that has
+      # lived in more than one place, one of them a development machine, is
+      # a weaker secret. `npm run secrets:init` locally will print a pair
+      # you can paste, or use any CSPRNG. If Zoho's webhook config already
+      # points at the Vercel URL with the Vercel secret, update both the URL
+      # and the header value together when cutting over — a mismatch here
+      # fails closed (401), which is correct but will look like the webhook
+      # "stopped working" until both sides match again.
       - key: JWT_SECRET
         sync: false
       - key: ZOHO_WEBHOOK_SECRET

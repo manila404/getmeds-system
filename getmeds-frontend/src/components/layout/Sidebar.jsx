@@ -18,6 +18,7 @@ import {
   FlaskConical,
   BarChart3,
   Layers,
+  Zap,
   PanelLeftClose,
   PanelLeftOpen
 } from 'lucide-react';
@@ -103,7 +104,13 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       badge: 'Admin',
       badgeClass: 'bg-slate-900 text-white',
       links: [
+        // Sep 9, 2026: admin raises orders from the MedRep Pipeline section's
+        // "Create New Order" above — it is the same form and the same route,
+        // so a second entry here would be two links to one page.
         { to: '/admin/users', icon: <Users size={18} />, label: 'User Management' },
+        // Sep 9, 2026: the Zoho sync retry outbox — was API-only until now,
+        // see ZohoSyncHealthPage.jsx.
+        { to: '/admin/zoho-sync', icon: <Zap size={18} />, label: 'Zoho Sync Health' },
         { to: '/test-mode', icon: <FlaskConical size={18} />, label: 'Test Mode Hub' }
       ]
     }
@@ -157,11 +164,18 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   } else if (role === 'admin') {
     mainLinks.push(
       { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
+      // Sep 9, 2026: admin can raise an order too, on the same form and with
+      // the same MedRep / Division / Salesperson controls management has —
+      // see orders.controller.js's resolveOrderMedrep.
+      { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
       { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
       { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
       { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' },
-      { to: '/admin/users', icon: <Users size={19} />, label: 'User Management' }
+      { to: '/admin/users', icon: <Users size={19} />, label: 'User Management' },
+      // Sep 9, 2026: the Zoho sync retry outbox — was API-only until now,
+      // see ZohoSyncHealthPage.jsx.
+      { to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' }
     );
     secondaryLinks.push(
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }

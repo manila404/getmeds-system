@@ -23,7 +23,8 @@ import {
   UserRound,
   FlaskConical,
   Building2,
-  ShieldCheck
+  ShieldCheck,
+  Plus
 } from 'lucide-react';
 import { useDebug } from '../../context/DebugContext';
 import { useAuth } from '../../hooks/useAuth';
@@ -55,7 +56,42 @@ const SOURCE_OPTIONS = [
   'Patient order referred by patient',
   'Emergency purchase',
   'Hospital PO',
-  'Distributor order'
+  'Distributor order',
+  // Sep 9, 2026: the assistance-programme sources the hospital flow uses.
+  // Kept in this same list rather than a separate hospital-only one — the
+  // Source field is one field with one set of answers, and splitting it would
+  // mean a MedRep who picked the wrong customer category sees the wrong menu.
+  'PAP-DSWD'
+];
+
+/**
+ * Sep 9, 2026: which customer categories put the form into its hospital
+ * variant — Doctor Name and GL Number required, a receiver type to pick, and
+ * four specific attachments before it will submit.
+ *
+ * Driven by `customers.category`, the local classification tag set from the
+ * Clients Directory. A customer with no category behaves as an ordinary one;
+ * that is the right default, since an untagged customer is far more likely to
+ * be a plain client than a hospital nobody has classified yet.
+ */
+const HOSPITAL_CATEGORIES = ['hospital'];
+
+/**
+ * The attachments a hospital order cannot be submitted without.
+ *
+ * The list is the requirement itself, so the checklist on screen and the
+ * submit gate can never disagree — they both read this.
+ */
+const HOSPITAL_REQUIRED_ATTACHMENTS = [
+  { value: 'gl',            label: 'Guarantee Letter (GL)' },
+  { value: 'prescription',  label: 'Prescription' },
+  { value: 'payment_proof', label: 'Proof of Payment' },
+  { value: 'id',            label: 'Valid ID' },
+];
+
+const RECEIVER_TYPES = [
+  { value: 'patient',        label: 'Patient' },
+  { value: 'representative', label: 'Representative' },
 ];
 
 // Exactly the two legal entities orders may be invoiced under — enforced
@@ -105,12 +141,18 @@ const SUB_DIVISIONS_BY_DIVISION = {
 // DIVISIONS exactly. Only used for Management's manual Division override
 // below (myDivision/divisionOverride) — a MedRep never sees this list,
 // their Division stays a read-only mirror of their own account.
+// Sep 9, 2026: '2MG Incorporated', 'Office of the President', 'PCSO', 'DSWD'
+// and 'GrabMart' removed at the user's request. Verified against the live
+// database first: no user and no order carried any of the five, so nothing
+// existing is stranded on a value this list no longer accepts.
+//
+// That check matters because `division` has no CHECK constraint — the column
+// keeps whatever was written to it, and validation happens only on the way in
+// (auth.controller.js at sign-up/profile, orders.controller.js at create and
+// at PATCH /:id/details). A row already holding a removed value would keep
+// working everywhere except the next save, which would then refuse it with
+// "division must be one of ..." for a value the account already has.
 const DIVISIONS = [
-  '2MG Incorporated',
-  'GrabMart',
-  'Office of the President',
-  'PCSO',
-  'DSWD',
   'B&B',
   'B2B',
   'B2C',
@@ -319,6 +361,17 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   const [invoicingFrom, setInvoicingFrom] = useState('');
   const [termsAndConditions, setTermsAndConditions] = useState('');
   const [paymentTerms, setPaymentTerms] = useState('');
+
+  // ── Sep 9, 2026: Master Form fields ────────────────────────────────────────
+  //
+  // `isDoctor` is deliberately '' (unanswered) rather than defaulting to Yes
+  // or No — it is a required question, and a default would mean most orders
+  // silently carry whichever answer happened to be pre-selected.
+  const [isDoctor, setIsDoctor] = useState('');
+  const [expectedShipmentDate, setExpectedShipmentDate] = useState('');
+  const [customerTin, setCustomerTin] = useState('');
+  const [glNumber, setGlNumber] = useState('');
+  const [receiverType, setReceiverType] = useState('');
   // UI-only for now — files are listed here but never uploaded anywhere
   // (see the mapping doc: Zoho's `documents` field needs each file already
   // uploaded to Zoho first, which isn't built yet). Kept purely so the form
@@ -349,6 +402,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // about attachments in general, so an 'other'-only staged list still needs
   // a reason.
   const hasStagedProof = stagedAttachments.some(a => a.fileType === 'payment_proof');
+
 
   // "Sales Order Date (Automatic Today)" — fixed to today, never editable.
   // The server independently stamps this the same way on save, so this is
@@ -388,6 +442,39 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // longer a full list to look it up in.
   const [selectedCustomer, setSelectedCustomer] = useState(null);
 
+  // ── Sep 9, 2026: the hospital variant of this form ─────────────────────────
+  //
+  // One selected customer decides it. Everything downstream — which fields are
+  // required, which attachments are demanded, what the review screen shows —
+  // reads these three, so there is one definition of "this is a hospital
+  // order" rather than a category check repeated at each site.
+  //
+  // Declared HERE, immediately after `selectedCustomer`, and not up with the
+  // other derived values near the top of this component. `const` is not
+  // hoisted the way `var` is: reading `selectedCustomer` above its own
+  // declaration throws "Cannot access 'selectedCustomer' before
+  // initialization" and takes the whole form down with it. That is a RUNTIME
+  // error — the bundler compiles it happily — so the only thing that catches
+  // it is opening the page.
+  const isHospitalOrder = HOSPITAL_CATEGORIES.includes(
+    String(selectedCustomer?.category || '').toLowerCase()
+  );
+
+  const stagedTypes = new Set(stagedAttachments.map(a => a.fileType));
+  // Computed from HOSPITAL_REQUIRED_ATTACHMENTS rather than listed again, so
+  // the checklist on screen and the submit gate can never disagree.
+  const missingHospitalAttachments = isHospitalOrder
+    ? HOSPITAL_REQUIRED_ATTACHMENTS.filter(t => !stagedTypes.has(t.value))
+    : [];
+
+  // Doctor Name is always required, but only typed when the customer is NOT
+  // the doctor. When they are, the field is the customer's own name — asking
+  // someone to retype what is already on screen is how a form gets a typo
+  // instead of an answer.
+  const effectiveDoctorName = isDoctor === 'yes'
+    ? (selectedCustomer?.name || '')
+    : doctorName;
+
   // Sep 2, 2026: "raise this order as…" — TEST_MODE + admin only.
   //
   // In Test Mode an admin passes every role gate, so they can reach this
@@ -421,7 +508,16 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // (4) note on the backend). Left blank, the order is attributed to the
   // Management account itself, and Division/Salesperson below become
   // manual fields instead of a read-only mirror of an account.
-  const isManagementUser = (user?.role || '').toLowerCase() === 'management';
+  // Sep 9, 2026: renamed from isManagementUser and widened to include admin.
+  //
+  // Every branch this gates asks the same underlying question — "is this order
+  // being raised from the back office rather than by the MedRep it belongs
+  // to?" — and admin answers it identically to management: their own account
+  // has no Division and no Salesperson, so they pick a MedRep or type both
+  // manually, and the "no proof of payment, say why" prompt is not aimed at
+  // them. Naming it after one role was what made an admin's version of this
+  // form silently behave like a MedRep's.
+  const isBackOffice = ['management', 'admin'].includes((user?.role || '').toLowerCase());
   // Sep 5, 2026 (4): Zoho's own known Salesperson names, for the manual
   // Salesperson field below — same gate as medrepOptions above (server
   // decides via `enabled`), so this is empty for anyone who can't use it.
@@ -472,7 +568,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // onBehalfOf audit note), never the Salesperson; the Salesperson is
   // always the picked MedRep, or one Management types manually below.
   const isTestCustomerSelected = !!selectedCustomer && testCustomerGateEnabled;
-  const mySalesperson = ((actingMedrep ? actingMedrep.salesperson : (isManagementUser ? '' : user?.salesperson)) || '').trim();
+  const mySalesperson = ((actingMedrep ? actingMedrep.salesperson : (isBackOffice ? '' : user?.salesperson)) || '').trim();
   const displaySalesPerson =
     mySalesperson || (isTestCustomerSelected ? 'TEST | MEDREP' : 'Not set');
 
@@ -483,8 +579,8 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // has picked one, otherwise the logged-in account (MedRep only — see the
   // Sep 7 (4) note above) — because the backend reads all three from one
   // user row and the screen must not imply otherwise.
-  const myDivision = ((actingMedrep ? actingMedrep.division : (isManagementUser ? '' : user?.division)) || '').trim();
-  const mySubDivision = ((actingMedrep ? actingMedrep.sub_division : (isManagementUser ? '' : user?.sub_division)) || '').trim();
+  const myDivision = ((actingMedrep ? actingMedrep.division : (isBackOffice ? '' : user?.division)) || '').trim();
+  const mySubDivision = ((actingMedrep ? actingMedrep.sub_division : (isBackOffice ? '' : user?.sub_division)) || '').trim();
 
   // Sep 5, 2026 (4): Division and Salesperson, manually typed — Management
   // ONLY (a MedRep's own account values above are never overridden; these
@@ -508,7 +604,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // Sub-division options below exactly like the backend's effectiveDivision
   // feeds its own Sub-division check, so the two never disagree about which
   // branch list applies.
-  const effectiveDivision = isManagementUser ? (divisionOverride || myDivision) : myDivision;
+  const effectiveDivision = isBackOffice ? (divisionOverride || myDivision) : myDivision;
 
   // Sep 5, 2026 (3): Sub-division is editable ON THIS ORDER, by whoever is
   // raising it — medrep or management — unlike Division and Salesperson,
@@ -568,6 +664,16 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     setDeliveryAddress(c.address || '');
     setReceiverName(c.contact_person || '');
     setReceiverContactNo(c.contact_number || '');
+    // Sep 9, 2026: the TIN comes with the customer when Zoho has one. Editable
+    // when it does not — Zoho refuses a Sales Order for a business-subtype
+    // contact with an empty TIN, so the MedRep supplying it here is what
+    // unblocks the order (orders.controller.js writes it through to the
+    // contact before creating the Sales Order).
+    setCustomerTin(c.tin || '');
+    // Answers that were about the PREVIOUS customer. Left standing, "Is
+    // Doctor: Yes" from one customer would silently carry onto the next.
+    setIsDoctor('');
+    setDoctorName('');
 
     // Aug 27, 2026: Zoho's bulk contact sync (customers.controller.js's
     // syncFromZoho) never receives billing_address — Zoho's List Contacts
@@ -602,6 +708,13 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     selectedCustomerIdRef.current = '';
     setCustomerId('');
     setSelectedCustomer(null);
+    // Sep 9, 2026: clear what belonged to that customer, for the same reason
+    // handleCustomerChange resets them — see the note there.
+    setCustomerTin('');
+    setIsDoctor('');
+    setDoctorName('');
+    setGlNumber('');
+    setReceiverType('');
     setIsFetchingZohoAddress(false);
   };
 
@@ -661,8 +774,17 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     'application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,' +
     'application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
+  // Sep 9, 2026: 'gl', 'prescription' and 'id' added for the hospital
+  // (PAP/DSWD) intake. Available on every order, not only hospital ones — a
+  // prescription is a prescription whoever the customer is, and hiding the
+  // option would mean tagging it 'other' and losing the distinction.
+  // Mirrors FILE_TYPES in paymentProof.controller.js and the CHECK in
+  // schema.pg.sql; a value here that those reject fails at upload.
   const ATTACHMENT_TYPES = [
     { value: 'payment_proof',  label: 'Proof of Payment' },
+    { value: 'gl',             label: 'Guarantee Letter (GL)' },
+    { value: 'prescription',   label: 'Prescription' },
+    { value: 'id',             label: 'Valid ID' },
     { value: 'purchase_order', label: 'Purchase Order' },
     { value: 'other',          label: 'Other' },
   ];
@@ -807,6 +929,17 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     deliveryAddress.trim() &&
     orderSource &&
     invoicingFrom &&
+    // Sep 9, 2026: the Master Form's own required set. Same standing as Source
+    // and Invoicing From above — a client-side UX guarantee, deliberately NOT
+    // enforced by POST /api/orders, which would otherwise reject every other
+    // caller of that endpoint including the test suite.
+    paymentTerms.trim() &&
+    expectedShipmentDate &&
+    deliveryNotes.trim() &&
+    isDoctor &&
+    effectiveDoctorName.trim() &&
+    // Hospital-only, and only when the customer actually is one.
+    (!isHospitalOrder || (glNumber.trim() && receiverType && missingHospitalAttachments.length === 0)) &&
     items.length > 0 &&
     items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0) &&
     // Sep 4, 2026: a proof of payment, or a reason there is none. Never neither,
@@ -818,10 +951,15 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     // tagged payment_proof" — an 'other'-only staged list still needs a
     // reason, same as an empty one.
     // Sep 5, 2026 (2): management is exempt from this entirely — the "no
-    // proof, say why" field is not shown to them at all (see isManagementUser
+    // proof, say why" field is not shown to them at all (see isBackOffice
     // below and the Field it gates), so there is nothing here for them to
     // fill in and this requirement must not block their submission.
-    (isManagementUser || hasStagedProof ||
+    // Sep 9, 2026: a hospital order requires a Proof of Payment outright (it is
+    // in HOSPITAL_REQUIRED_ATTACHMENTS), so the "or say why there isn't one"
+    // escape does not apply to it — including for management, who are
+    // otherwise exempt from this rule entirely.
+    (isHospitalOrder ||
+      isBackOffice || hasStagedProof ||
       (Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim()))))
     // Sep 5, 2026 (4): management picking a MedRep here used to be
     // required (see the Sep 5 removal note on resolveOrderMedrep on the
@@ -852,12 +990,17 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     const creditCust = customers.find(c => c.type === 'credit') || customers[0];
     handleCustomerChange(creditCust);
     setDeliveryAddress(creditCust.address || "St. Luke's Medical Center - 279 E Rodriguez Sr. Ave, Quezon City");
-    setDeliveryNotes('');
+    setDeliveryNotes('Auto-filled test order — no special handling instructions.');
     setDeliveryMethod('Lalamove');
+    setIsDoctor('no');
     setDoctorName('Dr. Test');
     setOrderSource('Patient order referred by doctor');
     setInvoicingFrom('2mg Incorporated');
     setTermsAndConditions('');
+    // Sep 9, 2026: the Master Form's own required fields, so this button still
+    // produces a form that can actually be submitted.
+    setPaymentTerms('30 days');
+    setExpectedShipmentDate(new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10));
 
     const testProduct = products.find(p => p.sku === 'GM-4533')
       || products.find(p => /hydroxyget/i.test(p.name || ''))
@@ -884,10 +1027,14 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     setDeliveryAddress(directCust.address || "Unit 402, Greenhills Tower, San Juan, Metro Manila");
     setDeliveryNotes('Direct Patient Order. Advance payment verification required before dispatch.');
     setDeliveryMethod('Grab Express');
-    setDoctorName('');
+    setIsDoctor('no');
+    setDoctorName('Dr. Test');
     setOrderSource('Patient order referred by patient');
     setInvoicingFrom('2mg Incorporated');
     setTermsAndConditions('Full payment required prior to dispatch.');
+    // See the note on the credit auto-fill above.
+    setPaymentTerms('30 days');
+    setExpectedShipmentDate(new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10));
 
     const sampleItems = [];
     if (products.length >= 1) {
@@ -939,9 +1086,26 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         // Optional intake fields — see IntakeRow-era comment history in
         // orders.controller.js. Blank strings are normalized to NULL
         // server-side.
-        doctor_name: doctorName,
+        // Sep 9, 2026: `effectiveDoctorName`, not `doctorName` — when the
+        // customer IS the doctor their own name is the answer, and sending the
+        // empty typed field would record no doctor at all on exactly the
+        // orders that most clearly have one.
+        doctor_name: effectiveDoctorName,
         receiver_name: receiverName,
         receiver_contact_no: receiverContactNo,
+        // ── Sep 9, 2026: Master Form fields ──────────────────────────────────
+        expected_shipment_date: expectedShipmentDate || null,
+        is_doctor: isDoctor === 'yes' ? true : isDoctor === 'no' ? false : null,
+        // Written through to the customer record and to Zoho's cf_tin
+        // (best-effort) before the Sales Order is created — see
+        // orders.controller.js. Sent on every order, and a no-op server-side
+        // when unchanged.
+        customer_tin: customerTin.trim() || null,
+        // Hospital-only fields, and only sent for a hospital order: a GL
+        // Number left over in state from a customer the MedRep then changed
+        // away from must not ride along on an ordinary order.
+        gl_number: isHospitalOrder ? (glNumber.trim() || null) : null,
+        receiver_type: isHospitalOrder ? (receiverType || null) : null,
         order_source: orderSource,
         delivery_method: deliveryMethod,
         terms: termsAndConditions,
@@ -965,8 +1129,8 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         // from anyone else, same belt-and-braces reasoning as medrep_id
         // above). Blank is treated the same as "not sent" server-side, so
         // there's no separate "clear it" affordance needed here either.
-        ...(isManagementUser && divisionOverride.trim() ? { division: divisionOverride.trim() } : {}),
-        ...(isManagementUser && salespersonOverride.trim() ? { salesperson: salespersonOverride.trim() } : {})
+        ...(isBackOffice && divisionOverride.trim() ? { division: divisionOverride.trim() } : {}),
+        ...(isBackOffice && salespersonOverride.trim() ? { salesperson: salespersonOverride.trim() } : {})
       });
       const order = createRes.data.data.order;
 
@@ -1036,11 +1200,30 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // field on the form.
   const filledIntakeDetails = [
     { label: 'Delivery Method', value: deliveryMethod },
-    { label: 'Doctor', value: doctorName },
+    { label: 'Payment Terms', value: paymentTerms },
+    // Sep 9, 2026: the Master Form fields, shown on the review screen for the
+    // same reason every other field is — a value that is never read back
+    // before submission is a value nobody checks.
+    { label: 'Expected Shipment', value: expectedShipmentDate },
+    { label: 'Doctor', value: effectiveDoctorName },
+    { label: 'Customer is the doctor', value: isDoctor === 'yes' ? 'Yes' : isDoctor === 'no' ? 'No' : '' },
+    { label: 'TIN', value: customerTin },
+    // Hospital-only, and only when it applies — an empty "GL Number: —" row on
+    // every ordinary order is noise that trains people to skip this list.
+    ...(isHospitalOrder
+      ? [
+          { label: 'GL Number', value: glNumber },
+          {
+            label: 'Receiver Type',
+            value: (RECEIVER_TYPES.find(r => r.value === receiverType) || {}).label || ''
+          }
+        ]
+      : []),
     { label: 'Receiver', value: receiverName },
     { label: 'Contact No.', value: receiverContactNo },
+    { label: 'Customer Remarks', value: deliveryNotes },
     { label: 'Terms & Conditions', value: termsAndConditions }
-  ].filter(f => f.value && f.value.trim());
+  ].filter(f => f.value && String(f.value).trim());
 
   return (
     <div className="space-y-6">
@@ -1094,77 +1277,57 @@ const OrderForm = ({ onCancel, onSuccess }) => {
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-visible">
         <form onSubmit={handleOpenReview} className="divide-y divide-slate-100">
 
-          {/* SECTION 1: ORDER DETAILS */}
+          {/* ── SECTION 1: GENERAL MEDREP ──────────────────────────────────
+              Sep 9, 2026: split out of what used to be one "1. Order Details"
+              section holding everything.
+
+              What belongs here is exactly what a MedRep does NOT fill in:
+              Salesperson, Division and Sub-division come from the ordering
+              account, and the MedRep picker above them is the control that
+              decides WHICH account that is. Grouping them separates "who is
+              this order from" from "what is being ordered and for whom",
+              which is the order the form is now read in. */}
           <div className="p-6 sm:p-8 space-y-5">
             <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100">
               <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
-                <ClipboardList size={16} />
+                <UserRound size={16} />
               </div>
-              <h2 className="text-base font-bold text-ink-primary">1. Order Details</h2>
+              <h2 className="text-base font-bold text-ink-primary">1. General MedRep</h2>
             </div>
-
-            <Field label="Customer Name" required>
-              <CustomerAutocomplete
-                selected={selectedCustomer}
-                onSelect={handleCustomerChange}
-                onClear={handleCustomerClear}
-                includeInactive={showInactiveCustomers}
-              />
-              {selectedCustomer && (
-                <p className="text-[11px] text-ink-secondary mt-1">
-                  {customerType === 'credit'
-                    ? 'Institutional terms — bypasses upfront payment, routes to Dispatch.'
-                    : 'Direct patient — requires Finance payment verification before picking.'}
-                </p>
-              )}
-              {/* Only offered when there is actually something behind it —
-                  a checkbox that reveals nothing is worse than no checkbox. */}
-              {(inactiveCustomerCount > 0 || showInactiveCustomers) && (
-                <label className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-ink-secondary cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={showInactiveCustomers}
-                    onChange={(e) => setShowInactiveCustomers(e.target.checked)}
-                    className="rounded border-slate-300 text-getmeds-blue focus:ring-getmeds-blue"
-                  />
-                  Show inactive clients
-                  {inactiveCustomerCount > 0 && ` (${inactiveCustomerCount})`}
-                  <span className="text-ink-secondary/70">— listed for reference, cannot be ordered for</span>
-                </label>
-              )}
-            </Field>
 
             {/* Sep 2, 2026: originally TEST_MODE + admin only.
                 Sep 5, 2026: also shown to management for the real (non-test)
-                pilot — see isManagementUser above and resolveOrderMedrep on
+                pilot — see isBackOffice above and resolveOrderMedrep on
                 the backend. Sits directly over the Salesperson field because
                 that is what it changes.
                 Sep 5, 2026 (4): no longer required for management — picking
                 a MedRep here, and the Division/Salesperson fields below,
                 are now three independently optional ways to say who/what
                 this order is for. Leaving all three blank simply attributes
-                the order to the Management account with no Division/
+                the order to the back-office account with no Division/
                 Salesperson, exactly as it would for any other role with
-                nothing set on their account. */}
+                nothing set on their account.
+                Sep 9, 2026: the second, amber "Test Mode only — raise this
+                order as the seeded MedRep account" variant of this block is
+                gone. It existed for admin, who could only reach this picker
+                in TEST_MODE; admin now has the same access management does in
+                normal mode, so `canPickMedrep` and `isBackOffice` are true for
+                exactly the same people and that branch could no longer
+                render. Kept as one styling, rather than a condition that
+                always takes the same side. */}
             {canPickMedrep && (
-              <div className={`rounded-lg border px-4 py-3 flex items-start gap-3 ${
-                isManagementUser
-                  ? 'border-getmeds-blue/30 bg-getmeds-blue/5'
-                  : 'border-amber-300 bg-amber-50'
-              }`}>
-                <FlaskConical size={16} className={`shrink-0 mt-0.5 ${isManagementUser ? 'text-getmeds-blue-dark' : 'text-amber-700'}`} />
+              <div className="rounded-lg border border-getmeds-blue/30 bg-getmeds-blue/5 px-4 py-3 flex items-start gap-3">
+                <FlaskConical size={16} className="shrink-0 mt-0.5 text-getmeds-blue-dark" />
                 <div className="flex-1 min-w-0">
-                  <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isManagementUser ? 'text-getmeds-blue-dark' : 'text-amber-900'}`}>
-                    {isManagementUser ? 'Create this order for' : 'Raise this order as'}
+                  <label className="block text-xs font-bold uppercase tracking-wide mb-1.5 text-getmeds-blue-dark">
+                    Create this order for
                   </label>
                   <select
                     value={actingMedrepId}
                     onChange={e => setActingMedrepId(e.target.value)}
                     className={inputClass}
                   >
-                    <option value="">
-                      {isManagementUser ? '— Select a MedRep (optional) —' : 'Default — the seeded MedRep account'}
-                    </option>
+                    <option value="">— Select a MedRep (optional) —</option>
                     {medrepOptions.map(m => (
                       <option key={m.id} value={m.id}>
                         {(m.display_name || m.name)}
@@ -1172,10 +1335,10 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                       </option>
                     ))}
                   </select>
-                  <p className={`text-[11px] mt-1.5 ${isManagementUser ? 'text-getmeds-blue-dark/80' : 'text-amber-900/80'}`}>
-                    {isManagementUser
-                      ? 'Optional. Picking a MedRep attributes the order to them and carries their Salesperson to Zoho. Leave it blank to set Division and/or Salesperson manually below instead — the audit trail always records that you created it.'
-                      : 'Test Mode only. The order is attributed to the MedRep you pick and carries their Salesperson to Zoho — the audit trail still records that you raised it.'}
+                  <p className="text-[11px] mt-1.5 text-getmeds-blue-dark/80">
+                    Optional. Picking a MedRep attributes the order to them and carries their Salesperson to Zoho.
+                    Leave it blank to set Division and/or Salesperson manually below instead — the audit trail
+                    always records that you created it.
                   </p>
                 </div>
               </div>
@@ -1220,15 +1383,16 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   difference that this one IS actually checked. */}
               <Field
                 label="Salesperson"
+                required
                 help={
-                  isManagementUser
+                  isBackOffice
                     ? 'Optional — must match a Salesperson Zoho already has. Blank falls back to the picked MedRep\'s own Salesperson, if any.'
                     : mySalesperson
                       ? 'From your account — sent as the Salesperson on the Zoho Sales Order.'
                       : 'Set from your Division and Display name at sign-up.'
                 }
               >
-                {isManagementUser ? (
+                {isBackOffice ? (
                   <SuggestField
                     value={salespersonOverride}
                     onChange={setSalespersonOverride}
@@ -1245,15 +1409,6 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 )}
               </Field>
 
-              <Field label="Delivery Method" help="Type to see suggestions, or enter your own.">
-                <SuggestField
-                  value={deliveryMethod}
-                  onChange={setDeliveryMethod}
-                  suggestions={DELIVERY_METHOD_SUGGESTIONS}
-                  placeholder="e.g. LBC, Grab Express, Own Rider"
-                />
-              </Field>
-
               {/* Sep 2, 2026: read-only for a MedRep — Division comes from
                   their account, not this form, because it also drives their
                   Salesperson, and changing it here without changing the
@@ -1265,13 +1420,14 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   here also drives the Sub-division list right below. */}
               <Field
                 label="Division"
+                required
                 help={
-                  isManagementUser
+                  isBackOffice
                     ? 'Optional — sent as Division on the Zoho Sales Order. Blank falls back to the picked MedRep\'s own Division, if any.'
                     : myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Set at sign-up.'
                 }
               >
-                {isManagementUser ? (
+                {isBackOffice ? (
                   <select
                     className={inputClass}
                     value={divisionOverride}
@@ -1329,38 +1485,102 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 )}
               </Field>
 
-              <Field label="Payment Terms" help="Type to see suggestions (matches Zoho's list), or enter your own.">
-                <SuggestField
-                  value={paymentTerms}
-                  onChange={setPaymentTerms}
-                  suggestions={PAYMENT_TERMS_SUGGESTIONS}
-                  placeholder="e.g. Net 15, 30 days"
-                />
-              </Field>
-
-              <Field label="Doctor Name" help="Manual entry — suggestions pulled from customers tagged as doctors.">
-                <SuggestField
-                  value={doctorName}
-                  onChange={setDoctorName}
-                  suggestions={doctorSuggestions}
-                  placeholder="Referring / prescribing doctor"
-                />
-              </Field>
-
-              <Field label="Source" required>
-                <select value={orderSource} onChange={e => setOrderSource(e.target.value)} className={inputClass} required>
-                  <option value="">-- Select source --</option>
-                  {SOURCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                </select>
-              </Field>
-
-              <Field label="Invoicing From" required help="Determines which entity this order is invoiced under.">
-                <select value={invoicingFrom} onChange={e => setInvoicingFrom(e.target.value)} className={inputClass} required>
-                  <option value="">-- Select invoicing entity --</option>
-                  {INVOICING_FROM_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                </select>
-              </Field>
             </div>
+          </div>
+
+          {/* ── SECTION 2: CUSTOMER DETAILS ────────────────────────────────
+              Everything about who the order is FOR and where it goes, in the
+              order the Master Form specifies: name, shipment, payment terms,
+              source, doctor, invoicing entity, remarks, expected shipment. */}
+          <div className="p-6 sm:p-8 space-y-5 border-t border-slate-100">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100">
+              <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
+                <Building2 size={16} />
+              </div>
+              <h2 className="text-base font-bold text-ink-primary">2. Customer Details</h2>
+            </div>
+
+            <Field label="Customer Name" required>
+              <CustomerAutocomplete
+                selected={selectedCustomer}
+                onSelect={handleCustomerChange}
+                onClear={handleCustomerClear}
+                includeInactive={showInactiveCustomers}
+              />
+              {selectedCustomer && (
+                <p className="text-[11px] text-ink-secondary mt-1">
+                  {customerType === 'credit'
+                    ? 'Institutional terms — bypasses upfront payment, routes to Dispatch.'
+                    : 'Direct patient — requires Finance payment verification before picking.'}
+                </p>
+              )}
+              {/* Only offered when there is actually something behind it —
+                  a checkbox that reveals nothing is worse than no checkbox. */}
+              {(inactiveCustomerCount > 0 || showInactiveCustomers) && (
+                <label className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-ink-secondary cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={showInactiveCustomers}
+                    onChange={(e) => setShowInactiveCustomers(e.target.checked)}
+                    className="rounded border-slate-300 text-getmeds-blue focus:ring-getmeds-blue"
+                  />
+                  Show inactive clients
+                  {inactiveCustomerCount > 0 && ` (${inactiveCustomerCount})`}
+                  <span className="text-ink-secondary/70">— listed for reference, cannot be ordered for</span>
+                </label>
+              )}
+
+              {/* Sep 9, 2026: placeholder for "the customer isn't in Zoho yet".
+                  Deliberately inert — creating a contact is a Zoho WRITE, and
+                  this app's adapter has no method that can create one on
+                  purpose (see ZohoAdapter.js). Shown disabled rather than
+                  omitted so the gap is visible where it will be filled, and so
+                  nobody wires a half-built create into the order form by
+                  accident. */}
+              <button
+                type="button"
+                disabled
+                title="Not built yet — new customers are still created in Zoho directly."
+                className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-lg border border-dashed border-slate-300 text-ink-secondary cursor-not-allowed opacity-70"
+              >
+                <Plus size={12} /> Add new customer
+              </button>
+              <span className="ml-2 text-[11px] text-ink-secondary">
+                Coming soon — create the customer in Zoho, then sync from the Clients page.
+              </span>
+
+              {isHospitalOrder && (
+                <p className="mt-2 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200 text-[11px] font-semibold">
+                  🏥 Hospital order — Doctor Name, GL Number, receiver type and four attachments are required below.
+                </p>
+              )}
+            </Field>
+
+            {/* Sep 9, 2026: TIN. Auto-filled from the customer when Zoho has
+                one; typed here when it does not, because Zoho REFUSES to
+                create a Sales Order for a business-subtype contact with an
+                empty TIN. What is typed here is written to the CONTACT before
+                the Sales Order is created (orders.controller.js), not just
+                onto the order — otherwise supplying it would not actually fix
+                the thing it exists to fix. */}
+            {selectedCustomer && (
+              <Field
+                label="TIN"
+                help={
+                  selectedCustomer.tin
+                    ? 'From this customer’s Zoho record.'
+                    : 'Zoho has no TIN for this customer. Zoho rejects Sales Orders for business accounts without one — entering it here saves it to the customer too.'
+                }
+              >
+                <input
+                  type="text"
+                  value={customerTin}
+                  onChange={(e) => setCustomerTin(e.target.value)}
+                  placeholder="000-000-000-000"
+                  className={inputClass}
+                />
+              </Field>
+            )}
 
             {/* Delivery mini-section — kept alongside the fields above since
                 Dispatch depends on an actual address to ship credit orders to. */}
@@ -1389,27 +1609,173 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   <input type="tel" value={receiverContactNo} onChange={e => setReceiverContactNo(e.target.value)} placeholder="09XXXXXXXXX" className={inputClass} />
                 </Field>
               </div>
+
+              {/* Sep 9, 2026: hospital-only, and here rather than up with
+                  Source/Invoicing From — the Guarantee Letter and who collects
+                  the delivery are both facts about the shipment, and reading
+                  them next to the address is how anyone checking a hospital
+                  order actually reads them. */}
+              {isHospitalOrder && (
+                <>
+                  <Field label="GL Number" required help="Guarantee Letter reference — e.g. the GL number issued by DSWD.">
+                    <input
+                      type="text"
+                      value={glNumber}
+                      onChange={(e) => setGlNumber(e.target.value)}
+                      placeholder="e.g. GL-2026-00123"
+                      className={inputClass}
+                      required
+                    />
+                  </Field>
+
+                  <Field label="Receiver" required help="Who physically receives the delivery.">
+                    <select
+                      value={receiverType}
+                      onChange={(e) => setReceiverType(e.target.value)}
+                      className={inputClass}
+                      required
+                    >
+                      <option value="">-- Select receiver --</option>
+                      {RECEIVER_TYPES.map((r) => (
+                        <option key={r.value} value={r.value}>{r.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                </>
+              )}
             </div>
 
-            <Field label="Remarks">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <Field label="Payment Terms" required help="Type to see suggestions (matches Zoho's list), or enter your own.">
+                <SuggestField
+                  value={paymentTerms}
+                  onChange={setPaymentTerms}
+                  suggestions={PAYMENT_TERMS_SUGGESTIONS}
+                  placeholder="e.g. Net 15, 30 days"
+                />
+              </Field>
+
+              <Field label="Source" required>
+                <select value={orderSource} onChange={e => setOrderSource(e.target.value)} className={inputClass} required>
+                  <option value="">-- Select source --</option>
+                  {SOURCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </select>
+              </Field>
+
+              {/* Sep 9, 2026: is the customer themselves the prescribing
+                  doctor? Starts unanswered on purpose — a default here would
+                  mean most orders quietly carry whichever answer happened to
+                  be pre-selected rather than one somebody gave. */}
+              <Field label="Is the customer the doctor?" required>
+                <div className="flex items-center gap-4 pt-1.5">
+                  {[{ v: 'yes', l: 'Yes' }, { v: 'no', l: 'No' }].map(({ v, l }) => (
+                    <label key={v} className="inline-flex items-center gap-1.5 text-sm text-ink-primary cursor-pointer select-none">
+                      <input
+                        type="radio"
+                        name="is-doctor"
+                        value={v}
+                        checked={isDoctor === v}
+                        onChange={() => setIsDoctor(v)}
+                        className="text-getmeds-blue focus:ring-getmeds-blue"
+                      />
+                      {l}
+                    </label>
+                  ))}
+                </div>
+              </Field>
+
+              {/* Answered Yes, the doctor IS the customer, so the name is
+                  already known and shown rather than retyped — retyping what
+                  is on screen produces typos, not answers. Answered No, it has
+                  to be supplied. Required either way; a hospital order can
+                  never be Yes in practice, which is why the hospital rule
+                  needs no separate clause for it. */}
+              <Field
+                label="Doctor Name"
+                required
+                help={
+                  isDoctor === 'yes'
+                    ? 'The selected customer is the doctor.'
+                    : 'Referring / prescribing doctor — suggestions pulled from customers tagged as doctors.'
+                }
+              >
+                {isDoctor === 'yes' ? (
+                  <input
+                    type="text"
+                    value={effectiveDoctorName}
+                    readOnly
+                    className={`${inputClass} bg-slate-50 text-ink-secondary cursor-not-allowed`}
+                  />
+                ) : (
+                  <SuggestField
+                    value={doctorName}
+                    onChange={setDoctorName}
+                    suggestions={doctorSuggestions}
+                    placeholder="Referring / prescribing doctor"
+                  />
+                )}
+              </Field>
+
+              <Field label="Invoicing From" required help="Determines which entity this order is invoiced under.">
+                <select value={invoicingFrom} onChange={e => setInvoicingFrom(e.target.value)} className={inputClass} required>
+                  <option value="">-- Select invoicing entity --</option>
+                  {INVOICING_FROM_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </select>
+              </Field>
+
+              <Field label="Delivery Method" help="Type to see suggestions, or enter your own.">
+                <SuggestField
+                  value={deliveryMethod}
+                  onChange={setDeliveryMethod}
+                  suggestions={DELIVERY_METHOD_SUGGESTIONS}
+                  placeholder="e.g. LBC, Grab Express, Own Rider"
+                />
+              </Field>
+
+            </div>
+
+            {/* Sep 9, 2026: renamed from "Remarks" and now required. Same
+                column (delivery_notes) — this is what actually reaches
+                Dispatch, and "no special instructions" is worth saying
+                explicitly rather than leaving as a blank nobody can tell from
+                an unfilled form. */}
+            <Field label="Customer Remarks" required>
               <textarea
                 value={deliveryNotes}
                 onChange={e => setDeliveryNotes(e.target.value)}
-                placeholder="e.g. Attn: Dr. Santos, Room 302. Handle with cold chain packaging..."
+                placeholder="e.g. Attn: Dr. Santos, Room 302. Handle with cold chain packaging. Write 'None' if there are no special instructions."
                 rows={2}
                 className={`${inputClass} resize-y`}
+                required
+              />
+            </Field>
+
+            {/* Sep 9, 2026: last in this section, and on its own row rather
+                than back in the grid above — the Master Form's sequence puts
+                it after Customer Remarks, and a date input is the one field
+                here people reliably forget when it is buried mid-grid. */}
+            {/* Sep 9, 2026: Expected Shipment Date. The one new field here
+                that reaches Zoho — it maps to the Sales Order's own
+                `shipment_date` (see LiveZohoAdapter.createSalesOrder). */}
+            <Field label="Expected Shipment Date" required help="Sent to Zoho as the Sales Order's expected shipment date.">
+              <input
+                type="date"
+                value={expectedShipmentDate}
+                onChange={(e) => setExpectedShipmentDate(e.target.value)}
+                className={inputClass}
+                required
               />
             </Field>
           </div>
 
-          {/* SECTION 2: ORDER ITEMS (PRODUCT AUTOCOMPLETE + CART) */}
+          {/* SECTION 3: ORDER DETAILS (PRODUCT AUTOCOMPLETE + CART) */}
           <div className="p-6 sm:p-8 space-y-5 overflow-visible">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
               <div className="flex items-center gap-2.5">
                 <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
                   <Package size={16} />
                 </div>
-                <h2 className="text-base font-bold text-ink-primary">2. Order Items <span className="text-state-error">*</span></h2>
+                <h2 className="text-base font-bold text-ink-primary">3. Order Details <span className="text-state-error">*</span></h2>
               </div>
               <span className="text-xs font-semibold text-ink-secondary">
                 {items.length} {items.length === 1 ? 'item' : 'items'} in requisition
@@ -1548,24 +1914,20 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             )}
           </div>
 
-          {/* SECTION 3: TERMS & ATTACHMENTS */}
+          {/* ── SECTION 4: ATTACHMENTS ──────────────────────────────────────
+              Sep 9, 2026: was one "3. Terms & Attachments" section with Terms
+              first. Split, and reordered, to match the Master Form's sequence
+              — attachments then terms. Attachments lead because they are the
+              part that can BLOCK submission (a hospital order needs four of
+              them; every other order needs a proof of payment or a stated
+              reason), and Terms & Conditions is free text that never does. */}
           <div className="p-6 sm:p-8 space-y-5">
             <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100">
               <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
-                <FileText size={16} />
+                <Paperclip size={16} />
               </div>
-              <h2 className="text-base font-bold text-ink-primary">3. Terms & Attachments</h2>
+              <h2 className="text-base font-bold text-ink-primary">4. Attachments</h2>
             </div>
-
-            <Field label="Terms and Conditions">
-              <textarea
-                value={termsAndConditions}
-                onChange={e => setTermsAndConditions(e.target.value)}
-                placeholder="Payment terms, return policy, or any conditions attached to this order..."
-                rows={3}
-                className={`${inputClass} resize-y`}
-              />
-            </Field>
 
             {/* Sep 4, 2026: proof of payment, replacing the dead "Attach
                 File(s)" control that used to sit here and discard whatever was
@@ -1579,10 +1941,42 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 its own. */}
             <Field
               label="Attach File(s) to Sales Order"
-              help={isManagementUser
+              help={isBackOffice
                 ? "A deposit slip, transfer screenshot, purchase order, or any other file worth attaching. Tag each as Proof of Payment, Purchase Order, or Other — Finance only reviews Proof of Payment files when they verify the order for invoicing."
                 : "A deposit slip, transfer screenshot, purchase order, or any other file worth attaching. Tag each as Proof of Payment, Purchase Order, or Other — Finance only reviews Proof of Payment files when they verify the order for invoicing. If there's no proof of payment yet, say why below."}
             >
+              {/* Sep 9, 2026: the hospital checklist. Driven by
+                  HOSPITAL_REQUIRED_ATTACHMENTS and the staged files' own tags,
+                  so what is shown here and what the submit gate enforces are
+                  literally the same computation — a checklist that can say
+                  "all four attached" while the button stays disabled is worse
+                  than no checklist. */}
+              {isHospitalOrder && (
+                <div className="mb-3 rounded-xl border border-indigo-200 bg-indigo-50/60 p-3">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-900 mb-2">
+                    Required for a hospital order
+                  </p>
+                  <ul className="space-y-1">
+                    {HOSPITAL_REQUIRED_ATTACHMENTS.map((t) => {
+                      const attached = stagedTypes.has(t.value);
+                      return (
+                        <li
+                          key={t.value}
+                          className={`flex items-center gap-1.5 text-xs ${attached ? 'text-pharmacy-green-dark font-semibold' : 'text-indigo-900'}`}
+                        >
+                          {attached ? <CheckCircle size={13} /> : <AlertCircle size={13} className="text-indigo-400" />}
+                          {t.label}
+                          {!attached && <span className="text-indigo-500">— not attached yet</span>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <p className="mt-2 text-[11px] text-indigo-800">
+                    Attach each file below and tag it with the matching type in the dropdown next to it.
+                  </p>
+                </div>
+              )}
+
               {stagedAttachments.length > 0 && (
                 <div className="space-y-2 mb-3">
                   {stagedAttachments.map((a) => (
@@ -1665,7 +2059,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 </label>
               </div>
 
-              {!hasStagedProof && !isManagementUser && (
+              {!hasStagedProof && !isBackOffice && !isHospitalOrder && (
                 <div className="mt-4">
                   <label className="block text-xs font-semibold text-ink-primary mb-1.5">
                     No proof of payment? Say why <span className="text-state-error">*</span>
@@ -1700,6 +2094,29 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   )}
                 </div>
               )}
+            </Field>
+          </div>
+
+          {/* ── SECTION 5: TERMS & CONDITIONS ───────────────────────────────
+              Sep 9, 2026: its own section now — see the note on Attachments
+              above. Free text, never required, and last because that is where
+              the Master Form puts it. */}
+          <div className="p-6 sm:p-8 space-y-5">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100">
+              <div className="w-7 h-7 rounded-md bg-getmeds-blue/15 flex items-center justify-center text-getmeds-blue">
+                <FileText size={16} />
+              </div>
+              <h2 className="text-base font-bold text-ink-primary">5. Terms &amp; Conditions</h2>
+            </div>
+
+            <Field label="Terms and Conditions">
+              <textarea
+                value={termsAndConditions}
+                onChange={e => setTermsAndConditions(e.target.value)}
+                placeholder="Payment terms, return policy, or any conditions attached to this order..."
+                rows={3}
+                className={`${inputClass} resize-y`}
+              />
             </Field>
           </div>
 
@@ -1774,7 +2191,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
             <div className="flex justify-between items-center">
               <span className="text-xs text-ink-secondary font-medium">Salesperson:</span>
               <span className="font-medium text-ink-primary">
-                {(isManagementUser ? salespersonOverride.trim() : '') || displaySalesPerson}
+                {(isBackOffice ? salespersonOverride.trim() : '') || displaySalesPerson}
               </span>
             </div>
             <div className="flex justify-between items-center">
@@ -1841,7 +2258,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   </span>
                 ))
               ) : null}
-              {!hasStagedProof && !isManagementUser && (
+              {!hasStagedProof && !isBackOffice && (
                 <span className="flex items-center gap-1.5">
                   {stagedAttachments.length > 0 && <Paperclip size={11} className="text-transparent shrink-0" />}
                   No proof of payment — {(NO_PROOF_REASONS.find(r => r.value === noProofReason) || {}).label || 'no reason given'}

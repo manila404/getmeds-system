@@ -22,9 +22,13 @@ async function requireAuth(req, res, next) {
     // the order form shows all three, and all three come from one row.
     // NULL for accounts created before sign-up collected a division.
     const user = await db
-      .prepare('SELECT id, name, email, role, is_active, salesperson, division, sub_division FROM users WHERE id = ?')
+      .prepare('SELECT id, name, email, role, is_active, approval_status, salesperson, division, sub_division FROM users WHERE id = ?')
       .get(decoded.id);
-    if (!user || !user.is_active) {
+    // Sep 9, 2026: approval_status is re-read on EVERY request rather than
+    // trusted from the token. A token is good for 8 hours; an admin who
+    // rejects an account should not have to wait out the rest of that window
+    // for it to stop working.
+    if (!user || !user.is_active || (user.approval_status && user.approval_status !== 'approved')) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'User not found or inactive' } });
     }
     req.user = user;

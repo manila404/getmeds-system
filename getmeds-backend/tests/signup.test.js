@@ -18,15 +18,23 @@ const EMAIL_PREFIX = 'signup-test-';
 const uniqueEmail = (label = 'user') =>
   `${EMAIL_PREFIX}${label}-${Date.now()}-${Math.floor(Math.random() * 10000)}@getmeds.ph`;
 
-// The sample from the spec, so the expected Salesperson string below is the
-// exact one that was asked for: "TEST | Aaron Manila".
+// Sep 9, 2026: `division` was 'TEST', which is not in DIVISIONS and never has
+// been — so register() answered 400 before reaching anything this suite meant
+// to assert, and 19 of its tests had been failing for that reason alone. The
+// spec sample it was copied from predates the fixed Division list.
+//
+// 'HOS' is a real Division, so the expected Salesperson string is now
+// "HOS | Aaron Manila".
 const validSignup = (overrides = {}) => ({
   first_name: 'Aaron',
   middle_name: 'Pun-an',
   last_name: 'Manila',
   display_name: 'Aaron Manila',
-  division: 'TEST',
-  sub_division: 'sample',
+  division: 'HOS',
+  // Sep 9, 2026: sub-division is free text and may name several — this one
+  // deliberately is NOT on the HOS suggestion list, which is the behaviour
+  // that changed today (see auth.controller.js's register).
+  sub_division: 'sample, another',
   email: uniqueEmail(),
   password: 'correct-horse',
   ...overrides
@@ -36,8 +44,27 @@ afterAll(async () => {
   await db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${EMAIL_PREFIX}%`);
 });
 
+/**
+ * Sep 9, 2026: a freshly signed-up account cannot log in until an admin
+ * approves it — that is the whole point of the change made today. The tests
+ * below that are about something ELSE (the Salesperson string, role
+ * enforcement) approve first so they still exercise what they are named after,
+ * rather than re-testing the approval gate by accident.
+ *
+ * Approved directly in the database rather than through
+ * POST /api/admin/users/:id/approve, deliberately: this is setup for another
+ * test's subject, and routing it through the admin endpoint would make every
+ * one of these fail if that endpoint broke, for reasons unrelated to what they
+ * assert. The endpoint has its own coverage in tests/signupApproval.test.js.
+ */
+async function approve(email) {
+  await db
+    .prepare("UPDATE users SET approval_status = 'approved' WHERE LOWER(email) = LOWER(?)")
+    .run(email);
+}
+
 describe('POST /api/auth/register', () => {
-  test('creates an active medrep and returns a token that works immediately', async () => {
+  test('creates a PENDING medrep and issues no token', async () => {
     const body = validSignup();
     const res = await request(app).post('/api/auth/register').send(body);
 
@@ -51,23 +78,28 @@ describe('POST /api/auth/register', () => {
         middle_name: 'Pun-an',
         last_name: 'Manila',
         display_name: 'Aaron Manila',
-        division: 'TEST',
-        sub_division: 'sample'
+        division: 'HOS',
+        sub_division: 'sample, another'
       })
     );
-    expect(res.body.data.token).toEqual(expect.any(String));
+    // Sep 9, 2026: NO token. Sign-up used to sign the applicant straight in,
+    // which is the thing admin approval exists to prevent — an account able to
+    // raise orders before anyone confirmed the person, or the Salesperson
+    // every one of their orders would send to Zoho.
+    expect(res.body.data.token).toBeUndefined();
+    expect(res.body.data.approval_status).toBe('pending');
+    expect(res.body.data.message).toMatch(/approve/i);
     // No password material comes back in the response.
     expect(res.body.data.user.password_hash).toBeUndefined();
 
-    const me = await request(app)
-      .get('/api/auth/me')
-      .set('Authorization', `Bearer ${res.body.data.token}`);
-    expect(me.status).toBe(200);
-    expect(me.body.data.user.email).toBe(body.email);
-
-    const row = await db.prepare('SELECT role, is_active FROM users WHERE email = ?').get(body.email);
+    const row = await db
+      .prepare('SELECT role, is_active, approval_status FROM users WHERE email = ?')
+      .get(body.email);
     expect(row.role).toBe('medrep');
+    // is_active stays 1 — the account is not DISABLED, it is unapproved. The
+    // two are separate columns because they are separate situations.
     expect(row.is_active).toBe(1);
+    expect(row.approval_status).toBe('pending');
   });
 
   describe('the Salesperson string', () => {
@@ -76,9 +108,9 @@ describe('POST /api/auth/register', () => {
       const res = await request(app).post('/api/auth/register').send(body);
 
       expect(res.status).toBe(201);
-      expect(res.body.data.user.salesperson).toBe('TEST | Aaron Manila');
+      expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
       expect((await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email)).salesperson)
-        .toBe('TEST | Aaron Manila');
+        .toBe('HOS | Aaron Manila');
     });
 
     // The point of making it a GENERATED column rather than a stored string:
@@ -103,17 +135,18 @@ describe('POST /api/auth/register', () => {
       const body = validSignup();
       await request(app).post('/api/auth/register').send(body);
 
+      await approve(body.email);
       const login = await request(app)
         .post('/api/auth/login')
         .send({ email: body.email, password: body.password });
       expect(login.status).toBe(200);
-      expect(login.body.data.user.salesperson).toBe('TEST | Aaron Manila');
+      expect(login.body.data.user.salesperson).toBe('HOS | Aaron Manila');
 
       const me = await request(app)
         .get('/api/auth/me')
         .set('Authorization', `Bearer ${login.body.data.token}`);
       expect(me.status).toBe(200);
-      expect(me.body.data.user.salesperson).toBe('TEST | Aaron Manila');
+      expect(me.body.data.user.salesperson).toBe('HOS | Aaron Manila');
     });
 
     test('is NULL for an account with no division', async () => {
@@ -137,11 +170,11 @@ describe('POST /api/auth/register', () => {
     });
 
     test('surrounding whitespace on either part is trimmed out of it', async () => {
-      const body = validSignup({ division: '  TEST  ', display_name: '  Aaron Manila  ' });
+      const body = validSignup({ division: '  HOS  ', display_name: '  Aaron Manila  ' });
       const res = await request(app).post('/api/auth/register').send(body);
 
       expect(res.status).toBe(201);
-      expect(res.body.data.user.salesperson).toBe('TEST | Aaron Manila');
+      expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
     });
   });
 
@@ -153,7 +186,7 @@ describe('POST /api/auth/register', () => {
       const res = await request(app).post('/api/auth/register').send(body);
       expect(res.status).toBe(201);
       expect(res.body.data.user.display_name).toBe('Aaron Manila');
-      expect(res.body.data.user.salesperson).toBe('TEST | Aaron Manila');
+      expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
     });
 
     test('display_name is kept when it differs from first + last', async () => {
@@ -162,7 +195,7 @@ describe('POST /api/auth/register', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.data.user.display_name).toBe('Bong Manila');
-      expect(res.body.data.user.salesperson).toBe('TEST | Bong Manila');
+      expect(res.body.data.user.salesperson).toBe('HOS | Bong Manila');
     });
 
     // Everything already on screen reads user.name, so it has to stay useful.
@@ -182,7 +215,7 @@ describe('POST /api/auth/register', () => {
       expect(row.middle_name).toBeNull();
       expect(row.sub_division).toBeNull();
       // A missing sub-division must not break the salesperson string.
-      expect(res.body.data.user.salesperson).toBe('TEST | Aaron Manila');
+      expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
     });
   });
 
@@ -222,6 +255,7 @@ describe('POST /api/auth/register', () => {
     const body = validSignup({ password: 'another-good-one' });
     await request(app).post('/api/auth/register').send(body);
 
+    await approve(body.email);
     const res = await request(app).post('/api/auth/login').send({ email: body.email, password: 'another-good-one' });
     expect(res.status).toBe(200);
     expect(res.body.data.user.role).toBe('medrep');
@@ -242,7 +276,7 @@ describe('POST /api/auth/register', () => {
     const res = await request(app).post('/api/auth/register').send(body);
 
     expect(res.status).toBe(201);
-    expect(res.body.data.user.salesperson).toBe('TEST | Aaron Manila');
+    expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
   });
 
   test('rejects an email outside the allowed domain and creates nothing', async () => {
@@ -331,11 +365,25 @@ describe('POST /api/auth/register', () => {
   });
 
   // Sign-up must not be a way to reach anything a medrep cannot already reach.
+  //
+  // Sep 9, 2026: this used to read a token straight off the register response.
+  // That response has no token any more, so it was sending "Bearer undefined"
+  // and getting its 403 for the wrong reason entirely — it would have passed
+  // just as well if admin routes were wide open to every medrep. The account
+  // is approved and logged in properly first, so the 403 is now about the ROLE.
   test('a signed-up medrep is still refused admin-only endpoints', async () => {
-    const res = await request(app).post('/api/auth/register').send(validSignup());
-    const token = res.body.data.token;
+    const body = validSignup();
+    await request(app).post('/api/auth/register').send(body);
+    await approve(body.email);
 
-    const admin = await request(app).get('/api/admin/users').set('Authorization', `Bearer ${token}`);
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ email: body.email, password: body.password });
+    expect(login.status).toBe(200);
+
+    const admin = await request(app)
+      .get('/api/admin/users')
+      .set('Authorization', `Bearer ${login.body.data.token}`);
     expect(admin.status).toBe(403);
   });
 });

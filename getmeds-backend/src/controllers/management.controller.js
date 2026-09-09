@@ -55,16 +55,79 @@ exports.getSummary = async (req, res, next) => {
 
 exports.getAllOrders = async (req, res, next) => {
   try {
-    const { status, customer_type, page = 1, limit = 50 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const { status, customer_type, date_from, date_to, search } = req.query;
+
+    // Sep 9, 2026: bounded. The Zoho import means this table is no longer a
+    // few hundred rows — the live org has 65,000+ Sales Orders — so an
+    // unbounded page would ship megabytes of JSON and lock the browser. 25 is
+    // the frontend's page size; the cap is what stops `?limit=999999` from
+    // being the same unbounded query by another name. Export CSV asks for a
+    // deliberately larger page, which is why the cap is 5,000 and not 100.
+    const MAX_LIMIT = 5000;
+    const DEFAULT_LIMIT = 25;
+    // A nonsense limit falls back to the default rather than being clamped
+    // into range: Math.max(1, -4) is 1, so `?limit=-4` would quietly serve
+    // one-row pages, which looks like a broken table rather than bad input.
+    const requestedLimit = parseInt(req.query.limit, 10);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(MAX_LIMIT, requestedLimit)
+        : DEFAULT_LIMIT;
+    const requestedPage = parseInt(req.query.page, 10);
+    const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+    const offset = (page - 1) * limit;
+
     let where = [];
     let params = [];
     if (status) { where.push('o.status = ?'); params.push(status); }
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
+
+    // Sep 9, 2026: date range, as a plain comparison on created_at rather than
+    // DATE(o.created_at) BETWEEN ?. Two reasons, and the second is the real one:
+    //
+    //  1. There is an index on orders(created_at DESC). A range comparison can
+    //     use it; wrapping the column in DATE() cannot, and on 65,000 rows
+    //     that is the difference between a lookup and a full scan on every
+    //     page of every filtered view.
+    //  2. created_at is TEXT holding ISO-8601, and ISO-8601 sorts
+    //     lexicographically in the same order it sorts chronologically — which
+    //     is the entire reason this column format was chosen. So a string
+    //     comparison against 'YYYY-MM-DD...' is exact, not an approximation,
+    //     and it stays exact for the mixed suffixes the import brings in
+    //     (Zoho's created_time carries a +0800 offset; this app writes Z).
+    //
+    // Both bounds are INCLUSIVE of their whole day, which is what a person
+    // picking "9 Sep to 9 Sep" means. The upper bound is therefore the end of
+    // the day, not its midnight — with midnight, picking a single day returns
+    // only orders created in the first instant of it, i.e. almost always none.
+    if (date_from) { where.push('o.created_at >= ?'); params.push(`${date_from}T00:00:00.000Z`); }
+    if (date_to) { where.push('o.created_at <= ?'); params.push(`${date_to}T23:59:59.999Z`); }
+
+    // Free-text across the three columns a person actually recognises an order
+    // by. Needed once the list is paginated: with 65,000 orders, "find this
+    // one" cannot mean "page through until you see it".
+    if (search) {
+      where.push('(o.getmeds_order_id LIKE ? OR c.name LIKE ? OR o.zoho_so_number LIKE ?)');
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
     const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.name as medrep_name,
+             -- Sep 9, 2026: the effective Salesperson, resolved here rather
+             -- than in the browser.
+             --
+             -- Two places hold one answer, and which one is authoritative
+             -- depends on where the order came from. orders.salesperson is set
+             -- when Management picked a Salesperson for this specific order,
+             -- and on every order adopted from Zoho (which carries Zoho's own
+             -- Salesperson and has no MedRep account behind it — see
+             -- services/zohoOrderImportService.js). Otherwise it is NULL and
+             -- means "whatever the ordering MedRep's account says", which is
+             -- users.salesperson, a generated "<division> | <display name>".
+             COALESCE(o.salesperson, u.salesperson) as salesperson_name,
              p.status as payment_status, d.status as dispatch_status, d.tracking_number, d.courier
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -74,10 +137,24 @@ exports.getAllOrders = async (req, res, next) => {
       ${whereClause}
       ORDER BY o.created_at DESC
       LIMIT ? OFFSET ?
-    `).all(...params, parseInt(limit), offset);
+    `).all(...params, limit, offset);
 
-    const total = (await db.prepare(`SELECT COUNT(*) as c FROM orders o ${whereClause}`).get(...params)).c;
+    // The count has to join customers too now — the search clause filters on
+    // c.name, and counting over `orders o` alone would raise "missing FROM
+    // clause entry for table c" the moment anyone typed in the search box.
+    const total = (await db.prepare(`
+      SELECT COUNT(*) as c
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      ${whereClause}
+    `).get(...params)).c;
 
-    res.json({ success: true, data: { orders, pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / parseInt(limit)) } } });
+    res.json({
+      success: true,
+      data: {
+        orders,
+        pagination: { total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) }
+      }
+    });
   } catch (err) { next(err); }
 };

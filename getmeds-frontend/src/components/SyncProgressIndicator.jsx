@@ -14,10 +14,16 @@ import { Loader2 } from 'lucide-react';
  * Resync with no prior estimate to go on) shows an indeterminate "N found
  * so far" counter instead of a fake/misleading percentage.
  */
-const SyncProgressIndicator = ({ job }) => {
+const SyncProgressIndicator = ({ job, labels }) => {
   if (!job || job.status !== 'running') return null;
 
-  const modeLabel = job.mode === 'full' ? 'Full Resync' : 'Quick Sync';
+  // Sep 9, 2026: `labels` overrides the Quick Sync / Full Resync wording, for
+  // the Sales Order import — where "Full Resync" would be actively wrong
+  // (adopting orders is an import, not a re-download of a list). Optional, so
+  // the Clients Directory and Inventory pages keep their wording untouched.
+  const modeLabel = job.mode === 'full'
+    ? (labels?.full || 'Full Resync')
+    : (labels?.quick || 'Quick Sync');
   const hasPercent = job.percent !== null && job.percent !== undefined;
 
   return (

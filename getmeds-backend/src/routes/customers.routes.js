@@ -39,4 +39,11 @@ router.get('/:id/address-from-zoho', requireAuth, c.getZohoAddress);
 // `type` (credit/direct). Admin/management only.
 router.patch('/:id/category', requireAuth, requireRole('admin', 'management'), c.updateCustomerCategory);
 
+// Sep 8, 2026: sets a customer's TIN, and — best-effort, never blocking —
+// pushes it to Zoho's cf_tin custom field. This is the one deliberate,
+// narrow exception to this app's create-only Zoho write policy; see
+// customers.controller.js's updateCustomerTin for the full rationale.
+// Admin/management only, same as category above.
+router.patch('/:id/tin', requireAuth, requireRole('admin', 'management'), c.updateCustomerTin);
+
 module.exports = router;

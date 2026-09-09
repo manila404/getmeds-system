@@ -4,6 +4,7 @@ const db = require('../db/database');
 const proofStorage = require('../services/paymentProofStorage');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
+const zoho = require('../integrations/zoho');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -88,7 +89,7 @@ const { notify, getUserIdsByRole } = require('../services/notificationService');
 async function loadOrder(id) {
   return await db
     .prepare(
-      `SELECT o.id, o.getmeds_order_id, o.status, o.medrep_id,
+      `SELECT o.id, o.getmeds_order_id, o.status, o.medrep_id, o.zoho_so_id,
               c.name AS customer_name,
               u.id   AS medrep_user_id
          FROM orders o
@@ -99,7 +100,13 @@ async function loadOrder(id) {
     .get(id);
 }
 
-const FILE_TYPES = ['payment_proof', 'other', 'purchase_order'];
+// Sep 9, 2026: 'gl' (Guarantee Letter), 'prescription' and 'id' added for the
+// hospital PAP/DSWD intake, which requires all four of GL, Prescription, Proof
+// of Payment and a photo ID. Must stay in step with REQUIRED_FILE_TYPES in
+// db/migrate.pg.js and the CHECK in schema.pg.sql — a value accepted here that
+// the constraint rejects fails at INSERT with a database error rather than a
+// useful message.
+const FILE_TYPES = ['payment_proof', 'other', 'purchase_order', 'gl', 'prescription', 'id'];
 
 /** Body may omit file_type entirely — every caller that predates this change
  * did, and they all meant a proof of payment. */
@@ -251,9 +258,49 @@ exports.attach = async (req, res, next) => {
       });
     }
 
+    // Sep 8, 2026: best-effort push of this same file onto the matching
+    // Zoho Sales Order's own "Attach File(s)" section (zoho.
+    // addSalesOrderAttachment — a deliberate, narrow exception to this
+    // app's create-only Zoho policy, see ZohoAdapter.js). Soft-gated, same
+    // shape as updateCustomerTin in customers.controller.js: the local
+    // attachment above has already succeeded and is never undone by this
+    // failing. Only attempted once the order actually has a Zoho Sales
+    // Order (zoho_so_id) — nothing to attach to before that exists, and a
+    // draft order's attachments simply stay local-only until it syncs.
+    // Applies to every attachment type (payment_proof/other/purchase_order)
+    // — Zoho's own "Attach File(s)" section doesn't distinguish types
+    // either, and this only ever pushes NEW uploads, never backfills
+    // whatever was attached before this existed.
+    let zohoPushed = false;
+    let zohoError = null;
+    if (order.zoho_so_id) {
+      try {
+        const buffer = await proofStorage.downloadFile(storagePath);
+        await zoho.addSalesOrderAttachment(order.zoho_so_id, {
+          buffer,
+          filename: fileName || 'attachment',
+          contentType: contentType || 'application/octet-stream',
+        });
+        zohoPushed = true;
+      } catch (zohoErr) {
+        zohoError = zohoErr.message;
+        console.warn(
+          `[PAYMENT_PROOF] addSalesOrderAttachment failed for SO ${order.zoho_so_id}:`,
+          zohoErr.message
+        );
+      }
+    }
+
     res.json({
       success: true,
-      data: { id: inserted.lastInsertRowid, status: 'pending', fileType, storagePath },
+      data: {
+        id: inserted.lastInsertRowid,
+        status: 'pending',
+        fileType,
+        storagePath,
+        zoho_pushed: zohoPushed,
+        zoho_error: zohoError,
+      },
     });
   } catch (err) {
     next(err);

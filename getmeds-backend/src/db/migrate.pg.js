@@ -50,7 +50,12 @@ const REQUIRED_STATUSES = [
  * needs widening on any database created before this, same reasoning as
  * reconcileStatusCheck below).
  */
-const REQUIRED_FILE_TYPES = ['payment_proof', 'other', 'purchase_order'];
+// Sep 9, 2026: 'gl', 'prescription' and 'id' added for the hospital (PAP/DSWD)
+// intake, which requires all four of Guarantee Letter, Prescription, Proof of
+// Payment and a photo ID. reconcilePaymentProofs below widens the existing
+// CHECK constraint to match, so an already-deployed database picks these up
+// without anyone editing SQL by hand.
+const REQUIRED_FILE_TYPES = ['payment_proof', 'other', 'purchase_order', 'gl', 'prescription', 'id'];
 
 function connectionString() {
   const url = process.env.DATABASE_URL;
@@ -344,6 +349,151 @@ async function reconcileOrdersDivisionSalesperson(client) {
   }
 }
 
+/**
+ * Sep 8, 2026 (5): `customers.tin` — Tax Identification Number, a Philippines
+ * BIR field Zoho requires (on the contact, not the Sales Order) before it
+ * will let a "business" sub-type customer's Sales Order be created. Same
+ * "existing rows default to NULL" reconciliation as sub_division/division/
+ * salesperson above — `CREATE TABLE IF NOT EXISTS` in schema.pg.sql is a
+ * no-op against a database that already has a `customers` table from before
+ * this column existed.
+ */
+async function reconcileCustomersTin(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'customers' AND column_name = 'tin'`
+  );
+  if (rows.length) {
+    console.log('  ✔ customers.tin already present');
+    return;
+  }
+  console.log('  ↻ customers.tin is missing — adding (existing rows default to NULL)');
+  await client.query('ALTER TABLE customers ADD COLUMN tin TEXT');
+  console.log('  ✔ customers.tin added');
+}
+
+/**
+ * Sep 8, 2026 (6): `orders.gm_lead_id` — the identity of the admin/
+ * management account that created an order (the order form's "Admin"
+ * field, previously never sent to Zoho — see orders.controller.js's
+ * gmLeadId note and LiveZohoAdapter.js's cf_gm_lead_id wiring). Same
+ * "existing rows default to NULL" reconciliation as every other column
+ * added this way above.
+ */
+async function reconcileOrdersGmLeadId(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'orders' AND column_name = 'gm_lead_id'`
+  );
+  if (rows.length) {
+    console.log('  ✔ orders.gm_lead_id already present');
+    return;
+  }
+  console.log('  ↻ orders.gm_lead_id is missing — adding (existing rows default to NULL)');
+  await client.query('ALTER TABLE orders ADD COLUMN gm_lead_id TEXT');
+  console.log('  ✔ orders.gm_lead_id added');
+}
+
+/**
+ * Sep 9, 2026: `orders.zoho_detail_synced_at` — when an order's full Zoho
+ * detail (line items + Comments & History) was last pulled, as opposed to the
+ * cheap list-only summary every imported order starts as. See schema.pg.sql's
+ * comment on the column for why the import has two tiers at all. Same
+ * "existing rows default to NULL" reconciliation as every other column added
+ * this way above; NULL is the correct value for every existing row, since none
+ * of them recorded this before now.
+ */
+async function reconcileOrdersZohoDetailSyncedAt(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'orders' AND column_name = 'zoho_detail_synced_at'`
+  );
+  if (rows.length) {
+    console.log('  ✔ orders.zoho_detail_synced_at already present');
+    return;
+  }
+  console.log('  ↻ orders.zoho_detail_synced_at is missing — adding (existing rows default to NULL)');
+  await client.query('ALTER TABLE orders ADD COLUMN zoho_detail_synced_at TEXT');
+  console.log('  ✔ orders.zoho_detail_synced_at added');
+}
+
+/**
+ * Sep 9, 2026: the five "Master Form" intake columns. See schema.pg.sql for
+ * what each one holds and why intake_receiver_type / intake_is_doctor are
+ * constrained rather than free text.
+ *
+ * One function for all five rather than five near-identical ones — the pattern
+ * above was already repeating itself, and a table of {name, type} is easier to
+ * read than five copies of the same information_schema probe. The CHECK
+ * constraints ride along in the type string, which is what ALTER TABLE ADD
+ * COLUMN accepts.
+ */
+const MASTER_FORM_COLUMNS = [
+  ['intake_expected_shipment_date', 'TEXT'],
+  ['intake_gl_number', 'TEXT'],
+  [
+    'intake_receiver_type',
+    "TEXT CHECK(intake_receiver_type IS NULL OR intake_receiver_type IN ('patient','representative'))",
+  ],
+  ['intake_is_doctor', 'INTEGER CHECK(intake_is_doctor IS NULL OR intake_is_doctor IN (0,1))'],
+  ['intake_tin', 'TEXT'],
+];
+
+async function reconcileMasterFormColumns(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'orders'`
+  );
+  const present = new Set(rows.map((r) => r.column_name));
+
+  for (const [name, type] of MASTER_FORM_COLUMNS) {
+    if (present.has(name)) {
+      console.log(`  \u2714 orders.${name} already present`);
+      continue;
+    }
+    console.log(`  \u21bb orders.${name} is missing \u2014 adding (existing rows default to NULL)`);
+    await client.query(`ALTER TABLE orders ADD COLUMN ${name} ${type}`);
+    console.log(`  \u2714 orders.${name} added`);
+  }
+}
+
+/**
+ * Sep 9, 2026: the three columns behind "a sign-up must be approved by an
+ * admin". See schema.pg.sql for why approval_status is separate from
+ * is_active.
+ *
+ * Existing rows get 'approved' — the column's own DEFAULT does that for the
+ * backfill, which is the whole reason the default is 'approved' rather than
+ * 'pending'. Adding it the other way round would lock every existing account
+ * out of the system the moment this ran.
+ */
+const APPROVAL_COLUMNS = [
+  [
+    'approval_status',
+    "TEXT NOT NULL DEFAULT 'approved' CHECK(approval_status IN ('pending','approved','rejected'))",
+  ],
+  ['approved_at', 'TEXT'],
+  ['approved_by', 'INTEGER REFERENCES users(id)'],
+];
+
+async function reconcileUserApproval(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'users'`
+  );
+  const present = new Set(rows.map((r) => r.column_name));
+
+  for (const [name, type] of APPROVAL_COLUMNS) {
+    if (present.has(name)) {
+      console.log(`  \u2714 users.${name} already present`);
+      continue;
+    }
+    console.log(`  \u21bb users.${name} is missing \u2014 adding`);
+    await client.query(`ALTER TABLE users ADD COLUMN ${name} ${type}`);
+    console.log(`  \u2714 users.${name} added`);
+  }
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -369,6 +519,11 @@ async function main() {
     await reconcilePaymentProofs(client);
     await reconcileOrdersSubDivision(client);
     await reconcileOrdersDivisionSalesperson(client);
+    await reconcileCustomersTin(client);
+    await reconcileOrdersGmLeadId(client);
+    await reconcileOrdersZohoDetailSyncedAt(client);
+    await reconcileMasterFormColumns(client);
+    await reconcileUserApproval(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

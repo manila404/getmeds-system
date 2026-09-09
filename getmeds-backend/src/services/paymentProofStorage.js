@@ -179,6 +179,24 @@ async function removeQuietly(storagePath) {
   }
 }
 
+/**
+ * Download a stored file's raw bytes.
+ *
+ * Sep 8, 2026: every other read in this file hands back a short-lived
+ * signed URL instead of the bytes themselves — this is the one place file
+ * content actually leaves Supabase through this server, and only because
+ * pushing a copy to Zoho's own Sales Order attachment endpoint (see
+ * integrations/zoho/*.addSalesOrderAttachment, called from
+ * paymentProof.controller.js's attach) needs the file body, not a link to
+ * it. Zoho's API has no way to fetch a file FROM a signed URL on our
+ * behalf — the bytes have to be in the request we send it.
+ */
+async function downloadFile(storagePath) {
+  const { data, error } = await client().storage.from(BUCKET).download(storagePath);
+  if (error) throw error;
+  return Buffer.from(await data.arrayBuffer());
+}
+
 module.exports = {
   BUCKET,
   MAX_BYTES,
@@ -190,5 +208,6 @@ module.exports = {
   createUploadUrl,
   createViewUrl,
   removeQuietly,
+  downloadFile,
   _resetClient,
 };

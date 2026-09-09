@@ -72,7 +72,17 @@ async function buildZohoSalesOrderPayload(orderId) {
     delivery_method: order.intake_delivery_method || null,
     terms: order.intake_terms || null,
     // Sep 8, 2026 (2): Payment Terms — same reasoning, same raw-string shape.
-    payment_terms: order.intake_payment_terms || null
+    payment_terms: order.intake_payment_terms || null,
+    // Sep 9, 2026: see orders.controller.js — a retry must send the same
+    // Expected Shipment Date the first attempt did, which is the entire
+    // reason this file rebuilds from the database instead of replaying a
+    // frozen snapshot.
+    expected_shipment_date: order.intake_expected_shipment_date || null,
+    // Sep 8, 2026 (3): GM Lead ID — set once at create() time (see
+    // orders.controller.js's gmLeadId note) and simply read back here,
+    // like everything else in this rebuild — `SELECT o.*` above already
+    // picks it up now that it's a real column.
+    gm_lead_id: order.gm_lead_id || null
   };
 }
 

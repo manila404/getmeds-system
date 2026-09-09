@@ -56,11 +56,19 @@ export const AuthProvider = ({ children }) => {
   //   salesperson — a generated column in the database, always
   //                 "<division> | <display name>". The form shows it as a
   //                 preview; sending it would imply the client decides it.
-  // A successful sign-up returns a token exactly like a login, so the new
-  // user lands straight in the app.
+  // Sep 9, 2026: a sign-up no longer establishes a session.
+  //
+  // The endpoint used to return a token like a login does, and this called
+  // establishSession with it. It now creates the account with
+  // approval_status 'pending' and returns NO token, because that is the point
+  // of admin approval — an account that could place orders the moment it was
+  // created would have nothing to approve.
+  //
+  // Returns the response payload (user + message) so the page can say what
+  // happens next instead of navigating into an app the caller cannot use.
   const signup = async (fields) => {
     const { data } = await client.post('/api/auth/register', fields);
-    if (data.success) return establishSession(data.data);
+    if (data.success) return data.data;
     throw new Error('Sign up failed');
   };
 

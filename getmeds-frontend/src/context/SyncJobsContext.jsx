@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import {
   startCustomersSyncJob,
   startInventorySyncJob,
+  startSalesOrdersImportJob,
   fetchSyncJobStatus
 } from '../api/queries';
 
@@ -54,6 +55,25 @@ const KINDS = {
     noun: 'item',
     truncatedNoun: 'item',
     done: (r) => `${r.created ?? 0} new product(s), ${r.updated ?? 0} updated`
+  },
+  // Sep 9, 2026: the Sales Order import. Same machinery, one difference worth
+  // noting — `truncated` here does NOT mean the pull broke. This import is
+  // capped per run on purpose (each order costs two Zoho reads, against a
+  // rate-limited API), so hitting the cap is the expected way a large history
+  // is imported: repeated runs. The completion message below says how many
+  // are left rather than reporting a warning for normal operation.
+  salesorders: {
+    start: startSalesOrdersImportJob,
+    invalidate: [['management-orders'], ['management-summary'], ['orders'], ['zoho-import-status']],
+    noun: 'Sales Order',
+    truncatedNoun: 'Sales Order',
+    done: (r) =>
+      `${r.imported ?? 0} imported` +
+      (r.already_present ? `, ${r.already_present} refreshed` : '') +
+      (r.linked ? `, ${r.linked} re-linked` : '') +
+      (r.log_entries ? `, ${r.log_entries} Zoho log entr${r.log_entries === 1 ? 'y' : 'ies'} added` : '') +
+      (r.salespersons_backfilled ? `, ${r.salespersons_backfilled} salesperson(s) filled in` : '') +
+      (r.failed ? `, ${r.failed} failed` : '')
   }
 };
 
@@ -106,12 +126,34 @@ const JobWatcher = ({ kind, jobId, onSettled }) => {
     }
     if (!status || status === 'running') return;
 
-    const modeLabel = job.mode === 'full' ? 'Full Resync' : 'Quick Sync';
+    // "Full Resync" is the right word for mirroring a list of contacts or
+    // items; it is the wrong one for adopting orders, which is an import, not
+    // a re-download. The label follows the kind so the toast says what the
+    // button said.
+    const modeLabel =
+      kind === 'salesorders'
+        ? job.mode === 'full'
+          ? 'Sales Order import'
+          : 'Sales Order quick sync'
+        : job.mode === 'full'
+          ? 'Full Resync'
+          : 'Quick Sync';
 
     if (status === 'done') {
       for (const key of config.invalidate) qc.invalidateQueries({ queryKey: key });
       const r = job.result || {};
-      if (r.truncated) {
+      // The import's cap is by design, not a failure — see the salesorders
+      // entry in KINDS above. Reported as "there is more to fetch, run it
+      // again", rather than through the generic truncation warning below,
+      // which exists for a pull that could not finish.
+      if (kind === 'salesorders' && r.remaining) {
+        toast.success(
+          `${modeLabel} complete — ${config.done(r)}. ` +
+            `${r.remaining} Sales Order(s) still to import, beyond this run's limit of ${r.capped_at} — ` +
+            'press it again to take the next batch.',
+          { icon: '📥', duration: 12000 }
+        );
+      } else if (r.truncated) {
         toast.error(
           `⚠️ ${modeLabel} pulled ${r.total_from_zoho ?? 0} ${config.truncatedNoun}(s), but Zoho reported even ` +
             `more beyond this pull's safety limit — incomplete (${config.done(r)}). Nothing was written to Zoho.`,

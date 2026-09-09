@@ -16,7 +16,8 @@ import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 // this list lives in more than one place: a value picked here has to
 // validate the same way it would have at order-creation time.
 const DIVISIONS = [
-  '2MG Incorporated', 'GrabMart', 'Office of the President', 'PCSO', 'DSWD',
+  // Sep 9, 2026: see the note on DIVISIONS in orders.controller.js — five
+  // entries removed, none of them in use on any existing user or order.
   'B&B', 'B2B', 'B2C', 'BID', 'CLIDP', 'HOS', 'MSA', 'STC',
   'TeleSales Anesthesia', 'URO',
 ];
@@ -109,7 +110,17 @@ const EVENT_LABELS = {
   ORDER_COMPLETION_BLOCKED: 'COMPLETION BLOCKED',
   ZOHO_SYNC_FAILED: 'ZOHO SYNC FAILED',
   ZOHO_EVENT_RECEIVED: 'ZOHO EVENT RECEIVED',
-  EXCEPTION_SET: 'EXCEPTION SET'
+  EXCEPTION_SET: 'EXCEPTION SET',
+  // Sep 9, 2026: the three the Zoho import writes.
+  //
+  // ZOHO_LOG is the only entry in this whole timeline that is not this app's
+  // own account of what happened — it is a line copied verbatim out of Zoho's
+  // Comments & History for the Sales Order, with Zoho's timestamp and the
+  // Zoho user Zoho names. Labelled so a reader can tell the two apart at a
+  // glance, because "who is saying this" changes how much the entry is worth.
+  ZOHO_LOG: 'FROM ZOHO HISTORY',
+  ORDER_IMPORTED_FROM_ZOHO: 'IMPORTED FROM ZOHO',
+  ZOHO_SO_LINKED: 'LINKED TO ZOHO SO'
 };
 
 // "[SO-66881] INVOICE SENT". The Sales Order number comes from the order
@@ -131,7 +142,8 @@ const EVENT_ICONS = {
   ZOHO_DISPATCH_UPDATED: '🚚', ZOHO_SO_CANCELLED: '🚫', ZOHO_EVENT_RECEIVED: '🔔',
   ZOHO_SO_STATUS_CHANGED: '📄', ORDER_ITEMS_EDITED: '✏️', ZOHO_SO_DELETED: '🗑️',
   FINANCE_VERIFIED: '🔍', FINANCE_REJECTED: '🛑',
-  PAYMENT_PROOF_UPLOADED: '🧾', PAYMENT_PROOF_REJECTED: '🛑'
+  PAYMENT_PROOF_UPLOADED: '🧾', PAYMENT_PROOF_REJECTED: '🛑',
+  ZOHO_LOG: '📜', ORDER_IMPORTED_FROM_ZOHO: '📥', ZOHO_SO_LINKED: '🔗'
 };
 
 const OrderDetailPage = () => {
@@ -543,6 +555,23 @@ const OrderDetailPage = () => {
                   ['Delivery Method', order.intake_delivery_method || '—'],
                   ['Payment Terms', order.intake_payment_terms || '—'],
                   ['Invoicing From', order.invoicing_from || '—'],
+                  // Sep 9, 2026: the Master Form fields. Collected on the
+                  // order form and previously readable nowhere — a field
+                  // nobody can read back is half a feature.
+                  ['Expected Shipment', order.intake_expected_shipment_date || '—'],
+                  [
+                    'Customer is the doctor',
+                    order.intake_is_doctor === 1 ? 'Yes' : order.intake_is_doctor === 0 ? 'No' : '—'
+                  ],
+                  ['TIN', order.intake_tin || '—'],
+                  // Hospital-only in practice, but shown whenever set rather
+                  // than gated on the customer's category here: the category
+                  // can be changed after the order was raised, and the values
+                  // recorded on it stay true regardless.
+                  ...(order.intake_gl_number ? [['GL Number', order.intake_gl_number]] : []),
+                  ...(order.intake_receiver_type
+                    ? [['Receiver Type', order.intake_receiver_type === 'patient' ? 'Patient' : 'Representative']]
+                    : []),
                 ].map(([label, val]) => (
                   <div key={label}>
                     <p className="text-xs text-ink-secondary">{label}</p>

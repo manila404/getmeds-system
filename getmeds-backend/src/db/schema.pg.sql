@@ -53,6 +53,30 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK(role IN ('medrep','finance','dispatch','management','admin')),
   is_active INTEGER DEFAULT 1,
   is_test_account INTEGER DEFAULT 0,
+  -- ── Sep 9, 2026: admin approval for self-service sign-ups ──────────────────
+  --
+  -- Separate from `is_active` on purpose, because they answer different
+  -- questions and conflating them loses one of the answers:
+  --
+  --   is_active       — has an admin switched this account off? (Deactivate)
+  --   approval_status — has an admin ever vetted this sign-up at all?
+  --
+  -- A rejected applicant and a deactivated employee both cannot log in, but
+  -- they are not the same thing, and an admin looking at the user list needs
+  -- to tell "never approved" from "was approved, then disabled".
+  --
+  -- DEFAULT 'approved' is what makes this safe to add to a live database:
+  -- every account that already exists was created before approval was a
+  -- concept, so treating them as approved is the only reading that does not
+  -- lock the entire company out on deploy. Only POST /api/auth/register
+  -- writes 'pending', explicitly.
+  approval_status TEXT NOT NULL DEFAULT 'approved'
+    CHECK(approval_status IN ('pending','approved','rejected')),
+  approved_at TEXT,
+  -- Who decided. Nullable: NULL for accounts that predate this, and for ones
+  -- an admin created directly (which are approved by the act of creating them).
+  approved_by INTEGER REFERENCES users(id),
+
   first_name TEXT,
   middle_name TEXT,
   last_name TEXT,
@@ -85,6 +109,16 @@ CREATE TABLE IF NOT EXISTS customers (
   source TEXT DEFAULT 'local' CHECK(source IN ('local','zoho')),
   last_synced_at TEXT,
   category TEXT CHECK(category IS NULL OR category IN ('doctor','hospital','distributor','pwd')),
+  -- Sep 8, 2026: TIN (Tax Identification Number — a Philippines BIR
+  -- requirement). Zoho refuses to create a Sales Order for a "business"
+  -- sub-type contact with no cf_tin value, so this exists to fix that from
+  -- this app rather than requiring a human to edit the contact in Zoho
+  -- directly. Nullable, no default — most existing customers won't have
+  -- one yet. Pushed to Zoho's cf_tin custom field by
+  -- zoho.updateContactTin() (see customers.controller.js's
+  -- updateCustomerTin) — a narrow, deliberate exception to this app's
+  -- otherwise create-only Zoho write policy (see ZohoAdapter.js).
+  tin TEXT,
   created_at TEXT DEFAULT iso_now()
 );
 
@@ -133,6 +167,38 @@ CREATE TABLE IF NOT EXISTS orders (
   intake_contact_no TEXT,
   intake_source TEXT,
   intake_pls_give TEXT,
+  -- ── Sep 9, 2026: "Master Form" intake fields ───────────────────────────────
+  --
+  -- Five fields the order form collects that had nowhere to live. All
+  -- nullable: POST /api/orders stays accepting an order without them, the way
+  -- every intake_* field before them does, so the form's requirements remain a
+  -- client-side UX guarantee rather than something that rejects other callers.
+
+  -- Zoho's own "Expected Shipment Date" (salesorder.shipment_date). The one
+  -- field of the five that maps to a REAL Zoho field rather than being local
+  -- bookkeeping — see LiveZohoAdapter's createSalesOrder.
+  intake_expected_shipment_date TEXT,
+
+  -- Guarantee Letter number, for the PAP/DSWD hospital flow. Local only: this
+  -- org has no Zoho custom field for it, and inventing a customfield_id is how
+  -- the Division field broke on Sep 8.
+  intake_gl_number TEXT,
+
+  -- Who physically receives a hospital delivery. An enum rather than free
+  -- text, for the reason the division field taught: 'patient', 'Patient',
+  -- 'pt' and 'the patient' are four answers to the same question and nothing
+  -- downstream can count them. The receiver's NAME stays intake_receiver.
+  intake_receiver_type TEXT CHECK(intake_receiver_type IS NULL OR intake_receiver_type IN ('patient','representative')),
+
+  -- Is the customer themselves the prescribing doctor? 1 yes, 0 no, NULL not
+  -- answered (every order raised before this field existed). When 0, the
+  -- doctor is named separately in intake_doctor.
+  intake_is_doctor INTEGER CHECK(intake_is_doctor IS NULL OR intake_is_doctor IN (0,1)),
+
+  -- The TIN as it stood on THIS order. customers.tin is the live value and can
+  -- change; this is the snapshot, so an order raised before a correction still
+  -- shows what was actually sent.
+  intake_tin TEXT,
   sales_order_date TEXT,
   intake_delivery_method TEXT,
   intake_terms TEXT,
@@ -145,6 +211,23 @@ CREATE TABLE IF NOT EXISTS orders (
   zoho_invoice_number TEXT,
   zoho_sync_status TEXT DEFAULT 'pending' CHECK(zoho_sync_status IN ('pending','synced','failed','skipped')),
   last_reconciled_at TEXT,
+  -- Sep 9, 2026: when this order's FULL Zoho detail was last pulled — its line
+  -- items, and Zoho's own Comments & History log.
+  --
+  -- The import has two tiers, and this column is what tells them apart. Zoho's
+  -- List Sales Orders response is cheap (one call per 200 orders) and carries
+  -- enough to create the order row: number, customer, total, date, salesperson,
+  -- status. Line items and history are not in it — those need a GET per order,
+  -- two calls each, against an API with a per-minute rate limit and a daily
+  -- budget. At this org's 65,000+ Sales Orders that is ~130,000 calls, so it
+  -- cannot be one click.
+  --
+  -- So every Sales Order is adopted from the list (NULL here — "we know this
+  -- order exists and what it is worth"), and the expensive detail is filled in
+  -- afterwards, a batch per import run and on demand whenever someone opens
+  -- the order. NULL is therefore normal and not an error state; it means
+  -- "summary only, so far".
+  zoho_detail_synced_at TEXT,
   exception_reason TEXT,
   -- Sep 4, 2026: why this order has NO proof of payment attached.
   --
@@ -185,6 +268,13 @@ CREATE TABLE IF NOT EXISTS orders (
   -- unrecognized name.
   division TEXT,
   salesperson TEXT,
+  -- Sep 8, 2026 (3): the identity of the admin/management account that
+  -- created this order (the order form's "Admin" field — previously shown
+  -- but never sent to Zoho). Set once at create() time, NULL when a MedRep
+  -- created their own order (nothing separate to report — see
+  -- orders.controller.js's gmLeadId note). Sent to Zoho's "GM Lead ID"
+  -- custom field (cf_gm_lead_id, confirmed live on this org).
+  gm_lead_id TEXT,
   created_at TEXT DEFAULT iso_now(),
   submitted_at TEXT,
   updated_at TEXT DEFAULT iso_now()
@@ -281,7 +371,13 @@ CREATE TABLE IF NOT EXISTS dispatch_records (
 CREATE TABLE IF NOT EXISTS payment_proofs (
   id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
   order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  file_type TEXT NOT NULL DEFAULT 'payment_proof' CHECK(file_type IN ('payment_proof','other','purchase_order')),
+  -- Sep 9, 2026: 'gl', 'prescription' and 'id' added for the hospital
+  -- (PAP/DSWD) flow, which requires all four of Guarantee Letter,
+  -- Prescription, Proof of Payment and a photo ID before an order can be
+  -- raised. Adding a value here means adding it to REQUIRED_FILE_TYPES in
+  -- migrate.pg.js and FILE_TYPES in paymentProof.controller.js too — the
+  -- three are checked against each other by the migration.
+  file_type TEXT NOT NULL DEFAULT 'payment_proof' CHECK(file_type IN ('payment_proof','other','purchase_order','gl','prescription','id')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified','rejected')),
   storage_path TEXT NOT NULL,
   file_name TEXT,

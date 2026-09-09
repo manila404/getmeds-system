@@ -17,6 +17,16 @@ const { evaluateCompletion } = require('../services/orderCompletionService');
 // implementation instead of three copies. See zohoReconcileService.js.
 const { reconcileOrder, reconcileOrderFully } = require('../services/zohoReconcileService');
 const { shouldRefreshOnOpen, markRefreshed } = require('../services/zohoAutoSyncService');
+// Sep 9, 2026: the bulk "pull every Sales Order Zoho has" import, and the
+// per-order mirror of Zoho's own Comments & History log. See
+// services/zohoOrderImportService.js for why the trail needs both halves.
+const { importSalesOrders, ingestSalesOrderLogs, IMPORT_MAX } = require('../services/zohoOrderImportService');
+const syncJobs = require('../services/syncJobs');
+const { getSyncState } = require('../services/syncState');
+// Sep 9, 2026: the Master Form collects a TIN, and Zoho refuses a Sales Order
+// for a business-subtype contact without one — so a TIN typed here has to
+// reach the contact, not just the order. Shared with the Clients page.
+const { setCustomerTin } = require('../services/customerTinService');
 // Sep 2, 2026: the MedRep -> Zoho Salesperson mapping ("<division> | <display
 // name>", from sign-up) and the read-only check that Zoho actually knows that
 // name. Zoho has Salesperson as a mandatory Sales Order field here.
@@ -70,12 +80,18 @@ const SUB_DIVISIONS_BY_DIVISION = {
 // effectiveDivision) — so a value submitted on an order has to be checked
 // against the same 15-item list a moment before it goes to Zoho, not just
 // once at sign-up/profile-save time.
+// Sep 9, 2026: '2MG Incorporated', 'Office of the President', 'PCSO', 'DSWD'
+// and 'GrabMart' removed at the user's request. Verified against the live
+// database first: no user and no order carried any of the five, so nothing
+// existing is stranded on a value this list no longer accepts.
+//
+// That check matters because `division` has no CHECK constraint — the column
+// keeps whatever was written to it, and validation happens only on the way in
+// (auth.controller.js at sign-up/profile, orders.controller.js at create and
+// at PATCH /:id/details). A row already holding a removed value would keep
+// working everywhere except the next save, which would then refuse it with
+// "division must be one of ..." for a value the account already has.
 const DIVISIONS = [
-  '2MG Incorporated',
-  'GrabMart',
-  'Office of the President',
-  'PCSO',
-  'DSWD',
   'B&B',
   'B2B',
   'B2C',
@@ -131,8 +147,17 @@ async function resolveOrderMedrep(user, requestedMedrepId) {
   if (!asked) return { actor: fallback, onBehalf: false };
 
   // Management can always select a medrep (production use for pilot).
-  // Admin can do it only in TEST_MODE (testing use). Anyone else: ignore medrep_id.
-  const canSelectMedrep = isManagement || (isTestModeEnabled() && isAdmin);
+  //
+  // Sep 9, 2026: so can Admin, in normal mode — it used to be TEST_MODE only.
+  // The restriction made sense while admin had no order form at all; now that
+  // it does, an admin who cannot name the MedRep would raise every order
+  // against their OWN account, which has no Division and no Salesperson, and
+  // Zoho rejects a Sales Order with no Salesperson outright. So the form would
+  // exist and produce nothing but failures.
+  //
+  // Anyone else: medrep_id is ignored, not refused — same belt-and-braces
+  // reasoning as division/salesperson below.
+  const canSelectMedrep = isManagement || isAdmin;
   if (!canSelectMedrep) return { actor: fallback, onBehalf: false };
 
   const target = await db
@@ -383,8 +408,10 @@ exports.getMedreps = async (req, res, next) => {
     const isAdmin = (req.user.role || '').toLowerCase() === 'admin';
     const isManagement = (req.user.role || '').toLowerCase() === 'management';
     // Sep 5, 2026: Management role (production) can pick a medrep.
-    // Admin can only do this in TEST_MODE (testing). Other roles: disabled.
-    const enabled = isManagement || (isTestModeEnabled() && isAdmin);
+    // Sep 9, 2026: so can Admin, in normal mode — see resolveOrderMedrep's
+    // note for why the TEST_MODE-only restriction stopped making sense once
+    // admin got the order form. Other roles: disabled.
+    const enabled = isManagement || isAdmin;
     if (!enabled) {
       return res.json({ success: true, data: { enabled: false, medreps: [], salespersons: [] } });
     }
@@ -621,13 +648,139 @@ exports.syncFromZoho = async (req, res, next) => {
       return res.status(status).json({ success: false, error: { code: result.code, message: result.message } });
     }
 
+    // Sep 9, 2026: also mirror Zoho's OWN history log for this Sales Order.
+    //
+    // The reconcile above is inference — it compares Zoho's current state
+    // against the local row and records the differences, which gives the
+    // milestones but never their timestamps or the people behind them (the
+    // comment on this endpoint has said as much since Sep 1: "Zoho's API
+    // doesn't expose *when* the SO was confirmed"). It does, in a different
+    // endpoint: the Sales Order's Comments & History. This pulls it.
+    //
+    // Best-effort and idempotent by Zoho's comment id, so a failure here
+    // never turns a successful sync into an error response, and pressing the
+    // button repeatedly does not grow duplicate entries.
+    const logsAdded = await ingestSalesOrderLogs({
+      orderId: req.params.id,
+      salesorderId: result.order?.zoho_so_id,
+      source: 'manual_reconcile'
+    });
+
+    // Re-read only when the log actually added something — the events array
+    // reconcileOrder already returned is otherwise still current.
+    const events = logsAdded
+      ? await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(req.params.id)
+      : result.events;
+
     res.json({
       success: true,
       data: {
         action: result.action,
         zoho_status: result.zohoStatus,
         order: result.order,
-        events: result.events
+        events,
+        zoho_log_entries_added: logsAdded || 0
+      }
+    });
+  } catch (err) { next(err); }
+};
+
+// ─── BULK IMPORT: every Sales Order that exists in Zoho ───────────────────────
+//
+// Sep 9, 2026. The reconcile above answers "is this order up to date with
+// Zoho". These two answer the bigger question behind it: can this app show
+// EVERY order, including the ones raised directly in Zoho, with the history
+// Zoho has for each. See services/zohoOrderImportService.js.
+//
+// Read-only toward Zoho — three GETs (list, detail, comments) and no write of
+// any kind, same as every other pull in this app.
+
+/**
+ * POST /api/orders/import-from-zoho/start?mode=quick|full
+ *
+ * Starts the import in the background and returns a job id immediately (202),
+ * exactly like the Clients Directory and Inventory pulls — poll progress at
+ * GET /api/sync-jobs/:jobId. Blocking the request was never an option here:
+ * one order costs two Zoho round trips plus the local writes, so even a
+ * few hundred of them runs for minutes.
+ */
+exports.startImportJob = async (req, res) => {
+  const mode = String(req.query.mode || '').toLowerCase();
+  if (mode !== 'quick' && mode !== 'full') {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_MODE', message: 'Query param "mode" must be "quick" or "full".' }
+    });
+  }
+
+  const job = syncJobs.createJob({ type: 'salesorders', mode });
+
+  // No `total` estimate seeded from the previous run, unlike the customers
+  // job — deliberately, and it is worth saying why, because copying that
+  // pattern here produces a visibly wrong bar.
+  //
+  // There, every contact fetched is a contact written, so the count found by
+  // the walk IS the total. Here it is not: the walk finds however many Sales
+  // Orders the org has, and only the first IMPORT_MAX of them are processed.
+  // An org with 5,000 Sales Orders and a 500 cap would seed a total from the
+  // fetched count and then pin the bar at 99% for the entire run.
+  //
+  // So the two phases are reported differently instead of being forced onto
+  // one scale: the walk has no total and shows an indeterminate "N found so
+  // far" (see SyncProgressIndicator), and the real total is set once the
+  // number actually being processed is known.
+  res.status(202).json({ success: true, data: { job_id: job.id, mode } });
+
+  // Fire-and-forget — the response above has already gone out. Everything
+  // below only updates the in-memory job and the local database.
+  (async () => {
+    try {
+      const result = await importSalesOrders({
+        mode,
+        // Phase 1, the list walk: a running count, no total.
+        onFetched: (n) => syncJobs.updateProgress(job.id, { processed: n }),
+        // Phase 2: the count that matters is now known, so this is a real
+        // percentage of real work rather than a fraction of an estimate.
+        onProgress: (done, total) => syncJobs.updateProgress(job.id, { processed: done, total })
+      });
+      syncJobs.finishJob(job.id, result);
+    } catch (err) {
+      console.error('[ORDERS] Zoho Sales Order import job failed:', err);
+      syncJobs.failJob(job.id, err);
+    }
+  })();
+};
+
+/**
+ * GET /api/orders/import-from-zoho/status
+ *
+ * What the last import did, so the button can say when it last ran and how
+ * much of the Orders list came from Zoho rather than from this app. Pure
+ * local read — makes no Zoho calls at all, so it is free to poll.
+ */
+exports.getImportStatus = async (req, res, next) => {
+  try {
+    const adopted = await db
+      .prepare("SELECT COUNT(*) AS c FROM orders WHERE getmeds_order_id LIKE 'ZOHO-%'").get();
+    const logged = await db
+      .prepare("SELECT COUNT(*) AS c FROM order_events WHERE event_type = 'ZOHO_LOG'").get();
+    // The two-tier import's backlog: orders that are here and correct, but so
+    // far only from Zoho's list summary — no line items, no history yet. Not
+    // an error state; see schema.pg.sql's zoho_detail_synced_at comment.
+    const awaiting = await db
+      .prepare('SELECT COUNT(*) AS c FROM orders WHERE zoho_so_id IS NOT NULL AND zoho_detail_synced_at IS NULL')
+      .get();
+
+    res.json({
+      success: true,
+      data: {
+        imported_orders: adopted?.c || 0,
+        zoho_log_entries: logged?.c || 0,
+        awaiting_detail: awaiting?.c || 0,
+        last_full_import_at: await getSyncState('salesorders_last_full_sync_at'),
+        last_full_import_total: parseInt(await getSyncState('salesorders_last_full_total'), 10) || null,
+        per_run_limit: IMPORT_MAX,
+        zoho_mode: zoho.mode
       }
     });
   } catch (err) { next(err); }
@@ -752,6 +905,20 @@ exports.create = async (req, res, next) => {
       // override values that already come from the ordering MedRep's own
       // account.
       division, salesperson,
+      // ── Sep 9, 2026: the "Master Form" fields ────────────────────────────
+      //
+      // All optional here, like every intake_* field before them, even though
+      // the form marks most of them required. That is a client-side UX
+      // guarantee; making it a server-side one would reject every other
+      // caller of this endpoint, including the tests and any older client.
+      // Values that ARE supplied still have to be valid — see the checks
+      // below — because a bad enum reaching a CHECK constraint fails as a
+      // database error rather than a message anyone can act on.
+      expected_shipment_date, gl_number, receiver_type, is_doctor,
+      // The customer's TIN. Written through to the customer record (and to
+      // Zoho's cf_tin, best-effort) rather than only onto the order, because
+      // the contact is what Zoho validates against.
+      customer_tin,
       // Sep 2, 2026: TEST_MODE + admin only — raise this order for a named
       // MedRep instead of the seeded stand-in. See resolveOrderMedrep above
       // for the four conditions and why it is ignored rather than refused
@@ -770,7 +937,14 @@ exports.create = async (req, res, next) => {
     // FOR (not whoever is clicking) — one read, so they cannot disagree.
     const medrepProfile = await salespersonService.profileForUser(effectiveActor.id);
 
-    const isManagementOrder = (req.user.role || '').toLowerCase() === 'management';
+    // Sep 9, 2026: renamed from isBackOfficeOrder and widened to include
+    // admin. It gates the two manual overrides below, and an admin needs both
+    // for the same reason management does: their own account has no Division
+    // and no Salesperson to fall back to, and Zoho rejects a Sales Order
+    // without a Salesperson. Naming it after the ROLE was always slightly
+    // wrong — what it actually means is "raised from the back office, not by
+    // the MedRep whose account the order belongs to".
+    const isBackOfficeOrder = ['management', 'admin'].includes((req.user.role || '').toLowerCase());
 
     // Sep 5, 2026 (4): Division — normally always the ordering MedRep's own
     // account value (medrepProfile.division), because it also drives their
@@ -783,7 +957,7 @@ exports.create = async (req, res, next) => {
     // protect, same reasoning as Sub-division below.
     const cleanDivision = (typeof division === 'string' && division.trim()) ? division.trim() : null;
     let effectiveDivision = medrepProfile.division;
-    if (isManagementOrder && cleanDivision !== null) {
+    if (isBackOfficeOrder && cleanDivision !== null) {
       if (!DIVISIONS.includes(cleanDivision)) {
         return res.status(400).json({
           success: false,
@@ -805,7 +979,7 @@ exports.create = async (req, res, next) => {
     // fail-safe retry queue every other Zoho call here already has.
     const cleanSalesperson = (typeof salesperson === 'string' && salesperson.trim()) ? salesperson.trim() : null;
     let effectiveSalesperson = medrepProfile.salesperson;
-    if (isManagementOrder && cleanSalesperson !== null) {
+    if (isBackOfficeOrder && cleanSalesperson !== null) {
       const verification = await salespersonService.verify(cleanSalesperson);
       if (verification.checked && !verification.exists) {
         return res.status(400).json({
@@ -825,39 +999,23 @@ exports.create = async (req, res, next) => {
     // Sep 5, 2026 (3): resolve the Sub-division that will actually be used
     // on THIS order.
     //
-    // Sep 5, 2026 (4): validated against `effectiveDivision` (above), not
-    // `medrepProfile.division` — when Management has typed a Division
-    // manually, the Sub-division options on screen and the ones enforced
-    // here must agree with THAT Division, not the (likely blank) one on
-    // their own account.
+    // Sep 9, 2026: no longer validated against SUB_DIVISIONS_BY_DIVISION.
+    // Sub-division is free text now, and may name more than one, matching the
+    // change made at sign-up and in Profile Settings (see
+    // auth.controller.js's register for the reasoning).
+    //
+    // Relaxing it HERE as well is not optional — leaving this strict while the
+    // account is free text produces the worst possible split: an account whose
+    // sub-division is "GENSAN, BAGUIO" would have every order it raises
+    // rejected for a value the account is required to hold. The two have to
+    // agree, and free text is the side that reflects how reps actually work.
+    //
+    // Sent to Zoho's cf_sub_division as typed — a plain text custom field, so
+    // several comma-separated names are as valid there as one.
     const cleanSubDivision = (typeof sub_division === 'string' && sub_division.trim()) ? sub_division.trim() : null;
-    let effectiveSubDivision;
-    if (cleanSubDivision !== null) {
-      // Explicitly typed/picked for this order — must match the ordering
-      // MedRep's Division's fixed list, if that Division has one. Strict:
-      // unlike Profile Settings, there is no "legacy value" to protect on a
-      // BRAND NEW order.
-      const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[effectiveDivision];
-      if (subDivisionOptions && !subDivisionOptions.includes(cleanSubDivision)) {
-        return res.status(400).json({
-          success: false,
-          error: {
-            code: 'VALIDATION_ERROR',
-            message: `Sub-division for ${effectiveDivision} must be one of: ${subDivisionOptions.join(', ')}`
-          }
-        });
-      }
-      effectiveSubDivision = cleanSubDivision;
-    } else {
-      // Not sent — fall back to the account's own default, exactly the
-      // behavior this endpoint had before Sub-division became editable
-      // here. Deliberately NOT re-validated: an account's stored
-      // sub_division already passed this exact check when it was saved
-      // (see auth.controller.js's updateProfile) — re-checking it here
-      // would let a legacy/grandfathered account value silently block
-      // every future order instead of just a profile edit.
-      effectiveSubDivision = medrepProfile.sub_division;
-    }
+    // Not sent — fall back to the ordering account's own value, exactly the
+    // behavior this endpoint had before Sub-division became editable here.
+    const effectiveSubDivision = cleanSubDivision !== null ? cleanSubDivision : medrepProfile.sub_division;
 
     const ALLOWED_INVOICING_FROM = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 
@@ -865,6 +1023,42 @@ exports.create = async (req, res, next) => {
     if (!customer_id) return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'customer_id is required' } });
     if (!items || !Array.isArray(items) || items.length === 0) return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'At least one order item is required' } });
     if (!delivery_address) return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'delivery_address is required' } });
+    // Sep 9, 2026: the two new enums. Checked here so a bad value comes back
+    // as a VALIDATION_ERROR naming the allowed set, rather than as a Postgres
+    // CHECK violation surfacing through the 500 handler.
+    const ALLOWED_RECEIVER_TYPES = ['patient', 'representative'];
+    const cleanReceiverType = clean(receiver_type) ? clean(receiver_type).toLowerCase() : null;
+    if (cleanReceiverType && !ALLOWED_RECEIVER_TYPES.includes(cleanReceiverType)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: `receiver_type must be one of: ${ALLOWED_RECEIVER_TYPES.join(', ')}`
+        }
+      });
+    }
+
+    // Accepts a real boolean, and the strings a form or query string produces.
+    // Anything else is left NULL ("not answered") rather than being coerced —
+    // `Boolean('false')` is true, and silently recording the opposite of what
+    // someone said is worse than recording nothing.
+    let cleanIsDoctor = null;
+    if (is_doctor === true || is_doctor === 1 || is_doctor === 'true' || is_doctor === '1') cleanIsDoctor = 1;
+    else if (is_doctor === false || is_doctor === 0 || is_doctor === 'false' || is_doctor === '0') cleanIsDoctor = 0;
+
+    // 'YYYY-MM-DD' — the shape <input type="date"> produces and the shape Zoho
+    // wants for shipment_date. Rejected rather than passed through, since Zoho
+    // refuses the whole Sales Order over a malformed date and the error it
+    // gives back names neither the field nor the value.
+    const cleanTin = clean(customer_tin);
+    const cleanShipmentDate = clean(expected_shipment_date);
+    if (cleanShipmentDate && !/^\d{4}-\d{2}-\d{2}$/.test(cleanShipmentDate)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'expected_shipment_date must be YYYY-MM-DD' }
+      });
+    }
+
     if (invoicing_from != null && clean(invoicing_from) && !ALLOWED_INVOICING_FROM.includes(clean(invoicing_from))) {
       return res.status(400).json({
         success: false,
@@ -962,6 +1156,14 @@ exports.create = async (req, res, next) => {
     // req.user is still admin — is unaffected: this checks req.user's OWN
     // role, not the order's medrep_id/effectiveActor.
     const isMedRepDirectSubmit = !isDraft && (req.user.role || '').toLowerCase() === 'medrep';
+    // Sep 8, 2026 (3): widened per Faith's request — the management-review
+    // gate now also fires for ANY B2B order, not only ones a MedRep submits
+    // directly. isMedRepDirectSubmit keeps its original narrow meaning
+    // (whether req.user themselves is a medrep); requiresManagementApproval
+    // is what everything below actually gates on, so a Management-raised
+    // B2B order now also waits for a (different) Management approval before
+    // it reaches Zoho, same as a MedRep's own order always has.
+    const requiresManagementApproval = isMedRepDirectSubmit || (!isDraft && effectiveDivision === 'B2B');
     const isCredit = resolvedCustomerType === 'credit';
     // Sep 1, 2026: same change as submit() below — a credit order stops at
     // 'so_created' until Zoho confirms the Sales Order, instead of landing
@@ -971,13 +1173,49 @@ exports.create = async (req, res, next) => {
     // disagree about where a credit order starts.
     const finalStatus = isDraft
       ? 'draft'
-      : (isMedRepDirectSubmit ? 'pending_management_approval' : (isCredit ? 'so_created' : 'ready_for_draft_invoice'));
+      : (requiresManagementApproval ? 'pending_management_approval' : (isCredit ? 'so_created' : 'ready_for_draft_invoice'));
     const now = new Date().toISOString();
     // "Sales Order Date (Automatic Today)" on the form — always set here,
     // server-side, to today's date. There is no client override; a
     // sales_order_date sent in the request body (there isn't one — the
     // frontend never sends it) would be ignored regardless.
     const salesOrderDate = now.slice(0, 10);
+
+    // Sep 8, 2026 (3): the order form's "Admin" field shows whoever is
+    // logged in creating this order, explicitly labeled "not sent to
+    // Zoho" — until now. Per the user's request, that identity now goes to
+    // Zoho's "GM Lead ID" custom field (cf_gm_lead_id, confirmed live on
+    // this org — see LiveZohoAdapter.js). Only set when the creator is NOT
+    // the order's own MedRep: a MedRep creating their own order has no
+    // separate "admin" to report (the form doesn't even show that field
+    // then — see OrderForm.jsx's canPickMedrep-gated "Admin" pill); their
+    // identity is already the Salesperson. Persisted on the order (below)
+    // so submit()/zohoPayloadBuilder.js's retry rebuild send the same
+    // value later, rather than re-deriving it from whoever happens to be
+    // submitting or retrying at that later moment.
+    const gmLeadId = (req.user.role || '').toLowerCase() !== 'medrep' ? req.user.name : null;
+
+    // Sep 9, 2026: the TIN, written to the CONTACT before the Sales Order is
+    // created — and that order matters.
+    //
+    // Zoho refuses to create a Sales Order for a "business" sub-type contact
+    // whose cf_tin is empty (see ZohoAdapter.updateContactTin, added Sep 8 for
+    // exactly this). So a MedRep who supplies the missing TIN on the order
+    // form has to have it reach the contact BEFORE the createSalesOrder call
+    // below, or the order they just fixed still fails on the same complaint.
+    //
+    // Soft-gated, like every other Zoho write in this app: setCustomerTin
+    // never throws, a Zoho-side failure leaves the local value saved, and
+    // nothing here can stop the order being raised. It is also a no-op when
+    // the value is unchanged, which is the common case — the form sends back
+    // whatever it was shown.
+    let tinResult = null;
+    if (cleanTin) {
+      tinResult = await setCustomerTin(customer.id, cleanTin);
+      if (tinResult?.zohoError) {
+        console.warn(`[ORDERS] TIN for customer ${customer.id} saved locally but not pushed to Zoho: ${tinResult.zohoError}`);
+      }
+    }
 
     // 2. Create Zoho SO *before* opening the DB transaction below.
     let zohoResult = null;
@@ -1060,7 +1298,18 @@ exports.create = async (req, res, next) => {
       // label -> {payment_terms, payment_terms_label} split, same division
       // of labor as Salesperson (name resolved to an id at the adapter
       // layer, not here).
-      payment_terms: clean(payment_terms)
+      payment_terms: clean(payment_terms),
+      // Sep 9, 2026: Expected Shipment Date -> Zoho's own `shipment_date`.
+      // A plain top-level field on the Sales Order, like delivery_method and
+      // terms above — no custom-field mapping, and no invented
+      // customfield_id, which is what makes it the only one of the five new
+      // Master Form fields that goes to Zoho at all. GL Number, Receiver
+      // Type and Is-Doctor have no field on this org's Sales Order, so they
+      // stay local; the TIN goes on the CONTACT, not the order.
+      expected_shipment_date: cleanShipmentDate,
+      // Sep 8, 2026 (3): see the gmLeadId note above — wired to Zoho's
+      // "GM Lead ID" custom field.
+      gm_lead_id: gmLeadId
     };
     // Aug 30, 2026: each line's discount/tax are still not added to this
     // payload. See ZOHO_SALES_ORDER_FIELD_MAPPING.md for exactly which Zoho
@@ -1070,12 +1319,14 @@ exports.create = async (req, res, next) => {
     // here confirms it). Confirming, invoicing, and recording payment all
     // happen directly in Zoho by Finance now, never through this app.
     //
-    // Sep 7, 2026: skipped entirely for isMedRepDirectSubmit — nothing
+    // Sep 7, 2026: skipped entirely when requiresManagementApproval — nothing
     // reaches Zoho until Management approves it (see approve() in
     // syncOrderToZohoAndFinalize's section below, which makes this exact
     // call later). zohoResult stays null and zohoSyncStatus stays 'pending',
-    // which is the correct, honest state for "not sent yet".
-    if (!isDraft && !isMedRepDirectSubmit) {
+    // which is the correct, honest state for "not sent yet". (Sep 8, 2026
+    // (3): this now also covers a Management-raised B2B order, not only a
+    // MedRep's own submission — see requiresManagementApproval above.)
+    if (!isDraft && !requiresManagementApproval) {
       if (isDryRunMode()) {
         // ZOHO_DRY_RUN=true — no HTTP call to Zoho is made at all.
         zohoResult = buildDryRunSalesOrder(zohoPayload);
@@ -1101,11 +1352,14 @@ exports.create = async (req, res, next) => {
           intake_receiver, intake_contact_no, intake_source, intake_pls_give,
           sales_order_date, intake_delivery_method, intake_terms, intake_payment_terms, invoicing_from,
           no_payment_proof_reason, no_payment_proof_note, sub_division,
-          division, salesperson,
+          division, salesperson, gm_lead_id,
+          -- Sep 9, 2026: the Master Form fields. See schema.pg.sql.
+          intake_expected_shipment_date, intake_gl_number, intake_receiver_type,
+          intake_is_doctor, intake_tin,
           zoho_so_id, zoho_so_number, zoho_so_status, zoho_sync_status,
           created_at, submitted_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         getmedsOrderId,
         customer_id,
@@ -1134,6 +1388,12 @@ exports.create = async (req, res, next) => {
         effectiveSubDivision,
         effectiveDivision,
         effectiveSalesperson,
+        clean(gmLeadId),
+        cleanShipmentDate,
+        clean(gl_number),
+        cleanReceiverType,
+        cleanIsDoctor,
+        cleanTin,
         zohoResult ? zohoResult.salesorder.salesorder_id : null,
         zohoResult ? zohoResult.salesorder.salesorder_number : null,
         // Sep 1, 2026: seed the Zoho-side status ('draft' as Zoho creates
@@ -1178,7 +1438,7 @@ exports.create = async (req, res, next) => {
           // every day in production and "(admin, Test Mode)" is simply
           // wrong for it.
           notes: onBehalfOf
-            ? (isManagementOrder
+            ? (isBackOfficeOrder
                 ? `${req.user.name} created an order for ${effectiveActor.name}.`
                 : `Draft order created — raised by ${req.user.name} (admin, Test Mode) on behalf of ${effectiveActor.name}`)
             : 'Draft order created',
@@ -1186,10 +1446,13 @@ exports.create = async (req, res, next) => {
             ? { onBehalfOf: true, raisedByUserId: req.user.id, raisedByName: req.user.name }
             : undefined
         });
-      } else if (isMedRepDirectSubmit) {
+      } else if (requiresManagementApproval) {
         // Sep 7, 2026: stops here — no child record, no Zoho retry queueing
         // (nothing was sent), no ORDER_SUBMITTED. Those all happen later,
         // inside syncOrderToZohoAndFinalize(), when Management approves.
+        // Sep 8, 2026 (3): notes text no longer hardcodes "MedRep" — this
+        // branch is now also reached by a Management user raising a B2B
+        // order themselves, where "submitted by MedRep" would be wrong.
         await logEvent({
           orderId,
           eventType: 'STATUS_CHANGE',
@@ -1197,7 +1460,9 @@ exports.create = async (req, res, next) => {
           newStatus: 'pending_management_approval',
           actorId: effectiveActor.id,
           actorName: effectiveActor.name,
-          notes: 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
+          notes: isMedRepDirectSubmit
+            ? 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
+            : `Submitted by ${req.user.name} — B2B order, waiting for Management approval before syncing to Zoho.`
         });
       } else {
         if (isCredit) {
@@ -1225,7 +1490,7 @@ exports.create = async (req, res, next) => {
           // "(admin, Test Mode)" phrasing, which only actually applies to
           // the admin/TEST_MODE case.
           notes: onBehalfOf
-            ? (isManagementOrder
+            ? (isBackOfficeOrder
                 ? `${req.user.name} created an order for ${effectiveActor.name} — ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'}).`
                 : `Order submitted for ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'}) — raised by ${req.user.name} (admin, Test Mode) on behalf of ${effectiveActor.name}`)
             : `Order submitted for ${customer.name} (${isCredit ? 'Credit Fast-Track' : 'Direct Patient Payment Queue'})`,
@@ -1253,7 +1518,7 @@ exports.create = async (req, res, next) => {
     const { orderId } = await createOrderTxn();
 
     // Trigger Notifications outside transaction
-    if (isMedRepDirectSubmit) {
+    if (requiresManagementApproval) {
       const orderDataForNotif = {
         getmeds_order_id: getmedsOrderId,
         customer_name: customer.name,
@@ -1392,7 +1657,16 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // Sep 8, 2026 (2): Payment Terms — see the matching note in `create`
     // above for why this is the raw local string, translated at the
     // LiveZohoAdapter layer rather than here.
-    payment_terms: order.intake_payment_terms || null
+    payment_terms: order.intake_payment_terms || null,
+    // Sep 9, 2026: Expected Shipment Date -> Zoho's `shipment_date`. Present
+    // in all three places a payload is built (here, create() above, and
+    // services/zohoPayloadBuilder.js for retries) — a field wired into only
+    // some of them silently disappears depending on which path sent the order.
+    expected_shipment_date: order.intake_expected_shipment_date || null,
+    // Sep 8, 2026 (3): GM Lead ID — set once at create() time (see the
+    // gmLeadId note there) and simply carried through here, not
+    // re-derived from whoever is submitting/approving now.
+    gm_lead_id: order.gm_lead_id || null
   };
   let zohoResult = null;
   let zohoSyncStatus = 'pending';
@@ -1555,12 +1829,21 @@ exports.submit = async (req, res, next) => {
     // MedRep's behalf via medrep_id at create() — nothing changes, the order
     // still syncs to Zoho immediately below, exactly as it always has.
     //
+    // Sep 8, 2026 (3): widened, same as create()'s requiresManagementApproval
+    // above — ANY B2B order also waits for Management approval here, even
+    // one Management raised and is submitting themselves. order.division is
+    // this order's own resolved value (set at create() — see the Sep 5 (4)
+    // divisions doc); order.medrep_division is the fallback for a draft that
+    // predates that column.
+    //
     // The order gets its real getmeds_order_id now, at this gate, not later
     // at approval — so it is identifiable in the Management approval queue
     // (GET /api/management/orders?status=pending_management_approval)
     // immediately. See approve()/reject() further down for what happens
     // next.
-    if (req.user.role === 'medrep') {
+    const effectiveDivisionForApprovalGate = order.division || order.medrep_division;
+    const requiresManagementApproval = req.user.role === 'medrep' || effectiveDivisionForApprovalGate === 'B2B';
+    if (requiresManagementApproval) {
       // Sep 7, 2026 (2): a draft already has a getmeds_order_id — create()
       // assigns one immediately, even to a draft (see the top of create()
       // above). Reuse it here instead of minting a second one: without this,
@@ -1582,7 +1865,9 @@ exports.submit = async (req, res, next) => {
         newStatus: 'pending_management_approval',
         actorId: req.user.id,
         actorName: req.user.name,
-        notes: 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
+        notes: req.user.role === 'medrep'
+          ? 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
+          : `Submitted by ${req.user.name} — B2B order, waiting for Management approval before syncing to Zoho.`
       });
 
       const orderDataForNotif = { getmeds_order_id: getmedsOrderId, customer_name: order.customer_name, status: 'pending_management_approval', medrep_email: order.medrep_email };
@@ -1931,7 +2216,23 @@ exports.updateDetails = async (req, res, next) => {
       intake_terms: 'terms',
       intake_payment_terms: 'payment_terms',
       invoicing_from: 'invoicing_from',
-      sub_division: 'sub_division'
+      sub_division: 'sub_division',
+      // Sep 9, 2026: the Master Form fields are editable here too. They have
+      // to be: this endpoint is what the send-back flow relies on
+      // (Management returns an order to draft, the MedRep fixes it and
+      // resubmits — see sendBack), and a GL Number or shipment date that
+      // could be entered but never corrected would make that flow useless for
+      // exactly the fields most likely to be wrong. Still gated by the same
+      // two conditions as everything else here: no Zoho Sales Order yet, and
+      // the order is draft or awaiting approval.
+      //
+      // intake_is_doctor is NOT in this map — it is an integer, and the loop
+      // below runs clean() over every value, which would turn 0 into null.
+      // It is handled on its own further down.
+      intake_expected_shipment_date: 'expected_shipment_date',
+      intake_gl_number: 'gl_number',
+      intake_receiver_type: 'receiver_type',
+      intake_tin: 'customer_tin'
     };
 
     const updates = {};
@@ -1944,6 +2245,30 @@ exports.updateDetails = async (req, res, next) => {
       return res.status(400).json({
         success: false,
         error: { code: 'VALIDATION_ERROR', message: `invoicing_from must be one of: ${ALLOWED_INVOICING_FROM.join(', ')}` }
+      });
+    }
+
+    // Sep 9, 2026: same two enums create() validates, checked the same way and
+    // for the same reason — a bad value reaching the CHECK constraint fails as
+    // a database error rather than a message anyone can act on.
+    if (Object.prototype.hasOwnProperty.call(body, 'receiver_type') && clean(body.receiver_type)) {
+      const rt = clean(body.receiver_type).toLowerCase();
+      if (!['patient', 'representative'].includes(rt)) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: 'receiver_type must be one of: patient, representative' }
+        });
+      }
+      body.receiver_type = rt;
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'expected_shipment_date') &&
+      clean(body.expected_shipment_date) &&
+      !/^\d{4}-\d{2}-\d{2}$/.test(clean(body.expected_shipment_date))
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'expected_shipment_date must be YYYY-MM-DD' }
       });
     }
 
@@ -1987,19 +2312,12 @@ exports.updateDetails = async (req, res, next) => {
       }
     }
 
+    // Sep 9, 2026: free text, like create() and the account fields — see the
+    // note on cleanSubDivision in create() for why all four sites had to move
+    // together rather than one at a time.
     if (Object.prototype.hasOwnProperty.call(body, 'sub_division')) {
       const cleanSub = clean(body.sub_division);
       if (cleanSub !== null) {
-        const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[effectiveDivisionForSubDivision];
-        if (subDivisionOptions && !subDivisionOptions.includes(cleanSub)) {
-          return res.status(400).json({
-            success: false,
-            error: {
-              code: 'VALIDATION_ERROR',
-              message: `Sub-division for ${effectiveDivisionForSubDivision} must be one of: ${subDivisionOptions.join(', ')}`
-            }
-          });
-        }
         updates.sub_division = cleanSub;
         changedSummary.push(`Sub-division: ${order.sub_division || '(none)'} → ${cleanSub}`);
       }
@@ -2016,6 +2334,20 @@ exports.updateDetails = async (req, res, next) => {
       const value = clean(body.invoicing_from);
       updates.invoicing_from = value;
       changedSummary.push(`invoicing_from: ${order.invoicing_from || '(none)'} → ${value || '(none)'}`);
+    }
+
+    // Sep 9, 2026: is_doctor, on its own because it is an integer. The loop
+    // above runs clean() over every value, and clean(0) is null — so routing
+    // this through the map would record "not answered" every time somebody
+    // answered No.
+    if (Object.prototype.hasOwnProperty.call(body, 'is_doctor')) {
+      const raw = body.is_doctor;
+      let value = null;
+      if (raw === true || raw === 1 || raw === 'true' || raw === '1') value = 1;
+      else if (raw === false || raw === 0 || raw === 'false' || raw === '0') value = 0;
+      updates.intake_is_doctor = value;
+      const label = (v) => (v === 1 ? 'Yes' : v === 0 ? 'No' : '(none)');
+      changedSummary.push(`is_doctor: ${label(order.intake_is_doctor)} → ${label(value)}`);
     }
 
     if (!Object.keys(updates).length) {

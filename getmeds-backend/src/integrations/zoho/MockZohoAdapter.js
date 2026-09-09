@@ -154,6 +154,11 @@ class MockZohoAdapter extends ZohoAdapter {
       salesperson_id: salespersonMatch.salesperson_id,
       salesperson_name: salespersonMatch.salesperson_name,
       date: new Date().toISOString().slice(0, 10),
+      // Sep 9, 2026: mirrors LiveZohoAdapter's shipment_date so a test can
+      // assert what would have been sent. Omitted when blank, exactly as
+      // there — the mock being lenient where live is strict is the divergence
+      // that hid the listSalespersons parsing bug.
+      ...(orderData.expected_shipment_date ? { shipment_date: orderData.expected_shipment_date } : {}),
       line_items: (orderData.items || []).map((item) => ({
         item_id: item.zoho_item_id || null,
         name: item.name,
@@ -168,7 +173,11 @@ class MockZohoAdapter extends ZohoAdapter {
         // cf_sub_division so a test can assert what would have been sent.
         // Omitted entirely when blank, exactly as there.
         ...(orderData.division ? [{ label: 'Division', value: orderData.division }] : []),
-        ...(orderData.sub_division ? [{ label: 'Sub-division', value: orderData.sub_division }] : [])
+        ...(orderData.sub_division ? [{ label: 'Sub-division', value: orderData.sub_division }] : []),
+        // Sep 8, 2026 (3): mirrors LiveZohoAdapter's cf_gm_lead_id so a test
+        // can assert what would have been sent. Omitted when blank, same
+        // convention as every other custom field here.
+        ...(orderData.gm_lead_id ? [{ label: 'GM Lead ID', value: orderData.gm_lead_id }] : [])
       ],
       created_time: new Date().toISOString(),
       _mock: true
@@ -191,8 +200,54 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorders: all.slice(0, limit) };
   }
 
-  async listSalesOrders() {
-    return { code: 0, message: 'success', salesorders: [...this._salesOrders.values()] };
+  /**
+   * Sep 9, 2026: accepts (and mostly ignores) the same `(params, opts)` shape
+   * LiveZohoAdapter's paginated walk takes, and returns the same
+   * truncated/newWatermark/stoppedEarly keys — same reasoning as
+   * listContacts/listItems below. Still calls `opts.onPage` once so an import
+   * job started against mock mode reports SOME progress rather than jumping
+   * from 0% straight to done.
+   */
+  async listSalesOrders(params = {}, opts = {}) {
+    const salesorders = [...this._salesOrders.values()];
+    if (opts.onPage) {
+      try { opts.onPage({ processed: salesorders.length, page: 1, hasMorePages: false }); } catch (_) {}
+    }
+    return { code: 0, message: 'success', salesorders, truncated: false, newWatermark: null, stoppedEarly: false };
+  }
+
+  /**
+   * Mirrors LiveZohoAdapter.listSalesOrderComments' shape. Read-only, like
+   * there — this mock has no addComment either.
+   *
+   * The fixture set carries no history of its own (a mock Sales Order is
+   * created and then never touched again), so this synthesises the ONE entry
+   * Zoho would definitely have for any Sales Order that exists: its creation.
+   * Enough for the import path's log ingestion to be exercised end to end in
+   * mock mode without pretending to a richer history than the mock has.
+   */
+  async listSalesOrderComments(salesorderId) {
+    const salesorder = this._salesOrders.get(salesorderId);
+    if (!salesorder) {
+      return { code: 4, message: 'The Sales Order ID given seems to be incorrect. [MOCK MODE]', comments: [] };
+    }
+    return {
+      code: 0,
+      message: 'success',
+      comments: [
+        {
+          comment_id: `mock-comment-${salesorderId}`,
+          salesorder_id: salesorderId,
+          description: `Sales Order created for ${salesorder.customer_name || 'customer'}`,
+          commented_by: salesorder.salesperson_name || 'Mock User',
+          comment_type: 'system',
+          operation_type: 'Added',
+          date: (salesorder.created_time || new Date().toISOString()).slice(0, 10),
+          date_description: 'Mock history entry',
+          time: '00:00 AM'
+        }
+      ]
+    };
   }
 
   // Aug 28, 2026: accepts (and mostly ignores) the same `(params, opts)`
@@ -231,6 +286,51 @@ class MockZohoAdapter extends ZohoAdapter {
       return { code: 4, message: 'The contact ID given seems to be incorrect. [MOCK MODE]' };
     }
     return { code: 0, message: 'success', contact };
+  }
+
+  /**
+   * Mirrors LiveZohoAdapter.updateContactTin: sets ONLY `cf_tin` on the
+   * seeded in-memory contact, nothing else about it. See ZohoAdapter.js's
+   * Sep 8, 2026 note for why this narrow write exists.
+   */
+  async updateContactTin(contactId, tin) {
+    if (!contactId) throw new Error('updateContactTin requires a Zoho contact id');
+    const value = String(tin || '').trim();
+    if (!value) throw new Error('updateContactTin requires a non-empty tin value');
+
+    const contact = this._contacts.get(contactId);
+    if (!contact) {
+      return { code: 4, message: 'The contact ID given seems to be incorrect. [MOCK MODE]' };
+    }
+    contact.cf_tin = value;
+    this._log(`[ZOHO_MOCK] Would PUT /contacts/${contactId} custom_fields: [{cf_tin: "${value}"}]`);
+    return { code: 0, message: 'Contact TIN updated successfully [MOCK MODE]', contact };
+  }
+
+  /**
+   * Mirrors LiveZohoAdapter.addSalesOrderAttachment: records the file
+   * against the seeded in-memory Sales Order, adds nothing else, never
+   * touches an existing attachment. See ZohoAdapter.js's Sep 8, 2026 (2)
+   * note for why this narrow write exists.
+   */
+  async addSalesOrderAttachment(salesorderId, file) {
+    const salesorder = this._salesOrders.get(salesorderId);
+    if (!salesorder) {
+      return { code: 4, message: 'The Sales Order ID given seems to be incorrect. [MOCK MODE]' };
+    }
+    const { filename, contentType, buffer } = file || {};
+    if (!buffer || !buffer.length) throw new Error('addSalesOrderAttachment requires non-empty file data');
+
+    const document = {
+      document_id: `MOCK-DOC-${this._soCounter}-${(salesorder._attachments || []).length + 1}`,
+      file_name: filename || 'attachment',
+      file_type: contentType || 'application/octet-stream',
+      file_size: buffer.length
+    };
+    salesorder._attachments = salesorder._attachments || [];
+    salesorder._attachments.push(document);
+    this._log(`[ZOHO_MOCK] Would POST /salesorders/${salesorderId}/attachment: ${document.file_name}`);
+    return { code: 0, message: 'Attachment added successfully [MOCK MODE]', document };
   }
 }
 

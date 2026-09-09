@@ -255,8 +255,19 @@ const PaymentProofPanel = ({ orderId, order }) => {
       });
       return confirmRes.data;
     },
-    onSuccess: (_data, variables) => {
-      toast.success(variables.fileType === 'payment_proof' ? 'Proof of payment uploaded.' : 'File attached.');
+    onSuccess: (data, variables) => {
+      const base = variables.fileType === 'payment_proof' ? 'Proof of payment uploaded.' : 'File attached.';
+      // Sep 8, 2026: `attach` also best-effort pushes this file to the
+      // matching Zoho Sales Order (once one exists) — reflect whether that
+      // part actually landed, same idea as ClientsPage's TIN save toast.
+      if (data?.zoho_pushed) {
+        toast.success(`${base} Also added to the Zoho Sales Order.`);
+      } else if (data?.zoho_error) {
+        toast.success(base);
+        toast.error(`Could not add it to the Zoho Sales Order: ${data.zoho_error}`);
+      } else {
+        toast.success(base);
+      }
       qc.invalidateQueries({ queryKey: ['order-attachments', orderId] });
       qc.invalidateQueries({ queryKey: ['order-payment-proof', orderId] });
       qc.invalidateQueries({ queryKey: ['order', String(orderId)] });

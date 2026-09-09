@@ -31,12 +31,18 @@ const MIN_PASSWORD_LENGTH = 8;
 // Sep 5, 2026: mirrors the backend's DIVISIONS in auth.controller.js and
 // SignupPage.jsx's copy exactly — see auth.controller.js's comment for why
 // division is a fixed list rather than free text. Kept in the order given.
+// Sep 9, 2026: '2MG Incorporated', 'Office of the President', 'PCSO', 'DSWD'
+// and 'GrabMart' removed at the user's request. Verified against the live
+// database first: no user and no order carried any of the five, so nothing
+// existing is stranded on a value this list no longer accepts.
+//
+// That check matters because `division` has no CHECK constraint — the column
+// keeps whatever was written to it, and validation happens only on the way in
+// (auth.controller.js at sign-up/profile, orders.controller.js at create and
+// at PATCH /:id/details). A row already holding a removed value would keep
+// working everywhere except the next save, which would then refuse it with
+// "division must be one of ..." for a value the account already has.
 const DIVISIONS = [
-  '2MG Incorporated',
-  'GrabMart',
-  'Office of the President',
-  'PCSO',
-  'DSWD',
   'B&B',
   'B2B',
   'B2C',
@@ -147,12 +153,10 @@ const ProfilePage = () => {
   // has switched to a different Division (which clears Sub-division via
   // handleDivisionChange below), the old value no longer means anything and
   // shouldn't be offered as if it still applied.
-  const legacySubDivision = (user?.sub_division || '').trim();
-  const subDivisionIsOnOriginalDivision = profileForm.division === legacyDivision;
-  const subDivisionSelectOptions =
-    subDivisionOptions && subDivisionIsOnOriginalDivision && legacySubDivision && !subDivisionOptions.includes(legacySubDivision)
-      ? [legacySubDivision, ...subDivisionOptions]
-      : subDivisionOptions;
+  // Sep 9, 2026: legacySubDivision / subDivisionSelectOptions are gone with the
+  // dropdown they existed for. They prepended the account's current value to
+  // the fixed list so an off-list value would not silently be lost on save —
+  // a problem that only exists when there IS a list to be off.
 
   // Sep 5, 2026 (2): Sub-division's own options depend on which Division is
   // selected — clear it on every Division change so a value that doesn't
@@ -273,30 +277,26 @@ const ProfilePage = () => {
                 ))}
               </select>
             </Field>
-            <Field label="Sub-division" help="Optional.">
-              {subDivisionSelectOptions ? (
-                <select
-                  value={profileForm.sub_division}
-                  onChange={(e) => setProfileForm((f) => ({ ...f, sub_division: e.target.value }))}
-                  className={inputClass}
-                >
-                  <option value="">-- Select sub-division --</option>
-                  {subDivisionSelectOptions.map((sd) => (
-                    <option key={sd} value={sd}>
-                      {sd}
-                      {sd === legacySubDivision && subDivisionOptions && !subDivisionOptions.includes(sd)
-                        ? ' (current — not in standard list)'
-                        : ''}
-                    </option>
+            <Field label="Sub-division" help="Optional. Type any value — separate several with commas.">
+              {/* Sep 9, 2026: free text, with the fixed lists demoted to
+                  datalist suggestions — see SignupPage for the reasoning. The
+                  "(current — not in standard list)" carve-out that used to be
+                  needed here is gone with the restriction it worked around:
+                  when every value is accepted, no value is off-list. */}
+              <input
+                type="text"
+                list="profile-sub-division-options"
+                placeholder="e.g. GENSAN, or GENSAN, BAGUIO"
+                value={profileForm.sub_division}
+                onChange={(e) => setProfileForm((f) => ({ ...f, sub_division: e.target.value }))}
+                className={inputClass}
+              />
+              {subDivisionOptions && (
+                <datalist id="profile-sub-division-options">
+                  {subDivisionOptions.map((sd) => (
+                    <option key={sd} value={sd} />
                   ))}
-                </select>
-              ) : (
-                <input
-                  type="text"
-                  value={profileForm.sub_division}
-                  onChange={(e) => setProfileForm((f) => ({ ...f, sub_division: e.target.value }))}
-                  className={inputClass}
-                />
+                </datalist>
               )}
             </Field>
           </div>

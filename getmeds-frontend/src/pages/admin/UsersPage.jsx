@@ -3,7 +3,7 @@ import client from '../../api/client';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import ErrorMessage from '../../components/ui/ErrorMessage';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
-import { Users, UserX, RefreshCw, Shield, Check } from 'lucide-react';
+import { Users, UserX, RefreshCw, Shield, Check, UserCheck, Ban, Clock } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const roleBadgeColors = {
@@ -42,6 +42,39 @@ const UsersPage = () => {
       setError(errorMsg);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Sep 9, 2026: the sign-up approval queue.
+  //
+  // POST /api/auth/register now creates an account with approval_status
+  // 'pending' that cannot log in at all, so these two are what let anyone in.
+  // Approving is not gated behind a confirmation dialog — it is the expected,
+  // reversible action (an approved account can still be deactivated), and a
+  // modal on the common path trains people to click through modals.
+  const [busyId, setBusyId] = useState(null);
+
+  const decide = async (user, action) => {
+    setBusyId(user.id);
+    try {
+      const res = await client.post(`/api/admin/users/${user.id}/${action}`);
+      const updated = res.data?.data?.user;
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === user.id ? { ...u, approval_status: updated?.approval_status || action + 'd' } : u
+        )
+      );
+      toast.success(
+        action === 'approve'
+          ? `${getUserDisplayName(user)} can now sign in.`
+          : `${getUserDisplayName(user)}'s sign-up was rejected.`
+      );
+    } catch (err) {
+      toast.error(
+        err.response?.data?.error?.message || err.message || `Could not ${action} this account.`
+      );
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -169,6 +202,12 @@ const UsersPage = () => {
                 ) : (
                   users.map((user) => {
                     const isActive = user.is_active === 1 || user.is_active === true;
+                    // Sep 9, 2026: undefined approval_status means an account
+                    // that predates the column, which the migration backfilled
+                    // as approved — so anything that is not literally
+                    // 'pending'/'rejected' is approved.
+                    const isPending = user.approval_status === 'pending';
+                    const isRejected = user.approval_status === 'rejected';
                     const roleKey = (user.role || user.role_name || '').toLowerCase();
                     const badgeColor = roleBadgeColors[roleKey] || 'bg-slate-100 text-slate-800 border-slate-200';
 
@@ -194,8 +233,26 @@ const UsersPage = () => {
                             {getRoleName(user)}
                           </span>
                         </td>
+                        {/* Sep 9, 2026: approval status wins the cell when it
+                            is not 'approved'. "Pending" and "Inactive" both
+                            mean "cannot log in", but they are different
+                            situations with different fixes, and showing only
+                            is_active would render a brand-new sign-up as
+                            "Active" — which it is, and which is exactly the
+                            wrong thing to tell an admin about an account
+                            waiting on them. */}
                         <td className="px-6 py-4 whitespace-nowrap">
-                          {isActive ? (
+                          {isPending ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 border border-amber-300">
+                              <Clock className="w-3 h-3" />
+                              Awaiting approval
+                            </span>
+                          ) : isRejected ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-800 border border-red-200">
+                              <Ban className="w-3 h-3" />
+                              Rejected
+                            </span>
+                          ) : isActive ? (
                             <span className="inline-flex items-center gap-1.5 pl-1 pr-3 py-1 rounded-full text-xs font-semibold bg-pharmacy-green/10 text-pharmacy-green">
                               <span className="flex items-center justify-center w-4 h-4 rounded-full bg-pharmacy-green text-white flex-shrink-0">
                                 <Check className="w-2.5 h-2.5" strokeWidth={4} />
@@ -209,7 +266,39 @@ const UsersPage = () => {
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-[13px] font-medium">
-                          {isActive ? (
+                          {isPending ? (
+                            <div className="inline-flex items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={busyId === user.id}
+                                onClick={() => decide(user, 'approve')}
+                                className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full text-pharmacy-green-dark bg-pharmacy-green/10 hover:bg-pharmacy-green/20 border border-pharmacy-green/30 transition-colors disabled:opacity-50"
+                              >
+                                <UserCheck className="w-3.5 h-3.5" />
+                                Approve
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busyId === user.id}
+                                onClick={() => decide(user, 'reject')}
+                                className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors disabled:opacity-50"
+                              >
+                                <Ban className="w-3.5 h-3.5" />
+                                Reject
+                              </button>
+                            </div>
+                          ) : isRejected ? (
+                            <button
+                              type="button"
+                              disabled={busyId === user.id}
+                              onClick={() => decide(user, 'approve')}
+                              className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full text-pharmacy-green-dark bg-pharmacy-green/10 hover:bg-pharmacy-green/20 border border-pharmacy-green/30 transition-colors disabled:opacity-50"
+                              title="Reverses the rejection — the account can sign in again."
+                            >
+                              <UserCheck className="w-3.5 h-3.5" />
+                              Approve after all
+                            </button>
+                          ) : isActive ? (
                             <button
                               type="button"
                               onClick={() => handleDeactivateClick(user)}

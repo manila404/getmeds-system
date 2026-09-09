@@ -42,6 +42,33 @@
  *   Zoho before sending an order that names it. There is still no method
  *   that creates one — a missing Salesperson is added by a human, in Zoho.
  *
+ *   Sep 8, 2026: `updateContactTin` is a second, deliberate exception to
+ *   "createSalesOrder is the ONLY write" above — reviewed and signed off
+ *   the same day. Zoho refuses to create a Sales Order for a "business"
+ *   sub-type contact with no value in its `cf_tin` (Tax Identification
+ *   Number — a Philippines BIR requirement) custom field, and there is no
+ *   Sales-Order-level alternative for this org: TIN can only be set on the
+ *   contact itself. This method exists to unblock exactly that, and
+ *   nothing more — it sends exactly one custom field and can never be used
+ *   to touch a contact's name, address, or anything else. It is still not
+ *   a general updateContact(): that continues not to exist here, on
+ *   purpose. If a real need for a broader contact write ever comes up,
+ *   that too should be a deliberate, reviewed addition, not a widening of
+ *   this one.
+ *
+ *   Sep 8, 2026 (2): `addSalesOrderAttachment` is a THIRD deliberate,
+ *   reviewed exception, same day, same reasoning. This app already lets
+ *   MedRep/Management/Finance attach files to an order locally (Proof of
+ *   Payment / Purchase Order / Other — see paymentProof.controller.js);
+ *   this pushes a copy of each newly-attached file onto the matching Zoho
+ *   Sales Order's own "Attach File(s)" section, so staff working directly
+ *   in Zoho see the same files without anyone re-uploading them there by
+ *   hand. It is strictly additive: there is no method here that lists,
+ *   downloads, replaces, or deletes an existing Zoho attachment — only
+ *   adds a new one. Soft-gated at the call site
+ *   (paymentProof.controller.js): a failed push never undoes or blocks the
+ *   local attachment.
+ *
  * Every method here mirrors the real Zoho Books/Inventory REST API's
  * request/response shape (see MockZohoAdapter.js and mock-server/ for the
  * exact field names), so code written against the mock needs zero changes
@@ -77,8 +104,21 @@ class ZohoAdapter {
     throw new Error('Not implemented');
   }
 
-  /** @returns {Promise<{code:number, message:string, salesorders:object[]}>} */
-  async listSalesOrders(params = {}) {
+  /**
+   * Read-only: EVERY Sales Order in the org, walking Zoho's pages until it
+   * says there are no more.
+   *
+   * Sep 9, 2026: `opts` added, identical in shape and meaning to
+   * listContacts/listItems below — `opts.onPage(progress)` for live progress
+   * reporting, and `opts.sinceWatermark` (+ optional `opts.watermarkField`,
+   * default `last_modified_time`) for an incremental "Quick Sync" walk that
+   * stops as soon as it reaches a Sales Order it has already seen. Both are
+   * additive and default to the previous behaviour (full walk, no callback),
+   * so the one existing caller needed no change.
+   *
+   * @returns {Promise<{code:number, message:string, salesorders:object[], truncated?:boolean, newWatermark?:string, stoppedEarly?:boolean}>}
+   */
+  async listSalesOrders(params = {}, opts = {}) {
     throw new Error('Not implemented');
   }
 
@@ -93,6 +133,33 @@ class ZohoAdapter {
    * @returns {Promise<{code:number, message:string, salesorders:object[]}>}
    */
   async listRecentSalesOrders(limit = 5) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Read-only: ONE Sales Order's "Comments & History" — the log Zoho itself
+   * keeps of everything that happened to it, each entry carrying who did it
+   * (`commented_by`), when (`date`/`time`/`operation_type`) and what
+   * (`description`: "Sales Order created", "Status changed from Draft to
+   * Confirmed", "Invoice created", ...).
+   *
+   * Sep 9, 2026. Added for the "retrieve everything from Zoho" import (see
+   * services/zohoOrderImportService.js). Everything else in this app's audit
+   * trail is INFERRED — reconcileService compares Zoho's current state
+   * against the local row and writes a checkpoint for each difference it can
+   * see. That reconstructs the milestones, but never the actual history: it
+   * cannot say WHEN the Sales Order was confirmed, or by WHOM, only that it
+   * is confirmed now. This endpoint is that missing half, straight from
+   * Zoho's own record.
+   *
+   * A plain GET, like every other read here. `addComment` was deliberately
+   * removed from this contract on Aug 27, 2026 and this does NOT bring it
+   * back — there is still no method anywhere that writes a comment to Zoho.
+   *
+   * @param {string} salesorderId
+   * @returns {Promise<{code:number, message:string, comments:object[]}>}
+   */
+  async listSalesOrderComments(salesorderId) {
     throw new Error('Not implemented');
   }
 
@@ -163,6 +230,34 @@ class ZohoAdapter {
    * @returns {Promise<{code:number, message:string, salespersons:object[]}>}
    */
   async listSalespersons() {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Write EXACTLY ONE thing to an existing Zoho contact: its TIN (`cf_tin`
+   * custom field). See the Sep 8, 2026 note above for why this narrow
+   * exception exists. Never creates a contact — `contactId` must already
+   * exist (from a prior `listContacts`/`getContact` read) — and never sends
+   * any field other than `cf_tin`, so it cannot be used to rename a
+   * customer, change its address, or touch anything else about it.
+   * @param {string} contactId - an existing Zoho contact id
+   * @param {string} tin - the TIN value to write
+   * @returns {Promise<{code:number, message:string, contact:object}>}
+   */
+  async updateContactTin(contactId, tin) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Add ONE file attachment to an existing Zoho Sales Order. See the Sep 8,
+   * 2026 (2) note above for why this narrow, add-only exception exists.
+   * Never lists, downloads, replaces, or deletes an attachment — every
+   * call here can only add a new one.
+   * @param {string} salesorderId - an existing Zoho Sales Order id
+   * @param {{buffer: Buffer, filename: string, contentType?: string}} file
+   * @returns {Promise<{code:number, message:string, document:object}>}
+   */
+  async addSalesOrderAttachment(salesorderId, file) {
     throw new Error('Not implemented');
   }
 

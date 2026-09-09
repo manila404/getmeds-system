@@ -10,6 +10,20 @@ const { evaluateCompletion } = require('./orderCompletionService');
 const { diffSalesOrderFields, summarizeChanges } = require('./zohoEditDiffService');
 
 /**
+ * Every Zoho Sales Order status that means "past draft".
+ *
+ * Sep 1, 2026 (6): lifted out of a local const inside reconcileOrder on Sep 9
+ * so the bulk import can use the SAME list when it adopts an order from Zoho's
+ * list response — which carries `status` and nothing else useful — rather than
+ * keeping a second copy that would drift. The reasoning for its contents is at
+ * the use site below.
+ */
+const CONFIRMED_OR_BEYOND = [
+  'confirmed', 'open', 'partially_shipped', 'shipped',
+  'fulfilled', 'partially_fulfilled', 'closed', 'invoiced', 'partially_invoiced'
+];
+
+/**
  * Pull an order's current truth out of Zoho and backfill anything this app
  * missed — Sales Order confirmed/cancelled/deleted, invoice drafted/sent/paid,
  * package created, shipment with tracking — then apply the shipped-AND-paid
@@ -34,8 +48,23 @@ const { diffSalesOrderFields, summarizeChanges } = require('./zohoEditDiffServic
  *
  * `source` is stamped into each audit entry's metadata ('manual_reconcile',
  * 'page_open', 'auto_sync') so the trail says how a backfill was triggered.
+ *
+ * Sep 9, 2026: `salesorder` is an optional, already-fetched Zoho Sales Order
+ * to reconcile against, instead of this function fetching it itself. Purely
+ * additive — omitted, everything below behaves exactly as before.
+ *
+ * It exists for the bulk import (services/zohoOrderImportService.js), where
+ * the cost is not theoretical. That import already holds each Sales Order's
+ * full detail, and reconcileOrderFully calls this up to seven times per order;
+ * without this parameter, adopting 500 Sales Orders means ~1,500 redundant
+ * GETs of records already in memory, against an API with a per-minute rate
+ * limit. Re-using ONE snapshot across the passes is also the correct
+ * semantics, not just the cheap one: the passes converge by comparing a fixed
+ * view of Zoho against a local row that changes underneath them, so re-reading
+ * Zoho between passes would only introduce the chance of a mid-convergence
+ * change nothing is prepared for.
  */
-async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync', source = 'auto_sync' }) {
+async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync', source = 'auto_sync', salesorder: prefetchedSalesOrder = null }) {
   try {
     const order = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.name as medrep_name, u.email as medrep_email, u.id as medrep_user_id
@@ -54,8 +83,16 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
 
     let salesorder;
     try {
-      const result = await zoho.getSalesOrder(order.zoho_so_id);
-      salesorder = result?.salesorder;
+      // A caller that already has the record hands it over; see the
+      // `salesorder` note on this function's doc comment. Nothing below this
+      // point can tell the difference, including the delete-detection catch —
+      // a Sales Order we were handed demonstrably exists.
+      if (prefetchedSalesOrder) {
+        salesorder = prefetchedSalesOrder;
+      } else {
+        const result = await zoho.getSalesOrder(order.zoho_so_id);
+        salesorder = result?.salesorder;
+      }
     } catch (zohoErr) {
       // Aug 31, 2026: a Sales Order deleted directly in Zoho (not
       // voided/cancelled — actually removed) makes this GET fail with a
@@ -180,10 +217,6 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
     // been confirmed first, so treating those as confirmed is not a guess —
     // it is the only way they could exist. The confirm branch then runs first
     // and the rest of the chain has a valid status to work from.
-    const CONFIRMED_OR_BEYOND = [
-      'confirmed', 'open', 'partially_shipped', 'shipped',
-      'fulfilled', 'partially_fulfilled', 'closed', 'invoiced', 'partially_invoiced'
-    ];
     const isConfirmed = CONFIRMED_OR_BEYOND.includes(soStatus);
     const isCancelled = soStatus === 'void' || soStatus === 'cancelled' || soStatus === 'voided';
 
@@ -622,12 +655,12 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
  * forever, hammering Zoho with one API read per pass. Seven is comfortably
  * more than the six checkpoints a single order can have.
  */
-async function reconcileOrderFully({ orderId, actorId = null, actorName = 'Auto Sync', source = 'auto_sync', maxPasses = 7 }) {
+async function reconcileOrderFully({ orderId, actorId = null, actorName = 'Auto Sync', source = 'auto_sync', maxPasses = 7, salesorder = null }) {
   const actions = [];
   let last = null;
 
   for (let pass = 0; pass < maxPasses; pass++) {
-    last = await reconcileOrder({ orderId, actorId, actorName, source });
+    last = await reconcileOrder({ orderId, actorId, actorName, source, salesorder });
     if (!last.ok) break;
     if (!last.action || last.action === 'NOTHING_NEW') break;
     actions.push(last.action);
@@ -653,4 +686,4 @@ async function reconcileOrderFully({ orderId, actorId = null, actorName = 'Auto 
   };
 }
 
-module.exports = { reconcileOrder, reconcileOrderFully };
+module.exports = { reconcileOrder, reconcileOrderFully, CONFIRMED_OR_BEYOND };

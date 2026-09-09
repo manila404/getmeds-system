@@ -21,6 +21,7 @@ import ApprovalQueuePage from './pages/management/ApprovalQueuePage';
 import ExceptionHubPage from './pages/management/ExceptionHubPage';
 import ClientsPage from './pages/management/ClientsPage';
 import UsersPage from './pages/admin/UsersPage';
+import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import InventoryPage from './pages/admin/InventoryPage';
 import TestModePage from './pages/TestModePage';
 import ProfilePage from './pages/ProfilePage';
@@ -109,10 +110,14 @@ function App() {
               resolveOrderMedrep. Without 'management' here, ProtectedRoute
               silently bounced them to /dashboard and the form never
               rendered, even though the backend was already wired for it. */}
+          {/* Sep 9, 2026: 'admin' added — see orders.routes.js. This route
+              guard is the one that decides whether the page renders at all, so
+              opening the backend without it would have looked, from the
+              browser, exactly like nothing had changed. */}
           <Route
             path="/orders/new"
             element={
-              <ProtectedRoute allowedRoles={['medrep', 'management']}>
+              <ProtectedRoute allowedRoles={['medrep', 'management', 'admin']}>
                 <NewOrderPage />
               </ProtectedRoute>
             }
@@ -193,16 +198,29 @@ function App() {
           />
 
           {/* Admin Routes */}
-          <Route 
-            path="/admin/users" 
+          <Route
+            path="/admin/users"
             element={
               <ProtectedRoute allowedRoles={['admin']}>
                 <UsersPage />
               </ProtectedRoute>
-            } 
+            }
           />
-          <Route 
-            path="/inventory" 
+          {/* Sep 9, 2026: surfaces the Zoho sync retry outbox that
+              admin.controller.js's getZohoQueue/retryZohoQueue already
+              exposed but nothing in the app ever showed — see
+              ZohoSyncHealthPage.jsx. Admin-only, matching admin.routes.js's
+              isAdmin gate on the underlying API. */}
+          <Route
+            path="/admin/zoho-sync"
+            element={
+              <ProtectedRoute allowedRoles={['admin']}>
+                <ZohoSyncHealthPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/inventory"
             element={
               <ProtectedRoute allowedRoles={['admin', 'management', 'dispatch']}>
                 <InventoryPage />

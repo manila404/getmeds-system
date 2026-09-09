@@ -193,6 +193,12 @@ function migrate() {
     "TEXT CHECK(category IS NULL OR category IN ('doctor','hospital','distributor','pwd'))"
   );
 
+  // Sep 8, 2026: TIN (Tax Identification Number — Philippines BIR
+  // requirement). Zoho refuses to create a Sales Order for a "business"
+  // sub-type contact with no cf_tin value — see schema.sql's customers
+  // table comment and customers.controller.js's updateCustomerTin.
+  ensureColumn('customers', 'tin', 'TEXT');
+
   // Aug 27, 2026 (2): local snapshot of Zoho's last-known stock/price per
   // product, so the Inventory status page can compare against it without
   // making a live Zoho call on every page view/auto-refresh — see
@@ -238,6 +244,21 @@ function migrate() {
   // throttle, so neither re-reads an order the other just did. NULL means
   // never reconciled, which sorts to the front of the queue.
   ensureColumn('orders', 'last_reconciled_at', 'TEXT');
+  // Sep 9, 2026: the Master Form intake fields. Mirrors migrate.pg.js's
+  // MASTER_FORM_COLUMNS — without the CHECK constraints, which SQLite cannot
+  // add to an existing table. The Postgres path is the live one; this exists
+  // so the two schemas do not silently diverge.
+  ensureColumn('orders', 'intake_expected_shipment_date', 'TEXT');
+  ensureColumn('orders', 'intake_gl_number', 'TEXT');
+  ensureColumn('orders', 'intake_receiver_type', 'TEXT');
+  ensureColumn('orders', 'intake_is_doctor', 'INTEGER');
+  ensureColumn('orders', 'intake_tin', 'TEXT');
+  // Sep 9, 2026: admin approval for sign-ups. Mirrors migrate.pg.js's
+  // APPROVAL_COLUMNS, minus the CHECK constraint SQLite cannot add to an
+  // existing table.
+  ensureColumn('users', 'approval_status', "TEXT NOT NULL DEFAULT 'approved'");
+  ensureColumn('users', 'approved_at', 'TEXT');
+  ensureColumn('users', 'approved_by', 'INTEGER');
 
   // Sep 2, 2026: sign-up form fields (see schema.sql's `users` table
   // comment). `name` is left alone and kept in sync with `display_name` by
@@ -279,6 +300,12 @@ function migrate() {
   // account", exactly like sub_division falls back when unset.
   ensureColumn('orders', 'division', 'TEXT');
   ensureColumn('orders', 'salesperson', 'TEXT');
+
+  // Sep 8, 2026 (3): the admin/management account that created this order —
+  // the order form's "Admin" field, previously never sent to Zoho. See
+  // schema.sql's `orders` table comment and orders.controller.js's
+  // gmLeadId note.
+  ensureColumn('orders', 'gm_lead_id', 'TEXT');
 
   // Sep 1, 2026: run LAST, after every ensureColumn above — the rebuild
   // copies rows across on the intersection of the old and new column lists,

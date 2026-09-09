@@ -182,6 +182,19 @@ export const updateCustomerCategory = async (customerId, category) => {
 };
 
 /**
+ * Sep 8, 2026: sets a customer's TIN (Tax Identification Number — a
+ * Philippines BIR requirement Zoho needs before it will create a Sales
+ * Order for a "business" sub-type contact). Saves locally first, always;
+ * the backend also best-effort pushes it to Zoho's cf_tin custom field —
+ * the response's `zoho_pushed` says whether that part actually landed.
+ * See customers.controller.js's updateCustomerTin for the full rationale.
+ */
+export const updateCustomerTin = async (customerId, tin) => {
+  const res = await client.patch(`/api/customers/${customerId}/tin`, { tin });
+  return res.data;
+};
+
+/**
  * Aug 28, 2026: background Quick Sync ("only contacts changed since last
  * time" — fast) / Full Resync ("everyone, registered here or not,
  * guaranteed") for the Clients Directory. Starts a job and returns
@@ -198,6 +211,35 @@ export const startCustomersSyncJob = async (mode) => {
 /** Same as startCustomersSyncJob, for the Inventory page's stock pull. */
 export const startInventorySyncJob = async (mode) => {
   const res = await client.post(`/api/inventory/sync-pull/start?mode=${mode}`);
+  return res.data;
+};
+
+/**
+ * Sep 9, 2026: the same background-job shape again, for pulling Sales Orders
+ * that exist in Zoho into this app — including the ones raised directly in
+ * Zoho, which until now the Orders list never showed at all. Each imported
+ * order also gets Zoho's own Comments & History mirrored into its trail.
+ *
+ * 'full'  — walk the org's Sales Orders and adopt whatever isn't here yet.
+ * 'quick' — only what has been created or edited in Zoho since the last run.
+ *
+ * Read-only towards Zoho, like every other sync here. Admin/management only,
+ * since it creates orders (and, where a Sales Order names a contact this app
+ * has never seen, customers) in bulk.
+ * @param {'quick'|'full'} mode
+ */
+export const startSalesOrdersImportJob = async (mode) => {
+  const res = await client.post(`/api/orders/import-from-zoho/start?mode=${mode}`);
+  return res.data;
+};
+
+/**
+ * How much of the Orders list came from Zoho, and when the last full import
+ * ran. A purely local read on the backend — no Zoho calls — so it is cheap to
+ * keep on screen next to the import buttons.
+ */
+export const fetchZohoImportStatus = async () => {
+  const res = await client.get('/api/orders/import-from-zoho/status');
   return res.data;
 };
 

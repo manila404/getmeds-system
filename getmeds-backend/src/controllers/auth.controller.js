@@ -34,12 +34,18 @@ const SIGNUP_ROLE = 'medrep';
 // create-user.js's own docstring example was 'NCR') and a hard constraint
 // would refuse to migrate against them. This is enforced only at the point
 // a human TYPES A NEW value — see register() and updateProfile() below.
+// Sep 9, 2026: '2MG Incorporated', 'Office of the President', 'PCSO', 'DSWD'
+// and 'GrabMart' removed at the user's request. Verified against the live
+// database first: no user and no order carried any of the five, so nothing
+// existing is stranded on a value this list no longer accepts.
+//
+// That check matters because `division` has no CHECK constraint — the column
+// keeps whatever was written to it, and validation happens only on the way in
+// (auth.controller.js at sign-up/profile, orders.controller.js at create and
+// at PATCH /:id/details). A row already holding a removed value would keep
+// working everywhere except the next save, which would then refuse it with
+// "division must be one of ..." for a value the account already has.
 const DIVISIONS = [
-  '2MG Incorporated',
-  'GrabMart',
-  'Office of the President',
-  'PCSO',
-  'DSWD',
   'B&B',
   'B2B',
   'B2C',
@@ -140,6 +146,27 @@ exports.login = async (req, res, next) => {
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
       return res.status(401).json({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'Invalid email or password' } });
     }
+
+    // Sep 9, 2026: the approval gate.
+    //
+    // Checked AFTER the password, deliberately. Checking it first would turn
+    // this endpoint into a way to discover which email addresses have signed
+    // up — "waiting for approval" and "invalid email or password" are
+    // different answers, and only a correct password should earn the specific
+    // one.
+    if (user.approval_status && user.approval_status !== 'approved') {
+      const pending = user.approval_status === 'pending';
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: pending ? 'PENDING_APPROVAL' : 'SIGNUP_REJECTED',
+          message: pending
+            ? 'Your account is waiting for an administrator to approve it. You will be able to sign in once it has been approved.'
+            : 'This sign-up was not approved. Please contact your administrator.'
+        }
+      });
+    }
+
     const token = issueToken(user);
     res.json({
       success: true,
@@ -272,18 +299,19 @@ exports.register = async (req, res, next) => {
     // Every other Division has no list, so any non-blank value is accepted
     // there, same as before this change. Still optional everywhere — a
     // blank sub-division is never rejected.
-    if (subDivision) {
-      const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[division];
-      if (subDivisionOptions && !subDivisionOptions.includes(subDivision)) {
-        return res.status(400).json({
-          success: false,
-          error: {
-            code: 'VALIDATION_ERROR',
-            message: `Sub-division for ${division} must be one of: ${subDivisionOptions.join(', ')}`
-          }
-        });
-      }
-    }
+    // Sep 9, 2026: sub-division is FREE TEXT, and may name more than one.
+    //
+    // It used to be checked against SUB_DIVISIONS_BY_DIVISION, which turned
+    // the field into a closed dropdown for the four Divisions that have a
+    // list — worst for HOS, whose list is the longest and least complete. Real
+    // reps cover several sub-divisions and the lists were never exhaustive, so
+    // the validation was rejecting true answers.
+    //
+    // Those lists survive as SUGGESTIONS in the UI (a datalist, not a
+    // <select>), which keeps the convenience without the refusal. Nothing
+    // downstream parses this value: it reaches Zoho's cf_sub_division as typed
+    // (a plain text custom field), so "GENSAN, BAGUIO" is as valid there as
+    // "GENSAN".
 
     const domains = allowedEmailDomains();
     if (domains.length) {
@@ -319,9 +347,15 @@ exports.register = async (req, res, next) => {
     // column and SQLite refuses to be told what it should contain.
     const result = await db
       .prepare(
+        // Sep 9, 2026: `approval_status` is written EXPLICITLY as 'pending'.
+        // The column DEFAULTS to 'approved' so that adding it to a live
+        // database does not lock every existing account out (see
+        // schema.pg.sql) — which means this is the one place that has to say
+        // otherwise, and relying on the default here would silently approve
+        // every self-service sign-up.
         `INSERT INTO users
-           (name, email, password_hash, role, first_name, middle_name, last_name, display_name, division, sub_division)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           (name, email, password_hash, role, first_name, middle_name, last_name, display_name, division, sub_division, approval_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
       )
       .run(
         displayName, // keeps user.name, which the whole frontend renders, meaningful
@@ -339,13 +373,32 @@ exports.register = async (req, res, next) => {
     const user = await db
       .prepare(
         `SELECT id, name, email, role, first_name, middle_name, last_name,
-                display_name, division, sub_division, salesperson
+                display_name, division, sub_division, salesperson, approval_status
          FROM users WHERE id = ?`
       )
       .get(result.lastInsertRowid);
 
-    const token = issueToken(user);
-    res.status(201).json({ success: true, data: { token, user } });
+    // Sep 9, 2026: NO TOKEN is issued here any more.
+    //
+    // This endpoint used to sign the applicant straight in, which is exactly
+    // what admin approval exists to prevent: an account able to raise orders
+    // the moment it is created, before anyone has confirmed the person is real
+    // or that the Division and Salesperson they typed are right — and that
+    // Salesperson is what every one of their orders sends to Zoho.
+    //
+    // They are told what happens next instead. `token` is absent rather than
+    // null: a client that reads it and stores whatever it finds would
+    // otherwise end up with a session of `null`.
+    res.status(201).json({
+      success: true,
+      data: {
+        user,
+        approval_status: user.approval_status,
+        message:
+          'Your account has been created and is waiting for an administrator to approve it. ' +
+          'You will be able to sign in once it has been approved.'
+      }
+    });
   } catch (err) {
     // A UNIQUE violation can still land here if two sign-ups race between the
     // SELECT above and the INSERT. Report it as the conflict it is rather
@@ -428,24 +481,11 @@ exports.updateProfile = async (req, res, next) => {
       }
     }
 
-    // Sep 5, 2026 (2): same "keep a legacy value, refuse a new off-list one"
-    // carve-out as Division, but only for the four Divisions that have a
-    // fixed sub-division list — see SUB_DIVISIONS_BY_DIVISION above.
-    if (subDivision) {
-      const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[division];
-      if (subDivisionOptions && !subDivisionOptions.includes(subDivision)) {
-        const current = await getCurrentRow();
-        if (subDivision !== (current.sub_division || '')) {
-          return res.status(400).json({
-            success: false,
-            error: {
-              code: 'VALIDATION_ERROR',
-              message: `Sub-division for ${division} must be one of: ${subDivisionOptions.join(', ')}`
-            }
-          });
-        }
-      }
-    }
+    // Sep 9, 2026: sub-division is free text here too — see register() above
+    // for why. The "keep a legacy value, refuse a new off-list one" carve-out
+    // that used to live here is gone with the restriction it was working
+    // around: when every value is accepted, there is no such thing as a legacy
+    // one to protect.
 
     await db
       .prepare('UPDATE users SET name = ?, display_name = ?, division = ?, sub_division = ? WHERE id = ?')

@@ -26,12 +26,18 @@ const MIN_PASSWORD_LENGTH = 8;
 // instead of free text (a free-typed division created junk Salespersons in
 // the live Zoho org before, since division feeds `salesperson`, the exact
 // string sent to every Zoho Sales Order). Kept in the order given.
+// Sep 9, 2026: '2MG Incorporated', 'Office of the President', 'PCSO', 'DSWD'
+// and 'GrabMart' removed at the user's request. Verified against the live
+// database first: no user and no order carried any of the five, so nothing
+// existing is stranded on a value this list no longer accepts.
+//
+// That check matters because `division` has no CHECK constraint — the column
+// keeps whatever was written to it, and validation happens only on the way in
+// (auth.controller.js at sign-up/profile, orders.controller.js at create and
+// at PATCH /:id/details). A row already holding a removed value would keep
+// working everywhere except the next save, which would then refuse it with
+// "division must be one of ..." for a value the account already has.
 const DIVISIONS = [
-  '2MG Incorporated',
-  'GrabMart',
-  'Office of the President',
-  'PCSO',
-  'DSWD',
   'B&B',
   'B2B',
   'B2C',
@@ -49,6 +55,12 @@ const DIVISIONS = [
 // four Divisions get a fixed Sub-division dropdown. Any Division not listed
 // here has no fixed sub-divisions, so the field below falls back to free
 // text for it, same as before this change.
+// Sep 9, 2026: SUGGESTIONS only. These are offered in a datalist and are
+// never enforced — see the Sub-division input below, and
+// auth.controller.js's register() for why the validation was dropped.
+const SUB_DIVISION_HELP =
+  'Type any sub-division. Separate several with commas — reps often cover more than one. The list is only a suggestion.';
+
 const SUB_DIVISIONS_BY_DIVISION = {
   'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],
   HOS: [
@@ -106,6 +118,10 @@ const SignupPage = () => {
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const { signup } = useAuth();
+  // Sep 9, 2026: the confirmation message once the account exists but cannot
+  // be used yet. Null until then; the form is replaced by it, so nobody
+  // re-submits and hits "an account with that email already exists".
+  const [submitted, setSubmitted] = useState(null);
   const navigate = useNavigate();
 
   const set = (field) => (e) => {
@@ -118,6 +134,11 @@ const SignupPage = () => {
       // Division change so a value that doesn't belong to the newly chosen
       // Division is never silently carried over and submitted.
       if (field === 'division') {
+        // Sep 9, 2026: left in place. Sub-division is free text now, so this
+        // is no longer about clearing an off-list value — but the branches
+        // named under one Division are still rarely the right answer under
+        // another, and silently carrying them over is the more misleading of
+        // the two behaviours.
         next.sub_division = '';
         return next;
       }
@@ -157,8 +178,13 @@ const SignupPage = () => {
     setIsLoading(true);
     try {
       const { confirm, ...fields } = form;
-      await signup(fields);
-      navigate('/dashboard');
+      // Sep 9, 2026: no navigation. Sign-up creates a PENDING account and
+      // hands back no token, so there is nowhere to navigate to — sending them
+      // to /dashboard would bounce straight back to the login screen with no
+      // explanation, which reads as the sign-up having failed.
+      const result = await signup(fields);
+      setSubmitted(result?.message ||
+        'Your account has been created and is waiting for an administrator to approve it.');
     } catch (err) {
       setError(
         err.response?.data?.error?.message ||
@@ -199,12 +225,40 @@ const SignupPage = () => {
         <div className="w-full max-w-[520px] bg-white rounded-2xl p-8 md:p-10 shadow-2xl">
           <div className="w-full mx-auto">
             <h2 className="text-[26px] font-semibold text-center text-ink-primary">
-              Create your account
+              {submitted ? 'Almost there' : 'Create your account'}
             </h2>
             <p className="text-[14px] text-ink-secondary text-center mt-2 mb-8">
-              For Medical Representatives. Other roles are set up by an administrator.
+              {submitted
+                ? 'Your account needs an administrator to approve it before you can sign in.'
+                : 'For Medical Representatives. Other roles are set up by an administrator. Your account will need an administrator to approve it before you can sign in.'}
             </p>
 
+            {/* Sep 9, 2026: the form is REPLACED by this once the account
+                exists, not merely supplemented by a toast. Leaving the filled
+                form on screen invites a second submit, which would come back
+                "an account with that email already exists" and read as the
+                sign-up having failed. */}
+            {submitted ? (
+              <div className="space-y-6">
+                <div className="rounded-xl border border-pharmacy-green/40 bg-pharmacy-green/10 p-4">
+                  <p className="text-sm font-semibold text-pharmacy-green-dark mb-1">
+                    Account created — waiting for approval
+                  </p>
+                  <p className="text-[13px] text-ink-secondary">{submitted}</p>
+                </div>
+                <p className="text-[13px] text-ink-secondary">
+                  Signed up as <span className="font-semibold text-ink-primary">{form.email}</span>.
+                  You can close this page; try signing in once an administrator has approved the account.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigate('/login')}
+                  className="w-full py-3 rounded-xl bg-getmeds-blue text-white text-sm font-semibold hover:bg-getmeds-blue-dark transition-colors"
+                >
+                  Back to sign in
+                </button>
+              </div>
+            ) : (
             <form className="space-y-6" onSubmit={handleSubmit}>
               <ErrorMessage message={error} onClose={() => setError(null)} />
 
@@ -288,22 +342,34 @@ const SignupPage = () => {
                     <label className={labelClass}>
                       Sub-division <span className={optionalClass}>(optional)</span>
                     </label>
-                    {subDivisionOptions ? (
-                      <select className={inputClass} value={form.sub_division} onChange={set('sub_division')}>
-                        <option value="">-- Select sub-division --</option>
+                    {/* Sep 9, 2026: always a free-text input, never a
+                        <select>. The dropdown appeared for the four Divisions
+                        with a fixed list and was worst for HOS, whose list is
+                        the longest and least complete — it could not express
+                        "GENSAN and BAGUIO", and it refused any branch the list
+                        had never been updated with.
+
+                        The list survives as a datalist: the same suggestions,
+                        offered rather than enforced. Typing anything is
+                        allowed, including several separated by commas, and the
+                        backend no longer checks the value against the list
+                        either (auth.controller.js's register). */}
+                    <input
+                      type="text"
+                      list="signup-sub-division-options"
+                      placeholder="e.g. GENSAN, or GENSAN, BAGUIO"
+                      className={inputClass}
+                      value={form.sub_division}
+                      onChange={set('sub_division')}
+                    />
+                    {subDivisionOptions && (
+                      <datalist id="signup-sub-division-options">
                         {subDivisionOptions.map((sd) => (
-                          <option key={sd} value={sd}>{sd}</option>
+                          <option key={sd} value={sd} />
                         ))}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        placeholder="Enter sub-division"
-                        className={inputClass}
-                        value={form.sub_division}
-                        onChange={set('sub_division')}
-                      />
+                      </datalist>
                     )}
+                    <p className="mt-1 text-[11px] text-slate-500">{SUB_DIVISION_HELP}</p>
                   </div>
                 </div>
 
@@ -415,6 +481,7 @@ const SignupPage = () => {
                 </Link>
               </p>
             </form>
+            )}
           </div>
         </div>
       </div>

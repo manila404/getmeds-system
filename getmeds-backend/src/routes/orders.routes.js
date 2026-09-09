@@ -20,15 +20,36 @@ router.get('/meta/salesperson', c.getSalespersonStatus);
 // gets the picker, since the server is what honours `medrep_id` on create.
 router.get('/meta/medreps', c.getMedreps);
 
+// Sep 9, 2026: bulk import of every Sales Order that exists in Zoho, with
+// each one's trail rebuilt from Zoho's own record (see
+// services/zohoOrderImportService.js). Read-only towards Zoho.
+//
+// Registered ABOVE `/:id` deliberately. Express matches in declaration order,
+// so `/import-from-zoho/status` declared after `GET /:id` would be swallowed
+// by it and read as "the order whose id is import-from-zoho" — a 404 that
+// looks like a missing feature rather than a routing mistake.
+//
+// Admin/management only: this can create orders and customers in bulk, which
+// is not a MedRep's or Finance's decision to make.
+router.post('/import-from-zoho/start', requireRole('admin', 'management'), c.startImportJob);
+router.get('/import-from-zoho/status', requireRole('admin', 'management'), c.getImportStatus);
+
 // Order CRUD
 router.get('/', c.getAll);
 // Sep 5, 2026: Both medreps and management can create orders.
 // MedReps create their own. Management specifies via medrep_id.
-router.post('/', requireRole('medrep', 'management'), c.create);
+// Sep 9, 2026: 'admin' added. Admin is a superset of management everywhere
+// else in this app — approvals, exceptions, the Clients Directory, the Zoho
+// import all accept both — and order creation was the one thing it was shut
+// out of, with no reason behind it beyond nobody having asked yet.
+router.post('/', requireRole('medrep', 'management', 'admin'), c.create);
 router.get('/:id', c.getById);
 router.get('/:id/events', c.getEvents);
 // Sep 5, 2026: Both medreps and management can submit orders.
-router.post('/:id/submit', requireRole('medrep', 'management'), c.submit);
+// Sep 9, 2026: 'admin' added alongside create above. Creating an order you
+// then cannot submit is not access to the form, it is a dead end — a draft
+// nobody can move.
+router.post('/:id/submit', requireRole('medrep', 'management', 'admin'), c.submit);
 // Sep 7, 2026: a MedRep's submit() stops at 'pending_management_approval'
 // instead of reaching Zoho — Management approves or rejects it here before
 // it syncs. See orders.controller.js's submit()/approve()/reject(). An

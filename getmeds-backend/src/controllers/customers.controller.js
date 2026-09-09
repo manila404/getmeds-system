@@ -3,6 +3,7 @@ const zoho = require('../integrations/zoho');
 const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
 const syncJobs = require('../services/syncJobs');
 const { getSyncState, setSyncState } = require('../services/syncState');
+const { setCustomerTin } = require('../services/customerTinService');
 
 // Purely local classification tag for the Clients Directory (Aug 27, 2026).
 // Kept strictly separate from `type` (credit/direct), which continues to
@@ -186,6 +187,64 @@ async function updateCustomerCategory(req, res, next) {
     const updated = await db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
 
     res.json({ success: true, data: { customer: updated } });
+  } catch (err) { next(err); }
+}
+
+/**
+ * PATCH /api/customers/:id/tin
+ *
+ * Sep 8, 2026: Zoho refuses to create a Sales Order for a "business"
+ * sub-type contact with no value in its `cf_tin` custom field (TIN — Tax
+ * Identification Number, a Philippines BIR requirement). Confirmed live
+ * against this org: there is no Sales-Order-level alternative — TIN can
+ * only be set on the Zoho contact itself. Until now the only fix was a
+ * human editing the contact directly in Zoho.
+ *
+ * This is a DELIBERATE, narrow, signed-off exception to this app's
+ * otherwise create-only Zoho write policy (see ZohoAdapter.js's header
+ * comment). The Zoho call this triggers, zoho.updateContactTin(), can ONLY
+ * ever set the cf_tin custom field on a contact — nothing else about the
+ * contact is touched, and there is no path from this endpoint to any other
+ * Zoho write.
+ *
+ * The local save always happens first and always succeeds on its own —
+ * the Zoho push is soft-gated, same fail-safe shape as getZohoAddress
+ * above: a local-only customer (no zoho_contact_id) or a Zoho hiccup
+ * (network, Zoho down, bad id) never blocks saving the TIN here, it just
+ * means Zoho doesn't have it yet. The response says whether the push
+ * actually landed (`zoho_pushed`) so the caller can tell the difference.
+ *
+ * Clearing the field locally (tin: null or '') is NOT pushed to Zoho —
+ * same "omitted/blank is never sent as an overwrite" convention already
+ * used for every other custom field in LiveZohoAdapter.createSalesOrder.
+ * If the TIN also needs clearing in Zoho, that's still a human, in Zoho.
+ */
+async function updateCustomerTin(req, res, next) {
+  try {
+    const { id } = req.params;
+    let { tin } = req.body || {};
+    tin = tin === null || tin === undefined ? null : String(tin).trim();
+    if (tin === '') tin = null;
+
+    const customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
+    if (!customer) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Customer not found' } });
+    }
+
+    // Sep 9, 2026: the local write + soft-gated Zoho push moved to
+    // services/customerTinService.js, so the order form (which now collects a
+    // TIN too — see orders.controller.js's create) runs the same code rather
+    // than a second copy of a Zoho write.
+    //
+    // One deliberate behaviour difference: the service is a no-op when the
+    // value is unchanged, so re-saving the same TIN no longer makes a
+    // pointless Zoho call. The response shape is unchanged.
+    const result = await setCustomerTin(id, tin);
+
+    res.json({
+      success: true,
+      data: { customer: result.customer, zoho_pushed: result.zohoPushed, zoho_error: result.zohoError }
+    });
   } catch (err) { next(err); }
 }
 
@@ -584,6 +643,7 @@ module.exports = {
   startSyncJob,
   getZohoAddress,
   updateCustomerCategory,
+  updateCustomerTin,
   getCustomerStats,
   ALLOWED_CATEGORIES,
   // Exposed for tests/reconcileBatch.verify.js, which measures the number of

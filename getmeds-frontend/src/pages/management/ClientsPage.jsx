@@ -3,7 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchClients,
   fetchClientStats,
-  updateCustomerCategory
+  updateCustomerCategory,
+  updateCustomerTin
 } from '../../api/queries';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
 import { useSyncJobs } from '../../context/SyncJobsContext';
@@ -40,6 +41,55 @@ const CATEGORY_META = {
   hospital: { label: 'Hospital', icon: Building2, className: 'bg-purple-50 text-purple-700 border-purple-200' },
   distributor: { label: 'Distributor', icon: Truck, className: 'bg-amber-50 text-amber-800 border-amber-200' },
   pwd: { label: 'PWD', icon: Accessibility, className: 'bg-rose-50 text-rose-700 border-rose-200' }
+};
+
+/**
+ * Sep 8, 2026: inline-editable TIN (Tax Identification Number — a
+ * Philippines BIR requirement) cell. Zoho refuses to create a Sales Order
+ * for a "business" sub-type contact with no TIN on its Zoho contact — this
+ * is what lets Management fix that from here instead of editing the
+ * contact directly in Zoho. Saves on blur/Enter, only when the value
+ * actually changed. Local component state (not the row prop directly) so
+ * typing doesn't fight a table re-render mid-edit; resets to the saved
+ * value if the row refreshes while untouched.
+ */
+const TinCell = ({ customer, onSave, saving }) => {
+  const [value, setValue] = useState(customer.tin || '');
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (!dirty) setValue(customer.tin || '');
+  }, [customer.tin, dirty]);
+
+  const commit = () => {
+    setDirty(false);
+    const trimmed = value.trim();
+    if (trimmed === (customer.tin || '')) return;
+    onSave(customer.id, trimmed);
+  };
+
+  return (
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => {
+        setValue(e.target.value);
+        setDirty(true);
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+      }}
+      placeholder="Add TIN..."
+      disabled={saving}
+      className="w-32 text-[11px] px-1.5 py-1 bg-white border border-slate-200 rounded-md font-mono focus:outline-none focus:ring-2 focus:ring-getmeds-blue disabled:opacity-50"
+      title={
+        customer.zoho_contact_id
+          ? "Saved here, then pushed to this client's TIN field in Zoho"
+          : 'Saved here only — this client has no Zoho contact id yet'
+      }
+    />
+  );
 };
 
 // Aug 27, 2026: this `category` tag (doctor/hospital/distributor/pwd) is a
@@ -158,6 +208,30 @@ const ClientsPage = () => {
     onError: (err) => {
       const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
       toast.error(`Could not update category: ${msg}`);
+    }
+  });
+
+  // Sep 8, 2026: saves a client's TIN locally, and — best-effort, never
+  // blocking the local save — pushes it to Zoho's cf_tin custom field. The
+  // toast reflects which of those actually happened, since a Zoho push can
+  // fail (network, Zoho down) while the local save still succeeds.
+  const tinMutation = useMutation({
+    mutationFn: ({ id, tin }) => updateCustomerTin(id, tin),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['clients'] });
+      const pushed = res?.data?.zoho_pushed;
+      const zohoErr = res?.data?.zoho_error;
+      if (pushed) {
+        toast.success('TIN saved and pushed to Zoho');
+      } else if (zohoErr) {
+        toast.error(`TIN saved here, but the Zoho push failed: ${zohoErr}`);
+      } else {
+        toast.success('TIN saved');
+      }
+    },
+    onError: (err) => {
+      const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+      toast.error(`Could not save TIN: ${msg}`);
     }
   });
 
@@ -457,6 +531,7 @@ const ClientsPage = () => {
                 <th className="py-3 px-4">Category</th>
                 <th className="py-3 px-4">Contact</th>
                 <th className="py-3 px-4">Address</th>
+                <th className="py-3 px-4">TIN</th>
                 <th className="py-3 px-4">Source</th>
                 <th className="py-3 px-4">Zoho Contact ID</th>
               </tr>
@@ -464,14 +539,14 @@ const ClientsPage = () => {
             <tbody className="divide-y divide-slate-100 font-medium">
               {isLoading ? (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-400">
+                  <td colSpan={8} className="py-8 text-center text-slate-400">
                     <RefreshCw size={20} className="animate-spin mx-auto mb-2 text-getmeds-blue" />
                     Loading clients...
                   </td>
                 </tr>
               ) : clients.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-400">
+                  <td colSpan={8} className="py-8 text-center text-slate-400">
                     No clients found. Try a Quick Sync or Full Resync above, or adjust your filters.
                   </td>
                 </tr>
@@ -550,6 +625,13 @@ const ClientsPage = () => {
                       </td>
                       <td className="py-3 px-4 text-slate-600 max-w-xs truncate" title={cl.address || ''}>
                         {cl.address || <span className="text-slate-400">—</span>}
+                      </td>
+                      <td className="py-3 px-4">
+                        <TinCell
+                          customer={cl}
+                          saving={tinMutation.isPending && tinMutation.variables?.id === cl.id}
+                          onSave={(id, tin) => tinMutation.mutate({ id, tin })}
+                        />
                       </td>
                       <td className="py-3 px-4">
                         <span

@@ -218,6 +218,11 @@ const facadeMethods = [
   'getSalesOrder',
   'listSalesOrders',
   'listRecentSalesOrders',
+  // Sep 9, 2026: added HERE at the same time as the adapters, rather than
+  // being remembered a week later — see the listSalespersons note below for
+  // what forgetting this line costs (a method that exists on every adapter
+  // and is `undefined` through the facade everything actually imports).
+  'listSalesOrderComments',
   'listContacts',
   'listItems',
   'getContact',
@@ -229,6 +234,16 @@ const facadeMethods = [
   // page's "this rep has no Zoho Salesperson" banner could therefore never
   // fire: the one outcome the pre-check exists to produce was unreachable.
   'listSalespersons',
+  // Sep 8, 2026: added HERE, not just on the adapters — same lesson as
+  // listSalespersons above (Sep 2, 2026), learned the same way once
+  // already. updateContactTin exists on ZohoAdapter/LiveZohoAdapter/
+  // MockZohoAdapter; without this line it would still silently be
+  // `undefined` through the one thing every controller actually imports.
+  'updateContactTin',
+  // Sep 8, 2026 (2): same lesson, same day — addSalesOrderAttachment exists
+  // on ZohoAdapter/LiveZohoAdapter/MockZohoAdapter; without this line it
+  // would be `undefined` through the facade every controller actually uses.
+  'addSalesOrderAttachment',
   'setSimulatedOutage',
   'isSimulatedOutage'
 ];
