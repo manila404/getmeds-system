@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, blockMedrepWritesOnImported } = require('../middleware/auth');
 const c = require('../controllers/orders.controller');
 
 // All orders routes require authentication
@@ -34,6 +34,14 @@ router.get('/meta/medreps', c.getMedreps);
 router.post('/import-from-zoho/start', requireRole('admin', 'management'), c.startImportJob);
 router.get('/import-from-zoho/status', requireRole('admin', 'management'), c.getImportStatus);
 
+// Sep 10, 2026: `blockMedrepWritesOnImported` on every route below that
+// CHANGES an order. A MedRep owns their imported Zoho history so they can read
+// it; editing it here would silently diverge from the Zoho record everyone
+// else works from. Management and admin are unaffected — see the middleware.
+//
+// Deliberately NOT on the GETs, and not on /sync-from-zoho, which only pulls
+// Zoho's own state back down and is how a rep refreshes what they are looking
+// at.
 // Order CRUD
 router.get('/', c.getAll);
 // Sep 5, 2026: Both medreps and management can create orders.
@@ -49,7 +57,7 @@ router.get('/:id/events', c.getEvents);
 // Sep 9, 2026: 'admin' added alongside create above. Creating an order you
 // then cannot submit is not access to the form, it is a dead end — a draft
 // nobody can move.
-router.post('/:id/submit', requireRole('medrep', 'management', 'admin'), c.submit);
+router.post('/:id/submit', requireRole('medrep', 'management', 'admin'), blockMedrepWritesOnImported, c.submit);
 // Sep 7, 2026: a MedRep's submit() stops at 'pending_management_approval'
 // instead of reaching Zoho — Management approves or rejects it here before
 // it syncs. See orders.controller.js's submit()/approve()/reject(). An
@@ -66,7 +74,7 @@ router.post('/:id/send-back', requireRole('management', 'admin'), c.sendBack);
 // /:id/items below. No requireRole here either — same as that route, the
 // ownership check (MedRep can only edit their own order) lives inside the
 // controller, and the "only before Zoho exists" precondition does too.
-router.patch('/:id/details', c.updateDetails);
+router.patch('/:id/details', blockMedrepWritesOnImported, c.updateDetails);
 // Manual fallback: pull this order's current Sales Order status straight
 // from Zoho and backfill the audit trail if a webhook was missed (backend
 // or ngrok not running at the moment Finance confirmed it in Zoho).
@@ -76,12 +84,12 @@ router.post('/:id/sync-from-zoho', c.syncFromZoho);
 // server.js) — this is how a failed sync gets retried instead, one click
 // at a time, so failures don't spam the audit timeline while an issue is
 // being diagnosed.
-router.post('/:id/retry-zoho-sync', c.retryZohoSync);
+router.post('/:id/retry-zoho-sync', blockMedrepWritesOnImported, c.retryZohoSync);
 router.patch('/:id/exception', requireRole('management', 'admin'), c.setException);
 // Aug 31, 2026: fix a failed Zoho sync caused by a bad line item (e.g. a
 // product Zoho has since marked inactive) — see orders.controller.js's
 // updateItems for why this only works before order.zoho_so_id is set.
-router.patch('/:id/items', c.updateItems);
+router.patch('/:id/items', blockMedrepWritesOnImported, c.updateItems);
 
 // ─── Attachments: proof of payment, and everything else (Sep 4, generalized Sep 5, 2026) ──
 //
@@ -107,14 +115,14 @@ router.patch('/:id/items', c.updateItems);
 // FinanceQueuePage.jsx and anything else written against the old shape keeps
 // working with zero changes.
 const proof = require('../controllers/paymentProof.controller');
-router.post('/:id/attachments/upload-url', proof.getUploadUrl);
-router.post('/:id/attachments', proof.attach);
+router.post('/:id/attachments/upload-url', blockMedrepWritesOnImported, proof.getUploadUrl);
+router.post('/:id/attachments', blockMedrepWritesOnImported, proof.attach);
 router.get('/:id/attachments', proof.list);
 
 // Legacy aliases — do not remove without checking FinanceQueuePage.jsx and
 // finance.routes.js's reject route, both of which still call these paths.
-router.post('/:id/payment-proof/upload-url', proof.getUploadUrl);
-router.post('/:id/payment-proof', proof.attach);
+router.post('/:id/payment-proof/upload-url', blockMedrepWritesOnImported, proof.getUploadUrl);
+router.post('/:id/payment-proof', blockMedrepWritesOnImported, proof.attach);
 router.get('/:id/payment-proof', proof.get);
 
 module.exports = router;

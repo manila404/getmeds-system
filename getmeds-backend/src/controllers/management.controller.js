@@ -55,7 +55,7 @@ exports.getSummary = async (req, res, next) => {
 
 exports.getAllOrders = async (req, res, next) => {
   try {
-    const { status, customer_type, date_from, date_to, search } = req.query;
+    const { status, customer_type, date_from, date_to, search, medrep_id, unassigned } = req.query;
 
     // Sep 9, 2026: bounded. The Zoho import means this table is no longer a
     // few hundred rows — the live org has 65,000+ Sales Orders — so an
@@ -103,6 +103,22 @@ exports.getAllOrders = async (req, res, next) => {
     if (date_from) { where.push('o.created_at >= ?'); params.push(`${date_from}T00:00:00.000Z`); }
     if (date_to) { where.push('o.created_at <= ?'); params.push(`${date_to}T23:59:59.999Z`); }
 
+    // Sep 10, 2026: filter by who the order is ASSIGNED to.
+    //
+    // The point of this one is verification, not browsing. After the Zoho
+    // import handed 60,817 orders to whoever ran it, and the Order Ownership
+    // screen handed some of them on to real reps, the only way to check that
+    // landed correctly is to ask "show me everything assigned to this rep" and
+    // look at it. Without that, the assignment is a number in a toast.
+    //
+    // `unassigned=true` is the other half of the same question: everything
+    // still sitting with the importing admin, which is what remains to be
+    // decided. It reads better than making someone know the admin's user id.
+    if (medrep_id) { where.push('o.medrep_id = ?'); params.push(parseInt(medrep_id, 10)); }
+    if (String(unassigned || '').toLowerCase() === 'true') {
+      where.push("o.getmeds_order_id LIKE 'ZOHO-%' AND u.role = 'admin'");
+    }
+
     // Free-text across the three columns a person actually recognises an order
     // by. Needed once the list is paginated: with 65,000 orders, "find this
     // one" cannot mean "page through until you see it".
@@ -116,6 +132,11 @@ exports.getAllOrders = async (req, res, next) => {
 
     const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.name as medrep_name,
+             -- Sep 10, 2026: the OWNER'S ROLE, so the table can tell "assigned
+             -- to a rep" from "still sitting with the admin who ran the
+             -- import". Both look like a name in medrep_name; only the role
+             -- says which one it is.
+             u.role as medrep_role,
              -- Sep 9, 2026: the effective Salesperson, resolved here rather
              -- than in the browser.
              --
@@ -142,10 +163,14 @@ exports.getAllOrders = async (req, res, next) => {
     // The count has to join customers too now — the search clause filters on
     // c.name, and counting over `orders o` alone would raise "missing FROM
     // clause entry for table c" the moment anyone typed in the search box.
+    // The count joins users as well as customers now — `unassigned` filters on
+    // u.role, and counting over a narrower FROM than the row query filters on
+    // is how a total silently stops matching the rows under it.
     const total = (await db.prepare(`
       SELECT COUNT(*) as c
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN users u ON o.medrep_id = u.id
       ${whereClause}
     `).get(...params)).c;
 

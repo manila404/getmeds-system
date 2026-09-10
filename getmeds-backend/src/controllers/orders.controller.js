@@ -17,6 +17,10 @@ const { evaluateCompletion } = require('../services/orderCompletionService');
 // implementation instead of three copies. See zohoReconcileService.js.
 const { reconcileOrder, reconcileOrderFully } = require('../services/zohoReconcileService');
 const { shouldRefreshOnOpen, markRefreshed } = require('../services/zohoAutoSyncService');
+// Sep 10, 2026 (2c): the raw event list turned into a ten-stage pipeline, with
+// everything that is not a stage collapsed underneath the stage it follows.
+// See services/orderTimelineService.js.
+const { buildTimeline, tierOf } = require('../services/orderTimelineService');
 // Sep 9, 2026: the bulk "pull every Sales Order Zoho has" import, and the
 // per-order mirror of Zoho's own Comments & History log. See
 // services/zohoOrderImportService.js for why the trail needs both halves.
@@ -91,6 +95,17 @@ const SUB_DIVISIONS_BY_DIVISION = {
 // at PATCH /:id/details). A row already holding a removed value would keep
 // working everywhere except the next save, which would then refuse it with
 // "division must be one of ..." for a value the account already has.
+// Sep 10, 2026: 'TeleSales', 'MD Telesales' and 'PS' added.
+//
+// Not new business units — they were already in use in Zoho and always had
+// been. Found while auditing the 171 distinct Salesperson strings on the
+// 60,817 imported Sales Orders: 'TeleSales | ...' accounts for 1,041 of them,
+// 'MD Telesales l ...' for 26 and 'PS | ...' for 6. Reps in those divisions
+// could sign up under no Division at all, or under a wrong one, which would
+// then be the Division their orders carried to Zoho.
+//
+// Ordered after the ten that were already here rather than alphabetically, so
+// the diff reads as "three added" rather than a reshuffle.
 const DIVISIONS = [
   'B&B',
   'B2B',
@@ -102,6 +117,9 @@ const DIVISIONS = [
   'STC',
   'TeleSales Anesthesia',
   'URO',
+  'TeleSales',
+  'MD Telesales',
+  'PS',
 ];
 
 /**
@@ -597,10 +615,24 @@ exports.getById = async (req, res, next) => {
     `).get(order.id);
 
     const events = await db.prepare(
-      'SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC'
+      'SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC'
     ).all(order.id);
 
-    res.json({ success: true, data: { order, items, payment, dispatch, events } });
+    // Sep 10, 2026 (2c): `events` is unchanged — anything already reading it
+    // keeps working — and `timeline` is the derived pipeline view beside it.
+    // Derived on read rather than stored, so re-tiering an event type later is
+    // one edit to SPINE and every existing order re-reads correctly.
+    res.json({
+      success: true,
+      data: {
+        order,
+        items,
+        payment,
+        dispatch,
+        events: events.map((e) => ({ ...e, tier: tierOf(e.event_type) })),
+        timeline: buildTimeline(order, events)
+      }
+    });
   } catch (err) { next(err); }
 };
 
@@ -665,11 +697,14 @@ exports.syncFromZoho = async (req, res, next) => {
       salesorderId: result.order?.zoho_so_id,
       source: 'manual_reconcile'
     });
+    // Sep 10, 2026: this now writes CLASSIFIED milestones with Zoho's own
+    // timestamps and the real person's name, rather than a generic copy of
+    // every line — see services/zohoHistoryService.js.
 
     // Re-read only when the log actually added something — the events array
     // reconcileOrder already returned is otherwise still current.
     const events = logsAdded
-      ? await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(req.params.id)
+      ? await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC').all(req.params.id)
       : result.events;
 
     res.json({
@@ -762,8 +797,13 @@ exports.getImportStatus = async (req, res, next) => {
   try {
     const adopted = await db
       .prepare("SELECT COUNT(*) AS c FROM orders WHERE getmeds_order_id LIKE 'ZOHO-%'").get();
+    // Sep 10, 2026: counted by ORIGIN, not by event type. Zoho history entries
+    // used to all be a generic 'ZOHO_LOG'; they are now classified into the
+    // same milestone types the reconcile writes (see zohoHistoryService), so
+    // the only thing that distinguishes one is that it came from a Zoho
+    // comment — which is exactly what zohoCommentId records.
     const logged = await db
-      .prepare("SELECT COUNT(*) AS c FROM order_events WHERE event_type = 'ZOHO_LOG'").get();
+      .prepare(`SELECT COUNT(*) AS c FROM order_events WHERE metadata LIKE '%"zohoCommentId"%'`).get();
     // The two-tier import's backlog: orders that are here and correct, but so
     // far only from Zoho's list summary — no line items, no history yet. Not
     // an error state; see schema.pg.sql's zoho_detail_synced_at comment.
@@ -846,7 +886,7 @@ exports.retryZohoSync = async (req, res, next) => {
 exports.getEvents = async (req, res, next) => {
   try {
     const events = await db.prepare(
-      'SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC'
+      'SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC'
     ).all(req.params.id);
     res.json({ success: true, data: { events } });
   } catch (err) { next(err); }

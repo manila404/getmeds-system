@@ -168,6 +168,48 @@ describe('Management orders list', () => {
     });
   });
 
+  describe('assigned-MedRep filter', () => {
+    test('filters to one rep, and the total follows the filter', async () => {
+      // The only practical way to CHECK that an Order Ownership assignment
+      // landed: ask for that rep's orders and look at them.
+      const rep = await db.prepare("SELECT id FROM users WHERE LOWER(role)='medrep' LIMIT 1").get();
+      const res = await get(`?medrep_id=${rep.id}&limit=5000`);
+
+      expect(res.statusCode).toBe(200);
+      for (const o of res.body.data.orders) expect(o.medrep_id).toBe(rep.id);
+      expect(res.body.data.pagination.total).toBe(res.body.data.orders.length);
+    });
+
+    test('every row says which role owns it, so "assigned" can be told from "not yet"', async () => {
+      const res = await get('?limit=5');
+      for (const o of res.body.data.orders) expect(o.medrep_role).toBeTruthy();
+    });
+
+    test('unassigned=true returns only imported orders still held by an admin', async () => {
+      const admin = await db.prepare("SELECT id FROM users WHERE LOWER(role)='admin' LIMIT 1").get();
+      const customer = await db.prepare("SELECT id FROM customers LIMIT 1").get();
+      const info = await db
+        .prepare(
+          `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type,
+                               total_amount, delivery_address, zoho_sync_status, created_at, updated_at)
+           VALUES ('ZOHO-UNASSIGNED-T1', ?, ?, 'so_created', 'direct', 10, 'x', 'synced', ?, ?)`
+        )
+        .run(customer.id, admin.id, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+      seededOrderIds.push(info.lastInsertRowid);
+
+      const res = await get('?unassigned=true&limit=5000');
+      expect(res.statusCode).toBe(200);
+      const ids = res.body.data.orders.map((o) => o.id);
+      expect(ids).toContain(info.lastInsertRowid);
+      // The seeded PAGE-TEST orders belong to a real medrep, so none of them
+      // should be here — this filter is about what is still to be decided.
+      for (const o of res.body.data.orders) {
+        expect(o.getmeds_order_id.startsWith('ZOHO-')).toBe(true);
+        expect((o.medrep_role || '').toLowerCase()).toBe('admin');
+      }
+    });
+  });
+
   test('a MedRep cannot read the management orders list', async () => {
     const res = await request(app)
       .get('/api/management/orders')

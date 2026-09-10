@@ -20,6 +20,7 @@ import ManagementDashboardPage from './pages/management/ManagementDashboardPage'
 import ApprovalQueuePage from './pages/management/ApprovalQueuePage';
 import ExceptionHubPage from './pages/management/ExceptionHubPage';
 import ClientsPage from './pages/management/ClientsPage';
+import SalespersonMappingPage from './pages/management/SalespersonMappingPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import InventoryPage from './pages/admin/InventoryPage';
@@ -185,6 +186,17 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['management', 'admin']}>
                 <ExceptionHubPage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Sep 10, 2026: who owns the Sales Orders imported from Zoho.
+              Management AND admin — the sales leads are the ones who know
+              which rep is which, so this is deliberately not admin-only. */}
+          <Route
+            path="/management/order-ownership"
+            element={
+              <ProtectedRoute allowedRoles={['management', 'admin']}>
+                <SalespersonMappingPage />
               </ProtectedRoute>
             }
           />

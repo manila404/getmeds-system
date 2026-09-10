@@ -1,12 +1,22 @@
 const db = require('../db/database');
 
 // 1. Prepare the statement once at module load for better performance
+// Sep 10, 2026: `created_at` is now a parameter rather than 'now'.
+//
+// It was hard-coded, which is why the trail on an imported order read as a log
+// of when this app last synced: an order raised on 31 Jan showed Confirmed,
+// Invoice Sent, Payment Received and Packed all at 08:08 on 10 Sep. Zoho knows
+// when each of those actually happened and hands us the dates; there was
+// simply nowhere to put them.
+//
+// Callers that do not pass one still get 'now', which is correct for anything
+// a person does IN this app — see logEvent's `occurredAt`.
 const insertEventStmt = db.prepare(`
   INSERT INTO order_events (
     order_id, event_type, old_status, new_status, 
     actor_id, actor_name, notes, metadata, created_at
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 /**
@@ -21,9 +31,12 @@ const insertEventStmt = db.prepare(`
  * @param {string} [params.actorName] - Name of the user.
  * @param {string} [params.notes] - Additional context.
  * @param {Object} [params.metadata] - Extra data to be stored as JSON.
+ * @param {string} [params.occurredAt] - ISO timestamp of when the event
+ *   actually happened. Omit for anything a person does in this app; pass
+ *   Zoho's own date when backfilling something that happened there.
  */
 async function logEvent(
-  { orderId, eventType, oldStatus, newStatus, actorId, actorName, notes, metadata }
+  { orderId, eventType, oldStatus, newStatus, actorId, actorName, notes, metadata, occurredAt }
 ) {
   // 2. Validate required fields
   if (!orderId || !eventType) {
@@ -41,7 +54,11 @@ async function logEvent(
       actorId ?? null,
       actorName ?? null,
       notes ?? null,
-      metadata ? JSON.stringify(metadata) : null
+      metadata ? JSON.stringify(metadata) : null,
+      // When it HAPPENED, not when we heard about it. Defaults to now, which
+      // is right for an action taken in this app and wrong for one backfilled
+      // from Zoho — see the note on insertEventStmt above.
+      occurredAt || new Date().toISOString()
     );
   } catch (error) {
     // 5. Handle potential database errors (e.g., constraint violations)

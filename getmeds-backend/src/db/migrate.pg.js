@@ -494,6 +494,37 @@ async function reconcileUserApproval(client) {
   }
 }
 
+/**
+ * Sep 10, 2026: Zoho's four status axes on `orders`. See schema.pg.sql for why
+ * one rollup status was not enough. Existing rows default to NULL and are
+ * filled in by the next Zoho list walk — nothing depends on them being
+ * present, so a database mid-backfill behaves exactly as it did before.
+ */
+const ZOHO_STATUS_COLUMNS = [
+  'zoho_order_status',
+  'zoho_invoiced_status',
+  'zoho_paid_status',
+  'zoho_shipped_status',
+];
+
+async function reconcileZohoStatusColumns(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'orders'`
+  );
+  const present = new Set(rows.map((r) => r.column_name));
+
+  for (const name of ZOHO_STATUS_COLUMNS) {
+    if (present.has(name)) {
+      console.log(`  \u2714 orders.${name} already present`);
+      continue;
+    }
+    console.log(`  \u21bb orders.${name} is missing \u2014 adding`);
+    await client.query(`ALTER TABLE orders ADD COLUMN ${name} TEXT`);
+    console.log(`  \u2714 orders.${name} added`);
+  }
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -524,6 +555,7 @@ async function main() {
     await reconcileOrdersZohoDetailSyncedAt(client);
     await reconcileMasterFormColumns(client);
     await reconcileUserApproval(client);
+    await reconcileZohoStatusColumns(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

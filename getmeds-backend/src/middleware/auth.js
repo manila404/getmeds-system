@@ -38,6 +38,54 @@ async function requireAuth(req, res, next) {
   }
 }
 
+/**
+ * Sep 10, 2026: a MedRep may LOOK at an order imported from Zoho, but not
+ * touch it.
+ *
+ * The Zoho import handed reps their historical Sales Orders so they can see
+ * their own record — 60,817 orders, some going back to 2024. Those are
+ * finished business that lives in Zoho, and this app is not where they get
+ * edited. Without this guard an imported order sitting at 'so_created' would
+ * be as editable to its owner as one they raised this morning, and an edit
+ * here would silently diverge from the Zoho record everyone else works from.
+ *
+ * Scoped as narrowly as it can be:
+ *   * MedReps only. Management and admin still act on these orders — they run
+ *     the process, and someone has to be able to fix a bad import.
+ *   * Imported orders only (getmeds_order_id LIKE 'ZOHO-%'). An order a rep
+ *     raised in this app is untouched by this.
+ *   * Mutating routes only. Every GET stays open, which is the entire point —
+ *     they can see everything and change nothing.
+ *
+ * 403 rather than 404: pretending the order does not exist would be a lie to
+ * the one person it belongs to, and they can see it on the very next screen.
+ */
+async function blockMedrepWritesOnImported(req, res, next) {
+  try {
+    if ((req.user?.role || '').toLowerCase() !== 'medrep') return next();
+
+    const order = await db
+      .prepare('SELECT getmeds_order_id FROM orders WHERE id = ?')
+      .get(req.params.id);
+    if (!order) return next(); // let the controller answer 404 in its own words
+
+    if (String(order.getmeds_order_id || '').startsWith('ZOHO-')) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'IMPORTED_ORDER_READ_ONLY',
+          message:
+            'This order was imported from Zoho and is read-only here. It can be viewed but not changed — ' +
+            'make changes in Zoho, or ask Management if something looks wrong.'
+        }
+      });
+    }
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // Middleware to check if the authenticated user is an Admin
 const isAdmin = (req, res, next) => {
   if (!req.user) {
@@ -84,6 +132,8 @@ module.exports = {
   requireAuth, 
   verifyToken: requireAuth, 
   requireRole, 
-  isAdmin 
+  isAdmin,
+  // Sep 10, 2026: MedReps can view imported Zoho orders, not edit them.
+  blockMedrepWritesOnImported,
 };
 

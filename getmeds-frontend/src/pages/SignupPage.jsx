@@ -37,6 +37,17 @@ const MIN_PASSWORD_LENGTH = 8;
 // at PATCH /:id/details). A row already holding a removed value would keep
 // working everywhere except the next save, which would then refuse it with
 // "division must be one of ..." for a value the account already has.
+// Sep 10, 2026: 'TeleSales', 'MD Telesales' and 'PS' added.
+//
+// Not new business units — they were already in use in Zoho and always had
+// been. Found while auditing the 171 distinct Salesperson strings on the
+// 60,817 imported Sales Orders: 'TeleSales | ...' accounts for 1,041 of them,
+// 'MD Telesales l ...' for 26 and 'PS | ...' for 6. Reps in those divisions
+// could sign up under no Division at all, or under a wrong one, which would
+// then be the Division their orders carried to Zoho.
+//
+// Ordered after the ten that were already here rather than alphabetically, so
+// the diff reads as "three added" rather than a reshuffle.
 const DIVISIONS = [
   'B&B',
   'B2B',
@@ -48,6 +59,9 @@ const DIVISIONS = [
   'STC',
   'TeleSales Anesthesia',
   'URO',
+  'TeleSales',
+  'MD Telesales',
+  'PS',
 ];
 
 // Sep 5, 2026 (2): mirrors the backend's SUB_DIVISIONS_BY_DIVISION in

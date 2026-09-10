@@ -130,11 +130,16 @@ describe('Zoho Sales Order import', () => {
     const types = events.map((e) => e.event_type);
 
     // Both halves of the trail: this app's account of the import, and Zoho's
-    // own log copied across.
+    // own history read across.
+    //
+    // Sep 10, 2026: the history no longer lands as a generic 'ZOHO_LOG'. It is
+    // classified into the same milestone types the reconcile uses, which is
+    // what stops the two paths recording the same confirmation twice — see
+    // services/zohoHistoryService.js.
     expect(types).toContain('ORDER_IMPORTED_FROM_ZOHO');
-    expect(types).toContain('ZOHO_LOG');
+    expect(types).toContain('ZOHO_SO_CREATED');
 
-    const log = events.find((e) => e.event_type === 'ZOHO_LOG');
+    const log = events.find((e) => e.event_type === 'ZOHO_SO_CREATED');
     expect(log.notes).toBeTruthy();
     // The Zoho comment id is what makes re-import idempotent, so it has to be
     // on the row, not merely used and thrown away.
@@ -315,7 +320,7 @@ describe('Zoho Sales Order import', () => {
 
     const types = (await eventsFor(inserted.lastInsertRowid)).map((e) => e.event_type);
     expect(types).toContain('ZOHO_SO_LINKED');
-    expect(types).toContain('ZOHO_LOG');
+    expect(types).toContain('ZOHO_SO_CREATED');
     // Adoption is what it was spared — it already existed here.
     expect(types).not.toContain('ORDER_IMPORTED_FROM_ZOHO');
 

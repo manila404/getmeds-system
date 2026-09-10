@@ -63,10 +63,29 @@ const PAGE_SIZE = 25;
 // back, so the number is stated here rather than discovered.
 const EXPORT_MAX = 5000;
 
+/**
+ * Sep 10, 2026: who owns this order IN THIS SYSTEM, as opposed to what Zoho
+ * recorded on it.
+ *
+ * An imported order still sitting with the admin who ran the import is not
+ * really "assigned to Aaron Manila" in any meaningful sense — it is waiting to
+ * be given to someone. Saying so is the difference between a table that looks
+ * finished and one that shows what is left to do.
+ */
+const assignedTo = (order) => {
+  const imported = String(order.getmeds_order_id || '').startsWith('ZOHO-');
+  const role = (order.medrep_role || '').toLowerCase();
+  if (imported && role && role !== 'medrep') return 'Unassigned';
+  return order.medrep_name || '—';
+};
+
 const ManagementDashboardPage = () => {
   const [statusFilter, setStatusFilter] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  // Sep 10, 2026: '' = everyone, a number = that rep, 'unassigned' = still
+  // sitting with the admin who ran the Zoho import.
+  const [medrepFilter, setMedrepFilter] = useState('');
   const [page, setPage] = useState(1);
 
   // Every filter resets to page 1. Without this, narrowing a filter while on
@@ -79,6 +98,8 @@ const ManagementDashboardPage = () => {
     if (statusFilter) p.set('status', statusFilter);
     if (dateFrom) p.set('date_from', dateFrom);
     if (dateTo) p.set('date_to', dateTo);
+    if (medrepFilter === 'unassigned') p.set('unassigned', 'true');
+    else if (medrepFilter) p.set('medrep_id', medrepFilter);
     return p;
   };
 
@@ -105,7 +126,7 @@ const ManagementDashboardPage = () => {
   const stats = summaryRes?.data || {};
 
   const { data: ordersRes, isLoading: loadingOrders, isFetching: fetchingOrders } = useQuery({
-    queryKey: ['management-orders', statusFilter, dateFrom, dateTo, page],
+    queryKey: ['management-orders', statusFilter, dateFrom, dateTo, medrepFilter, page],
     queryFn: () => {
       const p = orderParams();
       p.set('page', String(page));
@@ -118,12 +139,21 @@ const ManagementDashboardPage = () => {
   });
   const orders = ordersRes?.data?.orders || [];
   const pagination = ordersRes?.data?.pagination || { total: 0, page: 1, pages: 1 };
-  const hasFilters = !!(statusFilter || dateFrom || dateTo);
+  const hasFilters = !!(statusFilter || dateFrom || dateTo || medrepFilter);
+
+  // The reps to filter by. Same endpoint the order form's "create this order
+  // for" picker uses — enabled for management and admin, empty for anyone else.
+  const { data: medrepsRes } = useQuery({
+    queryKey: ['medrep-options'],
+    queryFn: () => client.get('/api/orders/meta/medreps').then((r) => r.data)
+  });
+  const medrepOptions = medrepsRes?.data?.medreps || [];
 
   const clearFilters = () => {
     setStatusFilter('');
     setDateFrom('');
     setDateTo('');
+    setMedrepFilter('');
     setPage(1);
   };
 
@@ -173,12 +203,12 @@ const ManagementDashboardPage = () => {
       const all = res.data?.data?.orders || [];
       const total = res.data?.data?.pagination?.total ?? all.length;
 
-      const headers = ['Order ID', 'Customer', 'Salesperson', 'Status', 'Total', 'Payment', 'Created'];
+      const headers = ['Order ID', 'Customer', 'Salesperson', 'Assigned To', 'Status', 'Total', 'Payment', 'Created'];
       // Quote every field: customer names contain commas, and an unquoted one
       // silently shifts every later column in that row.
       const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
       const rows = all.map(o => [
-        o.getmeds_order_id, o.customer_name, salespersonOf(o), o.status,
+        o.getmeds_order_id, o.customer_name, salespersonOf(o), assignedTo(o), o.status,
         o.total_amount, o.payment_status || '', o.created_at
       ]);
       const csv = [headers, ...rows].map(r => r.map(esc).join(',')).join('\n');
@@ -329,6 +359,24 @@ const ManagementDashboardPage = () => {
             {/* Date range. Filters on the order's created date — the same value
                 the Date column shows — so what is filtered and what is read
                 are the same thing. */}
+            {/* Sep 10, 2026: "show me this rep's orders" — the only practical
+                way to CHECK that an Order Ownership assignment actually
+                landed. */}
+            <select
+              value={medrepFilter}
+              onChange={(e) => applyFilter(setMedrepFilter)(e.target.value)}
+              className="px-2 py-1 border border-slate-200 rounded text-xs text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+              title="Filter by the MedRep an order is assigned to"
+            >
+              <option value="">All MedReps</option>
+              <option value="unassigned">Unassigned (still with the importer)</option>
+              {medrepOptions.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name || m.name}
+                </option>
+              ))}
+            </select>
+
             <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
               From
               <input
@@ -382,6 +430,12 @@ const ManagementDashboardPage = () => {
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Order ID</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Customer</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Salesperson</th>
+                {/* Sep 10, 2026: Salesperson is what ZOHO recorded; Assigned To
+                    is who owns it HERE. Swapping the MedRep column for
+                    Salesperson left management unable to see the second, which
+                    is the one the Order Ownership screen changes. Both are
+                    shown because they answer different questions. */}
+                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Assigned To</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Total</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Date</th>
@@ -394,6 +448,7 @@ const ManagementDashboardPage = () => {
                   <td className="px-4 py-3 text-sm font-mono font-semibold text-getmeds-blue">{order.getmeds_order_id}</td>
                   <td className="px-4 py-3 text-sm font-medium text-ink-primary">{order.customer_name}</td>
                   <td className="px-4 py-3 text-sm text-ink-secondary">{salespersonOf(order)}</td>
+                  <td className="px-4 py-3 text-sm text-ink-secondary">{assignedTo(order)}</td>
                   <td className="px-4 py-3">
                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${STATUS_COLORS[order.status] || 'bg-slate-100 text-slate-700'}`}>
                       {order.status?.replace(/_/g, ' ')}

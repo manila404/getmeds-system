@@ -16,6 +16,9 @@ const webhookRoutes = require('./routes/webhook.routes');
 const customersRoutes = require('./routes/customers.routes');
 const syncJobsRoutes = require('./routes/syncJobs.routes');
 const cronRoutes = require('./routes/cron.routes');
+// Sep 10, 2026: who owns the Sales Orders imported from Zoho — the review
+// queue behind services/salespersonMappingService.js.
+const salespersonMappingRoutes = require('./routes/salespersonMapping.routes');
 
 const app = express();
 
@@ -98,6 +101,7 @@ app.use('/api/sync-jobs', syncJobsRoutes);
 // server.js. Vercel never calls app.listen(), so those timers do not exist
 // there. Authenticated by CRON_SECRET inside the controller, not requireAuth.
 app.use('/api/cron', cronRoutes);
+app.use('/api/salesperson-mappings', salespersonMappingRoutes);
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } }));

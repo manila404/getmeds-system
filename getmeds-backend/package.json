@@ -17,6 +17,7 @@
     "secrets:init": "node scripts/set-secrets.js",
     "check:zoho": "node scripts/check-zoho.js",
     "check:salespersons": "node scripts/check-salespersons.js",
+    "enrich:zoho": "node scripts/enrich-zoho-history.js",
     "mock-server": "node mock-server/server.js",
     "simulate:webhook": "node scripts/simulate-zoho-webhook.js",
     "migrate:pg": "node src/db/migrate.pg.js",

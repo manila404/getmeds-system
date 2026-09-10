@@ -1,6 +1,20 @@
 const db = require('../db/database');
 const zoho = require('../integrations/zoho');
 const { reconcileOrderFully, CONFIRMED_OR_BEYOND } = require('./zohoReconcileService');
+// Sep 10, 2026: Zoho's four status axes -> our workflow status. See
+// zohoStatusMap for why reading only `salesorder.status` left 58,289 finished
+// orders showing as awaiting Finance verification.
+const { statusFromZoho, zohoStatusFields, FINANCE_VERIFICATION_NOTE } = require('./zohoStatusMap');
+// Sep 10, 2026 (Phase 2): Zoho's own Comments & History, classified into
+// milestones. This is a RECORD of what happened; the reconcile below is a
+// reconstruction of it. Where both exist the record wins — see
+// zohoHistoryService.
+const { ingestHistory } = require('./zohoHistoryService');
+// Sep 10, 2026: Zoho reports timestamps in the org's local time with an
+// offset ('+0800'); order_events.created_at and orders.created_at hold UTC
+// ISO. toIso is the conversion, and skipping it is what put 60,829 rows eight
+// hours out — see adoptFromList.
+const { toIso } = require('./zohoDates');
 const { getSyncState, setSyncState } = require('./syncState');
 
 /**
@@ -181,66 +195,18 @@ async function ingestSalesOrderLogs({ orderId, salesorderId, comments = null, so
     }
   }
 
-  if (!log.length) return 0;
-
-  // One read of what is already recorded, rather than one per log entry —
-  // this runs for every imported order, and a per-entry probe would be
-  // another network round trip each against a hosted database.
-  const existingRows = await db
-    .prepare("SELECT metadata FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_LOG'")
-    .all(orderId);
-
-  const seen = new Set();
-  for (const row of existingRows) {
-    try {
-      const key = JSON.parse(row.metadata || '{}').zohoCommentId;
-      if (key) seen.add(String(key));
-    } catch (_) {
-      // A malformed metadata blob is not a reason to refuse to import; the
-      // worst case is one duplicated trail entry.
-    }
-  }
-
-  const fresh = [];
-  for (const entry of log) {
-    const key = String(
-      entry.comment_id || `${entry.date || ''}|${entry.time || ''}|${entry.description || ''}`
-    );
-    if (seen.has(key)) continue;
-    seen.add(key);
-    fresh.push({ entry, key });
-  }
-
-  if (!fresh.length) return 0;
-
-  const insert = db.prepare(`
-    INSERT INTO order_events (order_id, event_type, old_status, new_status, actor_id, actor_name, notes, metadata, created_at)
-    VALUES (?, 'ZOHO_LOG', NULL, NULL, NULL, ?, ?, ?, ?)
-  `);
-
-  for (const { entry, key } of fresh) {
-    // actor_id stays NULL on purpose: the person named here is a Zoho user,
-    // and users(id) is this app's own table. Writing a local id would claim
-    // an equivalence that does not exist. The NAME is what the trail shows.
-    const actorName = entry.commented_by || 'Zoho';
-    const notes = entry.description || '(no description)';
-    await insert.run(
-      orderId,
-      actorName,
-      notes,
-      JSON.stringify({
-        zohoCommentId: key,
-        zohoCommentType: entry.comment_type || null,
-        zohoOperationType: entry.operation_type || null,
-        zohoDate: entry.date || null,
-        zohoTime: entry.time || null,
-        source
-      }),
-      zohoLogTimestamp(entry.date, entry.time) || new Date().toISOString()
-    );
-  }
-
-  return fresh.length;
+  // Sep 10, 2026: was a straight copy of every line into a generic ZOHO_LOG
+  // event. Two problems with that, both measured on the live org: 67% of the
+  // lines are Zoho Inventory workflow chatter nobody would read, and an
+  // untyped ZOHO_LOG could not cooperate with the reconcile — the two paths
+  // recorded the same confirmation twice, once with Zoho's timestamp and once
+  // with a guessed one.
+  //
+  // ingestHistory classifies instead, and emits the SAME event types the
+  // reconcile uses, so its `alreadyLogged` guards see the real entry and stand
+  // down.
+  const result = await ingestHistory({ orderId, salesorderId, comments: log, source });
+  return result ? result.written : 0;
 }
 
 /**
@@ -356,6 +322,129 @@ async function findLocalOrder(salesorder) {
 }
 
 /**
+ * Bring every already-imported order's STATUS into line with what Zoho says.
+ *
+ * Sep 10, 2026, and the highest-value thing in this file. The import used to
+ * read only `salesorder.status`, which left 58,289 orders that Zoho reports as
+ * finished sitting at 'ready_for_finance_verified' — the first stage after the
+ * Sales Order exists — and not one order ever marked completed.
+ *
+ * It runs off the LIST walk that has already happened, so correcting all
+ * 60,817 orders costs no extra Zoho calls at all. That is the whole reason
+ * this is worth doing as a bulk pass rather than waiting for each order's
+ * detail fetch: the detail pass is ~121,000 API calls and would take weeks;
+ * this is free.
+ *
+ * ── IT SETS THE STATUS DIRECTLY, BYPASSING THE STATE MACHINE ────────────────
+ * Deliberately, and it is the one place in this codebase that does.
+ *
+ * setOrderStatus/advanceTo exist to police WORKFLOW — "can an order legally
+ * move from here to there". This is not a move. The order was finished in Zoho
+ * months ago; the local value was simply never right, and asking the state
+ * machine whether 'ready_for_finance_verified' may become 'completed' asks the
+ * wrong question. It would refuse, correctly, and the data would stay wrong.
+ *
+ * What it must NOT do is touch an order this app raised — those went through
+ * the real workflow and their status is the product of it. Hence the ZOHO-
+ * prefix guard, same as everywhere else here.
+ */
+async function syncStatusesFromList(salesorders, known, actor) {
+  const changes = [];
+
+  for (const so of salesorders) {
+    const row = known.byZohoId.get(String(so.salesorder_id));
+    if (!row) continue;
+    if (!String(row.getmeds_order_id || '').startsWith('ZOHO-')) continue;
+
+    const target = statusFromZoho(so);
+    if (!target) continue;
+
+    const axes = zohoStatusFields(so);
+    // Nothing to say if the status and all four axes already agree.
+    const sameStatus = row.status === target;
+    const sameAxes =
+      row.zoho_order_status === axes.zoho_order_status &&
+      row.zoho_invoiced_status === axes.zoho_invoiced_status &&
+      row.zoho_paid_status === axes.zoho_paid_status &&
+      row.zoho_shipped_status === axes.zoho_shipped_status;
+    if (sameStatus && sameAxes) continue;
+
+    changes.push({ id: row.id, from: row.status, to: target, axes, statusChanged: !sameStatus });
+    row.status = target;
+    Object.assign(row, axes);
+  }
+
+  if (!changes.length) return { updated: 0, statusChanged: 0 };
+
+  const now = new Date().toISOString();
+  let updated = 0;
+
+  for (let i = 0; i < changes.length; i += WRITE_BATCH_SIZE) {
+    const batch = changes.slice(i, i + WRITE_BATCH_SIZE);
+    const params = [];
+    const tuples = batch.map((c) => {
+      params.push(
+        c.id, c.to,
+        c.axes.zoho_so_status, c.axes.zoho_order_status,
+        c.axes.zoho_invoiced_status, c.axes.zoho_paid_status, c.axes.zoho_shipped_status
+      );
+      return '(?::int, ?::text, ?::text, ?::text, ?::text, ?::text, ?::text)';
+    });
+
+    const res = await db
+      .prepare(
+        `UPDATE orders o SET
+           status = v.status,
+           zoho_so_status = v.so_status,
+           zoho_order_status = v.order_status,
+           zoho_invoiced_status = v.invoiced_status,
+           zoho_paid_status = v.paid_status,
+           zoho_shipped_status = v.shipped_status,
+           updated_at = '${now}'
+         FROM (VALUES ${tuples.join(', ')})
+              AS v(id, status, so_status, order_status, invoiced_status, paid_status, shipped_status)
+        WHERE o.id = v.id`
+      )
+      .run(...params);
+    updated += res.changes || 0;
+  }
+
+  // One audit entry per order whose STATUS actually moved — not for an axis
+  // refresh, which changes nothing anyone reads on the order.
+  //
+  // It carries the Finance-verification note because that is the question this
+  // correction raises: an order that jumps to 'completed' never passed through
+  // this app's verification step, and the trail should say where it DID happen
+  // rather than leave a gap that reads like a skipped control.
+  const moved = changes.filter((c) => c.statusChanged);
+  for (let i = 0; i < moved.length; i += WRITE_BATCH_SIZE) {
+    const batch = moved.slice(i, i + WRITE_BATCH_SIZE);
+    const params = [];
+    const tuples = batch.map((c) => {
+      params.push(
+        c.id, c.from, c.to, actor.id, `${actor.name} (Zoho status sync)`,
+        `Status corrected to match Zoho: "${c.from}" → "${c.to}". ${FINANCE_VERIFICATION_NOTE}`,
+        now
+      );
+      // Casts are load-bearing: an untyped VALUES column arrives as text, and
+      // order_id/actor_id are integers. Without them Postgres refuses the
+      // INSERT outright — which is the good outcome, but only if it is noticed.
+      return '(?::int, ?::text, ?::text, ?::int, ?::text, ?::text, ?::text)';
+    });
+    await db
+      .prepare(
+        `INSERT INTO order_events (order_id, event_type, old_status, new_status, actor_id, actor_name, notes, created_at)
+         SELECT v.id, 'ZOHO_STATUS_SYNCED', v.old_status, v.new_status, v.actor_id, v.actor_name, v.notes, v.created_at
+           FROM (VALUES ${tuples.join(', ')})
+                AS v(id, old_status, new_status, actor_id, actor_name, notes, created_at)`
+      )
+      .run(...params);
+  }
+
+  return { updated, statusChanged: moved.length };
+}
+
+/**
  * TIER 1 — adopt every Sales Order in `salesorders` from Zoho's LIST data
  * alone, in batches, with no per-order Zoho call and no per-order query.
  *
@@ -409,20 +498,34 @@ async function adoptFromList(salesorders, known, actor) {
     if (seenRef.has(localRef)) { skipped++; continue; }
     seenRef.add(localRef);
 
-    const status = CONFIRMED_OR_BEYOND.includes(String(so.status || '').toLowerCase())
-      ? 'ready_for_finance_verified'
-      : 'so_created';
-    const createdAt = so.created_time || (so.date ? `${so.date}T00:00:00.000Z` : new Date().toISOString());
+    // Sep 10, 2026: derived from all four Zoho axes, not from `status` alone.
+    // The old two-way guess put every fulfilled order at
+    // 'ready_for_finance_verified' — the first stage after the Sales Order
+    // exists — for orders Zoho had already closed out.
+    const status = statusFromZoho(so) || 'so_created';
+    // Sep 10, 2026: converted to UTC, not stored raw.
+    //
+    // Zoho reports created_time as '2026-09-09T15:14:00+0800'. Writing that
+    // verbatim into a column every other writer fills with UTC ISO put 60,829
+    // orders 8 hours out and, worse, broke SORTING: '...15:14+0800' compares
+    // as LATER than '...07:39Z' even though it is eight hours earlier. That is
+    // why an order's own "imported" entry sank below the history entries that
+    // came after it, and why the Orders list date filter — which compares
+    // against '...T00:00:00.000Z' — was quietly matching the wrong rows.
+    const createdAt =
+      toIso(so.created_time) || toIso(so.date) || new Date().toISOString();
 
+    const axes = zohoStatusFields(so);
     rows.push({
       localRef,
       customerId,
       status,
+      axes,
       total: Number(so.total ?? 0),
       date: so.date || createdAt.slice(0, 10),
       zohoSoId: String(so.salesorder_id),
       zohoSoNumber: so.salesorder_number || null,
-      zohoSoStatus: so.status ? String(so.status).toLowerCase() : 'draft',
+      zohoSoStatus: axes.zoho_so_status || 'draft',
       salesperson: so.salesperson_name || null,
       createdAt,
       notes:
@@ -441,13 +544,15 @@ async function adoptFromList(salesorders, known, actor) {
       params.push(
         r.localRef, r.customerId, actor.id, r.status, r.total, r.date,
         r.zohoSoId, r.zohoSoNumber, r.zohoSoStatus, r.salesperson,
-        r.notes, r.createdAt, r.createdAt, now
+        r.notes, r.createdAt, r.createdAt, now,
+        r.axes.zoho_order_status, r.axes.zoho_invoiced_status,
+        r.axes.zoho_paid_status, r.axes.zoho_shipped_status
       );
-      // 17 columns; the literals are customer_type, delivery_address and
+      // 21 columns; the literals are customer_type, delivery_address and
       // zoho_sync_status. Count the placeholders against the column list above
       // before touching this — one missing `?` silently shifts every value
       // after it into the wrong column.
-      return "(?, ?, ?, ?, 'direct', ?, 'See Zoho', ?, ?, ?, ?, ?, ?, 'synced', ?, ?, ?)";
+      return "(?, ?, ?, ?, 'direct', ?, 'See Zoho', ?, ?, ?, ?, ?, ?, 'synced', ?, ?, ?, ?, ?, ?, ?)";
     });
 
     // ON CONFLICT DO NOTHING rather than an upsert: a row that already exists
@@ -458,7 +563,8 @@ async function adoptFromList(salesorders, known, actor) {
         `INSERT INTO orders (
            getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
            delivery_address, sales_order_date, zoho_so_id, zoho_so_number, zoho_so_status,
-           salesperson, delivery_notes, zoho_sync_status, created_at, submitted_at, updated_at
+           salesperson, delivery_notes, zoho_sync_status, created_at, submitted_at, updated_at,
+           zoho_order_status, zoho_invoiced_status, zoho_paid_status, zoho_shipped_status
          ) VALUES ${tuples.join(', ')}
          ON CONFLICT (getmeds_order_id) DO NOTHING`
       )
@@ -693,7 +799,8 @@ async function adoptSalesOrder({ salesorder, customer, actor, productCache }) {
   // Zoho's own creation timestamp where it has one, so an adopted order sorts
   // into the Orders list where it actually belongs rather than all of them
   // landing together at the moment of the import.
-  const createdAt = salesorder.created_time || (salesorder.date ? `${salesorder.date}T00:00:00.000Z` : now);
+  // Same conversion as adoptFromList — see the note there.
+  const createdAt = toIso(salesorder.created_time) || toIso(salesorder.date) || now;
 
   let orderId = null;
   await db.transaction(async () => {
@@ -859,6 +966,14 @@ async function importSalesOrders({ mode = 'full', onFetched, onProgress, detailL
   // orders imported before Sep 9, when the Salesperson was not being recorded.
   const salespersonsBackfilled = await backfillSalespersonsFromList(all, known);
 
+  // The other free pass, and the bigger one: correct the STATUS of every order
+  // already here from the four Zoho axes the list walk just handed us. See
+  // syncStatusesFromList — no extra API calls, and it is what moves 58,289
+  // finished orders off 'awaiting Finance verification'.
+  const statusSync = mode === 'quick'
+    ? { updated: 0, statusChanged: 0 }
+    : await syncStatusesFromList(all, known, actor);
+
   // Re-link before adopting — see linkUnlinkedFromList for why the order of
   // these two matters.
   const linkedFromList = mode === 'quick' ? 0 : await linkUnlinkedFromList(all, known);
@@ -908,6 +1023,9 @@ async function importSalesOrders({ mode = 'full', onFetched, onProgress, detailL
     considered: salesorders.length,
     linked: linkedFromList,
     salespersons_backfilled: salespersonsBackfilled,
+    // Tier 1's other half: orders whose status was corrected from Zoho.
+    statuses_corrected: statusSync.statusChanged,
+    zoho_axes_refreshed: statusSync.updated,
     already_present: 0,
     skipped: adoption.skipped,
     log_entries: 0,
@@ -1005,7 +1123,12 @@ const PROBE_BATCH_SIZE = 500;
 async function loadKnownOrders(salesorders) {
   const byZohoId = new Map();
   const byRef = new Map();
-  const COLUMNS = 'SELECT id, zoho_so_id, getmeds_order_id, salesperson FROM orders';
+  // Sep 10, 2026: status and the four Zoho axes come back too, so
+  // syncStatusesFromList can tell what has actually changed without a second
+  // read per order.
+  const COLUMNS =
+    'SELECT id, zoho_so_id, getmeds_order_id, salesperson, status, ' +
+    'zoho_order_status, zoho_invoiced_status, zoho_paid_status, zoho_shipped_status FROM orders';
 
   const ids = [...new Set(salesorders.map((so) => String(so.salesorder_id)).filter(Boolean))];
   for (let i = 0; i < ids.length; i += PROBE_BATCH_SIZE) {
@@ -1191,9 +1314,26 @@ async function importOne({ salesorder, comments, actor, customerCache, productCa
     summary.imported++;
   }
 
-  // The inferred checkpoints — confirmed, invoiced, packed, shipped, paid.
-  // Re-uses the detail already fetched above rather than making up to seven
-  // more GETs per order; see reconcileOrder's `salesorder` parameter.
+  // Sep 10, 2026: HISTORY FIRST, then inference. The order matters.
+  //
+  // Zoho's Comments & History is a record — exact times, real people
+  // ("Aman Bishnoi", not "Zoho"). The reconcile is a reconstruction that dates
+  // "Confirmed" to the Sales Order's creation because Zoho's SO record has no
+  // confirmed-at field to read.
+  //
+  // Running history first means the real entry exists by the time the
+  // reconcile looks, and its `alreadyLogged` guards stand down. Run the other
+  // way round, the guessed one wins and the real one is skipped as a
+  // duplicate — the exact inversion of what anyone would want.
+  const written = await ingestSalesOrderLogs({
+    orderId,
+    salesorderId: salesorder.salesorder_id,
+    comments
+  });
+  if (written) summary.log_entries += written;
+
+  // The fallback: anything the history did not already establish, plus the
+  // status transitions, which the history lines do not carry.
   const result = await reconcileOrderFully({
     orderId,
     actorId: actor.id,
@@ -1202,14 +1342,6 @@ async function importOne({ salesorder, comments, actor, customerCache, productCa
     salesorder
   });
   summary.checkpoints += result.actions?.length || 0;
-
-  // Zoho's own history — the WHEN and WHO the inference cannot give.
-  const written = await ingestSalesOrderLogs({
-    orderId,
-    salesorderId: salesorder.salesorder_id,
-    comments
-  });
-  if (written) summary.log_entries += written;
 
   // This order is no longer summary-only. Stamped last, after the detail has
   // actually landed, so a run that dies partway leaves the orders it did not
@@ -1221,6 +1353,9 @@ async function importOne({ salesorder, comments, actor, customerCache, productCa
 
 module.exports = {
   importSalesOrders,
+  // Exported for tests: the bulk status correction is the highest-consequence
+  // write here, so it is exercised directly rather than only through a full run.
+  syncStatusesFromList,
   ingestSalesOrderLogs,
   // Exported for scripts/import-zoho-orders.js's dry run, which needs to say
   // what WOULD happen to each Sales Order without writing anything.

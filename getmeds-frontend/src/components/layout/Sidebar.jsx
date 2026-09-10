@@ -21,7 +21,7 @@ import {
   Zap,
   PanelLeftClose,
   PanelLeftOpen
-} from 'lucide-react';
+, UserCheck } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 
 const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollapse }) => {
@@ -96,7 +96,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         { to: '/management/approvals', icon: <ClipboardCheck size={18} />, label: 'Approval Queue' },
         { to: '/management/exceptions', icon: <AlertTriangle size={18} />, label: 'Exception Hub' },
         { to: '/inventory', icon: <Package size={18} />, label: 'Inventory & Stock Sync' },
-        { to: '/management/clients', icon: <Users size={18} />, label: 'Clients Directory' }
+        { to: '/management/clients', icon: <Users size={18} />, label: 'Clients Directory' },
+        { to: '/management/order-ownership', icon: <UserCheck size={18} />, label: 'Order Ownership' }
       ]
     },
     {
@@ -156,7 +157,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
       { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
-      { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' }
+      { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' },
+      { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' }
     );
     secondaryLinks.push(
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
@@ -175,7 +177,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/admin/users', icon: <Users size={19} />, label: 'User Management' },
       // Sep 9, 2026: the Zoho sync retry outbox — was API-only until now,
       // see ZohoSyncHealthPage.jsx.
-      { to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' }
+      { to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' },
+      { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' }
     );
     secondaryLinks.push(
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }

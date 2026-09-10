@@ -137,9 +137,21 @@ describe('Zoho auto-sync', () => {
         .prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SO_CONFIRMED'")
         .get(id);
       expect(event).toBeDefined();
-      // The trail should say it arrived by itself, not "manual sync".
-      expect(event.actor_name).toBe('Auto Sync');
-      expect(JSON.parse(event.metadata).source).toBe('auto_sync');
+      // Sep 10, 2026: the actor is ZOHO, not the thing that triggered the
+      // sync. This used to assert 'Auto Sync', which was the same mistake in a
+      // politer form — a Sales Order confirmed by a person in Zoho was
+      // credited to whatever noticed it, and on a manual sync that read
+      // "confirmed in Zoho — By: Fhaye (opened the order)".
+      //
+      // What triggered the sync is not lost, it moved to where it belongs:
+      // metadata.syncedBy / syncedAt, alongside the source that was already
+      // there.
+      expect(event.actor_name).toBe('Zoho');
+      expect(event.actor_id).toBeNull();
+      const meta = JSON.parse(event.metadata);
+      expect(meta.source).toBe('auto_sync');
+      expect(meta.syncedBy).toBe('Auto Sync');
+      expect(meta.syncedAt).toBeTruthy();
     });
   });
 

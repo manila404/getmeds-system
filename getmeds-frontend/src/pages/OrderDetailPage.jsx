@@ -6,6 +6,10 @@ import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle,
 import client from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPHT } from '../utils/dateUtils';
+// Sep 10, 2026 (2d): the flat event list became a ten-stage pipeline. See
+// components/orders/OrderPipeline.jsx and, on the backend,
+// services/orderTimelineService.js.
+import OrderPipeline from '../components/orders/OrderPipeline';
 import { useProducts } from '../hooks/useOrderData';
 import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
@@ -20,6 +24,8 @@ const DIVISIONS = [
   // entries removed, none of them in use on any existing user or order.
   'B&B', 'B2B', 'B2C', 'BID', 'CLIDP', 'HOS', 'MSA', 'STC',
   'TeleSales Anesthesia', 'URO',
+  // Sep 10, 2026: already in use in Zoho — see orders.controller.js.
+  'TeleSales', 'MD Telesales', 'PS',
 ];
 const SUB_DIVISIONS_BY_DIVISION = {
   'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],
@@ -120,7 +126,19 @@ const EVENT_LABELS = {
   // glance, because "who is saying this" changes how much the entry is worth.
   ZOHO_LOG: 'FROM ZOHO HISTORY',
   ORDER_IMPORTED_FROM_ZOHO: 'IMPORTED FROM ZOHO',
-  ZOHO_SO_LINKED: 'LINKED TO ZOHO SO'
+  ZOHO_SO_LINKED: 'LINKED TO ZOHO SO',
+  // Sep 10, 2026: milestones read straight out of Zoho's Comments & History
+  // (services/zohoHistoryService.js). These carry Zoho's own timestamp and the
+  // real person who did it, so they read as what happened rather than as what
+  // this app worked out afterwards.
+  ZOHO_SO_CREATED: 'CREATED IN ZOHO',
+  ZOHO_SO_FULFILLED: 'FULFILLED IN ZOHO',
+  ZOHO_DELIVERED: 'DELIVERED',
+  ZOHO_PACKAGE_UPDATED: 'PACKAGE UPDATED',
+  ZOHO_PACKAGE_DELETED: 'PACKAGE DELETED',
+  ZOHO_ATTACHMENT_ADDED: 'ATTACHMENT ADDED IN ZOHO',
+  ZOHO_STATUS_SYNCED: 'STATUS SYNCED FROM ZOHO',
+  ORDER_REASSIGNED: 'ASSIGNED TO MEDREP'
 };
 
 // "[SO-66881] INVOICE SENT". The Sales Order number comes from the order
@@ -143,7 +161,10 @@ const EVENT_ICONS = {
   ZOHO_SO_STATUS_CHANGED: '📄', ORDER_ITEMS_EDITED: '✏️', ZOHO_SO_DELETED: '🗑️',
   FINANCE_VERIFIED: '🔍', FINANCE_REJECTED: '🛑',
   PAYMENT_PROOF_UPLOADED: '🧾', PAYMENT_PROOF_REJECTED: '🛑',
-  ZOHO_LOG: '📜', ORDER_IMPORTED_FROM_ZOHO: '📥', ZOHO_SO_LINKED: '🔗'
+  ZOHO_LOG: '📜', ORDER_IMPORTED_FROM_ZOHO: '📥', ZOHO_SO_LINKED: '🔗',
+  ZOHO_SO_CREATED: '📝', ZOHO_SO_FULFILLED: '🎉', ZOHO_DELIVERED: '🏠',
+  ZOHO_PACKAGE_UPDATED: '📦', ZOHO_PACKAGE_DELETED: '🗑️',
+  ZOHO_ATTACHMENT_ADDED: '📎', ZOHO_STATUS_SYNCED: '🔄', ORDER_REASSIGNED: '👤'
 };
 
 const OrderDetailPage = () => {
@@ -414,7 +435,7 @@ const OrderDetailPage = () => {
   if (isLoading) return <div className="flex justify-center py-20"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-getmeds-blue" /></div>;
   if (error) return <div className="text-center py-20 text-red-600">Failed to load order. <button onClick={() => navigate(-1)} className="underline">Go back</button></div>;
 
-  const { order, items = [], payment, dispatch, events = [] } = data?.data || {};
+  const { order, items = [], payment, dispatch, events = [], timeline } = data?.data || {};
   if (!order) return null;
 
   // Sep 7, 2026 (2): while editing, Management changing Division live
@@ -1029,39 +1050,51 @@ const OrderDetailPage = () => {
 
           {/* Timeline Tab */}
           {activeTab === 'timeline' && (
-            <div className="space-y-3">
-              {events.length === 0 ? (
-                <p className="text-sm text-ink-secondary text-center py-8">No events recorded yet.</p>
-              ) : (
-                events.map((event, i) => (
-                  <div key={event.id} className="flex gap-3">
-                    <div className="flex flex-col items-center">
-                      <div className="w-8 h-8 rounded-full bg-getmeds-blue/10 flex items-center justify-center text-sm flex-shrink-0">
-                        {EVENT_ICONS[event.event_type] || '📋'}
-                      </div>
-                      {i < events.length - 1 && <div className="w-0.5 bg-slate-200 flex-1 my-1" />}
-                    </div>
-                    <div className="pb-3 flex-1">
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <p className="text-sm font-semibold text-ink-primary">
-                            {eventTitle(event, order)}
-                            {event.old_status && event.new_status && (
-                              <span className="ml-2 text-xs font-normal text-ink-secondary">
-                                {event.old_status} → <span className={`font-semibold ${STATUS_COLORS[event.new_status] ? 'text-ink-primary' : ''}`}>{event.new_status}</span>
-                              </span>
-                            )}
-                          </p>
-                          {event.notes && <p className="text-xs text-ink-secondary mt-0.5">{event.notes}</p>}
-                          <p className="text-xs text-ink-secondary mt-0.5">By: {event.actor_name || 'System'}</p>
+            <div>
+              {/* Sep 10, 2026 (2d): the pipeline replaces a flat list that gave
+                  every event equal weight — this order once rendered 20 rows
+                  for six real things. The raw list is still one click away, so
+                  nothing is hidden, it is just no longer the default. */}
+              <OrderPipeline timeline={timeline} />
+
+              {events.length > 0 && (
+                <details className="mt-6 border-t border-slate-100 pt-4">
+                  <summary className="text-xs font-semibold text-ink-secondary cursor-pointer hover:text-ink-primary select-none">
+                    Show the full event log ({events.length} entries)
+                  </summary>
+
+                  <div className="mt-4 space-y-3">
+                    {events.map((event, i) => (
+                      <div key={event.id} className="flex gap-3">
+                        <div className="flex flex-col items-center">
+                          <div className="w-8 h-8 rounded-full bg-getmeds-blue/10 flex items-center justify-center text-sm flex-shrink-0">
+                            {EVENT_ICONS[event.event_type] || '📋'}
+                          </div>
+                          {i < events.length - 1 && <div className="w-0.5 bg-slate-200 flex-1 my-1" />}
                         </div>
-                        <p className="text-xs text-ink-secondary flex-shrink-0 ml-4">
-                          {event.created_at ? formatPHT(event.created_at, 'timeline') : ''}
-                        </p>
+                        <div className="pb-3 flex-1">
+                          <div className="flex items-start justify-between">
+                            <div>
+                              <p className="text-sm font-semibold text-ink-primary">
+                                {eventTitle(event, order)}
+                                {event.old_status && event.new_status && event.old_status !== event.new_status && (
+                                  <span className="ml-2 text-xs font-normal text-ink-secondary">
+                                    {event.old_status} → <span className="font-semibold text-ink-primary">{event.new_status}</span>
+                                  </span>
+                                )}
+                              </p>
+                              {event.notes && <p className="text-xs text-ink-secondary mt-0.5">{event.notes}</p>}
+                              <p className="text-xs text-ink-secondary mt-0.5">By: {event.actor_name || 'System'}</p>
+                            </div>
+                            <p className="text-xs text-ink-secondary flex-shrink-0 ml-4">
+                              {event.created_at ? formatPHT(event.created_at, 'timeline') : ''}
+                            </p>
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    ))}
                   </div>
-                ))
+                </details>
               )}
             </div>
           )}

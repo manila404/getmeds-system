@@ -8,6 +8,17 @@ const { evaluateCompletion } = require('./orderCompletionService');
 // 'salesorder.edited' branch already runs — see the note where it's used
 // below for why this path needed it too.
 const { diffSalesOrderFields, summarizeChanges } = require('./zohoEditDiffService');
+// Sep 10, 2026: Zoho's own dates for the checkpoints backfilled below. Without
+// these every event was stamped with the moment of the sync, so an order
+// raised on 31 Jan showed Confirmed / Invoiced / Paid / Packed all at 08:08 on
+// 10 Sep — a log of when this app looked, not of what happened.
+const { firstIso, notBefore } = require('./zohoDates');
+
+/** The later of two ISO timestamps, ignoring nulls. */
+function latestOf(...isos) {
+  const known = isos.filter(Boolean).sort();
+  return known.length ? known[known.length - 1] : null;
+}
 
 /**
  * Every Zoho Sales Order status that means "past draft".
@@ -66,6 +77,24 @@ const CONFIRMED_OR_BEYOND = [
  */
 async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync', source = 'auto_sync', salesorder: prefetchedSalesOrder = null }) {
   try {
+    // Sep 10, 2026: everything backfilled below happened in ZOHO, done by
+    // whoever was working there — not by the person whose click happened to
+    // trigger this sync. Naming them as the actor produced trail lines reading
+    // "Sales Order confirmed in Zoho — By: Fhaye (opened the order)" for an
+    // order Fhaye had merely opened, months after someone else confirmed it.
+    //
+    // The person who triggered the sync is not lost: they are in every event's
+    // metadata as `syncedBy`/`syncedAt`, which is where "when did we find out"
+    // belongs. The trail itself reports what happened.
+    const ZOHO_ACTOR = 'Zoho';
+    // Nothing that happens TO a Sales Order can predate the Sales Order — see
+    // notBefore in zohoDates for why that matters here.
+    const soCreatedIso = firstIso(
+      prefetchedSalesOrder && prefetchedSalesOrder.created_time,
+      prefetchedSalesOrder && prefetchedSalesOrder.date
+    );
+    const syncedAt = new Date().toISOString();
+    const syncMeta = { source, syncedBy: actorName, syncedAt };
     const order = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.name as medrep_name, u.email as medrep_email, u.id as medrep_user_id
       FROM orders o
@@ -165,8 +194,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           const notes = refused
             ? `Sales Order no longer exists in Zoho (deleted), but the order could NOT be moved from "${order.status}" to "deleted" — the workflow does not allow that transition (see workflow/stateMachine.js). The status has been left unchanged and needs a look.`
             : canChangeStatus
-              ? 'Sales Order no longer exists in Zoho (deleted) — backfilled by manual sync.'
-              : `Sales Order no longer exists in Zoho (deleted) — backfilled by manual sync. Order status kept as "${order.status}" since it was already there; this just records that the Zoho Sales Order itself is gone.`;
+              ? 'Sales Order no longer exists in Zoho — it was deleted there.'
+              : `Sales Order no longer exists in Zoho — it was deleted there. Order status kept as "${order.status}" since it was already there; this just records that the Zoho Sales Order itself is gone.`;
 
           await logEvent({
             orderId: order.id,
@@ -176,6 +205,9 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
             actorId,
             actorName,
             notes,
+            // No occurredAt: the Sales Order is GONE from Zoho, so there is no
+            // Zoho date left to read. "When we found out" is the only true
+            // answer available for this one, and it is the honest one.
             metadata: { source, refused }
           });
 
@@ -194,7 +226,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       }
 
       const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
-      const events = await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(order.id);
+      const events = await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC').all(order.id);
       return { ok: true, action: deletedAction, zohoStatus: 'deleted', order: updatedOrder, events };
     }
     if (!salesorder) {
@@ -254,10 +286,13 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           eventType: 'ZOHO_SO_EDITED',
           oldStatus: order.status,
           newStatus: order.status,
-          actorId,
-          actorName,
-          notes: `Sales Order edited in Zoho — ${summarizeChanges(fieldChanges)} — backfilled by manual sync; the live webhook did not reach this app when it actually happened`,
-          metadata: { changes: fieldChanges, source }
+          actorId: null,
+          actorName: ZOHO_ACTOR,
+          notes: `Sales Order edited in Zoho — ${summarizeChanges(fieldChanges)}`,
+          // last_modified_time is EXACTLY when the edit happened — the one
+          // checkpoint here Zoho timestamps precisely.
+          occurredAt: firstIso(salesorder.last_modified_time, salesorder.date),
+          metadata: { changes: fieldChanges, ...syncMeta }
         });
 
         const financeIds = await getUserIdsByRole('finance');
@@ -298,10 +333,15 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           eventType: 'ZOHO_SO_CONFIRMED',
           oldStatus: order.status,
           newStatus,
-          actorId,
-          actorName,
-          notes: `Sales Order confirmed in Zoho (${zohoSoNumber || order.zoho_so_id}) — backfilled by manual sync; the live webhook did not reach this app when it actually happened`,
-          metadata: { zohoSoId: order.zoho_so_id, zohoSoNumber, source }
+          actorId: null,
+          actorName: ZOHO_ACTOR,
+          notes: `Sales Order confirmed in Zoho (${zohoSoNumber || order.zoho_so_id})`,
+          // Zoho records no separate "confirmed at" on the Sales Order, so
+          // this is the SO's own date — the closest honest answer. The exact
+          // moment, when it matters, is in the ZOHO_LOG entries copied from
+          // Zoho's Comments & History.
+          occurredAt: firstIso(salesorder.created_time, salesorder.date),
+          metadata: { zohoSoId: order.zoho_so_id, zohoSoNumber, ...syncMeta }
         });
 
         await notify({
@@ -326,9 +366,10 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           eventType: 'ZOHO_SO_CANCELLED',
           oldStatus: order.status,
           newStatus,
-          actorId,
-          actorName,
-          notes: 'Sales Order cancelled or voided in Zoho — backfilled by manual sync',
+          actorId: null,
+          actorName: ZOHO_ACTOR,
+          notes: 'Sales Order cancelled or voided in Zoho',
+          occurredAt: firstIso(salesorder.last_modified_time, salesorder.date),
           metadata: { source }
         });
 
@@ -353,6 +394,27 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       const latestPackage = packages[packages.length - 1];
       const shipmentInfo = latestPackage?.shipment_order;
       const trackingNumber = shipmentInfo?.tracking_number || latestPackage?.tracking_number || null;
+
+      // Sep 10, 2026 (3a): what actually PROVES an order shipped.
+      //
+      // It used to be the tracking number, and that was wrong in the same way
+      // the package check was wrong before Sep 10: it demanded evidence Zoho
+      // does not reliably record. SO-59373 shipped via Lalamove on 31 Jan with
+      // package PKG-44566 marked `status: shipped`, `shipment_status: shipped`
+      // — and `tracking_number: ""`. An empty string is falsy, so the branch
+      // never fired and the order sat at "packed" forever.
+      //
+      // Measured across the org: Zoho reports 59,384 orders as shipped or
+      // fulfilled, and only 560 of them had ever produced a ZOHO_DISPATCHED
+      // event. 58,824 orders were missing the milestone because of this one
+      // condition.
+      //
+      // Tracking is now DETAIL ON the event, not the precondition FOR it.
+      const shippedStatus = String(salesorder.shipped_status || '').toLowerCase();
+      const packageShipped = ['shipped', 'delivered', 'fulfilled'].includes(
+        String(latestPackage?.shipment_status || latestPackage?.status || '').toLowerCase()
+      );
+      const hasShipped = packageShipped || ['shipped', 'partially_shipped', 'fulfilled'].includes(shippedStatus);
       const courier = shipmentInfo?.carrier || latestPackage?.carrier || latestPackage?.delivery_method || null;
 
       // Sep 1, 2026 (6): the invoice facts are worked out BEFORE the chain,
@@ -441,20 +503,22 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
               eventType,
               oldStatus: order.status,
               newStatus,
-              actorId,
-              actorName,
+              actorId: null,
+              actorName: ZOHO_ACTOR,
               // Sep 1, 2026 (8): if the order was still awaiting finance
               // verification when the invoice appeared, say so rather than
               // letting the stage be skipped silently. Raising the invoice in
               // Zoho IS the approval in practice — but the trail should record
               // that nobody pressed Verify, so an auditor can tell the two
               // apart later.
-              notes: `Invoice ${zohoInvoiceNumber || zohoInvoiceId} found in Zoho, status "${invoiceStatus || 'draft'}" — backfilled by manual sync; the live webhook did not reach this app when it actually happened.${
+              notes: `Invoice ${zohoInvoiceNumber || zohoInvoiceId} raised in Zoho, status "${invoiceStatus || 'draft'}".${
                 order.status === 'ready_for_finance_verified'
                   ? ' Note: this order had not been marked Finance Verified in this app — raising the invoice in Zoho is treated as the approval.'
                   : ''
               }`,
-              metadata: { zohoInvoiceId, zohoInvoiceNumber, invoiceStatus, source }
+              // The invoice's own date, not the sync's.
+              occurredAt: notBefore(firstIso(latestInvoice.date, salesorder.date), soCreatedIso),
+              metadata: { zohoInvoiceId, zohoInvoiceNumber, invoiceStatus, ...syncMeta }
             });
 
             // Zoho says this invoice is paid but no payment has reached us —
@@ -483,18 +547,30 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
                 eventType: 'ZOHO_PAYMENT_VERIFIED',
                 oldStatus: newStatus,
                 newStatus,
-                actorId,
-                actorName,
-                notes: `Zoho reports invoice ${paidRef} as "${invoiceStatus}" — payment recorded by manual sync`,
-                metadata: { invoiceStatus, source }
+                actorId: null,
+                actorName: ZOHO_ACTOR,
+                notes: `Zoho reports invoice ${paidRef} as "${invoiceStatus}".`,
+                // Zoho's Sales Order view carries no payment date, only the
+                // invoice's own — so this is dated to the invoice. It is the
+                // least precise checkpoint here, and saying "the invoice date"
+                // is better than saying "the day we noticed".
+                occurredAt: notBefore(firstIso(latestInvoice.date, salesorder.date), soCreatedIso),
+                metadata: { invoiceStatus, ...syncMeta }
               });
 
               const completion = await evaluateCompletion({
                 orderId: order.id,
                 currentStatus: newStatus,
-                actorId,
-                actorName,
-                trigger: 'payment'
+                actorId: null,
+                actorName: ZOHO_ACTOR,
+                trigger: 'payment',
+                // An order completes when it is BOTH shipped and paid, so it
+                // completed on whichever of the two came last — not on the day
+                // this sync noticed both were true.
+                occurredAt: notBefore(latestOf(
+                  firstIso(latestInvoice.date, salesorder.date),
+                  firstIso(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date)
+                ), soCreatedIso)
               });
               if (completion.completed) newStatus = 'completed';
             }
@@ -515,13 +591,26 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
 
           action = invoiceIsPaid ? 'INVOICE_PAID_BACKFILLED' : 'INVOICE_BACKFILLED';
         }
-      } else if (packages.length > 0 && !(await alreadyLogged('ZOHO_PACKAGE_CREATED')) && ['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch'].includes(order.status)) {
+      // Sep 10, 2026: the status list moved OFF this condition and onto the
+      // advanceTo below it.
+      //
+      // It was doing two jobs at once — deciding whether the package is worth
+      // RECORDING, and whether the order should MOVE — and those are different
+      // questions. An order already at picking_packing has a package that is
+      // every bit as real; it just has nowhere left to advance to. Conflating
+      // them meant the checkpoint was silently dropped for any order that had
+      // already got past that status, which is every order whose trail is
+      // being rebuilt, and any order whose webhooks arrived out of order.
+      } else if (packages.length > 0 && !(await alreadyLogged('ZOHO_PACKAGE_CREATED'))) {
         // Aug 31, 2026 (5): 'ready_for_invoice_sent' added here too — same
         // reasoning as the dispatch backfill just above.
         // Sep 1, 2026: and 'ready_for_dispatch' with it, now that Mark-as-Sent is
         // a real status an invoice-first order actually sits at when packing
         // starts.
-        newStatus = 'picking_packing';
+        // Only move an order that still has this hop ahead of it. One already
+        // packed, shipped or completed keeps the status it has.
+        const canAdvanceToPacking = ['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch'].includes(order.status);
+        newStatus = canAdvanceToPacking ? 'picking_packing' : order.status;
         await db.transaction(async () => {
           const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
           if (existingDispatch) {
@@ -530,13 +619,16 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
             await db.prepare(`INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'packing', ?)`).run(order.id, now);
           }
 
-          const moved = await advanceTo(order.id, order.status, newStatus, now);
-          if (!moved.changed) newStatus = moved.status;
+          if (canAdvanceToPacking) {
+            const moved = await advanceTo(order.id, order.status, newStatus, now);
+            if (!moved.changed) newStatus = moved.status;
+          }
           await logEvent({
             orderId: order.id, eventType: 'ZOHO_PACKAGE_CREATED', oldStatus: order.status, newStatus,
-            actorId, actorName,
-            notes: `Package ${latestPackage.package_number || latestPackage.package_id || ''} found in Zoho — backfilled by manual sync`,
-            metadata: { source }
+            actorId: null, actorName: ZOHO_ACTOR,
+            notes: `Package ${latestPackage.package_number || latestPackage.package_id || ''} created in Zoho`,
+            occurredAt: notBefore(firstIso(latestPackage.date, salesorder.shipment_date, salesorder.date), soCreatedIso),
+            metadata: { ...syncMeta }
           });
           await notify({
             orderId: order.id,
@@ -548,7 +640,10 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
         })();
 
         action = 'PACKAGE_BACKFILLED';
-      } else if (trackingNumber && !(await alreadyLogged('ZOHO_DISPATCHED')) && !['completed', 'cancelled'].includes(order.status)) {
+      // Sep 10, 2026: same split as the package branch above — 'completed' and
+      // 'cancelled' still block it, because a shipment appearing on a closed
+      // order is a real anomaly rather than a checkpoint to backfill.
+      } else if (hasShipped && !(await alreadyLogged('ZOHO_DISPATCHED')) && !['completed', 'cancelled'].includes(order.status)) {
         await db.transaction(async () => {
           const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
           if (existingDispatch) {
@@ -584,16 +679,34 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           }
           await logEvent({
             orderId: order.id, eventType: 'ZOHO_DISPATCHED', oldStatus: order.status, newStatus: cascadeStatus,
-            actorId, actorName,
-            notes: `Shipment found in Zoho — Tracking: ${trackingNumber} (${courier || 'courier TBD'}) — backfilled by manual sync`,
-            metadata: { trackingNumber, courier, source }
+            actorId: null, actorName: ZOHO_ACTOR,
+            notes: trackingNumber
+              ? `Shipped in Zoho — Tracking: ${trackingNumber} (${courier || 'courier TBD'})`
+              // No tracking number is the NORMAL case for this org's in-house
+              // and Lalamove deliveries. Say what is known rather than
+              // printing "Tracking: null".
+              : `Shipped in Zoho${courier ? ` via ${courier}` : ''} — no tracking number recorded`,
+            occurredAt: notBefore(firstIso(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date, salesorder.date), soCreatedIso),
+            metadata: { trackingNumber, courier, ...syncMeta }
           });
 
           const dispatchedStatus = cascadeStatus;
           const tracked = await advanceTo(order.id, dispatchedStatus, 'tracking_shared', now);
           if (tracked.changed) {
             cascadeStatus = tracked.status;
-            await logEvent({ orderId: order.id, eventType: 'TRACKING_ENTERED', oldStatus: dispatchedStatus, newStatus: cascadeStatus, actorId, actorName, notes: `${courier || 'Courier'}: ${trackingNumber}` });
+            await logEvent({
+              orderId: order.id,
+              eventType: 'TRACKING_ENTERED',
+              oldStatus: dispatchedStatus,
+              newStatus: cascadeStatus,
+              actorId: null,
+              actorName: ZOHO_ACTOR,
+              notes: trackingNumber
+                ? `${courier || 'Courier'}: ${trackingNumber}`
+                : `${courier || 'Courier'} — no tracking number recorded`,
+              occurredAt: notBefore(firstIso(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date, salesorder.date), soCreatedIso),
+              metadata: { ...syncMeta }
+            });
           }
 
           newStatus = cascadeStatus;
@@ -603,16 +716,22 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           const completion = await evaluateCompletion({
             orderId: order.id,
             currentStatus: newStatus,
-            actorId,
-            actorName,
-            trigger: 'shipment'
+            actorId: null,
+            actorName: ZOHO_ACTOR,
+            trigger: 'shipment',
+            // See the payment-side call above — the later of shipped and paid.
+            occurredAt: notBefore(latestOf(
+              firstIso(latestInvoice?.date, salesorder.date),
+              firstIso(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date)
+            ), soCreatedIso)
           });
           if (completion.completed) newStatus = 'completed';
 
           await notify({
             orderId: order.id,
             recipientIds: [order.medrep_user_id],
-            message: `Order ${order.getmeds_order_id} shipped via Zoho. Courier: ${courier || 'TBD'}, Tracking: ${trackingNumber}.`,
+            message: `Order ${order.getmeds_order_id} shipped via Zoho. Courier: ${courier || 'TBD'}` +
+              (trackingNumber ? `, Tracking: ${trackingNumber}.` : ', no tracking number recorded.'),
             eventType: 'ORDER_DISPATCHED',
             orderData: { ...order, status: newStatus, tracking_number: trackingNumber, courier }
           });
@@ -623,7 +742,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
     }
 
     const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
-    const events = await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(order.id);
+    const events = await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC').all(order.id);
 
     return { ok: true, action, zohoStatus: soStatus, order: updatedOrder, events };
   } catch (err) {
