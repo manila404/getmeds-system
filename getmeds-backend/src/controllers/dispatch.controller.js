@@ -1,4 +1,5 @@
 const db = require('../db/database');
+const { loadScope, scopeSql } = require('../services/orderScopeService');
 
 // ─── Dispatch visibility (read-only) ───────────────────────────────────────
 // Picking, packing, dispatch and tracking status now come FROM Zoho
@@ -14,6 +15,16 @@ const db = require('../db/database');
 
 exports.getQueue = async (req, res, next) => {
   try {
+    // Sep 11, 2026 (Phase C): narrowed to the viewer's divisions.
+    //
+    // This queue is open to `management` as well as its own role, so without
+    // this a division-scoped manager would see every order in it — the same
+    // leak the orders list has, on a page nobody thinks of as an orders list.
+    // loadScope returns full scope for Dispatch users themselves, so their queue is
+    // unchanged.
+    const scope = await loadScope(req.user);
+    const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
+    const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
     const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_number,
              u.name as medrep_name,
@@ -28,9 +39,9 @@ exports.getQueue = async (req, res, next) => {
       -- warehouse sees an order at the point Finance is done with it, and the
       -- two finance stages ahead of it (ready_for_draft_invoice,
       -- ready_for_invoice_sent) correctly stay out of this list.
-      WHERE o.status IN ('ready_for_dispatch', 'picking_packing', 'dispatched')
+      WHERE o.status IN ('ready_for_dispatch', 'picking_packing', 'dispatched')${scopeAnd}
       ORDER BY o.updated_at ASC
-    `).all();
+    `).all(...scopeParams);
     res.json({ success: true, data: { orders } });
   } catch (err) { next(err); }
 };

@@ -19,6 +19,9 @@ const cronRoutes = require('./routes/cron.routes');
 // Sep 10, 2026: who owns the Sales Orders imported from Zoho — the review
 // queue behind services/salespersonMappingService.js.
 const salespersonMappingRoutes = require('./routes/salespersonMapping.routes');
+// Sep 11, 2026: which divisions each manager covers — see
+// services/orderScopeService.js for what the scope actually gates.
+const managerScopeRoutes = require('./routes/managerScope.routes');
 
 const app = express();
 
@@ -102,6 +105,7 @@ app.use('/api/sync-jobs', syncJobsRoutes);
 // there. Authenticated by CRON_SECRET inside the controller, not requireAuth.
 app.use('/api/cron', cronRoutes);
 app.use('/api/salesperson-mappings', salespersonMappingRoutes);
+app.use('/api/manager-scopes', managerScopeRoutes);
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } }));

@@ -46,6 +46,9 @@
  * to repeat: a row it has fixed no longer matches the filter.
  */
 require('dotenv').config();
+// Share the database politely: this is a bulk job, and the deployed app is on
+// the same Supabase pooler. See lib/batch-job.js.
+require('./lib/batch-job');
 
 const db = require('../src/db/database');
 const zoho = require('../src/integrations/zoho');

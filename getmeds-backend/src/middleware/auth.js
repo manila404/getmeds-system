@@ -86,6 +86,58 @@ async function blockMedrepWritesOnImported(req, res, next) {
   }
 }
 
+/**
+ * A division-scoped manager may only touch orders in their own divisions.
+ *
+ * ── WHY THIS IS MIDDLEWARE AND NOT A CHECK IN EACH CONTROLLER ───────────────
+ *
+ * Sep 11, 2026 (Phase C). Approve, reject and send back are the actions that
+ * make scoping worth having: a gap here does not mean somebody SAW an order
+ * that was not theirs, it means they APPROVED it, and the order moved on
+ * through Zoho with their name against it.
+ *
+ * Written as `router.param('id', ...)` rather than a line inside each
+ * controller because the failure mode of the per-controller version is a route
+ * added six months from now that nobody remembers to guard. Attached to the
+ * parameter, a new `/:id/anything` route is covered the day it is written, and
+ * skipping the check has to be a deliberate act rather than an oversight.
+ *
+ * Read paths are covered too. `getById` also checks — that one is kept because
+ * it is the check a reader of the controller will look for — and both consult
+ * the same rules in orderScopeService.
+ *
+ * Deliberately silent for anyone who is not a scoped manager: admins, MedReps
+ * (already restricted to their own orders by medrep_id), Finance and Dispatch
+ * all pass straight through. Scoping is a management concept, and applying it
+ * to Finance's queue would break it rather than secure anything.
+ */
+async function requireOrderScope(req, res, next) {
+  try {
+    // `canAccessOrder` short-circuits to true for every unscoped role, so this
+    // costs one cheap lookup on the paths that need it and nothing on the rest.
+    const { canAccessOrder } = require('../services/orderScopeService');
+
+    const order = await db
+      .prepare('SELECT id, division, sub_division FROM orders WHERE id = ?')
+      .get(req.params.id);
+    // Let the controller answer 404 in its own words rather than turning a
+    // missing order into a permissions message.
+    if (!order) return next();
+
+    if (await canAccessOrder(req.user, order)) return next();
+
+    return res.status(403).json({
+      success: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'This order belongs to a division you do not cover.'
+      }
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // Middleware to check if the authenticated user is an Admin
 const isAdmin = (req, res, next) => {
   if (!req.user) {
@@ -135,5 +187,6 @@ module.exports = {
   isAdmin,
   // Sep 10, 2026: MedReps can view imported Zoho orders, not edit them.
   blockMedrepWritesOnImported,
+  requireOrderScope,
 };
 

@@ -30,29 +30,21 @@ const db = require('../src/db/database');
 
 const ROLES = ['medrep', 'finance', 'dispatch', 'management', 'admin'];
 
-// Sep 5, 2026: mirrors auth.controller.js's DIVISIONS exactly — see that
-// file's comment for why division became a fixed list (a free-typed one
-// created junk Salespersons in the live Zoho org before). This CLI still
-// takes it as free-typed input rather than a picker (there's no terminal
-// UI for that here), but the value is checked against the same list once
-// entered, same as ROLES above.
-const DIVISIONS = [
-  '2MG Incorporated',
-  'GrabMart',
-  'Office of the President',
-  'PCSO',
-  'DSWD',
-  'B&B',
-  'B2B',
-  'B2C',
-  'BID',
-  'CLIDP',
-  'HOS',
-  'MSA',
-  'STC',
-  'TeleSales Anesthesia',
-  'URO',
-];
+// Sep 11, 2026: IMPORTED, not mirrored.
+//
+// This used to be a copy of auth.controller.js's list, described as mirroring
+// it "exactly". It did not. Divisions were added and removed there on Sep 5
+// and Sep 10 and this copy was never touched, so by today it rejected three
+// real divisions (TeleSales, MD Telesales, PS) and still accepted five that
+// had been deliberately deleted (2MG Incorporated, GrabMart, Office of the
+// President, PCSO, DSWD).
+//
+// The failure was silent in the worst direction: creating a TeleSales manager
+// errored with "Division must be one of…", which reads like the division is
+// wrong rather than like this file is out of date.
+//
+// Importing costs one require and cannot drift.
+const { DIVISIONS } = require('../src/controllers/auth.controller');
 
 // Same cost the app uses everywhere it hashes (auth, admin, seed). A different
 // cost here would still verify correctly, but keeping them equal means one

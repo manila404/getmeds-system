@@ -1,10 +1,17 @@
 const express = require('express');
 const router = express.Router();
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, requireOrderScope } = require('../middleware/auth');
 const c = require('../controllers/finance.controller');
 
 router.use(requireAuth);
 router.use(requireRole('finance', 'admin', 'management'));
+
+// Sep 11, 2026 (Phase C): division-scoped managers may only reach orders in
+// their own divisions. Finance's per-order routes are open to `management` too, so a scoped
+// manager could otherwise verify or reject payment on an order in a division
+// they do not cover. Finance and Dispatch users themselves are unscoped and
+// pass straight through.
+router.param('id', (req, res, next) => requireOrderScope(req, res, next));
 
 // Read-only — Finance verification now happens in Zoho itself (confirm SO ->
 // convert to Invoice -> record Customer Payment), which calls back to

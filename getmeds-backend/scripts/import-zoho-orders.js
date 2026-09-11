@@ -37,6 +37,9 @@
 // DATABASE_URL is unset here and the first query fails with "DATABASE_URL is
 // not set" even though .env has it.
 require('dotenv').config();
+// Share the database politely: this is a bulk job, and the deployed app is on
+// the same Supabase pooler. See lib/batch-job.js.
+require('./lib/batch-job');
 
 const db = require('../src/db/database');
 const zoho = require('../src/integrations/zoho');

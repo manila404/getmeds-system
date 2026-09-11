@@ -1,10 +1,23 @@
 const express = require('express');
 const router = express.Router();
-const { requireAuth, requireRole, blockMedrepWritesOnImported } = require('../middleware/auth');
+const { requireAuth, requireRole, blockMedrepWritesOnImported, requireOrderScope } = require('../middleware/auth');
 const c = require('../controllers/orders.controller');
 
 // All orders routes require authentication
 router.use(requireAuth);
+
+// Sep 11, 2026 (Phase C): a division-scoped manager may only reach orders in
+// their own divisions — on EVERY route that names one.
+//
+// Attached to the `:id` parameter rather than listed route by route, so this
+// holds for the routes below and for any added later. The per-route version
+// works exactly as well until somebody adds `/:id/something` and does not
+// think about scope; here, forgetting is not an option, and an exemption has
+// to be written down on purpose.
+//
+// Runs after requireAuth, so req.user is populated. Everyone who is not a
+// scoped manager passes straight through — see the middleware.
+router.param('id', (req, res, next) => requireOrderScope(req, res, next));
 
 // Meta endpoints (customers + products for dropdowns)
 router.get('/meta/customers', c.getCustomers);

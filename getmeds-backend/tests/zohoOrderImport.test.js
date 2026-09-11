@@ -21,7 +21,11 @@ const request = require('supertest');
 const app = require('../src/app');
 const db = require('../src/db/database');
 const zoho = require('../src/integrations/zoho');
-const { importSalesOrders } = require('../src/services/zohoOrderImportService');
+const {
+  importSalesOrders,
+  enrichPendingDetail,
+  countAwaitingDetail
+} = require('../src/services/zohoOrderImportService');
 
 const SALESPERSON = 'TEST | Admin User';
 
@@ -329,6 +333,111 @@ describe('Zoho Sales Order import', () => {
       .prepare("SELECT id FROM customers WHERE zoho_contact_id = 'CONTACT-FIX-1002'")
       .get();
     if (adopted) createdCustomerIds.push(adopted.id);
+  });
+
+  /**
+   * Sep 10, 2026 (3c-2). Enriching ~60,000 adopted orders is ~120,000 Zoho
+   * GETs against an org with a daily call budget, so it is a campaign run over
+   * many passes rather than one button press.
+   *
+   * That makes the cost of a PASS the thing worth testing. Each pass used to
+   * begin by re-walking Zoho's Sales Order list — ~305 requests to re-learn
+   * something already sitting in the orders table. Over the whole campaign
+   * that is thousands of calls spent on nothing.
+   *
+   * So the first assertion here is about a call NOT being made. It is the only
+   * one that can catch the regression: if enrichPendingDetail ever grows a
+   * list walk again, every other assertion in this file still passes and the
+   * campaign just quietly costs a third more.
+   */
+  describe('enrichPendingDetail — filling in detail without re-walking the list', () => {
+    /** Put orders back into the "summary-only" state a tier-1 adoption leaves. */
+    async function markPending(limit) {
+      const rows = await db
+        .prepare(
+          `SELECT id FROM orders
+            WHERE zoho_so_id IS NOT NULL AND getmeds_order_id LIKE 'ZOHO-%'
+            ORDER BY id LIMIT ?`
+        )
+        .all(limit);
+      for (const r of rows) {
+        await db.prepare('UPDATE orders SET zoho_detail_synced_at = NULL WHERE id = ?').run(r.id);
+      }
+      return rows.map((r) => r.id);
+    }
+
+    async function syncedAt(orderId) {
+      const row = await db.prepare('SELECT zoho_detail_synced_at FROM orders WHERE id = ?').get(orderId);
+      return row?.zoho_detail_synced_at || null;
+    }
+
+    test('asks Postgres for the backlog, not Zoho — no Sales Order list call', async () => {
+      const ids = await markPending(2);
+      expect(ids.length).toBeGreaterThan(0);
+
+      const listSpy = jest.spyOn(zoho, 'listSalesOrders');
+      try {
+        const summary = await enrichPendingDetail({ limit: ids.length });
+        expect(listSpy).not.toHaveBeenCalled();
+        expect(summary.detailed).toBe(ids.length);
+      } finally {
+        listSpy.mockRestore();
+      }
+
+      for (const id of ids) expect(await syncedAt(id)).toBeTruthy();
+    });
+
+    test('respects its limit and advances, rather than re-taking the same slice', async () => {
+      const ids = await markPending(3);
+      expect(ids.length).toBe(3);
+
+      const first = await enrichPendingDetail({ limit: 1 });
+      expect(first.detailed).toBe(1);
+
+      // The one it stamped must be out of the backlog, so the next pass reaches
+      // a different order. This is the bug that made the original detail budget
+      // unable to see past its own first 500.
+      const stamped = [];
+      for (const id of ids) if (await syncedAt(id)) stamped.push(id);
+      expect(stamped.length).toBe(1);
+
+      const second = await enrichPendingDetail({ limit: 1 });
+      expect(second.detailed).toBe(1);
+
+      const stampedAfter = [];
+      for (const id of ids) if (await syncedAt(id)) stampedAfter.push(id);
+      expect(stampedAfter.length).toBe(2);
+
+      await enrichPendingDetail({ limit: 5 });
+    });
+
+    test('reports the backlog it leaves behind, counted after the pass', async () => {
+      await markPending(2);
+      const before = await countAwaitingDetail();
+      expect(before).toBeGreaterThanOrEqual(2);
+
+      const summary = await enrichPendingDetail({ limit: 1 });
+      // Counted after the writes landed, so it is what is genuinely left —
+      // not `before - limit`, which would be wrong the moment a detail fetch
+      // fails and leaves its order outstanding.
+      expect(summary.awaiting_detail).toBe(before - 1);
+
+      await enrichPendingDetail({ limit: 10 });
+    });
+
+    test('a zero budget is a no-op that still makes no Zoho calls', async () => {
+      const listSpy = jest.spyOn(zoho, 'listSalesOrders');
+      const detailSpy = jest.spyOn(zoho, 'getSalesOrder');
+      try {
+        const summary = await enrichPendingDetail({ limit: 0 });
+        expect(summary.detailed).toBe(0);
+        expect(listSpy).not.toHaveBeenCalled();
+        expect(detailSpy).not.toHaveBeenCalled();
+      } finally {
+        listSpy.mockRestore();
+        detailSpy.mockRestore();
+      }
+    });
   });
 
   describe('endpoints', () => {

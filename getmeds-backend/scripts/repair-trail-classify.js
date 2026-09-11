@@ -35,6 +35,9 @@
  *   node scripts/repair-trail-classify.js --yes --keep-noise   # steps 1 and 3 only
  */
 require('dotenv').config();
+// Share the database politely: this is a bulk job, and the deployed app is on
+// the same Supabase pooler. See lib/batch-job.js.
+require('./lib/batch-job');
 
 const db = require('../src/db/database');
 const { classify } = require('../src/services/zohoHistoryService');

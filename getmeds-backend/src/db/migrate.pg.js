@@ -525,6 +525,40 @@ async function reconcileZohoStatusColumns(client) {
   }
 }
 
+/**
+ * Sep 11, 2026: `users.order_scope` — how much of the order list a management
+ * user may see.
+ *
+ * Existing rows get 'all', NOT because that is the safe default but because it
+ * is what they already had: every management user could see every order before
+ * this column existed, and a migration must not quietly revoke access that was
+ * working yesterday. New scoped managers are created with 'divisions'
+ * explicitly.
+ *
+ * The fail-closed rule lives one level up, in orderScopeService: a user set to
+ * 'divisions' with no scope rows sees nothing.
+ */
+async function reconcileUserOrderScope(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'users'`
+  );
+  if (rows.some((r) => r.column_name === 'order_scope')) {
+    console.log('  ✔ users.order_scope already present');
+    return;
+  }
+  console.log('  ↻ users.order_scope is missing — adding');
+  // DEFAULT 'all' so a user created by any path that does not mention this
+  // column keeps the access management users have always had — see the
+  // opt-in note in services/orderScopeService.js.
+  await client.query(`ALTER TABLE users ADD COLUMN order_scope TEXT DEFAULT 'all'`);
+  // Preserve what every management user could already do.
+  const upd = await client.query(
+    `UPDATE users SET order_scope = 'all' WHERE order_scope IS NULL`
+  );
+  console.log(`  ✔ users.order_scope added (${upd.rowCount} existing user(s) kept at 'all')`);
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -556,6 +590,7 @@ async function main() {
     await reconcileMasterFormColumns(client);
     await reconcileUserApproval(client);
     await reconcileZohoStatusColumns(client);
+    await reconcileUserOrderScope(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

@@ -37,12 +37,52 @@ const getAllUsers = async (req, res, next) => {
 };
 
 // Deactivate a user (Soft Delete)
+/**
+ * Sep 11, 2026: an admin account cannot be switched off.
+ *
+ * The database enforces this too (see the protect_admin_accounts trigger in
+ * schema.pg.sql), and that is the enforcement that actually matters — it
+ * covers the repair scripts and any SQL console, not just this controller.
+ * What this adds is a readable answer: without it the trigger surfaces as a
+ * 500 with a Postgres exception in it, which tells an admin they broke
+ * something rather than that they were prevented from doing something.
+ *
+ * Three routes reach the same row, and the third is the one that gets missed:
+ * demoting an admin to another role removes exactly the same access as
+ * deactivating them, while looking like an edit rather than a removal.
+ */
+function adminProtection(target, { role, is_active: isActive } = {}) {
+  if (target.role !== 'admin') return null;
+
+  if (isActive !== undefined && !isActive) return 'deactivated';
+  if (role !== undefined && String(role).toLowerCase() !== 'admin') return 'changed to another role';
+  return null;
+}
+
+function refuseAdminChange(res, what) {
+  return res.status(403).json({
+    success: false,
+    error: {
+      code: 'ADMIN_PROTECTED',
+      message:
+        `Admin accounts cannot be ${what}. This is deliberate — it is what stops the system ` +
+        'being locked out of its own administration. To offboard a departing admin, a database ' +
+        'session has to set app.allow_admin_change explicitly.'
+    }
+  });
+}
+
 const deactivateUser = async (req, res, next) => {
   try {
     const userId = req.params.id;
     const user = await db.prepare('SELECT id, name, is_active FROM users WHERE id = ?').get(userId);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const user_full = await db.prepare('SELECT role FROM users WHERE id = ?').get(userId);
+    if (adminProtection({ role: user_full.role }, { is_active: false })) {
+      return refuseAdminChange(res, 'deactivated');
     }
 
     await db.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(userId);
@@ -163,6 +203,9 @@ const update = async (req, res, next) => {
     const { role, is_active } = req.body;
     const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
     if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
+
+    const blocked = adminProtection(user, { role, is_active });
+    if (blocked) return refuseAdminChange(res, blocked);
 
     if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
     if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);

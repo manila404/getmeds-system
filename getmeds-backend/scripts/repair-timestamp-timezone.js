@@ -36,6 +36,9 @@
  *   node scripts/repair-timestamp-timezone.js --yes --limit 5000
  */
 require('dotenv').config();
+// Share the database politely: this is a bulk job, and the deployed app is on
+// the same Supabase pooler. See lib/batch-job.js.
+require('./lib/batch-job');
 
 const db = require('../src/db/database');
 

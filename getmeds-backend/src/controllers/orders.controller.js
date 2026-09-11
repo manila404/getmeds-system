@@ -25,6 +25,9 @@ const { buildTimeline, tierOf } = require('../services/orderTimelineService');
 // per-order mirror of Zoho's own Comments & History log. See
 // services/zohoOrderImportService.js for why the trail needs both halves.
 const { importSalesOrders, ingestSalesOrderLogs, IMPORT_MAX } = require('../services/zohoOrderImportService');
+// Sep 11, 2026: division-scoped manager visibility. Read and write paths
+// both consult this — see services/orderScopeService.js.
+const { canAccessOrder } = require('../services/orderScopeService');
 const syncJobs = require('../services/syncJobs');
 const { getSyncState } = require('../services/syncState');
 // Sep 9, 2026: the Master Form collects a TIN, and Zoho refuses a Sales Order
@@ -539,6 +542,18 @@ exports.getById = async (req, res, next) => {
     // Sep 5, 2026: MedReps can only see their own orders. Management can
     // see any medrep's order. Other roles can see all orders.
     if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    }
+
+    // Sep 11, 2026: a division-scoped manager can only open an order in their
+    // own divisions.
+    //
+    // This check is the reason the feature is not just a filter on the orders
+    // list. A list filter hides rows from a table and stops there — the URL
+    // still works, and /orders/41207 would happily render a division the
+    // viewer has no business seeing. Anyone who has ever pasted an order link
+    // into a chat would find it.
+    if (!(await canAccessOrder(req.user, order))) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
 

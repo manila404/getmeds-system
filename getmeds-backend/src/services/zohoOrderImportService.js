@@ -919,6 +919,146 @@ async function linkExistingOrder(order, salesorder) {
 }
 
 /**
+ * Tier 2: pull each Sales Order's full detail and Zoho history, and fold both
+ * into the local order.
+ *
+ * Sep 10, 2026 (3c). Lifted out of importSalesOrders unchanged so that
+ * enrichPendingDetail can reuse it. It was worth extracting rather than
+ * copying: this loop is the only place that decides what a failed detail
+ * fetch costs versus a failed history fetch, and two copies of that judgement
+ * would drift — the same trap scripts/import-zoho-orders.js fell into when it
+ * kept its own copy of the adopt-and-reconcile logic.
+ *
+ * `salesorders` need only carry `salesorder_id`. Every other field is
+ * overwritten by the detail fetch below, which is what makes the DB-driven
+ * caller possible.
+ */
+async function enrichDetail({ salesorders, actor, summary, onProgress }) {
+  const customerCache = new Map();
+  const productCache = new Map();
+  let processed = 0;
+
+  // Chunked fetch-then-write rather than fetch-everything-then-write-everything:
+  // it bounds how much Zoho detail is held in memory at once, and it means a
+  // run that dies halfway has still committed everything up to that point
+  // instead of losing all of it.
+  for (let i = 0; i < salesorders.length; i += CHUNK_SIZE) {
+    const chunk = salesorders.slice(i, i + CHUNK_SIZE);
+
+    const fetched = await mapWithConcurrency(chunk, FETCH_CONCURRENCY, async (summaryRecord) => {
+      const id = summaryRecord.salesorder_id;
+      const out = { id, salesorder: summaryRecord, comments: null, error: null };
+      try {
+        const detail = await zoho.getSalesOrder(id);
+        if (detail?.salesorder) out.salesorder = detail.salesorder;
+      } catch (err) {
+        out.error = err;
+        return out;
+      }
+      try {
+        const log = await zoho.listSalesOrderComments(id);
+        out.comments = log?.comments || [];
+      } catch (err) {
+        // The history is the nice-to-have half. Losing it costs the WHEN and
+        // WHO of the trail, not the order itself, so the import continues
+        // with the inferred checkpoints alone.
+        out.comments = null;
+      }
+      return out;
+    });
+
+    for (const item of fetched) {
+      processed++;
+      if (onProgress) onProgress(processed, salesorders.length);
+
+      if (item.error) {
+        summary.failed++;
+        if (summary.failures.length < 20) {
+          summary.failures.push({ salesorder_id: item.id, message: item.error.message });
+        }
+        continue;
+      }
+
+      try {
+        await importOne({ salesorder: item.salesorder, comments: item.comments, actor, customerCache, productCache, summary });
+      } catch (err) {
+        console.error(`[ZOHO_IMPORT] Sales Order ${item.id} failed:`, err);
+        summary.failed++;
+        if (summary.failures.length < 20) {
+          summary.failures.push({ salesorder_id: item.id, message: err.message });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Fill in detail and history for orders that are still summary-only, WITHOUT
+ * walking Zoho's Sales Order list first.
+ *
+ * Sep 10, 2026 (3c-2). Once tier 1 has adopted every Sales Order — which one
+ * full run does — the list walk tells an enrichment pass nothing it does not
+ * already know. The backlog is a local question: which rows have
+ * `zoho_detail_synced_at IS NULL`. Asking Postgres costs one query; asking
+ * Zoho costs ~305 requests and several minutes, every pass, against an org
+ * with a daily call budget.
+ *
+ * That budget is the reason this exists. Enriching ~60,000 orders is ~120,000
+ * Zoho GETs, which cannot happen in one sitting however it is driven; it is a
+ * campaign run over days. Spending a third of a pass's calls re-reading a list
+ * whose answer is already in the database is a third of the campaign wasted.
+ *
+ * Returns the same shape importSalesOrders does, minus the tier-1 fields it
+ * does not touch, so a caller can report on either the same way.
+ */
+async function enrichPendingDetail({ limit = IMPORT_MAX, onProgress } = {}) {
+  const budget = Math.max(0, Number.isFinite(limit) ? limit : IMPORT_MAX);
+  const actor = await systemActor();
+  if (!actor) {
+    throw new Error('No users exist in this database, so an imported order would have no owner to record.');
+  }
+
+  // Oldest first, so repeated passes work steadily through the backlog in a
+  // stable order instead of re-taking the same slice — the bug that made the
+  // original detail budget unable to reach past its first 500.
+  const pending = budget
+    ? await db
+        .prepare(
+          `SELECT zoho_so_id FROM orders
+            WHERE zoho_so_id IS NOT NULL AND zoho_detail_synced_at IS NULL
+            ORDER BY created_at ASC
+            LIMIT ?`
+        )
+        .all(budget)
+    : [];
+
+  const salesorders = pending.map((r) => ({ salesorder_id: String(r.zoho_so_id) }));
+
+  const summary = {
+    mode: 'enrich',
+    detailed: salesorders.length,
+    considered: salesorders.length,
+    already_present: 0,
+    linked: 0,
+    imported: 0,
+    skipped: 0,
+    salespersons_backfilled: 0,
+    log_entries: 0,
+    checkpoints: 0,
+    failed: 0,
+    failures: []
+  };
+
+  await enrichDetail({ salesorders, actor, summary, onProgress });
+
+  // Counted AFTER the pass, so it is what is genuinely left rather than an
+  // estimate — orders that failed their detail fetch are still outstanding and
+  // must stay in the count.
+  summary.awaiting_detail = await countAwaitingDetail();
+  return summary;
+}
+
+/**
  * Import every Sales Order Zoho has (up to IMPORT_MAX), and build each one's
  * trail.
  *
@@ -1038,62 +1178,7 @@ async function importSalesOrders({ mode = 'full', onFetched, onProgress, detailL
     stopped_early: !!listed.stoppedEarly
   };
 
-  const customerCache = new Map();
-  const productCache = new Map();
-  let processed = 0;
-
-  // Chunked fetch-then-write rather than fetch-everything-then-write-everything:
-  // it bounds how much Zoho detail is held in memory at once, and it means a
-  // run that dies halfway has still committed everything up to that point
-  // instead of losing all of it.
-  for (let i = 0; i < salesorders.length; i += CHUNK_SIZE) {
-    const chunk = salesorders.slice(i, i + CHUNK_SIZE);
-
-    const fetched = await mapWithConcurrency(chunk, FETCH_CONCURRENCY, async (summaryRecord) => {
-      const id = summaryRecord.salesorder_id;
-      const out = { id, salesorder: summaryRecord, comments: null, error: null };
-      try {
-        const detail = await zoho.getSalesOrder(id);
-        if (detail?.salesorder) out.salesorder = detail.salesorder;
-      } catch (err) {
-        out.error = err;
-        return out;
-      }
-      try {
-        const log = await zoho.listSalesOrderComments(id);
-        out.comments = log?.comments || [];
-      } catch (err) {
-        // The history is the nice-to-have half. Losing it costs the WHEN and
-        // WHO of the trail, not the order itself, so the import continues
-        // with the inferred checkpoints alone.
-        out.comments = null;
-      }
-      return out;
-    });
-
-    for (const item of fetched) {
-      processed++;
-      if (onProgress) onProgress(processed, salesorders.length);
-
-      if (item.error) {
-        summary.failed++;
-        if (summary.failures.length < 20) {
-          summary.failures.push({ salesorder_id: item.id, message: item.error.message });
-        }
-        continue;
-      }
-
-      try {
-        await importOne({ salesorder: item.salesorder, comments: item.comments, actor, customerCache, productCache, summary });
-      } catch (err) {
-        console.error(`[ZOHO_IMPORT] Sales Order ${item.id} failed:`, err);
-        summary.failed++;
-        if (summary.failures.length < 20) {
-          summary.failures.push({ salesorder_id: item.id, message: err.message });
-        }
-      }
-    }
-  }
+  await enrichDetail({ salesorders, actor, summary, onProgress });
 
   if (listed.newWatermark) await setSyncState('salesorders_last_modified_watermark', listed.newWatermark);
   if (mode === 'full') {
@@ -1353,6 +1438,10 @@ async function importOne({ salesorder, comments, actor, customerCache, productCa
 
 module.exports = {
   importSalesOrders,
+  // Sep 10, 2026 (3c-2): the list-free enrichment pass. Driven from the local
+  // backlog, so it can be run repeatedly without re-reading Zoho's list.
+  enrichPendingDetail,
+  countAwaitingDetail,
   // Exported for tests: the bulk status correction is the highest-consequence
   // write here, so it is exercised directly rather than only through a full run.
   syncStatusesFromList,

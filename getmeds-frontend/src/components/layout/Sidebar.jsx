@@ -2,26 +2,7 @@ import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import {
-  LayoutDashboard,
-  PlusCircle,
-  ClipboardList,
-  CreditCard,
-  History,
-  Truck,
-  MapPin,
-  AlertTriangle,
-  ClipboardCheck,
-  Users,
-  Package,
-  X,
-  FlaskConical,
-  BarChart3,
-  Layers,
-  Zap,
-  PanelLeftClose,
-  PanelLeftOpen
-, UserCheck } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 
 const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollapse }) => {
@@ -97,7 +78,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         { to: '/management/exceptions', icon: <AlertTriangle size={18} />, label: 'Exception Hub' },
         { to: '/inventory', icon: <Package size={18} />, label: 'Inventory & Stock Sync' },
         { to: '/management/clients', icon: <Users size={18} />, label: 'Clients Directory' },
-        { to: '/management/order-ownership', icon: <UserCheck size={18} />, label: 'Order Ownership' }
+        { to: '/management/order-ownership', icon: <UserCheck size={18} />, label: 'Order Ownership' },
+        { to: '/management/manager-scopes', icon: <Shield size={18} />, label: 'Manager Access' }
       ]
     },
     {
@@ -158,7 +140,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
       { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' },
-      { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' }
+      { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
+      { to: '/management/manager-scopes', icon: <Shield size={19} />, label: 'Manager Access' }
     );
     secondaryLinks.push(
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
@@ -178,7 +161,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       // Sep 9, 2026: the Zoho sync retry outbox — was API-only until now,
       // see ZohoSyncHealthPage.jsx.
       { to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' },
-      { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' }
+      { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
+      { to: '/management/manager-scopes', icon: <Shield size={19} />, label: 'Manager Access' }
     );
     secondaryLinks.push(
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }

@@ -1,38 +1,75 @@
 const db = require('../db/database');
+const { loadScope, scopeSql } = require('../services/orderScopeService');
 
+/**
+ * Sep 11, 2026: every KPI on this dashboard counts only what the viewer is
+ * allowed to see.
+ *
+ * Scoping the orders LIST and not this would be worse than not scoping at
+ * all: a manager restricted to B2B would see "60,866 total orders" over a
+ * table holding 9,941, and the obvious conclusion is that the table is broken.
+ * Numbers a person cannot drill into are not a smaller leak than rows — they
+ * are the same leak, harder to notice.
+ */
 exports.getSummary = async (req, res, next) => {
   try {
+    const scope = await loadScope(req.user);
+    const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'orders');
+
+    // Compose each query's own WHERE with the viewer's scope. Returns the SQL
+    // and the params in the right order, because getting those out of step is
+    // how a scoped query silently becomes an unscoped one.
+    const scoped = (where = '', params = []) => {
+      const parts = [];
+      if (where) parts.push(`(${where})`);
+      if (scopeClause) parts.push(scopeClause);
+      const clause = parts.length ? ` WHERE ${parts.join(' AND ')}` : '';
+      return { clause, params: [...params, ...(scopeClause ? scopeParams : [])] };
+    };
+
+    const countWhere = async (where = '', params = []) => {
+      const { clause, params: p } = scoped(where, params);
+      return (await db.prepare(`SELECT COUNT(*) as c FROM orders${clause}`).get(...p)).c;
+    };
+
     // Orders by status
-    const statusRows = await db.prepare('SELECT status, COUNT(*) as count FROM orders GROUP BY status').all();
+    const byStatus = scoped();
+    const statusRows = await db
+      .prepare(`SELECT status, COUNT(*) as count FROM orders${byStatus.clause} GROUP BY status`)
+      .all(...byStatus.params);
     const orders_by_status = {};
     for (const row of statusRows) orders_by_status[row.status] = row.count;
 
-    const total_orders = (await db.prepare('SELECT COUNT(*) as c FROM orders').get()).c;
+    const total_orders = await countWhere();
     // Sep 1, 2026: invoice_drafted/invoice_sent counted here too. Both are
     // orders Finance is still carrying — invoiced in Zoho but not yet paid —
     // and they are already in the Finance queue, so leaving them out made
     // this KPI disagree with the queue it is meant to summarise.
-    const pending_payment_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('ready_for_draft_invoice','ready_for_invoice_sent','ready_for_dispatch')").get()).c;
-    const ready_dispatch_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('ready_for_dispatch','picking_packing')").get()).c;
-    const dispatched_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('dispatched','tracking_shared')").get()).c;
-    const completed_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status = 'completed'").get()).c;
+    const pending_payment_count = await countWhere("status IN ('ready_for_draft_invoice','ready_for_invoice_sent','ready_for_dispatch')");
+    const ready_dispatch_count = await countWhere("status IN ('ready_for_dispatch','picking_packing')");
+    const dispatched_count = await countWhere("status IN ('dispatched','tracking_shared')");
+    const completed_count = await countWhere("status = 'completed'");
     // 'deleted' counted alongside 'cancelled' (Sep 1, 2026) so an order whose
     // Sales Order was removed in Zoho still shows up somewhere on the
     // dashboard rather than dropping out of every KPI.
-    const exception_count = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE status IN ('on_hold','exception','cancelled','deleted')").get()).c;
+    const exception_count = await countWhere("status IN ('on_hold','exception','cancelled','deleted')");
 
     const today = new Date().toISOString().slice(0, 10);
-    const orders_today = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE DATE(created_at) = ?").get(today)).c;
+    const orders_today = await countWhere('DATE(created_at) = ?', [today]);
 
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const orders_this_week = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE DATE(created_at) >= ?").get(weekAgo)).c;
+    const orders_this_week = await countWhere('DATE(created_at) >= ?', [weekAgo]);
 
     // Avg processing time (submitted_at → completed dispatched)
-    const avgRow = await db.prepare(`
-      SELECT AVG((JULIANDAY(updated_at) - JULIANDAY(submitted_at)) * 24) as avg_hours
-      FROM orders
-      WHERE status IN ('completed', 'dispatched', 'tracking_shared') AND submitted_at IS NOT NULL
-    `).get();
+    const avg = scoped(
+      "status IN ('completed', 'dispatched', 'tracking_shared') AND submitted_at IS NOT NULL"
+    );
+    const avgRow = await db
+      .prepare(
+        `SELECT AVG((JULIANDAY(updated_at) - JULIANDAY(submitted_at)) * 24) as avg_hours
+           FROM orders${avg.clause}`
+      )
+      .get(...avg.params);
     const avg_processing_time_hours = avgRow.avg_hours ? Math.round(avgRow.avg_hours * 10) / 10 : null;
 
     res.json({
@@ -47,7 +84,15 @@ exports.getSummary = async (req, res, next) => {
         exception_count,
         avg_processing_time_hours,
         orders_today,
-        orders_this_week
+        orders_this_week,
+        // What these numbers are counting. Without it a scoped manager cannot
+        // tell a quiet day from a narrowed view.
+        scope: {
+          mode: scope.mode,
+          divisions: scope.rules.map((r) =>
+            r.sub_division ? `${r.division} / ${r.sub_division}` : r.division
+          )
+        }
       }
     });
   } catch (err) { next(err); }
@@ -126,6 +171,22 @@ exports.getAllOrders = async (req, res, next) => {
       where.push('(o.getmeds_order_id LIKE ? OR c.name LIKE ? OR o.zoho_so_number LIKE ?)');
       const like = `%${search}%`;
       params.push(like, like, like);
+    }
+
+    // Sep 11, 2026: the viewer's own scope, applied last and unconditionally.
+    //
+    // Pushed onto the SAME `where` list as the query-string filters rather
+    // than bolted on at the end, so there is no route by which a caller's
+    // parameters can displace it — every filter above narrows what is already
+    // narrowed by this, and none of them can widen it.
+    //
+    // For a manager restricted to divisions with no rules configured this is
+    // `1 = 0`: no orders, deliberately. See services/orderScopeService.js.
+    const scope = await loadScope(req.user);
+    const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
+    if (scopeClause) {
+      where.push(scopeClause);
+      params.push(...scopeParams);
     }
 
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';

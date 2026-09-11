@@ -1,4 +1,5 @@
 const db = require('../db/database');
+const { loadScope, scopeSql } = require('../services/orderScopeService');
 const stateMachine = require('../workflow/stateMachine');
 const { setOrderStatus } = require('../services/orderStatusService');
 const { logEvent, resolveActor } = require('../services/auditService');
@@ -32,6 +33,16 @@ const { markVerifiedWithOrder } = require('./paymentProof.controller');
 // not the finish line.
 exports.getQueue = async (req, res, next) => {
   try {
+    // Sep 11, 2026 (Phase C): narrowed to the viewer's divisions.
+    //
+    // This queue is open to `management` as well as its own role, so without
+    // this a division-scoped manager would see every order in it — the same
+    // leak the orders list has, on a page nobody thinks of as an orders list.
+    // loadScope returns full scope for Finance and Dispatch users themselves, so their queue is
+    // unchanged.
+    const scope = await loadScope(req.user);
+    const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
+    const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
     const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_number,
              u.name as medrep_name, u.email as medrep_email,
@@ -75,9 +86,9 @@ exports.getQueue = async (req, res, next) => {
         WHERE proofs.file_type = 'payment_proof'
         GROUP BY proofs.order_id
       ) pp ON pp.order_id = o.id
-      WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')
+      WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')${scopeAnd}
       ORDER BY o.submitted_at ASC
-    `).all();
+    `).all(...scopeParams);
     res.json({ success: true, data: { orders } });
   } catch (err) { next(err); }
 };

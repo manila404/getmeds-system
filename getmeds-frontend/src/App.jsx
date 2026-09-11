@@ -21,6 +21,7 @@ import ApprovalQueuePage from './pages/management/ApprovalQueuePage';
 import ExceptionHubPage from './pages/management/ExceptionHubPage';
 import ClientsPage from './pages/management/ClientsPage';
 import SalespersonMappingPage from './pages/management/SalespersonMappingPage';
+import ManagerScopePage from './pages/management/ManagerScopePage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import InventoryPage from './pages/admin/InventoryPage';
@@ -197,6 +198,19 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['management', 'admin']}>
                 <SalespersonMappingPage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Sep 11, 2026: which divisions each manager covers. The route is
+              open to management so the full-access manager can hand out
+              access; the SERVER refuses a division-scoped manager, which is
+              the check that matters — a restricted manager who could edit
+              scopes could lift their own restriction. */}
+          <Route
+            path="/management/manager-scopes"
+            element={
+              <ProtectedRoute allowedRoles={['management', 'admin']}>
+                <ManagerScopePage />
               </ProtectedRoute>
             }
           />
