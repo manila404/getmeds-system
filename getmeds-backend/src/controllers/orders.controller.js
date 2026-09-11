@@ -436,7 +436,7 @@ exports.getMedreps = async (req, res, next) => {
     if (!enabled) {
       return res.json({ success: true, data: { enabled: false, medreps: [], salespersons: [] } });
     }
-    const medreps = await db
+    const medrepRows = await db
       .prepare(
         `SELECT id, name, email, display_name, division, sub_division, salesperson
          FROM users
@@ -444,6 +444,11 @@ exports.getMedreps = async (req, res, next) => {
          ORDER BY COALESCE(NULLIF(TRIM(display_name), ''), name)`
       )
       .all();
+    // Sep 11, 2026: each rep's whole Salesperson list, primary first
+    // (`salesperson` above stays their primary), so the form can offer the
+    // right ones when an order is raised for a rep who covers several.
+    const lists = await salespersonService.listsByUser();
+    const medreps = medrepRows.map((m) => ({ ...m, salespersons: salespersonService.salespersonsOf(lists, m) }));
 
     let salespersons = [];
     try {
@@ -1049,6 +1054,23 @@ exports.create = async (req, res, next) => {
       // comparison is case/whitespace-insensitive — see verify()'s comment)
       // so what actually reaches Zoho always exactly matches what it has.
       effectiveSalesperson = (verification.checked && verification.matchedName) ? verification.matchedName : cleanSalesperson;
+    }
+
+    // Sep 11, 2026: an account can cover several Zoho Salespersons (see
+    // user_salespersons in schema.pg.sql). A MedRep raising their OWN order
+    // picks which one it goes out under; blank means their primary, which is
+    // what medrepProfile already holds.
+    //
+    // Only their own are accepted. This used to be ignored for a MedRep, and
+    // is now REFUSED instead: a name that is not theirs would file the order
+    // under another rep in Zoho, and silently sending the primary instead
+    // would send something the rep did not choose.
+    if (!isBackOfficeOrder && cleanSalesperson !== null) {
+      const choice = await salespersonService.resolveForUser(effectiveActor.id, cleanSalesperson);
+      if (choice.error) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: choice.error } });
+      }
+      effectiveSalesperson = choice.salesperson;
     }
 
     // Sep 5, 2026 (3): resolve the Sub-division that will actually be used

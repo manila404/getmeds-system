@@ -3,6 +3,8 @@ const bcrypt = require('bcryptjs');
 const zohoRetryService = require('../services/zohoRetryService');
 // Sep 11, 2026: the Salesperson list an admin assigns from. Read-only.
 const zoho = require('../integrations/zoho');
+// Sep 11, 2026: an account's full Salesperson list (user_salespersons).
+const salespersonService = require('../services/salespersonService');
 // Sep 9, 2026: reuse the same Division/Sub-division enums Profile Settings
 // enforces — see auth.controller.js's DIVISIONS comment for why this is an
 // enum (a free-typed division created junk Salespersons in the live Zoho org
@@ -24,8 +26,11 @@ const getAllUsers = async (req, res, next) => {
           ORDER BY (approval_status = 'pending') DESC, name`
       )
       .all();
+    // Sep 11, 2026: every Zoho Salesperson on each account, primary first.
+    const lists = await salespersonService.listsByUser();
     const enriched = users.map(u => ({
       ...u,
+      salespersons: salespersonService.salespersonsOf(lists, u),
       username: u.email ? u.email.split('@')[0] : `user_${u.id}`,
       role_name: u.role ? (u.role.charAt(0).toUpperCase() + u.role.slice(1)) : 'User',
       first_name: u.name ? u.name.split(' ')[0] : '',
@@ -264,8 +269,47 @@ async function loadZohoSalespersons() {
   return salespersonCache;
 }
 
-async function zohoSalespersonNames() {
-  return (await loadZohoSalespersons()).names;
+/**
+ * Check a list of Salesperson names against Zoho's live list and return Zoho's
+ * own spellings — or the error to answer with.
+ *
+ * All or nothing: one unknown name refuses the whole list. Saving the rest
+ * would leave the account with a list the admin never asked for, and an
+ * unknown name is not rejected by Zoho later — it is CREATED there on the
+ * first order, so it has to stop here.
+ */
+async function checkSalespersons(names) {
+  const wanted = [];
+  for (const raw of names || []) {
+    const n = raw == null ? '' : String(raw).trim();
+    if (n && !wanted.some((w) => w.toLowerCase() === n.toLowerCase())) wanted.push(n);
+  }
+  if (!wanted.length) return { names: [] };
+
+  const { names: known, list } = await loadZohoSalespersons();
+  // A null list means Zoho was unreachable. Refusing is the safe answer: the
+  // cost of waiting is a retry, the cost of guessing is permanent.
+  if (!known) {
+    return {
+      status: 503,
+      error: { code: 'ZOHO_UNAVAILABLE', message: 'Could not reach Zoho to check those Salespersons. Try again in a moment.' }
+    };
+  }
+
+  const spelling = new Map(list.map((s) => [s.name.toLowerCase(), s.name]));
+  const unknown = wanted.filter((n) => !spelling.has(n.toLowerCase()));
+  if (unknown.length) {
+    return {
+      status: 400,
+      error: {
+        code: 'UNKNOWN_SALESPERSON',
+        message:
+          `${unknown.map((n) => `"${n}"`).join(', ')} ${unknown.length === 1 ? 'is not a Salesperson' : 'are not Salespersons'} in Zoho. ` +
+          'Pick from the list — a name Zoho does not know would be created there as a new Salesperson on their first order.'
+      }
+    };
+  }
+  return { names: wanted.map((n) => spelling.get(n.toLowerCase())) };
 }
 
 /**
@@ -285,24 +329,40 @@ const getSalespersons = async (req, res, next) => {
       });
     }
 
-    // Which ones are already spoken for, so an admin can see at a glance that
-    // a name is taken rather than assigning the same Salesperson twice.
+    // Which ones are already spoken for, so an admin can see at a glance who
+    // else holds a name before giving it to someone.
+    //
+    // Sep 11, 2026: a list of holders per name. An account can hold several
+    // Salespersons and two accounts can share one, so "taken by" is no longer
+    // one person. The UNION's second half covers an account whose single
+    // Salesperson was written straight to users.salesperson with no rows.
     const taken = await db
-      .prepare("SELECT salesperson, name, email FROM users WHERE salesperson IS NOT NULL AND salesperson <> ''")
+      .prepare(
+        `SELECT s.salesperson, u.name, u.email
+           FROM user_salespersons s JOIN users u ON u.id = s.user_id
+         UNION
+         SELECT u.salesperson, u.name, u.email
+           FROM users u
+          WHERE u.salesperson IS NOT NULL AND u.salesperson <> ''
+            AND NOT EXISTS (SELECT 1 FROM user_salespersons s WHERE s.user_id = u.id)`
+      )
       .all();
-    const byName = new Map(taken.map((t) => [String(t.salesperson).toLowerCase(), t]));
+    const byName = new Map();
+    for (const t of taken) {
+      const key = String(t.salesperson).toLowerCase();
+      if (!byName.has(key)) byName.set(key, []);
+      byName.get(key).push({ name: t.name, email: t.email });
+    }
 
     res.json({
       success: true,
       data: {
-        salespersons: list.map((sp) => {
-          const owner = byName.get(sp.name.toLowerCase());
-          return {
-            name: sp.name,
-            is_active: sp.is_active,
-            assigned_to: owner ? { name: owner.name, email: owner.email } : null
-          };
-        }),
+        salespersons: list.map((sp) => ({
+          name: sp.name,
+          is_active: sp.is_active,
+          // Every account holding this name; empty when nobody does.
+          assigned_to: byName.get(sp.name.toLowerCase()) || []
+        })),
         // So the screen can say "and 97 more who have left" rather than making
         // someone count what the filter removed.
         active_count: list.filter((sp) => sp.is_active).length,
@@ -323,51 +383,65 @@ const update = async (req, res, next) => {
     const blocked = adminProtection(user, { role, is_active });
     if (blocked) return refuseAdminChange(res, blocked);
 
-    if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
-    if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
-
-    // Sep 11, 2026: the Salesperson an admin picked from Zoho's list.
+    // Sep 11, 2026: the Salespersons an admin picked from Zoho's list.
     //
     // Not derived from division and display name any more — see the column
-    // comment in schema.pg.sql. It is checked against Zoho's actual list
-    // rather than accepted as free text, because an unknown name does not
-    // fail on the first order: LiveZohoAdapter.createSalesOrder CREATES the
-    // Salesperson, so a typo becomes a permanent junk record in the company's
-    // org that nobody will connect back to this form.
+    // comment in schema.pg.sql. Checked against Zoho's actual list rather than
+    // accepted as free text, because an unknown name does not fail on the
+    // first order: LiveZohoAdapter.createSalesOrder CREATES the Salesperson,
+    // so a typo becomes a permanent junk record in the company's org.
     //
-    // Explicit null clears it, which is how an admin says "not decided yet".
-    if (salesperson !== undefined) {
-      const wanted = salesperson === null ? null : String(salesperson).trim();
-      if (wanted) {
-        const known = await zohoSalespersonNames();
-        // A null list means Zoho was unreachable. Refusing is the safe answer:
-        // the cost of waiting is a retry, the cost of guessing is permanent.
-        if (!known) {
-          return res.status(503).json({
-            success: false,
-            error: {
-              code: 'ZOHO_UNAVAILABLE',
-              message: 'Could not reach Zoho to check that Salesperson. Try again in a moment.'
-            }
-          });
-        }
-        if (!known.has(wanted.toLowerCase())) {
-          return res.status(400).json({
-            success: false,
-            error: {
-              code: 'UNKNOWN_SALESPERSON',
-              message:
-                `"${wanted}" is not a Salesperson in Zoho. Pick one from the list — a name Zoho ` +
-                'does not know would be created there as a new Salesperson on their first order.'
-            }
-          });
-        }
+    // Sep 11, 2026 (2): an account can hold SEVERAL (user_salespersons).
+    //   salespersons: [...]         replaces the whole list
+    //   primary_salesperson: 'X'    which of them is primary (default: first)
+    //   salesperson: 'X' | null     the older single-value form — the list
+    //                               becomes just X, or empty ("not decided yet")
+    //
+    // Checked BEFORE anything is written, so a bad name cannot leave the role
+    // or active flag changed and the Salespersons not.
+    let salespersonPlan = null;
+    if (req.body.salespersons !== undefined) {
+      if (!Array.isArray(req.body.salespersons)) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: 'salespersons must be a list of Zoho Salesperson names.' }
+        });
       }
-      await db.prepare('UPDATE users SET salesperson = ? WHERE id = ?').run(wanted || null, user.id);
+      salespersonPlan = { names: req.body.salespersons, primary: req.body.primary_salesperson ?? null };
+    } else if (salesperson !== undefined) {
+      salespersonPlan = { names: salesperson === null ? [] : [salesperson], primary: null };
+    }
+
+    let canonical = null;
+    if (salespersonPlan) {
+      const checked = await checkSalespersons(salespersonPlan.names);
+      if (checked.error) return res.status(checked.status).json({ success: false, error: checked.error });
+      canonical = checked.names;
+
+      const primary = salespersonPlan.primary == null ? '' : String(salespersonPlan.primary).trim();
+      if (primary && !canonical.some((n) => n.toLowerCase() === primary.toLowerCase())) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'PRIMARY_NOT_IN_LIST',
+            message: `The primary Salesperson "${primary}" has to be one of the account's Salespersons.`
+          }
+        });
+      }
+    }
+
+    if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
+    if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
+    if (canonical) {
+      await salespersonService.setForUser(user.id, canonical, {
+        primary: salespersonPlan.primary,
+        actorId: req.user.id
+      });
     }
 
     const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at, salesperson FROM users WHERE id = ?').get(user.id);
-    res.json({ success: true, data: { user: updated } });
+    const salespersons = await salespersonService.listForUser(user.id);
+    res.json({ success: true, data: { user: { ...updated, salespersons } } });
   } catch (err) {
     if (next) next(err);
     else res.status(500).json({ success: false, error: err.message });

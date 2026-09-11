@@ -262,3 +262,42 @@ describe('POST /api/orders with medrep_id', () => {
     expect(event.metadata).toBeNull();
   });
 });
+
+// Sep 11, 2026: a MedRep covering several Zoho Salespersons picks one per order.
+describe('a MedRep with several Salespersons', () => {
+  beforeAll(async () => {
+    // Bea covers her own name and the TEST | MEDREP stand-in; both exist in the mock org.
+    await db
+      .prepare('INSERT INTO user_salespersons (user_id, salesperson, is_primary) VALUES (?, ?, 1), (?, ?, 0)')
+      .run(repB.id, 'NORTH | Bea Cruz', repB.id, 'TEST | MEDREP');
+  });
+
+  test('no choice sends their primary', async () => {
+    const res = await createOrder(repBToken, {});
+    expect(res.status).toBe(201);
+    createdOrderIds.push(res.body.data.order.id);
+
+    const so = await zoho.getSalesOrder(res.body.data.order.zoho_so_id);
+    expect(so.salesorder.salesperson_name).toBe('NORTH | Bea Cruz');
+  });
+
+  test('choosing another of their own sends that one, and the order records it', async () => {
+    const res = await createOrder(repBToken, { salesperson: 'test | medrep' });
+    expect(res.status).toBe(201);
+    createdOrderIds.push(res.body.data.order.id);
+
+    const row = await db.prepare('SELECT salesperson FROM orders WHERE id = ?').get(res.body.data.order.id);
+    expect(row.salesperson).toBe('TEST | MEDREP');
+    const so = await zoho.getSalesOrder(res.body.data.order.zoho_so_id);
+    expect(so.salesorder.salesperson_name).toBe('TEST | MEDREP');
+  });
+
+  test('a Salesperson that is not theirs is refused, not sent', async () => {
+    const before = (await db.prepare('SELECT COUNT(*) c FROM orders').get()).c;
+    const res = await createOrder(repBToken, { salesperson: 'TEST | Aaron Manila' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toContain('not one of this account');
+    expect((await db.prepare('SELECT COUNT(*) c FROM orders').get()).c).toBe(before);
+  });
+});

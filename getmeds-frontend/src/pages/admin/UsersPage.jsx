@@ -34,6 +34,11 @@ const UsersPage = () => {
   const [salespersonError, setSalespersonError] = useState(null);
   const [editingSalesperson, setEditingSalesperson] = useState(null);
   const [savingSalesperson, setSavingSalesperson] = useState(false);
+  // Sep 11, 2026: an account can hold several Zoho Salespersons. The editor
+  // works on a draft of the list and saves it in one request, so orders never
+  // go out under a half-edited list.
+  const [draftSalespersons, setDraftSalespersons] = useState([]);
+  const [draftPrimary, setDraftPrimary] = useState(null);
   // Sep 11, 2026: the picker shows CURRENT salespersons by default.
   //
   // Zoho marks a Salesperson inactive when the person leaves, and this org's
@@ -71,33 +76,64 @@ const UsersPage = () => {
     }
   };
 
+  /** Every Salesperson on an account, primary first. */
+  const salespersonsOf = (user) =>
+    user.salespersons?.length
+      ? user.salespersons
+      : user.salesperson
+        ? [{ salesperson: user.salesperson, is_primary: true }]
+        : [];
+
   /**
    * Which salespersons this row may pick from.
    *
-   * Active ones, plus -- always -- whatever this account is already set to.
+   * Active ones, plus -- always -- whatever this account already holds.
    * Without that second half, opening the picker on somebody assigned to a
    * now-departed salesperson would show their current value missing from the
-   * list, and a stray change would silently clear it.
+   * list, and a stray change would silently drop it.
    */
-  const optionsFor = (user) =>
-    salespersons.filter(
-      (sp) => showInactive || sp.is_active || sp.name === user.salesperson
-    );
+  const optionsFor = (user) => {
+    const mine = new Set(salespersonsOf(user).map((s) => s.salesperson));
+    return salespersons.filter((sp) => showInactive || sp.is_active || mine.has(sp.name));
+  };
+
+  const startEditing = (user) => {
+    const list = salespersonsOf(user);
+    setDraftSalespersons(list.map((s) => s.salesperson));
+    setDraftPrimary((list.find((s) => s.is_primary) || list[0] || {}).salesperson || null);
+    setEditingSalesperson(user.id);
+  };
+
+  const addDraft = (name) => {
+    if (!name || draftSalespersons.includes(name)) return;
+    setDraftSalespersons([...draftSalespersons, name]);
+    if (!draftPrimary) setDraftPrimary(name);
+  };
+
+  const removeDraft = (name) => {
+    const next = draftSalespersons.filter((n) => n !== name);
+    setDraftSalespersons(next);
+    if (draftPrimary === name) setDraftPrimary(next[0] || null);
+  };
 
   /**
-   * Assign (or clear) the Zoho Salesperson for one account.
+   * Save the whole Salesperson list for one account.
    *
-   * The server checks the name against Zoho as well -- this picker is the
-   * convenience, not the guarantee.
+   * The server checks every name against Zoho as well -- this picker is the
+   * convenience, not the guarantee -- and refuses the whole list if one is
+   * unknown.
    */
-  const saveSalesperson = async (user, value) => {
+  const saveSalespersons = async (user) => {
     setSavingSalesperson(true);
     try {
-      await client.patch(`/api/admin/users/${user.id}`, { salesperson: value || null });
+      await client.patch(`/api/admin/users/${user.id}`, {
+        salespersons: draftSalespersons,
+        primary_salesperson: draftPrimary
+      });
       toast.success(
-        value
-          ? `${getUserDisplayName(user)} will order as "${value}" in Zoho.`
-          : `Cleared the Salesperson for ${getUserDisplayName(user)}.`
+        draftSalespersons.length
+          ? `${getUserDisplayName(user)} now covers ${draftSalespersons.length} Salesperson${draftSalespersons.length > 1 ? 's' : ''} in Zoho.`
+          : `Cleared the Salespersons for ${getUserDisplayName(user)}.`
       );
       setEditingSalesperson(null);
       await fetchUsers();
@@ -348,30 +384,64 @@ const UsersPage = () => {
                             actually knows the answer. */}
                         <td className="px-6 py-4 text-[13px]">
                           {editingSalesperson === user.id ? (
-                            <div className="flex items-center gap-2">
+                            <div className="space-y-2 min-w-[16rem]">
+                              {/* Sep 11, 2026: the account's list, as a draft.
+                                  ★ marks the primary -- the one an order uses
+                                  when it does not say otherwise. */}
+                              {draftSalespersons.length ? (
+                                <ul className="space-y-1">
+                                  {draftSalespersons.map((name) => (
+                                    <li key={name} className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setDraftPrimary(name)}
+                                        title={name === draftPrimary ? 'Primary' : 'Make this the primary'}
+                                        className={`text-sm leading-none ${name === draftPrimary ? 'text-getmeds-blue' : 'text-slate-300 hover:text-getmeds-blue'}`}
+                                      >
+                                        ★
+                                      </button>
+                                      <span className="text-ink-primary">{name}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => removeDraft(name)}
+                                        aria-label={`Remove ${name}`}
+                                        className="text-xs text-red-600 hover:text-red-800"
+                                      >
+                                        ✕
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <p className="text-xs text-amber-800">No Salesperson -- this account cannot place orders.</p>
+                              )}
+                              <div className="flex flex-wrap items-center gap-2">
                               <select
                                 autoFocus
-                                defaultValue={user.salesperson || ''}
+                                value=""
                                 disabled={savingSalesperson}
-                                onChange={(e) => saveSalesperson(user, e.target.value)}
+                                onChange={(e) => addDraft(e.target.value)}
                                 className="max-w-[15rem] text-[13px] border border-slate-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
                               >
-                                <option value="">-- not assigned --</option>
-                                {optionsFor(user).map((sp) => (
-                                  <option key={sp.name} value={sp.name}>
-                                    {sp.name}
-                                    {/* Marked rather than hidden when shown:
-                                        picking a departed colleague should be
-                                        a decision, not a misread. */}
-                                    {sp.is_active ? '' : ' (inactive)'}
-                                    {/* Two people on one Zoho Salesperson is
-                                        allowed but rarely intended, so it is
-                                        visible at the moment of choosing. */}
-                                    {sp.assigned_to && sp.assigned_to.email !== user.email
-                                      ? ` - taken by ${sp.assigned_to.name}`
-                                      : ''}
-                                  </option>
-                                ))}
+                                <option value="">+ Add a Salesperson…</option>
+                                {optionsFor(user)
+                                  .filter((sp) => !draftSalespersons.includes(sp.name))
+                                  .map((sp) => {
+                                    // Two people on one Zoho Salesperson is
+                                    // allowed, so it is shown at the moment of
+                                    // choosing rather than refused.
+                                    const others = (sp.assigned_to || []).filter((a) => a.email !== user.email);
+                                    return (
+                                      <option key={sp.name} value={sp.name}>
+                                        {sp.name}
+                                        {/* Marked rather than hidden when shown:
+                                            picking a departed colleague should be
+                                            a decision, not a misread. */}
+                                        {sp.is_active ? '' : ' (inactive)'}
+                                        {others.length ? ` - also ${others.map((a) => a.name).join(', ')}` : ''}
+                                      </option>
+                                    );
+                                  })}
                               </select>
                               {salespersonCounts.inactive > 0 && (
                                 <button
@@ -389,34 +459,57 @@ const UsersPage = () => {
                                     : `Show inactive (${salespersonCounts.inactive})`}
                                 </button>
                               )}
-                              <button
-                                type="button"
-                                onClick={() => setEditingSalesperson(null)}
-                                className="text-xs text-ink-secondary hover:text-ink-primary"
-                              >
-                                Cancel
-                              </button>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  disabled={savingSalesperson}
+                                  onClick={() => saveSalespersons(user)}
+                                  className="text-xs font-semibold text-white bg-getmeds-blue hover:bg-getmeds-blue-hover rounded px-2.5 py-1 disabled:opacity-50"
+                                >
+                                  {savingSalesperson ? 'Saving…' : 'Save'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingSalesperson(null)}
+                                  className="text-xs text-ink-secondary hover:text-ink-primary"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
                             </div>
                           ) : (
                             <button
                               type="button"
-                              onClick={() => setEditingSalesperson(user.id)}
+                              onClick={() => startEditing(user)}
                               disabled={!!salespersonError}
-                              title={salespersonError || 'Pick the name Zoho knows this person by'}
+                              title={salespersonError || 'Pick the names Zoho knows this person by'}
                               className="text-left group disabled:cursor-not-allowed"
                             >
-                              {user.salesperson ? (
-                                <span className="inline-flex items-center gap-1.5 text-ink-primary group-hover:text-getmeds-blue">
-                                  <Briefcase className="w-3.5 h-3.5 text-ink-secondary" />
-                                  {user.salesperson}
-                                  {/* Assigned once, since marked inactive in
-                                      Zoho -- worth surfacing, because nothing
-                                      else would ever mention it. */}
-                                  {salespersons.some(
-                                    (sp) => sp.name === user.salesperson && !sp.is_active
-                                  ) && (
-                                    <span className="text-[11px] text-amber-800">(inactive in Zoho)</span>
-                                  )}
+                              {salespersonsOf(user).length ? (
+                                <span className="flex flex-col gap-1">
+                                  {salespersonsOf(user).map((s) => (
+                                    <span
+                                      key={s.salesperson}
+                                      className="inline-flex items-center gap-1.5 text-ink-primary group-hover:text-getmeds-blue"
+                                    >
+                                      <Briefcase className="w-3.5 h-3.5 text-ink-secondary" />
+                                      {s.salesperson}
+                                      {s.is_primary && salespersonsOf(user).length > 1 && (
+                                        <span className="text-[10px] font-semibold uppercase tracking-wide text-getmeds-blue">
+                                          primary
+                                        </span>
+                                      )}
+                                      {/* Assigned once, since marked inactive in
+                                          Zoho -- worth surfacing, because nothing
+                                          else would ever mention it. */}
+                                      {salespersons.some(
+                                        (sp) => sp.name === s.salesperson && !sp.is_active
+                                      ) && (
+                                        <span className="text-[11px] text-amber-800">(inactive in Zoho)</span>
+                                      )}
+                                    </span>
+                                  ))}
                                 </span>
                               ) : salespersonError ? (
                                 <span className="text-ink-secondary">-</span>

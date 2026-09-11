@@ -61,8 +61,8 @@ const SalespersonNotice = () => {
         <div className="text-[13px] text-amber-900">
           <p className="font-semibold">This account has no Salesperson set.</p>
           <p className="mt-0.5">
-            Zoho requires one on every Sales Order. Ask an administrator to add a Division and
-            Display name to your account, or sign up with them.
+            Zoho requires one on every Sales Order. Ask an administrator to assign your Zoho
+            Salesperson on the Users page.
           </p>
         </div>
       </div>
@@ -70,13 +70,21 @@ const SalespersonNotice = () => {
   }
 
   // Zoho answered, and it has never heard of this name.
-  if (status.checked && status.exists === false) {
+  //
+  // Sep 11, 2026: checked for EVERY Salesperson on the account, not just the
+  // primary — a rep covering several can pick any of them on the form.
+  const missing = (status.salespersons || [])
+    .filter((s) => s.checked && s.exists === false)
+    .map((s) => s.salesperson);
+  if (!missing.length && status.checked && status.exists === false) missing.push(status.salesperson);
+  if (missing.length) {
     return (
       <div className="mb-5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex gap-3">
         <AlertTriangle size={18} className="text-amber-700 shrink-0 mt-0.5" />
         <div className="text-[13px] text-amber-900">
           <p className="font-semibold">
-            Zoho does not have a Salesperson called “{status.salesperson}”.
+            Zoho does not have {missing.length === 1 ? 'a Salesperson called' : 'these Salespersons:'}{' '}
+            {missing.map((n) => `“${n}”`).join(', ')}.
           </p>
           <p className="mt-0.5">
             Orders you submit will be rejected until someone adds that exact name in Zoho

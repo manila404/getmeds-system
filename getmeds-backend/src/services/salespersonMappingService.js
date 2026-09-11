@@ -1,4 +1,5 @@
 const db = require('../db/database');
+const salespersonService = require('./salespersonService');
 
 /**
  * Who owns the Sales Orders that came in from Zoho.
@@ -116,10 +117,16 @@ function suggestUser(zohoSalesperson, users) {
   const name = namePart(zohoSalesperson);
   if (!full) return null;
 
-  const exact = users.find((u) => u.salesperson && normalise(u.salesperson) === full);
-  if (exact) {
-    return { user: exact, confidence: 'exact', reason: 'Division and name both match this account.' };
+  // Sep 11, 2026: against EVERY Salesperson an account holds, not just its
+  // primary — a rep covering four regions is an exact match for all four.
+  // Exactly one account, or no suggestion: two people can share a Zoho
+  // Salesperson, and choosing between them is a human's call.
+  const holds = (u) => (u.salespersons && u.salespersons.length ? u.salespersons : [u.salesperson]).filter(Boolean);
+  const exact = users.filter((u) => holds(u).some((sp) => normalise(sp) === full));
+  if (exact.length === 1) {
+    return { user: exact[0], confidence: 'exact', reason: 'This account holds exactly this Zoho Salesperson.' };
   }
+  if (exact.length > 1) return null;
 
   if (!name) return null;
 
@@ -213,7 +220,7 @@ async function listForReview() {
     )
     .all();
 
-  const users = await db
+  const userRows = await db
     .prepare(
       `SELECT id, name, display_name, division, salesperson
          FROM users
@@ -221,6 +228,12 @@ async function listForReview() {
         ORDER BY COALESCE(NULLIF(TRIM(display_name), ''), name)`
     )
     .all();
+  // Sep 11, 2026: each rep's full Salesperson list, for suggestUser.
+  const lists = await salespersonService.listsByUser();
+  const users = userRows.map((u) => ({
+    ...u,
+    salespersons: salespersonService.salespersonsOf(lists, u).map((s) => s.salesperson)
+  }));
 
   const rows = mappings.map((m) => {
     const suggestion = m.user_id ? null : suggestUser(m.zoho_salesperson, users);

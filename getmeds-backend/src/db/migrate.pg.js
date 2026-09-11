@@ -597,6 +597,32 @@ async function reconcileUserSalespersonColumn(client) {
   console.log(`  ✔ users.salesperson converted (${kept[0].n} existing value(s) preserved)`);
 }
 
+/**
+ * Sep 11, 2026: seed user_salespersons from users.salesperson.
+ *
+ * schema.pg.sql creates the table (an account can now hold several Zoho
+ * Salespersons); this copies each account's existing single one in as its
+ * primary, so nobody loses the Salesperson they already had.
+ *
+ * Only for accounts that have no rows yet. An account whose list an admin has
+ * already edited is never touched, which is also what makes re-running this a
+ * no-op.
+ */
+async function reconcileUserSalespersons(client) {
+  const res = await client.query(
+    `INSERT INTO user_salespersons (user_id, salesperson, is_primary)
+     SELECT u.id, TRIM(u.salesperson), 1
+       FROM users u
+      WHERE u.salesperson IS NOT NULL AND TRIM(u.salesperson) <> ''
+        AND NOT EXISTS (SELECT 1 FROM user_salespersons s WHERE s.user_id = u.id)`
+  );
+  if (res.rowCount) {
+    console.log(`  ↻ user_salespersons: seeded ${res.rowCount} account(s) from users.salesperson`);
+  } else {
+    console.log('  ✔ user_salespersons already seeded');
+  }
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -630,6 +656,7 @@ async function main() {
     await reconcileZohoStatusColumns(client);
     await reconcileUserOrderScope(client);
     await reconcileUserSalespersonColumn(client);
+    await reconcileUserSalespersons(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

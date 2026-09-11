@@ -126,11 +126,135 @@ async function verify(name, { force = false } = {}) {
   }
 }
 
-/** Convenience for the order form: the caller's mapping plus its status. */
+// ── Sep 11, 2026: one account, several Salespersons ─────────────────────────
+//
+// See user_salespersons in schema.pg.sql. users.salesperson is the PRIMARY of
+// that list (kept in step by a trigger), so forUser/profileForUser above still
+// answer "this account's default" correctly; the functions below deal with the
+// whole list.
+
+/**
+ * Every Zoho Salesperson an account handles, primary first:
+ * [{ salesperson, is_primary }].
+ *
+ * Falls back to users.salesperson for an account with no rows — one written
+ * directly to the column by an older path or a script — so it still has the
+ * one it always had.
+ */
+async function listForUser(userId) {
+  if (!userId) return [];
+  const rows = await db
+    .prepare(
+      `SELECT salesperson, is_primary FROM user_salespersons
+        WHERE user_id = ?
+        ORDER BY is_primary DESC, id`
+    )
+    .all(userId);
+  if (rows.length) return rows.map((r) => ({ salesperson: r.salesperson, is_primary: !!r.is_primary }));
+  const legacy = await forUser(userId);
+  return legacy ? [{ salesperson: legacy, is_primary: true }] : [];
+}
+
+/** Every account's list in one query: Map(user_id -> [{ salesperson, is_primary }]). */
+async function listsByUser() {
+  const rows = await db
+    .prepare('SELECT user_id, salesperson, is_primary FROM user_salespersons ORDER BY user_id, is_primary DESC, id')
+    .all();
+  const map = new Map();
+  for (const r of rows) {
+    if (!map.has(r.user_id)) map.set(r.user_id, []);
+    map.get(r.user_id).push({ salesperson: r.salesperson, is_primary: !!r.is_primary });
+  }
+  return map;
+}
+
+/** One account's list out of listsByUser(), with the same legacy fallback as listForUser. */
+function salespersonsOf(map, user) {
+  const rows = map.get(user.id);
+  if (rows && rows.length) return rows;
+  return user.salesperson ? [{ salesperson: user.salesperson, is_primary: true }] : [];
+}
+
+/**
+ * Replace an account's whole list, atomically — orders never go out under a
+ * half-edited list.
+ *
+ * `names` must already be Zoho's own spellings; the caller checks them against
+ * the live list (admin.controller.js), because this layer cannot tell a real
+ * Salesperson from a typo. The first name is primary unless `primary` names
+ * another one in the list. An empty list clears the account.
+ */
+const setForUser = db.transaction(async (userId, names, { primary = null, actorId = null } = {}) => {
+  const list = [];
+  for (const raw of names || []) {
+    const n = String(raw == null ? '' : raw).trim();
+    if (n && !list.some((x) => normalize(x) === normalize(n))) list.push(n);
+  }
+  const wantedPrimary = primary ? list.find((n) => normalize(n) === normalize(primary)) : null;
+  const primaryName = wantedPrimary || list[0] || null;
+
+  await db.prepare('DELETE FROM user_salespersons WHERE user_id = ?').run(userId);
+  const now = new Date().toISOString();
+  for (const n of list) {
+    await db
+      .prepare(
+        `INSERT INTO user_salespersons (user_id, salesperson, is_primary, assigned_by, assigned_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(userId, n, n === primaryName ? 1 : 0, actorId, now);
+  }
+  // The trigger already does this; stated explicitly so the account is right
+  // even when the DELETE above touched no rows (a legacy account being cleared).
+  await db.prepare('UPDATE users SET salesperson = ? WHERE id = ?').run(primaryName, userId);
+
+  return listForUser(userId);
+});
+
+/**
+ * Which of an account's Salespersons an order goes out under.
+ *
+ * Blank asks for the primary. Anything else must be one of the account's OWN
+ * (case- and spacing-insensitive), and the stored spelling is returned. A name
+ * that is not theirs is refused, never sent: it would file this rep's order
+ * under somebody else in Zoho.
+ */
+async function resolveForUser(userId, requested) {
+  const list = await listForUser(userId);
+  const primary = (list.find((s) => s.is_primary) || list[0] || {}).salesperson || null;
+  const want = typeof requested === 'string' ? requested.trim() : '';
+  if (!want) return { salesperson: primary, list };
+
+  const hit = list.find((s) => normalize(s.salesperson) === normalize(want));
+  if (!hit) {
+    const mine = list.map((s) => s.salesperson).join(', ') || 'none assigned';
+    return { error: `"${want}" is not one of this account's Salespersons (${mine}).`, list };
+  }
+  return { salesperson: hit.salesperson, list };
+}
+
+/**
+ * Convenience for the order form: the caller's primary Salesperson and its
+ * status, plus — Sep 11, 2026 — every Salesperson on the account, each checked,
+ * so the form can offer the list and warn about any Zoho does not have.
+ */
 async function statusForUser(userId, opts = {}) {
-  const salesperson = await forUser(userId);
+  const list = await listForUser(userId);
+  const salesperson = (list.find((s) => s.is_primary) || list[0] || {}).salesperson || null;
   const verification = await verify(salesperson, opts);
-  return { salesperson, ...verification };
+
+  const salespersons = [];
+  for (const s of list) {
+    // Cached list after the first call, so this is one Zoho read at most.
+    const v = s.salesperson === salesperson ? verification : await verify(s.salesperson);
+    salespersons.push({
+      salesperson: s.salesperson,
+      is_primary: s.is_primary,
+      checked: v.checked,
+      exists: v.exists,
+      matchedName: v.matchedName || null
+    });
+  }
+  return { salesperson, ...verification, salespersons };
 }
 
 // Sep 5, 2026 (4): exported so orders.controller.js's GET /api/orders/meta/medreps
@@ -141,4 +265,18 @@ async function statusForUser(userId, opts = {}) {
 // verify() above). create() still independently re-verifies whatever is
 // actually submitted — this export only feeds the UI's suggestions, it is
 // not itself a trust boundary.
-module.exports = { forUser, profileForUser, verify, statusForUser, loadNames, clearCache, _normalize: normalize };
+module.exports = {
+  forUser,
+  profileForUser,
+  verify,
+  statusForUser,
+  loadNames,
+  clearCache,
+  // Sep 11, 2026: several Salespersons per account.
+  listForUser,
+  listsByUser,
+  salespersonsOf,
+  setForUser,
+  resolveForUser,
+  _normalize: normalize
+};

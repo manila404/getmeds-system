@@ -23,6 +23,8 @@ let adminToken;
 
 /** A name the mock org genuinely has, so the happy path uses a real value. */
 let knownSalesperson;
+/** Another real one, for accounts holding several. */
+let secondSalesperson;
 
 async function makeUser({ email, role = 'medrep', division = 'B2B', displayName = 'Assign Target' }) {
   const seed = await db.prepare("SELECT password_hash FROM users WHERE email = 'admin@getmeds.ph'").get();
@@ -44,6 +46,7 @@ describe('Salesperson is assigned by an admin from Zoho’s list', () => {
     adminToken = login.body.data.token;
     const list = await zoho.listSalespersons();
     knownSalesperson = (list.salespersons || [])[0]?.salesperson_name;
+    secondSalesperson = (list.salespersons || [])[1]?.salesperson_name;
   });
 
   afterAll(async () => {
@@ -123,8 +126,9 @@ describe('Salesperson is assigned by an admin from Zoho’s list', () => {
       const row = res.body.data.salespersons.find((s) => s.name === knownSalesperson);
       // Two people on one Zoho Salesperson is not an error, but an admin
       // should be able to see it rather than discover it later in a report.
-      expect(row.assigned_to).toBeTruthy();
-      expect(row.assigned_to.email).toBe(email);
+      // Sep 11, 2026: a list of holders — an account can hold several names
+      // and two accounts can share one.
+      expect(row.assigned_to.map((a) => a.email)).toContain(email);
     });
 
     test('marks each name active or inactive, and counts both', async () => {
@@ -245,6 +249,97 @@ describe('Salesperson is assigned by an admin from Zoho’s list', () => {
       expect(res.statusCode).toBe(200);
       const after = await db.prepare('SELECT salesperson FROM users WHERE id = ?').get(id);
       expect(after.salesperson).toBe(knownSalesperson);
+    });
+  });
+
+  // Sep 11, 2026: one account, several Zoho Salespersons (user_salespersons).
+  describe('several Salespersons on one account', () => {
+    const patch = (id, body) =>
+      request(app).patch(`/api/admin/users/${id}`).set('Authorization', `Bearer ${adminToken}`).send(body);
+    const listOf = async (id) =>
+      (await db.prepare('SELECT salesperson, is_primary FROM user_salespersons WHERE user_id = ? ORDER BY is_primary DESC, id').all(id))
+        .map((r) => ({ salesperson: r.salesperson, is_primary: !!r.is_primary }));
+
+    test('an admin can assign a list and choose the primary', async () => {
+      const id = await makeUser({ email: `sp.multi.${Date.now()}@getmeds.ph` });
+      const res = await patch(id, { salespersons: [knownSalesperson, secondSalesperson], primary_salesperson: secondSalesperson });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.data.user.salespersons).toEqual([
+        { salesperson: secondSalesperson, is_primary: true },
+        { salesperson: knownSalesperson, is_primary: false }
+      ]);
+      // users.salesperson follows the primary, so everything that still reads
+      // one value (requireAuth, the dashboard) gets the right default.
+      const row = await db.prepare('SELECT salesperson FROM users WHERE id = ?').get(id);
+      expect(row.salesperson).toBe(secondSalesperson);
+    });
+
+    test('the first name is primary when none is named', async () => {
+      const id = await makeUser({ email: `sp.first.${Date.now()}@getmeds.ph` });
+      await patch(id, { salespersons: [secondSalesperson, knownSalesperson] });
+      expect((await listOf(id))[0]).toEqual({ salesperson: secondSalesperson, is_primary: true });
+    });
+
+    test('one unknown name refuses the whole list, and nothing changes', async () => {
+      const id = await makeUser({ email: `sp.partial.${Date.now()}@getmeds.ph` });
+      await patch(id, { salespersons: [knownSalesperson] });
+
+      const res = await patch(id, { salespersons: [secondSalesperson, 'Totally Made Up Person'] });
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error.code).toBe('UNKNOWN_SALESPERSON');
+      expect(await listOf(id)).toEqual([{ salesperson: knownSalesperson, is_primary: true }]);
+    });
+
+    test('a primary that is not in the list is refused', async () => {
+      const id = await makeUser({ email: `sp.badprimary.${Date.now()}@getmeds.ph` });
+      const res = await patch(id, { salespersons: [knownSalesperson], primary_salesperson: secondSalesperson });
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error.code).toBe('PRIMARY_NOT_IN_LIST');
+    });
+
+    test('the same name twice is stored once', async () => {
+      const id = await makeUser({ email: `sp.dupe.${Date.now()}@getmeds.ph` });
+      await patch(id, { salespersons: [knownSalesperson, knownSalesperson.toUpperCase()] });
+      expect(await listOf(id)).toHaveLength(1);
+    });
+
+    test('salesperson: null still clears everything', async () => {
+      const id = await makeUser({ email: `sp.clearall.${Date.now()}@getmeds.ph` });
+      await patch(id, { salespersons: [knownSalesperson, secondSalesperson] });
+
+      const res = await patch(id, { salesperson: null });
+      expect(res.statusCode).toBe(200);
+      expect(await listOf(id)).toEqual([]);
+      expect((await db.prepare('SELECT salesperson FROM users WHERE id = ?').get(id)).salesperson).toBeNull();
+    });
+
+    test('two accounts may share one Salesperson, and the list shows both', async () => {
+      const a = `sp.shareA.${Date.now()}@getmeds.ph`;
+      const b = `sp.shareB.${Date.now()}@getmeds.ph`;
+      await patch(await makeUser({ email: a }), { salespersons: [secondSalesperson] });
+      await patch(await makeUser({ email: b }), { salespersons: [secondSalesperson] });
+
+      const res = await request(app).get('/api/admin/salespersons').set('Authorization', `Bearer ${adminToken}`);
+      const row = res.body.data.salespersons.find((s) => s.name === secondSalesperson);
+      expect(row.assigned_to.map((x) => x.email)).toEqual(expect.arrayContaining([a, b]));
+    });
+
+    test('the user list and the MedRep’s own order-form check both carry the list', async () => {
+      const email = `sp.visible.${Date.now()}@getmeds.ph`;
+      const id = await makeUser({ email });
+      await patch(id, { salespersons: [knownSalesperson, secondSalesperson] });
+
+      const users = await request(app).get('/api/admin/users').set('Authorization', `Bearer ${adminToken}`);
+      const mine = users.body.data.find((u) => u.id === id);
+      expect(mine.salespersons.map((s) => s.salesperson)).toEqual([knownSalesperson, secondSalesperson]);
+
+      const login = await request(app).post('/api/auth/login').send({ email, password: 'demo123' });
+      const status = await request(app)
+        .get('/api/orders/meta/salesperson')
+        .set('Authorization', `Bearer ${login.body.data.token}`);
+      expect(status.body.data.salesperson).toBe(knownSalesperson);
+      expect(status.body.data.salespersons.map((s) => s.salesperson)).toEqual([knownSalesperson, secondSalesperson]);
     });
   });
 });
