@@ -19,11 +19,17 @@ const MIN_PASSWORD_LENGTH = 8;
 const SIGNUP_ROLE = 'medrep';
 
 // Sep 5, 2026: the fixed list of Divisions this org actually uses, given by
-// the user. `division` feeds `users.salesperson` — a GENERATED column
-// reading "<division> | <display name>" that LiveZohoAdapter puts on every
-// Sales Order — and a free-typed division created junk Salespersons in the
-// live Zoho org before this (see working-agreements.md's "Design defaults"
-// section: "Enums over free text ... division taught this on Sep 2").
+// the user.
+//
+// Sep 11, 2026: `division` no longer feeds `users.salesperson`. That column
+// used to be GENERATED as "<division> | <display name>", and the enum here
+// existed partly to keep the generated value clean. The Salesperson is now
+// assigned by an admin from Zoho's own list instead — see the column comment
+// in schema.pg.sql for why a formula could never get it right.
+//
+// The enum stays, for its own sake: division is a real attribute of an
+// account, it is reported on, and free text would give "B2B", "b2b" and
+// "B2B " as three divisions.
 // Kept in the exact order given, and mirrored on SignupPage.jsx and
 // ProfilePage.jsx (both render it as a dropdown) and scripts/create-user.js
 // — enforced here AND in each of those, same pattern as
@@ -357,8 +363,17 @@ exports.register = async (req, res, next) => {
     }
 
     const hash = bcrypt.hashSync(password, 10);
-    // `salesperson` is absent from this INSERT on purpose — it is a GENERATED
-    // column and SQLite refuses to be told what it should contain.
+    // `salesperson` is absent from this INSERT on purpose, and now for a
+    // different reason than it used to be.
+    //
+    // It was a GENERATED column, so it could not be written. Sep 11, 2026 it
+    // became a plain one — and it is STILL not written here, because signing
+    // up is not the moment anybody knows the answer. The Salesperson has to be
+    // a name from Zoho's list of 198, an admin picks it when approving the
+    // account, and a guess made here would be created in Zoho as a new
+    // Salesperson on this person's first order rather than rejected.
+    //
+    // NULL means "nobody has said yet", which is the truth at sign-up.
     const result = await db
       .prepare(
         // Sep 9, 2026: `approval_status` is written EXPLICITLY as 'pending'.
@@ -435,13 +450,17 @@ exports.me = (req, res) => {
  * PATCH /api/auth/profile — a signed-in user edits their own account.
  *
  * Sep 5, 2026. First piece of "Profile Settings". Deliberately scoped to
- * just the two fields that actually drive something else in the system:
- * `salesperson` is a GENERATED column ("<division> | <display name>", the
- * value LiveZohoAdapter puts on every Sales Order — see the long note on
- * register() above) and recomputes itself the instant either of these
- * changes, with no extra code needed here. `name` is written alongside
- * `display_name` for the same reason register() does it — most of the
- * frontend renders `user.name`, not `display_name`.
+ * just the two fields that actually drive something else in the system.
+ *
+ * Sep 11, 2026: editing these NO LONGER changes the Salesperson. It used to:
+ * `salesperson` was GENERATED from division and display name, so renaming
+ * yourself here silently changed the name on every Sales Order you sent to
+ * Zoho — and, since Zoho creates an unknown Salesperson rather than rejecting
+ * it, could mint a new one in the company's org from a profile edit. It is now
+ * set by an admin from Zoho's list and is untouched by this endpoint.
+ *
+ * `name` is written alongside `display_name` for the same reason register()
+ * does it — most of the frontend renders `user.name`, not `display_name`.
  *
  * First/middle/last name (the legal name parts sign-up collects) are
  * deliberately NOT editable here — only the display name that's actually

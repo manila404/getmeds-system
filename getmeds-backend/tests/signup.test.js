@@ -23,8 +23,9 @@ const uniqueEmail = (label = 'user') =>
 // to assert, and 19 of its tests had been failing for that reason alone. The
 // spec sample it was copied from predates the fixed Division list.
 //
-// 'HOS' is a real Division, so the expected Salesperson string is now
-// "HOS | Aaron Manila".
+// 'HOS' is a real Division. Sep 11, 2026: sign-up no longer derives a
+// Salesperson from it — an admin assigns one from Zoho's own list — so these
+// fixtures expect `salesperson` to come back NULL.
 const validSignup = (overrides = {}) => ({
   first_name: 'Aaron',
   middle_name: 'Pun-an',
@@ -102,79 +103,112 @@ describe('POST /api/auth/register', () => {
     expect(row.approval_status).toBe('pending');
   });
 
-  describe('the Salesperson string', () => {
-    test('is "<division> | <display name>" in both the response and the database', async () => {
+  /**
+   * Sep 11, 2026: this block used to pin the OPPOSITE contract — that sign-up
+   * produces "<division> | <display name>" and that it follows any later edit
+   * to either half.
+   *
+   * That behaviour was removed deliberately, not broken. `users.salesperson`
+   * was a generated column, and what it generated did not reliably exist in
+   * Zoho: the org's list holds 198 names under no single convention, some bare
+   * ('Mohit Kumar'), some prefixed ('MSA | DIANA ROSE ALCANTARA'). Measured
+   * against the live org, 3 of this system's generated values matched a real
+   * Salesperson and 2 did not.
+   *
+   * And a miss does not fail. LiveZohoAdapter.createSalesOrder CREATES an
+   * unknown Salesperson rather than rejecting it, so every wrong guess became
+   * a permanent junk record in the company's Zoho, minted on someone's first
+   * order — or, via the old profile-edit behaviour, on a rename.
+   *
+   * So the assertions are inverted on purpose: sign-up must now leave this
+   * empty, and an admin fills it in from Zoho's list (see
+   * salespersonAssignment.test.js).
+   */
+  describe('the Salesperson string is NOT derived at sign-up', () => {
+    test('a new account has no salesperson, even with division and display name set', async () => {
       const body = validSignup();
       const res = await request(app).post('/api/auth/register').send(body);
 
       expect(res.status).toBe(201);
-      expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
-      expect((await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email)).salesperson)
-        .toBe('HOS | Aaron Manila');
+      // Both halves of the old formula are present and correct...
+      const row = await db
+        .prepare('SELECT division, display_name, salesperson FROM users WHERE email = ?')
+        .get(body.email);
+      expect(row.division).toBe('HOS');
+      expect(row.display_name).toBe('Aaron Manila');
+      // ...and it still produces nothing, because nobody has said who this
+      // person is in Zoho yet. NULL is the honest answer.
+      expect(row.salesperson).toBeNull();
+      expect(res.body.data.user.salesperson).toBeNull();
     });
 
-    // The point of making it a GENERATED column rather than a stored string:
-    // change either half and it follows, with no code involved.
-    test('follows a later change to division or display_name — it cannot go stale', async () => {
+    test('changing division or display_name does NOT invent one', async () => {
       const body = validSignup();
       await request(app).post('/api/auth/register').send(body);
 
-      await db.prepare('UPDATE users SET division = ? WHERE email = ?').run('NORTH', body.email);
-      expect((await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email)).salesperson)
-        .toBe('NORTH | Aaron Manila');
-
+      await db.prepare('UPDATE users SET division = ? WHERE email = ?').run('B2B', body.email);
       await db.prepare('UPDATE users SET display_name = ? WHERE email = ?').run('A. Manila', body.email);
-      expect((await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email)).salesperson)
-        .toBe('NORTH | A. Manila');
+
+      const row = await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email);
+      expect(row.salesperson).toBeNull();
+    });
+
+    test('an admin-assigned salesperson survives a later profile change', async () => {
+      // The other half of the same guarantee. Under the generated column a
+      // rename silently rewrote the name on every future Sales Order.
+      const body = validSignup();
+      await request(app).post('/api/auth/register').send(body);
+      await db
+        .prepare('UPDATE users SET salesperson = ? WHERE email = ?')
+        .run('NORTH | Juan dela Cruz', body.email);
+
+      await db.prepare('UPDATE users SET division = ?, display_name = ? WHERE email = ?')
+        .run('B2B', 'Someone Else', body.email);
+
+      const row = await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email);
+      expect(row.salesperson).toBe('NORTH | Juan dela Cruz');
     });
 
     // The New Order form reads user.salesperson straight off the session, so
-    // both ways of establishing one have to carry it — otherwise the field
-    // there is silently blank until the next full page load.
-    test('login and /api/auth/me both carry it', async () => {
+    // both ways of establishing one have to carry it — including carrying the
+    // absence of one, which is what tells the form to say so.
+    test('login and /api/auth/me both carry whatever it is', async () => {
       const body = validSignup();
       await request(app).post('/api/auth/register').send(body);
-
       await approve(body.email);
+
       const login = await request(app)
         .post('/api/auth/login')
         .send({ email: body.email, password: body.password });
       expect(login.status).toBe(200);
-      expect(login.body.data.user.salesperson).toBe('HOS | Aaron Manila');
+      expect(login.body.data.user.salesperson).toBeNull();
+
+      await db
+        .prepare('UPDATE users SET salesperson = ? WHERE email = ?')
+        .run('NORTH | Maria Santos', body.email);
 
       const me = await request(app)
         .get('/api/auth/me')
         .set('Authorization', `Bearer ${login.body.data.token}`);
       expect(me.status).toBe(200);
-      expect(me.body.data.user.salesperson).toBe('HOS | Aaron Manila');
+      expect(me.body.data.user.salesperson).toBe('NORTH | Maria Santos');
     });
 
-    test('is NULL for an account with no division', async () => {
-      // Sep 2, 2026 (2): this used to point at the seeded logins, which
-      // carried no mapping because they predated these fields. seed.js now
-      // gives all six one — an account without a mapping cannot place an
-      // order, since Salesperson is mandatory in this Zoho org. The case
-      // still needs covering, so it is made here rather than assumed.
-      const id = (await db
+    test('is NULL for an account with no division either', async () => {
+      await db
         .prepare(
           `INSERT INTO users (name, email, password_hash, role)
            VALUES ('No Mapping', 'signup-test-no-division@getmeds.ph', 'x', 'medrep')`
         )
-        .run()).lastInsertRowid;
+        .run();
+      const row = await db
+        .prepare("SELECT id, salesperson FROM users WHERE email = 'signup-test-no-division@getmeds.ph'")
+        .get();
       try {
-        const row = await db.prepare('SELECT salesperson FROM users WHERE id = ?').get(id);
         expect(row.salesperson).toBeNull();
       } finally {
-        await db.prepare('DELETE FROM users WHERE id = ?').run(id);
+        await db.prepare('DELETE FROM users WHERE id = ?').run(row.id);
       }
-    });
-
-    test('surrounding whitespace on either part is trimmed out of it', async () => {
-      const body = validSignup({ division: '  HOS  ', display_name: '  Aaron Manila  ' });
-      const res = await request(app).post('/api/auth/register').send(body);
-
-      expect(res.status).toBe(201);
-      expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
     });
   });
 
@@ -186,7 +220,8 @@ describe('POST /api/auth/register', () => {
       const res = await request(app).post('/api/auth/register').send(body);
       expect(res.status).toBe(201);
       expect(res.body.data.user.display_name).toBe('Aaron Manila');
-      expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
+      // display_name no longer feeds the Salesperson — see the block below.
+      expect(res.body.data.user.salesperson).toBeNull();
     });
 
     test('display_name is kept when it differs from first + last', async () => {
@@ -195,7 +230,7 @@ describe('POST /api/auth/register', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.data.user.display_name).toBe('Bong Manila');
-      expect(res.body.data.user.salesperson).toBe('HOS | Bong Manila');
+      expect(res.body.data.user.salesperson).toBeNull();
     });
 
     // Everything already on screen reads user.name, so it has to stay useful.
@@ -214,8 +249,7 @@ describe('POST /api/auth/register', () => {
       const row = await db.prepare('SELECT middle_name, sub_division FROM users WHERE email = ?').get(body.email);
       expect(row.middle_name).toBeNull();
       expect(row.sub_division).toBeNull();
-      // A missing sub-division must not break the salesperson string.
-      expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
+      expect(res.body.data.user.salesperson).toBeNull();
     });
   });
 
@@ -271,12 +305,20 @@ describe('POST /api/auth/register', () => {
     expect((await db.prepare('SELECT role FROM users WHERE email = ?').get(body.email)).role).toBe('medrep');
   });
 
-  test('a salesperson in the request body is ignored — it is derived, not accepted', async () => {
+  test('a salesperson in the request body is ignored — it is an admin’s decision', async () => {
+    // Still ignored, and now for a stronger reason than "it is derived". A
+    // self-declared Salesperson that Zoho does not know would be CREATED there
+    // on this person’s first order, so accepting one at sign-up would let
+    // anybody add a record to the company’s Zoho org by typing it into a
+    // registration form.
     const body = validSignup({ salesperson: 'ADMIN | Somebody Else' });
     const res = await request(app).post('/api/auth/register').send(body);
 
     expect(res.status).toBe(201);
-    expect(res.body.data.user.salesperson).toBe('HOS | Aaron Manila');
+    expect(res.body.data.user.salesperson).toBeNull();
+
+    const row = await db.prepare('SELECT salesperson FROM users WHERE email = ?').get(body.email);
+    expect(row.salesperson).toBeNull();
   });
 
   test('rejects an email outside the allowed domain and creates nothing', async () => {

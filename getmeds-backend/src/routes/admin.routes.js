@@ -10,6 +10,14 @@ router.use(isAdmin);
 // Route to get all users: GET /api/admin/users
 router.get('/users', adminController.getAllUsers);
 
+// Sep 11, 2026: the Zoho Salesperson list an admin assigns from.
+//
+// A picker, not a text box, and deliberately so. A Salesperson name Zoho does
+// not recognise is not rejected on the first order — LiveZohoAdapter creates
+// it — so a typo here becomes a permanent junk Salesperson in the company's
+// org. Read-only towards Zoho.
+router.get('/salespersons', adminController.getSalespersons);
+
 // Route to create a new user: POST /api/admin/users
 router.post('/users', adminController.create);
 

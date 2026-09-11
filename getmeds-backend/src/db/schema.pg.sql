@@ -83,16 +83,29 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT,
   division TEXT,
   sub_division TEXT,
-  -- SQLite had this VIRTUAL; Postgres only supports STORED. Same value, and
-  -- still impossible to drift, which was the point: there is no stored string
-  -- for a code path to forget to update, only a definition.
-  salesperson TEXT GENERATED ALWAYS AS (
-    CASE
-      WHEN division IS NULL OR TRIM(division) = '' THEN NULL
-      WHEN display_name IS NULL OR TRIM(display_name) = '' THEN NULL
-      ELSE TRIM(division) || ' | ' || TRIM(display_name)
-    END
-  ) STORED,
+  -- The name Zoho knows this person by, chosen by an admin from Zoho's own
+  -- Salesperson list. NOT derived from anything here.
+  --
+  -- Sep 11, 2026: this used to be GENERATED ALWAYS AS
+  -- (division || ' | ' || display_name). The appeal was that it could not
+  -- drift -- there was no stored string for a code path to forget to update.
+  -- The problem is that it was drifting from the only thing that matters,
+  -- which is what Zoho actually holds.
+  --
+  -- Zoho's list has 198 Salespersons and no single convention: some are bare
+  -- names ('Mohit Kumar'), some carry a division ('MSA | DIANA ROSE
+  -- ALCANTARA'). A formula cannot produce both. Measured against the live org,
+  -- 3 of this database's generated values matched a real Salesperson and 2 did
+  -- not ('Management | Veron', 'B2B | testdisp').
+  --
+  -- A miss is not a harmless mismatch. LiveZohoAdapter.createSalesOrder does
+  -- not match an unknown Salesperson name -- it CREATES one, so every wrong
+  -- guess adds a junk Salesperson to the company's Zoho org, permanently, on
+  -- somebody's first order.
+  --
+  -- So it is set deliberately by an admin, from the list, or left NULL. NULL
+  -- is honest: it means nobody has said who this person is in Zoho yet.
+  salesperson TEXT,
   created_at TEXT DEFAULT iso_now()
 );
 

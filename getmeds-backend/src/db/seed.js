@@ -109,22 +109,29 @@ async function run() {
     console.log('✅ Seeded roles (Admin, MedRep, Finance, Dispatch).');
 
     // Seed Users
-    // Sep 2, 2026 (2): division + display_name, so `users.salesperson` (a
-    // generated column reading "<division> | <display name>") resolves for
-    // these accounts. Not decoration: createSalesOrder now refuses an order
-    // whose rep has no Salesperson mapping, because Salesperson is
-    // mandatory in this Zoho org AND Zoho creates any name it does not
-    // recognise. Without these the six demo logins could not place an
-    // order at all. The names match MockZohoAdapter's seeded list.
+    // Sep 2, 2026 (2): division + display_name, so a seeded account matches a
+    // Salesperson the mock Zoho org actually has.
+    //
+    // Sep 11, 2026: `salesperson` is now written EXPLICITLY. It used to be a
+    // generated column reading "<division> | <display name>", so seeding those
+    // two produced it for free. It is a plain column now — assigned by an
+    // admin from Zoho's list, because no formula reproduces that list (see
+    // schema.pg.sql).
+    //
+    // Which means the seed has to do what an admin would, and these strings
+    // are not decorative: MockZohoAdapter matches on them, and an order whose
+    // salesperson_name it does not recognise fails the sync. A NULL here made
+    // zohoRetryService.test.js fail with 'retry_scheduled' and no mention of a
+    // salesperson anywhere in the error.
     const insUser = db.prepare(
-      'INSERT INTO users (name, email, password_hash, role, display_name, division) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO users (name, email, password_hash, role, display_name, division, salesperson) VALUES (?, ?, ?, ?, ?, ?, ?)'
     );
-    await insUser.run('Admin User', 'admin@getmeds.ph', hash('demo123'), 'admin', 'Admin User', 'TEST');
-    await insUser.run('Juan dela Cruz', 'medrep@getmeds.ph', hash('demo123'), 'medrep', 'Juan dela Cruz', 'NORTH');
-    await insUser.run('Maria Santos', 'medrep2@getmeds.ph', hash('demo123'), 'medrep', 'Maria Santos', 'NORTH');
-    await insUser.run('Rosa Reyes', 'finance@getmeds.ph', hash('demo123'), 'finance', 'Rosa Reyes', 'TEST');
-    await insUser.run('Ben Ramos', 'dispatch@getmeds.ph', hash('demo123'), 'dispatch', 'Ben Ramos', 'TEST');
-    await insUser.run('Carlo Tan', 'manager@getmeds.ph', hash('demo123'), 'management', 'Carlo Tan', 'TEST');
+    await insUser.run('Admin User', 'admin@getmeds.ph', hash('demo123'), 'admin', 'Admin User', 'TEST', 'TEST | Admin User');
+    await insUser.run('Juan dela Cruz', 'medrep@getmeds.ph', hash('demo123'), 'medrep', 'Juan dela Cruz', 'NORTH', 'NORTH | Juan dela Cruz');
+    await insUser.run('Maria Santos', 'medrep2@getmeds.ph', hash('demo123'), 'medrep', 'Maria Santos', 'NORTH', 'NORTH | Maria Santos');
+    await insUser.run('Rosa Reyes', 'finance@getmeds.ph', hash('demo123'), 'finance', 'Rosa Reyes', 'TEST', 'TEST | Rosa Reyes');
+    await insUser.run('Ben Ramos', 'dispatch@getmeds.ph', hash('demo123'), 'dispatch', 'Ben Ramos', 'TEST', 'TEST | Ben Ramos');
+    await insUser.run('Carlo Tan', 'manager@getmeds.ph', hash('demo123'), 'management', 'Carlo Tan', 'TEST', 'TEST | Carlo Tan');
     console.log('✅ Seeded users.');
   });
 

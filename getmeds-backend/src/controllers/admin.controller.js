@@ -1,6 +1,8 @@
 const db = require('../db/database');
 const bcrypt = require('bcryptjs');
 const zohoRetryService = require('../services/zohoRetryService');
+// Sep 11, 2026: the Salesperson list an admin assigns from. Read-only.
+const zoho = require('../integrations/zoho');
 // Sep 9, 2026: reuse the same Division/Sub-division enums and validation
 // register() already enforces on public sign-up — see auth.controller.js's
 // DIVISIONS comment for why this is an enum (a free-typed division created
@@ -198,9 +200,105 @@ const create = async (req, res, next) => {
 };
 
 // Update an existing user
+/**
+ * The Salesperson names Zoho actually has, lowercased for comparison.
+ *
+ * Cached briefly because assigning Salespersons is a burst activity — an admin
+ * works through a handful of new accounts in one sitting, and that should not
+ * be one Zoho round trip per keystroke. Short enough that a Salesperson added
+ * in Zoho shows up without a restart.
+ *
+ * Returns null when Zoho cannot be reached, so callers can tell "not on the
+ * list" apart from "could not check" — those deserve different answers.
+ */
+let salespersonCache = { at: 0, names: null, list: [] };
+const SALESPERSON_CACHE_MS = 5 * 60 * 1000;
+
+async function loadZohoSalespersons() {
+  const now = Date.now();
+  if (salespersonCache.names && now - salespersonCache.at < SALESPERSON_CACHE_MS) {
+    return salespersonCache;
+  }
+  try {
+    const res = await zoho.listSalespersons();
+    const list = (res?.salespersons || [])
+      .map((s) => ({
+        name: String(s.salesperson_name || s.name || '').trim(),
+        // Zoho marks a Salesperson inactive when the person leaves. Half this
+        // org's list is in that state (101 active, 97 inactive), so it is the
+        // difference between a picker of 101 current colleagues and one of 198
+        // mostly-former ones.
+        //
+        // `!== false` rather than truthiness: the mock adapter's fixtures carry
+        // no is_active at all, and an absent flag means "no opinion", not
+        // "inactive".
+        is_active: s.is_active !== false
+      }))
+      .filter((s) => s.name)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    salespersonCache = { at: now, names: new Set(list.map((n) => n.name.toLowerCase())), list };
+  } catch (err) {
+    console.error('[ADMIN] could not read Zoho salespersons:', err.message);
+    // Deliberately not cached: a failure should be retried on the next
+    // request, not remembered for five minutes.
+    return { at: 0, names: null, list: [] };
+  }
+  return salespersonCache;
+}
+
+async function zohoSalespersonNames() {
+  return (await loadZohoSalespersons()).names;
+}
+
+/**
+ * GET /api/admin/salespersons — the list an admin picks from.
+ *
+ * Read-only towards Zoho. Exists so the choice is a picker rather than a text
+ * box: a typed name that Zoho does not recognise is not rejected by Zoho, it
+ * is CREATED there.
+ */
+const getSalespersons = async (req, res, next) => {
+  try {
+    const { names, list } = await loadZohoSalespersons();
+    if (!names) {
+      return res.status(503).json({
+        success: false,
+        error: { code: 'ZOHO_UNAVAILABLE', message: 'Could not reach Zoho to load the Salesperson list.' }
+      });
+    }
+
+    // Which ones are already spoken for, so an admin can see at a glance that
+    // a name is taken rather than assigning the same Salesperson twice.
+    const taken = await db
+      .prepare("SELECT salesperson, name, email FROM users WHERE salesperson IS NOT NULL AND salesperson <> ''")
+      .all();
+    const byName = new Map(taken.map((t) => [String(t.salesperson).toLowerCase(), t]));
+
+    res.json({
+      success: true,
+      data: {
+        salespersons: list.map((sp) => {
+          const owner = byName.get(sp.name.toLowerCase());
+          return {
+            name: sp.name,
+            is_active: sp.is_active,
+            assigned_to: owner ? { name: owner.name, email: owner.email } : null
+          };
+        }),
+        // So the screen can say "and 97 more who have left" rather than making
+        // someone count what the filter removed.
+        active_count: list.filter((sp) => sp.is_active).length,
+        inactive_count: list.filter((sp) => !sp.is_active).length
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const update = async (req, res, next) => {
   try {
-    const { role, is_active } = req.body;
+    const { role, is_active, salesperson } = req.body;
     const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
     if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
 
@@ -210,7 +308,47 @@ const update = async (req, res, next) => {
     if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
     if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
 
-    const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at FROM users WHERE id = ?').get(user.id);
+    // Sep 11, 2026: the Salesperson an admin picked from Zoho's list.
+    //
+    // Not derived from division and display name any more — see the column
+    // comment in schema.pg.sql. It is checked against Zoho's actual list
+    // rather than accepted as free text, because an unknown name does not
+    // fail on the first order: LiveZohoAdapter.createSalesOrder CREATES the
+    // Salesperson, so a typo becomes a permanent junk record in the company's
+    // org that nobody will connect back to this form.
+    //
+    // Explicit null clears it, which is how an admin says "not decided yet".
+    if (salesperson !== undefined) {
+      const wanted = salesperson === null ? null : String(salesperson).trim();
+      if (wanted) {
+        const known = await zohoSalespersonNames();
+        // A null list means Zoho was unreachable. Refusing is the safe answer:
+        // the cost of waiting is a retry, the cost of guessing is permanent.
+        if (!known) {
+          return res.status(503).json({
+            success: false,
+            error: {
+              code: 'ZOHO_UNAVAILABLE',
+              message: 'Could not reach Zoho to check that Salesperson. Try again in a moment.'
+            }
+          });
+        }
+        if (!known.has(wanted.toLowerCase())) {
+          return res.status(400).json({
+            success: false,
+            error: {
+              code: 'UNKNOWN_SALESPERSON',
+              message:
+                `"${wanted}" is not a Salesperson in Zoho. Pick one from the list — a name Zoho ` +
+                'does not know would be created there as a new Salesperson on their first order.'
+            }
+          });
+        }
+      }
+      await db.prepare('UPDATE users SET salesperson = ? WHERE id = ?').run(wanted || null, user.id);
+    }
+
+    const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at, salesperson FROM users WHERE id = ?').get(user.id);
     res.json({ success: true, data: { user: updated } });
   } catch (err) {
     if (next) next(err);
@@ -344,6 +482,7 @@ module.exports = {
   rejectUser,
   create,
   update,
+  getSalespersons,
   getZohoQueue,
   retryZohoQueue
 };

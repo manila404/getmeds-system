@@ -3,7 +3,7 @@ import client from '../../api/client';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import ErrorMessage from '../../components/ui/ErrorMessage';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
-import { Users, UserX, RefreshCw, Shield, Check, UserCheck, Ban, Clock } from 'lucide-react';
+import { Users, UserX, RefreshCw, Shield, Check, UserCheck, Ban, Clock, Briefcase, AlertTriangle } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const roleBadgeColors = {
@@ -21,10 +21,93 @@ const UsersPage = () => {
   const [selectedUser, setSelectedUser] = useState(null);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
 
+  // Sep 11, 2026: the Zoho Salesperson list, and which row is being edited.
+  //
+  // A picker rather than a text box, and that is the whole point. A name Zoho
+  // does not recognise is not rejected on the first order -- Zoho CREATES the
+  // Salesperson -- so a typed name becomes a permanent junk record in the
+  // company org that nobody traces back to this screen.
+  const [salespersons, setSalespersons] = useState([]);
+  const [salespersonError, setSalespersonError] = useState(null);
+  const [editingSalesperson, setEditingSalesperson] = useState(null);
+  const [savingSalesperson, setSavingSalesperson] = useState(false);
+  // Sep 11, 2026: the picker shows CURRENT salespersons by default.
+  //
+  // Zoho marks a Salesperson inactive when the person leaves, and this org's
+  // list is 101 active to 97 inactive -- so showing everything made the
+  // dropdown twice as long as it needed to be, with half of it former staff
+  // whose names sit right next to the people actually being assigned.
+  //
+  // Kept as a toggle rather than a hard filter because assigning one is still
+  // legitimate: correcting a historical record, or a rep coming back.
+  const [showInactive, setShowInactive] = useState(false);
+  const [salespersonCounts, setSalespersonCounts] = useState({ active: 0, inactive: 0 });
+
   // Fetch users on component mount
   useEffect(() => {
     fetchUsers();
+    fetchSalespersons();
   }, []);
+
+  const fetchSalespersons = async () => {
+    try {
+      const res = await client.get('/api/admin/salespersons');
+      setSalespersons(res.data?.data?.salespersons || []);
+      setSalespersonCounts({
+        active: res.data?.data?.active_count || 0,
+        inactive: res.data?.data?.inactive_count || 0
+      });
+      setSalespersonError(null);
+    } catch (err) {
+      // Not fatal: the rest of user management works without it, and the
+      // column below says plainly that the list could not be loaded rather
+      // than rendering an empty picker that looks like Zoho has nobody.
+      setSalespersonError(
+        err.response?.data?.error?.message || 'Could not load the Zoho Salesperson list.'
+      );
+    }
+  };
+
+  /**
+   * Which salespersons this row may pick from.
+   *
+   * Active ones, plus -- always -- whatever this account is already set to.
+   * Without that second half, opening the picker on somebody assigned to a
+   * now-departed salesperson would show their current value missing from the
+   * list, and a stray change would silently clear it.
+   */
+  const optionsFor = (user) =>
+    salespersons.filter(
+      (sp) => showInactive || sp.is_active || sp.name === user.salesperson
+    );
+
+  /**
+   * Assign (or clear) the Zoho Salesperson for one account.
+   *
+   * The server checks the name against Zoho as well -- this picker is the
+   * convenience, not the guarantee.
+   */
+  const saveSalesperson = async (user, value) => {
+    setSavingSalesperson(true);
+    try {
+      await client.patch(`/api/admin/users/${user.id}`, { salesperson: value || null });
+      toast.success(
+        value
+          ? `${getUserDisplayName(user)} will order as "${value}" in Zoho.`
+          : `Cleared the Salesperson for ${getUserDisplayName(user)}.`
+      );
+      setEditingSalesperson(null);
+      await fetchUsers();
+    } catch (err) {
+      toast.error(
+        err.response?.data?.error?.message ||
+          err.response?.data?.message ||
+          'Could not save the Salesperson.'
+      );
+    } finally {
+      setSavingSalesperson(false);
+    }
+  };
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -185,6 +268,9 @@ const UsersPage = () => {
                     Role
                   </th>
                   <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
+                    Zoho Salesperson
+                  </th>
+                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     Status
                   </th>
                   <th scope="col" className="px-6 py-3 text-center text-[13px] font-semibold text-white">
@@ -195,7 +281,7 @@ const UsersPage = () => {
               <tbody className="bg-white divide-y divide-slate-100">
                 {users.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-6 py-12 text-center text-ink-secondary">
+                    <td colSpan={8} className="px-6 py-12 text-center text-ink-secondary">
                       No user accounts found in the system.
                     </td>
                   </tr>
@@ -233,6 +319,100 @@ const UsersPage = () => {
                             {getRoleName(user)}
                           </span>
                         </td>
+                        {/* Sep 11, 2026: the name Zoho files this account's
+                            orders under. Not derived from anything -- an admin
+                            picks it from Zoho's own list.
+
+                            A MedRep without one cannot place an order at all,
+                            since Salesperson is mandatory on a Sales Order in
+                            this org, so the empty state is a warning rather
+                            than a dash. It sits beside Approve because
+                            approving a new sign-up is the moment somebody
+                            actually knows the answer. */}
+                        <td className="px-6 py-4 text-[13px]">
+                          {editingSalesperson === user.id ? (
+                            <div className="flex items-center gap-2">
+                              <select
+                                autoFocus
+                                defaultValue={user.salesperson || ''}
+                                disabled={savingSalesperson}
+                                onChange={(e) => saveSalesperson(user, e.target.value)}
+                                className="max-w-[15rem] text-[13px] border border-slate-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
+                              >
+                                <option value="">-- not assigned --</option>
+                                {optionsFor(user).map((sp) => (
+                                  <option key={sp.name} value={sp.name}>
+                                    {sp.name}
+                                    {/* Marked rather than hidden when shown:
+                                        picking a departed colleague should be
+                                        a decision, not a misread. */}
+                                    {sp.is_active ? '' : ' (inactive)'}
+                                    {/* Two people on one Zoho Salesperson is
+                                        allowed but rarely intended, so it is
+                                        visible at the moment of choosing. */}
+                                    {sp.assigned_to && sp.assigned_to.email !== user.email
+                                      ? ` - taken by ${sp.assigned_to.name}`
+                                      : ''}
+                                  </option>
+                                ))}
+                              </select>
+                              {salespersonCounts.inactive > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setShowInactive((v) => !v)}
+                                  className="text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark whitespace-nowrap"
+                                  title={
+                                    showInactive
+                                      ? 'Show only salespersons who are still active in Zoho'
+                                      : 'Also show salespersons Zoho has marked inactive'
+                                  }
+                                >
+                                  {showInactive
+                                    ? `Hide inactive (${salespersonCounts.inactive})`
+                                    : `Show inactive (${salespersonCounts.inactive})`}
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setEditingSalesperson(null)}
+                                className="text-xs text-ink-secondary hover:text-ink-primary"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setEditingSalesperson(user.id)}
+                              disabled={!!salespersonError}
+                              title={salespersonError || 'Pick the name Zoho knows this person by'}
+                              className="text-left group disabled:cursor-not-allowed"
+                            >
+                              {user.salesperson ? (
+                                <span className="inline-flex items-center gap-1.5 text-ink-primary group-hover:text-getmeds-blue">
+                                  <Briefcase className="w-3.5 h-3.5 text-ink-secondary" />
+                                  {user.salesperson}
+                                  {/* Assigned once, since marked inactive in
+                                      Zoho -- worth surfacing, because nothing
+                                      else would ever mention it. */}
+                                  {salespersons.some(
+                                    (sp) => sp.name === user.salesperson && !sp.is_active
+                                  ) && (
+                                    <span className="text-[11px] text-amber-800">(inactive in Zoho)</span>
+                                  )}
+                                </span>
+                              ) : salespersonError ? (
+                                <span className="text-ink-secondary">-</span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 text-amber-800">
+                                  <AlertTriangle className="w-3.5 h-3.5" />
+                                  {roleKey === 'medrep' ? 'Not set - cannot order' : 'Not set'}
+                                </span>
+                              )}
+                            </button>
+                          )}
+                        </td>
+
                         {/* Sep 9, 2026: approval status wins the cell when it
                             is not 'approved'. "Pending" and "Inactive" both
                             mean "cannot log in", but they are different

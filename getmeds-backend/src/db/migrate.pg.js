@@ -559,6 +559,44 @@ async function reconcileUserOrderScope(client) {
   console.log(`  ✔ users.order_scope added (${upd.rowCount} existing user(s) kept at 'all')`);
 }
 
+/**
+ * Sep 11, 2026: `users.salesperson` stops being a generated column.
+ *
+ * It was GENERATED ALWAYS AS (division || ' | ' || display_name). See
+ * schema.pg.sql for why that was wrong: Zoho's Salesperson list has no single
+ * convention, and a name that does not match one CREATES a new Salesperson in
+ * the org rather than failing, so every wrong guess is permanent junk in the
+ * company's Zoho.
+ *
+ * DROP EXPRESSION converts the column in place and KEEPS the values already
+ * computed. That matters: three real accounts hold a value that does match a
+ * Zoho Salesperson, and rebuilding the column would throw those away and make
+ * an admin re-enter them from memory.
+ */
+async function reconcileUserSalespersonColumn(client) {
+  const { rows } = await client.query(
+    `SELECT is_generated FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'users' AND column_name = 'salesperson'`
+  );
+  if (!rows.length) {
+    console.log('  ✔ users.salesperson not present yet (fresh schema will create it plain)');
+    return;
+  }
+  if (rows[0].is_generated !== 'ALWAYS') {
+    console.log('  ✔ users.salesperson is already a plain column');
+    return;
+  }
+
+  console.log('  ↻ users.salesperson is GENERATED — converting to a plain column (values kept)');
+  await client.query(`ALTER TABLE users ALTER COLUMN salesperson DROP EXPRESSION`);
+
+  const { rows: kept } = await client.query(
+    `SELECT COUNT(*)::int AS n FROM users WHERE salesperson IS NOT NULL`
+  );
+  console.log(`  ✔ users.salesperson converted (${kept[0].n} existing value(s) preserved)`);
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -591,6 +629,7 @@ async function main() {
     await reconcileUserApproval(client);
     await reconcileZohoStatusColumns(client);
     await reconcileUserOrderScope(client);
+    await reconcileUserSalespersonColumn(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`
