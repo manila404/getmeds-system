@@ -68,8 +68,10 @@ CREATE TABLE IF NOT EXISTS users (
   -- DEFAULT 'approved' is what makes this safe to add to a live database:
   -- every account that already exists was created before approval was a
   -- concept, so treating them as approved is the only reading that does not
-  -- lock the entire company out on deploy. Only POST /api/auth/register
-  -- writes 'pending', explicitly.
+  -- lock the entire company out on deploy. Only the self-service sign-up ever
+  -- wrote 'pending', and it was removed Sep 11, 2026: accounts are now made by
+  -- an admin, approved by the act of creating them. The gate stays for rows
+  -- that were already pending or rejected.
   approval_status TEXT NOT NULL DEFAULT 'approved'
     CHECK(approval_status IN ('pending','approved','rejected')),
   approved_at TEXT,

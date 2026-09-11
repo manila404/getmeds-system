@@ -3,7 +3,8 @@ import client from '../../api/client';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import ErrorMessage from '../../components/ui/ErrorMessage';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
-import { Users, UserX, RefreshCw, Shield, Check, UserCheck, Ban, Clock, Briefcase, AlertTriangle } from 'lucide-react';
+import CreateUserModal from '../../components/admin/CreateUserModal';
+import { Users, UserX, UserPlus, RefreshCw, Shield, Check, UserCheck, Ban, Clock, Briefcase, AlertTriangle } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const roleBadgeColors = {
@@ -20,6 +21,8 @@ const UsersPage = () => {
   const [error, setError] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
+  // Sep 11, 2026: sign-up is gone, so this is where every account is made.
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
 
   // Sep 11, 2026: the Zoho Salesperson list, and which row is being edited.
   //
@@ -130,8 +133,12 @@ const UsersPage = () => {
 
   // Sep 9, 2026: the sign-up approval queue.
   //
-  // POST /api/auth/register now creates an account with approval_status
-  // 'pending' that cannot log in at all, so these two are what let anyone in.
+  // Sep 11, 2026: self-service sign-up was removed, so no new account arrives
+  // pending — an account created here is approved from the start. These stay
+  // for the sign-ups that were still waiting when it went; the buttons only
+  // appear on a pending or rejected row, so they disappear once those are dealt
+  // with.
+  //
   // Approving is not gated behind a confirmation dialog — it is the expected,
   // reversible action (an approved account can still be deactivated), and a
   // modal on the common path trains people to click through modals.
@@ -224,17 +231,27 @@ const UsersPage = () => {
             <h1 className="text-2xl font-semibold text-ink-primary">User Management</h1>
           </div>
           <p className="text-sm text-ink-secondary mt-1">
-            View, audit, and manage system user accounts and role permissions.
+            Create accounts, assign Zoho Salespersons, and manage who can sign in.
           </p>
         </div>
-        <button
-          onClick={fetchUsers}
-          disabled={loading}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-slate-200 rounded-md text-sm font-medium text-ink-secondary bg-white hover:bg-surface hover:text-ink-primary shadow-sm transition-colors disabled:opacity-50"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={fetchUsers}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-slate-200 rounded-md text-sm font-medium text-ink-secondary bg-white hover:bg-surface hover:text-ink-primary shadow-sm transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsCreateOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md text-sm font-semibold text-white bg-getmeds-blue hover:bg-getmeds-blue-hover shadow-sm transition-colors"
+          >
+            <UserPlus className="w-4 h-4" />
+            Create account
+          </button>
+        </div>
       </div>
 
       {/* Error state */}
@@ -506,6 +523,14 @@ const UsersPage = () => {
           </div>
         </div>
       )}
+
+      {/* The list refreshes as soon as the account exists, behind the modal,
+          so the new row is there to assign a Salesperson on when it closes. */}
+      <CreateUserModal
+        isOpen={isCreateOpen}
+        onClose={() => setIsCreateOpen(false)}
+        onCreated={() => fetchUsers()}
+      />
 
       {/* Confirmation Dialog */}
       <ConfirmDialog

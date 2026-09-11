@@ -15,6 +15,7 @@
  * opens a socket.
  */
 const request = require('supertest');
+const bcrypt = require('bcryptjs');
 const app = require('../src/app');
 const db = require('../src/db/database');
 const zoho = require('../src/integrations/zoho');
@@ -24,20 +25,25 @@ const salespersonService = require('../src/services/salespersonService');
 const EMAIL_PREFIX = 'salesperson-test-';
 const uniqueEmail = (label) => `${EMAIL_PREFIX}${label}-${Date.now()}-${Math.floor(Math.random() * 10000)}@getmeds.ph`;
 
-const signUp = (overrides = {}) =>
-  request(app)
-    .post('/api/auth/register')
-    .send({
-      first_name: 'Aaron',
-      middle_name: 'Pun-an',
-      last_name: 'Manila',
-      display_name: 'Aaron Manila',
-      division: 'TEST',
-      sub_division: 'sample',
-      email: uniqueEmail('rep'),
-      password: 'long-enough-pw',
-      ...overrides
-    });
+// Sep 11, 2026: the rep is made directly rather than through sign-up, which is
+// gone — and with its Salesperson set explicitly, the way an admin assigns it,
+// since it is no longer derived from division + display name.
+const makeRep = async ({
+  email = uniqueEmail('rep'),
+  password = 'long-enough-pw',
+  division = 'TEST',
+  salesperson = 'TEST | Aaron Manila'
+} = {}) => {
+  await db
+    .prepare(
+      `INSERT INTO users (name, email, password_hash, role, first_name, middle_name, last_name,
+                          display_name, division, sub_division, salesperson)
+       VALUES ('Aaron Manila', ?, ?, 'medrep', 'Aaron', 'Pun-an', 'Manila', 'Aaron Manila', ?, 'sample', ?)`
+    )
+    .run(email, bcrypt.hashSync(password, 4), division, salesperson);
+  const { id } = await db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  return { id, email, password };
+};
 
 beforeEach(() => salespersonService.clearCache());
 
@@ -47,9 +53,9 @@ afterAll(async () => {
 });
 
 describe('salespersonService.forUser', () => {
-  test('returns the generated "<division> | <display name>" for a signed-up rep', async () => {
-    const res = await signUp();
-    expect(await salespersonService.forUser(res.body.data.user.id)).toBe('TEST | Aaron Manila');
+  test('returns the salesperson assigned to the rep', async () => {
+    const rep = await makeRep();
+    expect(await salespersonService.forUser(rep.id)).toBe('TEST | Aaron Manila');
   });
 
   test('returns null for an account with no division — nothing to attribute to', async () => {
@@ -151,10 +157,9 @@ describe('GET /api/orders/meta/salesperson', () => {
     return res.body.data.token;
   };
 
-  test('reports a verified mapping for a signed-up rep', async () => {
-    const body = { email: uniqueEmail('ok'), password: 'long-enough-pw' };
-    await signUp(body);
-    const token = await login(body.email, body.password);
+  test('reports a verified mapping for a rep with a salesperson', async () => {
+    const rep = await makeRep({ email: uniqueEmail('ok') });
+    const token = await login(rep.email, rep.password);
 
     const res = await request(app).get('/api/orders/meta/salesperson').set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
@@ -163,10 +168,9 @@ describe('GET /api/orders/meta/salesperson', () => {
     );
   });
 
-  test('reports exists:false for a division Zoho does not know', async () => {
-    const body = { email: uniqueEmail('unknown'), password: 'long-enough-pw', division: 'NOPE' };
-    await signUp(body);
-    const token = await login(body.email, body.password);
+  test('reports exists:false for a salesperson Zoho does not know', async () => {
+    const rep = await makeRep({ email: uniqueEmail('unknown'), division: 'NOPE', salesperson: 'NOPE | Aaron Manila' });
+    const token = await login(rep.email, rep.password);
 
     const res = await request(app).get('/api/orders/meta/salesperson').set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
@@ -326,8 +330,8 @@ describe('Division and Sub-division on the Sales Order', () => {
   // how a rep's Salesperson could end up describing a different division
   // than the Division field beside it.
   test('they come from the same account as the Salesperson', async () => {
-    const res = await signUp();
-    const profile = await salespersonService.profileForUser(res.body.data.user.id);
+    const rep = await makeRep();
+    const profile = await salespersonService.profileForUser(rep.id);
     expect(profile).toEqual({
       salesperson: 'TEST | Aaron Manila',
       division: 'TEST',

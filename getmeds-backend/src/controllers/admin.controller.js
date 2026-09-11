@@ -3,11 +3,11 @@ const bcrypt = require('bcryptjs');
 const zohoRetryService = require('../services/zohoRetryService');
 // Sep 11, 2026: the Salesperson list an admin assigns from. Read-only.
 const zoho = require('../integrations/zoho');
-// Sep 9, 2026: reuse the same Division/Sub-division enums and validation
-// register() already enforces on public sign-up — see auth.controller.js's
-// DIVISIONS comment for why this is an enum (a free-typed division created
-// junk Salespersons in the live Zoho org before Sep 5).
-const { DIVISIONS, SUB_DIVISIONS_BY_DIVISION } = require('./auth.controller');
+// Sep 9, 2026: reuse the same Division/Sub-division enums Profile Settings
+// enforces — see auth.controller.js's DIVISIONS comment for why this is an
+// enum (a free-typed division created junk Salespersons in the live Zoho org
+// before Sep 5).
+const { DIVISIONS, SUB_DIVISIONS_BY_DIVISION, MIN_PASSWORD_LENGTH } = require('./auth.controller');
 
 // Get all users with their roles
 const getAllUsers = async (req, res, next) => {
@@ -104,11 +104,20 @@ const deactivateUser = async (req, res, next) => {
 // no Division/Sub-division/Salesperson mapping at all. `users.salesperson`
 // is a GENERATED column ("<division> | <display name>", see
 // auth.controller.js), so an admin-created medrep account had no Salesperson
-// and Zoho rejected their very first order at submit — the same class of bug
-// this session already fixed for sign-up. Mirrors register()'s handling of
-// the same fields (first/middle/last name, display name, division,
-// sub-division), rather than inventing a second set of rules for the same
-// data.
+// and Zoho rejected their very first order at submit. Takes the same fields
+// (first/middle/last name, display name, division, sub-division) Profile
+// Settings works with, rather than inventing a second set of rules for the
+// same data.
+//
+// Sep 11, 2026: this is now the ONLY way an account is created. Self-service
+// sign-up (POST /api/auth/register) was removed; an admin creates each account
+// on the Users page and hands the login to the person. So the checks sign-up
+// used to make live here now — email format and minimum password length. Not
+// the email-domain allow-list: that stood in for "someone decided this person
+// should have an account", which is exactly what an admin creating it is.
+//
+// No approval step either. approval_status defaults to 'approved', and an
+// account an admin made is approved by the act of making it.
 const create = async (req, res, next) => {
   try {
     const str = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -119,8 +128,8 @@ const create = async (req, res, next) => {
     const lastName = str(req.body.last_name);
     const division = str(req.body.division);
     const subDivision = str(req.body.sub_division);
-    // Admin form may send a single `name`, or first/last like Sign-Up does —
-    // support both rather than forcing this form to change shape.
+    // May be sent a single `name`, or first/last as the Create account form
+    // does — support both rather than forcing one shape on every caller.
     const displayName = str(req.body.display_name) || str(name) || [firstName, lastName].filter(Boolean).join(' ');
 
     if (!displayName || !email || !password || !role) {
@@ -132,9 +141,17 @@ const create = async (req, res, next) => {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `role must be one of: ${valid_roles.join(', ')}` } });
     }
 
-    // A medrep with no Division has no Salesperson and cannot place an
-    // order — same requirement register() enforces, since register() only
-    // ever creates medreps. Other roles never raise an order as themselves
+    // Deliberately loose: one @, no spaces, a dot in the domain. Only catches
+    // obvious typos — the admin typing it is the real check.
+    if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'That does not look like a valid email address' } });
+    }
+    if (String(password).length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` } });
+    }
+
+    // A medrep needs a Division — it is sent as cf_division on every Sales
+    // Order they raise. Other roles never raise an order as themselves
     // (Management orders on someone else's behalf — see orders.controller.js's
     // gmLeadId note — Finance/Dispatch/Admin never do), so Division stays
     // optional for them; validated below if given, but not required.
@@ -142,7 +159,7 @@ const create = async (req, res, next) => {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'division is required for a medrep account' } });
     }
 
-    // Same fixed-list validation register() applies — see DIVISIONS'
+    // Same fixed-list validation Profile Settings applies — see DIVISIONS'
     // comment in auth.controller.js. Only checked when a division was
     // actually given, so non-medrep accounts created without one aren't
     // refused for omitting a field they don't need.
@@ -150,8 +167,8 @@ const create = async (req, res, next) => {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `Division must be one of: ${DIVISIONS.join(', ')}` } });
     }
     // Sep 9, 2026: sub-division is NOT validated — it is free text and may
-    // name more than one, matching sign-up, Profile Settings and the order
-    // form. See auth.controller.js's register() for why.
+    // name more than one, matching Profile Settings and the order form. See
+    // SUB_DIVISIONS_BY_DIVISION in auth.controller.js for why.
 
     // Sep 5, 2026: normalize to lowercase before storing — seed.js,
     // create-user.js and the public sign-up endpoint all already do this;
@@ -164,9 +181,10 @@ const create = async (req, res, next) => {
     if (existing) return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'Email already in use' } });
 
     const hash = bcrypt.hashSync(password, 10);
-    // `salesperson` is absent from this INSERT on purpose — it is a
-    // GENERATED column and the database refuses to be told what it should
-    // contain (see the identical note on register()'s INSERT).
+    // `salesperson` is absent from this INSERT on purpose. It must be a name
+    // from Zoho's own list, and an admin picks it from that list on the Users
+    // page afterwards (see update() below) — never guessed at creation, since
+    // a name Zoho does not know is created there on the first order.
     const result = await db
       .prepare(
         `INSERT INTO users
@@ -391,10 +409,13 @@ const retryZohoQueue = async (req, res, next) => {
 /**
  * POST /api/admin/users/:id/approve — let a self-service sign-up in.
  *
- * Sep 9, 2026. POST /api/auth/register now creates an account with
- * approval_status 'pending' and issues no token, so nobody who signs up can do
- * anything until this runs. See schema.pg.sql for why approval_status is its
+ * Sep 9, 2026. POST /api/auth/register created an account with
+ * approval_status 'pending' and issued no token, so nobody who signed up could
+ * do anything until this ran. See schema.pg.sql for why approval_status is its
  * own column rather than a reuse of is_active.
+ *
+ * Sep 11, 2026: sign-up has been removed, so nothing creates a pending account
+ * any more. This and rejectUser stay for the ones already waiting.
  *
  * Idempotent: approving an already-approved account is a reported no-op, not a
  * 409. An admin double-clicking a button is not an error, and the outcome they

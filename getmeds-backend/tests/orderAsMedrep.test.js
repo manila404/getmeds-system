@@ -21,6 +21,7 @@
  * this file does not change behaviour when someone edits .env.
  */
 const request = require('supertest');
+const bcrypt = require('bcryptjs');
 const app = require('../src/app');
 const db = require('../src/db/database');
 const zoho = require('../src/integrations/zoho');
@@ -43,18 +44,30 @@ const setEnv = (key, value) => {
   else process.env[key] = value;
 };
 
-const signUp = async (label, division, displayName) => {
+// Sep 11, 2026: made directly rather than through sign-up, which is gone. The
+// Salesperson is set the way an admin would set it — it is no longer derived
+// from division + display name. These tests are about whose name an order goes
+// out under, not about how the account came to exist.
+const makeRep = async (label, division, displayName) => {
   const email = `${PREFIX}${label}-${Date.now()}-${Math.floor(Math.random() * 1000)}@getmeds.ph`;
-  const res = await request(app).post('/api/auth/register').send({
-    first_name: displayName.split(' ')[0],
-    last_name: displayName.split(' ').slice(1).join(' ') || 'Rep',
-    display_name: displayName,
-    division,
-    email,
-    password: PASSWORD
-  });
-  if (res.status !== 201) throw new Error(`sign-up failed: ${JSON.stringify(res.body)}`);
-  return { ...res.body.data.user, email };
+  const [firstName, ...rest] = displayName.split(' ');
+  await db
+    .prepare(
+      `INSERT INTO users (name, email, password_hash, role, first_name, last_name, display_name, division, salesperson)
+       VALUES (?, ?, ?, 'medrep', ?, ?, ?, ?, ?)`
+    )
+    .run(
+      displayName,
+      email,
+      bcrypt.hashSync(PASSWORD, 4),
+      firstName,
+      rest.join(' ') || 'Rep',
+      displayName,
+      division,
+      `${division} | ${displayName}`
+    );
+  const { id } = await db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  return { id, email, display_name: displayName, division };
 };
 
 const login = async (email, password = PASSWORD) => {
@@ -84,8 +97,8 @@ beforeAll(async () => {
 
   adminToken = await login('admin@getmeds.ph', 'demo123');
 
-  repA = await signUp('repa', 'TEST', 'Aaron Manila');
-  repB = await signUp('repb', 'NORTH', 'Bea Cruz');
+  repA = await makeRep('repa', 'TEST', 'Aaron Manila');
+  repB = await makeRep('repb', 'NORTH', 'Bea Cruz');
   repBToken = await login(repB.email);
 
   customerId = (await db

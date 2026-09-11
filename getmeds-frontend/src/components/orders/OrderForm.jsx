@@ -1428,8 +1428,8 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   Salesperson, and changing it here without changing the
                   account would let the two disagree.
                   Sep 5, 2026 (4): editable for Management, as one of the 15
-                  DIVISIONS above (never free text — same enum Sign Up/
-                  Profile Settings enforce), since a Management account
+                  DIVISIONS above (never free text — same enum Profile
+                  Settings and Create account enforce), since a Management account
                   typically has no Division of its own to show. Picking one
                   here also drives the Sub-division list right below. */}
               <Field
@@ -1438,7 +1438,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 help={
                   isBackOffice
                     ? 'Optional — sent as Division on the Zoho Sales Order. Blank falls back to the picked MedRep\'s own Division, if any.'
-                    : myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Set at sign-up.'
+                    : myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Not set on your account — set it under Profile Settings.'
                 }
               >
                 {isBackOffice ? (
@@ -1468,7 +1468,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   value (see subDivisionInput above). A fixed dropdown when
                   the ordering MedRep's Division has a defined list
                   (SUB_DIVISIONS_BY_DIVISION), otherwise free text — same
-                  fallback Sign Up/Profile Settings use. */}
+                  fallback Profile Settings uses. */}
               <Field
                 label="Sub-division"
                 help={

@@ -52,26 +52,32 @@ describe('Salesperson is assigned by an admin from Zoho’s list', () => {
   });
 
   describe('it is no longer derived', () => {
-    test('a new sign-up has NO salesperson', async () => {
-      const email = `sp.signup.${Date.now()}@getmeds.ph`;
-      const res = await request(app).post('/api/auth/register').send({
-        email,
-        password: 'demo1234',
-        first_name: 'Sign',
-        last_name: 'Up',
-        display_name: 'Sign Up',
-        division: 'B2B'
-      });
-      expect([200, 201]).toContain(res.statusCode);
+    // Sep 11, 2026: was "a new sign-up has NO salesperson". Sign-up is gone;
+    // accounts are created by an admin, and the same guarantee holds there.
+    test('a newly created account has NO salesperson', async () => {
+      const email = `sp.created.${Date.now()}@getmeds.ph`;
+      const res = await request(app)
+        .post('/api/admin/users')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          email,
+          password: 'demo1234',
+          first_name: 'New',
+          last_name: 'Rep',
+          display_name: 'New Rep',
+          role: 'medrep',
+          division: 'B2B'
+        });
+      expect(res.statusCode).toBe(201);
 
       const row = await db.prepare('SELECT id, division, display_name, salesperson FROM users WHERE email = ?').get(email);
       created.push(row.id);
 
       // Division and display name are both set, which under the old generated
-      // column would have produced "B2B | Sign Up" and put that on the first
+      // column would have produced "B2B | New Rep" and put that on the first
       // Sales Order this person sent.
       expect(row.division).toBe('B2B');
-      expect(row.display_name).toBe('Sign Up');
+      expect(row.display_name).toBe('New Rep');
       expect(row.salesperson).toBeNull();
     });
 
