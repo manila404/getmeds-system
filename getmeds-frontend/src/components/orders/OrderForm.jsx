@@ -537,7 +537,27 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // Sep 5, 2026 (4): Zoho's own known Salesperson names, for the manual
   // Salesperson field below — same gate as medrepOptions above (server
   // decides via `enabled`), so this is empty for anyone who can't use it.
-  const salespersonSuggestions = medrepPicker?.salespersons || [];
+  //
+  // Sep 11, 2026: the picked MedRep's own Salespersons lead the list — a rep
+  // can cover several, and those are the likeliest right answers.
+  const actingMedrepSalespersons = (actingMedrep?.salespersons || []).map((s) => s.salesperson);
+  const salespersonSuggestions = [
+    ...actingMedrepSalespersons,
+    ...(medrepPicker?.salespersons || []).filter((n) => !actingMedrepSalespersons.includes(n))
+  ];
+
+  // Sep 11, 2026: a MedRep may cover several Zoho Salespersons (see
+  // user_salespersons in schema.pg.sql) and picks one per order. This is their
+  // own list; the server accepts only these, and sending none means primary.
+  const { data: mySalespersonStatus } = useQuery({
+    queryKey: ['my-salespersons'],
+    queryFn: async () =>
+      (await client.get('/api/orders/meta/salesperson', { skipAuthRedirect: true })).data.data,
+    enabled: !!user && !isBackOffice,
+    staleTime: 1000 * 60 * 5
+  });
+  const myOwnSalespersons = mySalespersonStatus?.salespersons || [];
+  const [ownSalespersonChoice, setOwnSalespersonChoice] = useState('');
 
   // Aug 30, 2026: the backend stamps every live Zoho Sales Order created
   // while the TEST-customer gate is on with a fixed "TEST | MEDREP"
@@ -584,7 +604,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // onBehalfOf audit note), never the Salesperson; the Salesperson is
   // always the picked MedRep, or one Management types manually below.
   const isTestCustomerSelected = !!selectedCustomer && testCustomerGateEnabled;
-  const mySalesperson = ((actingMedrep ? actingMedrep.salesperson : (isBackOffice ? '' : user?.salesperson)) || '').trim();
+  const mySalesperson = ((actingMedrep ? actingMedrep.salesperson : (isBackOffice ? '' : (ownSalespersonChoice || user?.salesperson))) || '').trim();
   const displaySalesPerson =
     mySalesperson || (isTestCustomerSelected ? 'TEST | MEDREP' : 'Not set');
 
@@ -1158,7 +1178,10 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         // above). Blank is treated the same as "not sent" server-side, so
         // there's no separate "clear it" affordance needed here either.
         ...(isBackOffice && divisionOverride.trim() ? { division: divisionOverride.trim() } : {}),
-        ...(isBackOffice && salespersonOverride.trim() ? { salesperson: salespersonOverride.trim() } : {})
+        ...(isBackOffice && salespersonOverride.trim() ? { salesperson: salespersonOverride.trim() } : {}),
+        // Sep 11, 2026: a MedRep's pick among their OWN Salespersons. Only sent
+        // when they actually chose one; left out, the server uses their primary.
+        ...(!isBackOffice && ownSalespersonChoice ? { salesperson: ownSalespersonChoice } : {})
       });
       const order = createRes.data.data.order;
 
@@ -1415,9 +1438,11 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 help={
                   isBackOffice
                     ? 'Optional — must match a Salesperson Zoho already has. Blank falls back to the picked MedRep\'s own Salesperson, if any.'
-                    : mySalesperson
-                      ? 'From your account — sent as the Salesperson on the Zoho Sales Order.'
-                      : 'Set from your Division and Display name at sign-up.'
+                    : myOwnSalespersons.length > 1
+                      ? 'You cover several Salespersons — pick the one this order is for.'
+                      : mySalesperson
+                        ? 'From your account — sent as the Salesperson on the Zoho Sales Order.'
+                        : 'Not set on your account — ask an administrator to assign one.'
                 }
               >
                 {isBackOffice ? (
@@ -1427,6 +1452,18 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                     suggestions={salespersonSuggestions}
                     placeholder="Type or pick a Salesperson"
                   />
+                ) : myOwnSalespersons.length > 1 ? (
+                  <select
+                    className={inputClass}
+                    value={ownSalespersonChoice || mySalesperson}
+                    onChange={(e) => setOwnSalespersonChoice(e.target.value)}
+                  >
+                    {myOwnSalespersons.map((s) => (
+                      <option key={s.salesperson} value={s.salesperson}>
+                        {s.salesperson}{s.is_primary ? ' (primary)' : ''}
+                      </option>
+                    ))}
+                  </select>
                 ) : (
                   <span className={readOnlyPillClass}>
                     <UserRound size={14} className="text-ink-secondary shrink-0" />
@@ -1442,8 +1479,8 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   Salesperson, and changing it here without changing the
                   account would let the two disagree.
                   Sep 5, 2026 (4): editable for Management, as one of the 15
-                  DIVISIONS above (never free text — same enum Sign Up/
-                  Profile Settings enforce), since a Management account
+                  DIVISIONS above (never free text — same enum Profile
+                  Settings and Create account enforce), since a Management account
                   typically has no Division of its own to show. Picking one
                   here also drives the Sub-division list right below. */}
               <Field
@@ -1452,7 +1489,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 help={
                   isBackOffice
                     ? 'Optional — sent as Division on the Zoho Sales Order. Blank falls back to the picked MedRep\'s own Division, if any.'
-                    : myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Set at sign-up.'
+                    : myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Not set on your account — set it under Profile Settings.'
                 }
               >
                 {isBackOffice ? (
@@ -1482,7 +1519,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   value (see subDivisionInput above). A fixed dropdown when
                   the ordering MedRep's Division has a defined list
                   (SUB_DIVISIONS_BY_DIVISION), otherwise free text — same
-                  fallback Sign Up/Profile Settings use. */}
+                  fallback Profile Settings uses. */}
               <Field
                 label="Sub-division"
                 help={

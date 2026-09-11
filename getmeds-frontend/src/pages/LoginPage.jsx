@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import ErrorMessage from '../components/ui/ErrorMessage';
 import LoadingSpinner from '../components/ui/LoadingSpinner';
 import { Eye, EyeOff, FlaskConical, ArrowRight } from 'lucide-react';
@@ -14,7 +14,7 @@ const LoginPage = () => {
   // Sep 3, 2026: the reveal button on this page had no state and no onClick —
   // it was a static EyeOff icon over an input hard-coded to type="password",
   // so it looked like a control and did nothing, on local and on the deployed
-  // site alike. SignupPage has had a working one since it was written.
+  // site alike.
   const [showPassword, setShowPassword] = useState(false);
   const { login, quickLogin } = useAuth();
   const navigate = useNavigate();
@@ -168,13 +168,11 @@ const LoginPage = () => {
                 </button>
               </div>
 
-              {/* Sep 2, 2026: sign-up creates a MedRep account only — every
-                  other role is still made by an admin on /admin/users. */}
+              {/* Sep 11, 2026: there is no self-service sign-up. Accounts are
+                  created by an admin on /admin/users and handed out, so all
+                  someone without one needs to know is who to ask. */}
               <p className="text-[13px] text-ink-secondary text-center">
-                New here?{' '}
-                <Link to="/signup" className="text-getmeds-blue font-semibold hover:underline">
-                  Create an account
-                </Link>
+                Need an account? Ask your administrator.
               </p>
             </form>
           </div>

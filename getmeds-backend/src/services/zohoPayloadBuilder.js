@@ -61,7 +61,12 @@ async function buildZohoSalesOrderPayload(orderId) {
     // retry sends the corrected string rather than the one that failed.
     // That is the entire point of rebuilding the payload instead of
     // replaying the stored snapshot.
-    salesperson_name: order.medrep_salesperson || null,
+    //
+    // Sep 11, 2026: the ORDER's own Salesperson wins when it has one, same as
+    // submit() does. A rep can cover several Salespersons now and picks one
+    // per order; a retry falling back to the account would resend the rep's
+    // primary instead of the one this order was actually raised under.
+    salesperson_name: order.salesperson || order.medrep_salesperson || null,
     // Same row, same reason as salesperson above — a division corrected
     // after a failed sync is picked up by the retry.
     division: order.medrep_division || null,

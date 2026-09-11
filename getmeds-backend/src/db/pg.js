@@ -247,7 +247,7 @@ class Statement {
    * equivalent — there is no connection-scoped "last id" that is safe under a
    * pool — so INSERTs into tables that have an `id` get `RETURNING id`
    * appended and we read it back. Five call sites depend on this, including
-   * signup (auth.controller.js:225) and order creation
+   * admin account creation (admin.controller.js's create) and order creation
    * (orders.controller.js:875); both would break in ways that only show up
    * with a real user in front of them.
    */

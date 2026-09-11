@@ -14,11 +14,16 @@
 //     entirely when it's blank, rather than sending an empty string — this
 //     is handled below).
 //
-// Deliberately NOT diffed here: Salesperson (no local column this app
-// stores it against — see ZOHO_SALES_ORDER_FIELD_MAPPING.md), line items,
-// addresses, tax/discount. Keeping this to the fields the "Create New
-// Order" form itself collects keeps the trail focused on edits a MedRep or
-// Finance user would actually recognize and care about.
+// Deliberately NOT diffed here: line items, addresses, tax/discount. Keeping
+// this to the fields the "Create New Order" form itself collects keeps the
+// trail focused on edits a MedRep or Finance user would actually recognize
+// and care about.
+//
+// Sep 11, 2026: Salesperson IS diffed now. It used to be excluded for having
+// no local column; orders.salesperson has existed since Sep 5 and every order
+// raised here stores the one it went out under. A Salesperson changed on the
+// Sales Order in Zoho is now mirrored onto the order and shown in its trail,
+// by the same webhook and reconcile paths as every field above.
 
 const TRACKED_FIELDS = [
   {
@@ -56,6 +61,20 @@ const TRACKED_FIELDS = [
     label: 'Payment Terms',
     localColumn: 'intake_payment_terms',
     zohoValue: (so) => so.payment_terms_label ?? null
+  },
+  {
+    key: 'salesperson',
+    label: 'Salesperson',
+    localColumn: 'salesperson',
+    zohoValue: (so) => so.salesperson_name ?? null,
+    // An order with no Salesperson stored locally (raised before Sep 5, or
+    // adopted before the import recorded it) is LEARNING Zoho's value, not
+    // seeing an edit. Written, but not reported — see `baseline` below.
+    baselineWhenBlank: true,
+    // Zoho answering with no Salesperson never blanks a stored one: it is
+    // mandatory on every Sales Order here, so a missing value is a partial
+    // response, not somebody clearing the field.
+    ignoreBlankRemote: true
   }
 ];
 
@@ -81,9 +100,19 @@ function diffSalesOrderFields(zohoSalesOrder, localOrder) {
   for (const field of TRACKED_FIELDS) {
     const oldValue = normalize(localOrder[field.localColumn]);
     const newValue = normalize(field.zohoValue(zohoSalesOrder));
-    if (oldValue !== newValue) {
-      changes.push({ key: field.key, label: field.label, localColumn: field.localColumn, oldValue, newValue });
-    }
+    if (oldValue === newValue) continue;
+    if (newValue === null && field.ignoreBlankRemote) continue;
+    changes.push({
+      key: field.key,
+      label: field.label,
+      localColumn: field.localColumn,
+      oldValue,
+      newValue,
+      // Sep 11, 2026: true when Zoho's value is filling a column this app
+      // never stored, rather than replacing one. Callers write it but leave it
+      // out of the trail and notifications — an "edit" nobody made is noise.
+      baseline: oldValue === null && !!field.baselineWhenBlank
+    });
   }
   return changes;
 }

@@ -31,8 +31,8 @@ export const AuthProvider = ({ children }) => {
     fetchUser();
   }, [token]);
 
-  // Shared by login/signup/quickLogin: all three return the same
-  // { token, user } payload, so the session is established the same way.
+  // Shared by login/quickLogin: both return the same { token, user }
+  // payload, so the session is established the same way.
   const establishSession = (data) => {
     const { token: newToken, user: userData } = data;
     sessionStorage.setItem('token', newToken);
@@ -45,31 +45,6 @@ export const AuthProvider = ({ children }) => {
     const { data } = await client.post('/api/auth/login', { email, password });
     if (data.success) return establishSession(data.data);
     throw new Error('Login failed');
-  };
-
-  // Sep 2, 2026. Self-service sign-up. Takes the whole form as one object —
-  // first/middle/last, display_name, division, sub_division, email, password.
-  //
-  // Two fields are deliberately NOT parameters here:
-  //   role        — the backend hard-codes every sign-up to medrep and
-  //                 ignores a role sent by the client.
-  //   salesperson — a generated column in the database, always
-  //                 "<division> | <display name>". The form shows it as a
-  //                 preview; sending it would imply the client decides it.
-  // Sep 9, 2026: a sign-up no longer establishes a session.
-  //
-  // The endpoint used to return a token like a login does, and this called
-  // establishSession with it. It now creates the account with
-  // approval_status 'pending' and returns NO token, because that is the point
-  // of admin approval — an account that could place orders the moment it was
-  // created would have nothing to approve.
-  //
-  // Returns the response payload (user + message) so the page can say what
-  // happens next instead of navigating into an app the caller cannot use.
-  const signup = async (fields) => {
-    const { data } = await client.post('/api/auth/register', fields);
-    if (data.success) return data.data;
-    throw new Error('Sign up failed');
   };
 
   const quickLogin = async (target) => {
@@ -98,7 +73,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, signup, quickLogin, logout, refreshUser, isLoading }}>
+    <AuthContext.Provider value={{ user, token, login, quickLogin, logout, refreshUser, isLoading }}>
       {children}
     </AuthContext.Provider>
   );

@@ -3,6 +3,7 @@ import { useAuth } from '../hooks/useAuth';
 import client from '../api/client';
 import toast from 'react-hot-toast';
 import { UserRound, ShieldCheck, Loader2 } from 'lucide-react';
+import { DIVISIONS, SUB_DIVISIONS_BY_DIVISION } from '../constants/divisions';
 
 /**
  * Profile Settings — Sep 5, 2026.
@@ -12,8 +13,8 @@ import { UserRound, ShieldCheck, Loader2 } from 'lucide-react';
  * (Topbar.jsx) for every role — this page has no allowedRoles restriction
  * in App.jsx, since "edit my own account" is not a role-gated action.
  *
- * Deliberately NOT here: first/middle/last legal name (collected at
- * sign-up, not shown or used anywhere else, so there's nothing this page
+ * Deliberately NOT here: first/middle/last legal name (set when an admin
+ * creates the account, not shown or used anywhere else, so there's nothing this page
  * would keep in sync by exposing them), email (the login identifier —
  * changing it safely needs its own verification step), and role (an
  * admin-only decision, made from /admin/users).
@@ -21,90 +22,11 @@ import { UserRound, ShieldCheck, Loader2 } from 'lucide-react';
  * The Division/Display Name pair matters beyond cosmetics: `salesperson` is
  * a GENERATED column, "<division> | <display name>", and it's the exact
  * value LiveZohoAdapter puts on every Sales Order this account creates —
- * see the long comment on auth.controller.js's register(). Editing either
- * field here changes what gets sent to Zoho on the next order, which is
- * why both are shown next to a live preview of the resulting Salesperson
- * string, same as the sign-up form does.
+ * see the column comment in schema.pg.sql. Editing either field here
+ * changes what gets sent to Zoho on the next order, which is why both are
+ * shown next to a live preview of the resulting Salesperson string.
  */
 const MIN_PASSWORD_LENGTH = 8;
-
-// Sep 5, 2026: mirrors the backend's DIVISIONS in auth.controller.js and
-// SignupPage.jsx's copy exactly — see auth.controller.js's comment for why
-// division is a fixed list rather than free text. Kept in the order given.
-// Sep 9, 2026: '2MG Incorporated', 'Office of the President', 'PCSO', 'DSWD'
-// and 'GrabMart' removed at the user's request. Verified against the live
-// database first: no user and no order carried any of the five, so nothing
-// existing is stranded on a value this list no longer accepts.
-//
-// That check matters because `division` has no CHECK constraint — the column
-// keeps whatever was written to it, and validation happens only on the way in
-// (auth.controller.js at sign-up/profile, orders.controller.js at create and
-// at PATCH /:id/details). A row already holding a removed value would keep
-// working everywhere except the next save, which would then refuse it with
-// "division must be one of ..." for a value the account already has.
-// Sep 10, 2026: 'TeleSales', 'MD Telesales' and 'PS' added.
-//
-// Not new business units — they were already in use in Zoho and always had
-// been. Found while auditing the 171 distinct Salesperson strings on the
-// 60,817 imported Sales Orders: 'TeleSales | ...' accounts for 1,041 of them,
-// 'MD Telesales l ...' for 26 and 'PS | ...' for 6. Reps in those divisions
-// could sign up under no Division at all, or under a wrong one, which would
-// then be the Division their orders carried to Zoho.
-//
-// Ordered after the ten that were already here rather than alphabetically, so
-// the diff reads as "three added" rather than a reshuffle.
-const DIVISIONS = [
-  'B&B',
-  'B2B',
-  'B2C',
-  'BID',
-  'CLIDP',
-  'HOS',
-  'MSA',
-  'STC',
-  'TeleSales Anesthesia',
-  'URO',
-  'TeleSales',
-  'MD Telesales',
-  'PS',
-];
-
-// Sep 5, 2026 (2): mirrors the backend's SUB_DIVISIONS_BY_DIVISION in
-// auth.controller.js exactly — see that file's comment for why only these
-// four Divisions get a fixed Sub-division dropdown. Any Division not listed
-// here has no fixed sub-divisions, so the field below falls back to free
-// text for it, same as before this change.
-const SUB_DIVISIONS_BY_DIVISION = {
-  'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],
-  HOS: [
-    'GENSAN',
-    'PALAWAN',
-    'BAGUIO',
-    'BICOL',
-    'CABANATUAN',
-    'CAMANAVA',
-    'CAVITE',
-    'CDO',
-    'COMMONWEALTH',
-    'DAVAO NORTH',
-    'DAVAO SOUTH',
-    'ILOILO',
-    'LAGUNA',
-    'LAS PINAS',
-    'MANILA VACANT',
-    'MARIKINA',
-    'NORTH CEBU',
-    'PAMPANGA',
-    'PARANAQUE',
-    'PASAY',
-    'QUEZON PROVINCE',
-    'SOUTH CEBU',
-    'TUGUEGARAO',
-    'ZAMBOANGA',
-  ],
-  STC: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
-  URO: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
-};
 
 const inputClass =
   'w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs transition-colors disabled:bg-surface disabled:text-ink-secondary';
@@ -293,7 +215,7 @@ const ProfilePage = () => {
             </Field>
             <Field label="Sub-division" help="Optional. Type any value — separate several with commas.">
               {/* Sep 9, 2026: free text, with the fixed lists demoted to
-                  datalist suggestions — see SignupPage for the reasoning. The
+                  datalist suggestions — see constants/divisions.js for why. The
                   "(current — not in standard list)" carve-out that used to be
                   needed here is gone with the restriction it worked around:
                   when every value is accepted, no value is off-list. */}
@@ -316,7 +238,7 @@ const ProfilePage = () => {
           </div>
 
           {/* Read-only: the database derives this from Division + Display
-              name, same preview the sign-up form shows. */}
+              name. */}
           <Field
             label="Salesperson"
             help="Built automatically from Division + Display Name — this is what's sent to Zoho on your Sales Orders."

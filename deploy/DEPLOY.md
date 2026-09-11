@@ -121,11 +121,13 @@ someone opens the order.
 
 1. **Do not run `npm run seed`.** It creates six accounts with the password
    `demo123`, admin included, and wipes existing orders and users.
-2. Create the real accounts through the sign-up page (`/signup`, restricted to
-   `@getmeds.ph`). Each MedRep's **Division** and **Display name** must
-   combine into a Salesperson that exists in Zoho — check with
-   `npm run check:salespersons` before they place an order, or Zoho rejects it
-   at submit.
+2. Create the first admin with `npm run create:user` (it prompts for the
+   password rather than putting it in shell history). There is no
+   self-service sign-up: every other account is created by that admin under
+   **User Management → Create account** (`/admin/users`) and handed to the
+   person, who can change the password under Profile Settings. Give each
+   MedRep their **Zoho Salesperson** from the picker in the same table — a
+   MedRep without one cannot place an order.
 3. Log in as an admin and run **Full Resync** for customers and inventory.
    ~475 paginated Zoho reads for 94,980 contacts; it runs in the background.
 4. Place one real order end to end and confirm it appears in Zoho.
@@ -158,7 +160,3 @@ it is the most destructive operation in this codebase.
   off-site is the next piece of work.
 - **No error tracking.** Nothing tells you when a Zoho push fails other than
   reading logs.
-- Division is free text on sign-up. A typo fails loudly at submit rather than
-  corrupting anything, but it fails after the MedRep has filled in the order.
-- `POST /api/admin/users` collects only `name`, so admin-created accounts get
-  no Salesperson mapping and cannot raise orders. Use sign-up instead.

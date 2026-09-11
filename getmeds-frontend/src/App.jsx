@@ -6,7 +6,6 @@ import Layout from './components/layout/Layout';
 
 // Pages
 import LoginPage from './pages/LoginPage';
-import SignupPage from './pages/SignupPage';
 import DashboardPage from './pages/DashboardPage';
 import MedrepDashboardPage from './pages/medrep/MedrepDashboardPage';
 import NewOrderPage from './pages/medrep/NewOrderPage';
@@ -62,12 +61,11 @@ function App() {
       <Routes>
         <Route path="/" element={user ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
 
-        {/* Sep 2, 2026: public self-service sign-up. Outside <Layout /> and
-            outside ProtectedRoute for the same reason as the login page —
-            there is no session yet. Signing up creates a MedRep and logs the
-            user straight in, so an already-signed-in visitor is bounced to
-            the dashboard rather than shown the form again. */}
-        <Route path="/signup" element={user ? <Navigate to="/dashboard" replace /> : <SignupPage />} />
+        {/* Sep 11, 2026: self-service sign-up was removed — accounts are
+            created by an admin on /admin/users. The old URL goes to the login
+            page rather than a blank screen, since it may still be bookmarked
+            or linked from somewhere. */}
+        <Route path="/signup" element={<Navigate to="/" replace />} />
 
         <Route element={<Layout />}>
           {/* Sep 2, 2026: was reachable by URL to anyone, signed in or not.

@@ -853,7 +853,11 @@ exports.handleZohoWebhook = async (req, res, next) => {
         });
         actionTaken = 'EDIT_LOGGED_NO_DIFF';
       } else {
-        const changes = diffSalesOrderFields(liveSalesOrder, order);
+        // Sep 11, 2026: `baseline` entries are Zoho's value filling a column
+        // this app never stored (an older order's Salesperson). Written below,
+        // but not reported as an edit somebody made.
+        const allChanges = diffSalesOrderFields(liveSalesOrder, order);
+        const changes = allChanges.filter((c) => !c.baseline);
 
         // Aug 31, 2026 (2): also catch a Zoho-side Sales Order STATUS change
         // (e.g. clicking "Confirm" in Zoho's own UI moves status
@@ -877,9 +881,9 @@ exports.handleZohoWebhook = async (req, res, next) => {
           : null;
 
         await db.transaction(async () => {
-          if (changes.length) {
-            const setClause = changes.map((c) => `${c.localColumn} = ?`).join(', ');
-            const values = changes.map((c) => c.newValue);
+          if (allChanges.length) {
+            const setClause = allChanges.map((c) => `${c.localColumn} = ?`).join(', ');
+            const values = allChanges.map((c) => c.newValue);
             await db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`).run(...values, now, order.id);
           }
           if (liveZohoStatus && liveZohoStatus !== previousZohoStatus) {

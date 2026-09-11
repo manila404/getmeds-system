@@ -256,8 +256,8 @@ the offset cancels exactly.
 
 - **Nothing has run against a live Supabase project.** Everything above is a
   local PostgreSQL 16 with the same schema.
-- **The signup rate limiter is still in-memory** — per-instance, so effectively
-  no limit across serverless instances.
+- ~~**The signup rate limiter is still in-memory**~~ — moot since Sep 11,
+  2026: self-service sign-up and its rate limiter were removed.
 - **`.github/workflows/*.yml` must be added by hand** — the bridge refuses to
   write into that directory.
 
@@ -411,9 +411,8 @@ Unchanged from the Sep 1 assessment, restated so it stays a choice:
 2. **Vercel Hobby is non-commercial** per their fair-use terms. This is company
    software.
 3. **In-memory state**: the auto-sync overlap guard is now handled by
-   `cronLock.js`. Still outstanding: the signup rate limiter (per-instance, so
-   effectively no limit across instances) and the salesperson cache (harmless —
-   just a cache miss).
+   `cronLock.js`. Still outstanding: the salesperson cache (harmless — just a
+   cache miss). The signup rate limiter went with sign-up on Sep 11, 2026.
 4. **The 420 tests are still unported and unrun.** This is now the single
    largest piece of unverified work: the port parses and the data layer has 27
    passing assertions, but nothing has confirmed the order pipeline still

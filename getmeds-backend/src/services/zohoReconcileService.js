@@ -274,12 +274,18 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
     // and produces an empty `fieldChanges`, same as the webhook branch relies
     // on. Runs independently of (and before) the status chain below, since an
     // edit can happen with or without a status change in the same Zoho action.
-    const fieldChanges = diffSalesOrderFields(salesorder, order);
-    if (fieldChanges.length) {
+    // Sep 11, 2026: `baseline` entries are Zoho's value filling a column this
+    // app never stored (an older order's Salesperson) — written, but not
+    // logged or notified as an edit, since nobody made one.
+    const allFieldChanges = diffSalesOrderFields(salesorder, order);
+    const fieldChanges = allFieldChanges.filter((c) => !c.baseline);
+    if (allFieldChanges.length) {
       await db.transaction(async () => {
-        const setClause = fieldChanges.map((c) => `${c.localColumn} = ?`).join(', ');
-        const values = fieldChanges.map((c) => c.newValue);
+        const setClause = allFieldChanges.map((c) => `${c.localColumn} = ?`).join(', ');
+        const values = allFieldChanges.map((c) => c.newValue);
         await db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`).run(...values, now, order.id);
+
+        if (!fieldChanges.length) return;
 
         await logEvent({
           orderId: order.id,
@@ -305,7 +311,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
         });
       })();
 
-      action = 'EDIT_BACKFILLED';
+      if (fieldChanges.length) action = 'EDIT_BACKFILLED';
     }
 
     if (isConfirmed && !(await alreadyLogged('ZOHO_SO_CONFIRMED'))) {

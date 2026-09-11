@@ -1,41 +1,47 @@
 /**
- * Sep 9, 2026 — a sign-up has to be approved by an admin before it can be used,
- * and sub-division is free text.
+ * The approval gate, for accounts left pending when sign-up was removed.
+ *
+ * Sep 9, 2026: a self-service sign-up had to be approved by an admin before it
+ * could be used. Sep 11, 2026: sign-up itself is gone — accounts are created
+ * by an admin, approved from the start — but sign-ups were still waiting in
+ * the live database when it went, so the gate and the Approve/Reject endpoints
+ * stay for them. There is no endpoint that makes a pending account any more,
+ * so these tests seed them directly.
  *
  * The gate is only as good as its weakest hole, so each way in is asserted
- * separately: the sign-up response itself, the login, and a token that was
- * valid when approval was revoked. Missing any one of the three would leave
- * "approved" as decoration.
+ * separately: the login, and a token that was valid when approval was revoked.
+ * Missing either would leave "approved" as decoration.
+ *
+ * (Was tests/signupApproval.test.js.)
  */
 const request = require('supertest');
+const bcrypt = require('bcryptjs');
 const app = require('../src/app');
 const db = require('../src/db/database');
 
 const PREFIX = 'approval.test+';
-const email = () => `${PREFIX}${Date.now()}${Math.random().toString(36).slice(2, 8)}@getmeds.ph`;
-
-const applicant = (overrides = {}) => ({
-  first_name: 'Pending',
-  last_name: 'Person',
-  display_name: 'Pending Person',
-  division: 'HOS',
-  email: email(),
-  password: 'correct-horse',
-  ...overrides
-});
+const PASSWORD = 'correct-horse';
+const HASH = bcrypt.hashSync(PASSWORD, 4);
 
 let adminToken;
 
-async function signUp(overrides = {}) {
-  const body = applicant(overrides);
-  const res = await request(app).post('/api/auth/register').send(body);
-  return { body, res };
+/** A leftover sign-up: a medrep row still waiting on an admin. */
+async function pendingAccount() {
+  const email = `${PREFIX}${Date.now()}${Math.random().toString(36).slice(2, 8)}@getmeds.ph`;
+  await db
+    .prepare(
+      `INSERT INTO users (name, email, password_hash, role, display_name, division, approval_status)
+       VALUES ('Pending Person', ?, ?, 'medrep', 'Pending Person', 'HOS', 'pending')`
+    )
+    .run(email, HASH);
+  const { id } = await db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  return { id, body: { email, password: PASSWORD } };
 }
 
 const login = (body) =>
   request(app).post('/api/auth/login').send({ email: body.email, password: body.password });
 
-describe('Sign-up requires admin approval', () => {
+describe('Accounts still pending from sign-up', () => {
   beforeAll(async () => {
     const admin = await request(app).post('/api/auth/login').send({ email: 'admin@getmeds.ph', password: 'demo123' });
     adminToken = admin.body.data.token;
@@ -45,8 +51,8 @@ describe('Sign-up requires admin approval', () => {
     await db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${PREFIX}%`);
   });
 
-  test('a new sign-up cannot log in', async () => {
-    const { body } = await signUp();
+  test('a pending account cannot log in', async () => {
+    const { body } = await pendingAccount();
     const res = await login(body);
 
     expect(res.status).toBe(403);
@@ -59,8 +65,8 @@ describe('Sign-up requires admin approval', () => {
   test('a wrong password on a pending account still reads as invalid credentials', async () => {
     // The approval check runs AFTER the password on purpose. Answering
     // "waiting for approval" to any password would turn this endpoint into a
-    // way to discover which email addresses have signed up.
-    const { body } = await signUp();
+    // way to discover which email addresses have an account.
+    const { body } = await pendingAccount();
     const res = await request(app)
       .post('/api/auth/login')
       .send({ email: body.email, password: 'not-the-password' });
@@ -70,8 +76,7 @@ describe('Sign-up requires admin approval', () => {
   });
 
   test('approving lets them in', async () => {
-    const { body, res: signup } = await signUp();
-    const id = signup.body.data.user.id;
+    const { id, body } = await pendingAccount();
 
     const approved = await request(app)
       .post(`/api/admin/users/${id}/approve`)
@@ -88,8 +93,7 @@ describe('Sign-up requires admin approval', () => {
   });
 
   test('approving twice is a no-op, not an error', async () => {
-    const { res: signup } = await signUp();
-    const id = signup.body.data.user.id;
+    const { id } = await pendingAccount();
     const url = `/api/admin/users/${id}/approve`;
 
     const first = await request(app).post(url).set('Authorization', `Bearer ${adminToken}`);
@@ -101,8 +105,7 @@ describe('Sign-up requires admin approval', () => {
   });
 
   test('rejecting keeps them out, and says so differently', async () => {
-    const { body, res: signup } = await signUp();
-    const id = signup.body.data.user.id;
+    const { id, body } = await pendingAccount();
 
     const rejected = await request(app)
       .post(`/api/admin/users/${id}/reject`)
@@ -118,8 +121,7 @@ describe('Sign-up requires admin approval', () => {
   });
 
   test('a rejected account can be approved after all', async () => {
-    const { body, res: signup } = await signUp();
-    const id = signup.body.data.user.id;
+    const { id, body } = await pendingAccount();
 
     await request(app).post(`/api/admin/users/${id}/reject`).set('Authorization', `Bearer ${adminToken}`);
     await request(app).post(`/api/admin/users/${id}/approve`).set('Authorization', `Bearer ${adminToken}`);
@@ -129,8 +131,7 @@ describe('Sign-up requires admin approval', () => {
   });
 
   test('an already-approved account cannot be "rejected" — that is a Deactivate', async () => {
-    const { res: signup } = await signUp();
-    const id = signup.body.data.user.id;
+    const { id } = await pendingAccount();
 
     await request(app).post(`/api/admin/users/${id}/approve`).set('Authorization', `Bearer ${adminToken}`);
     const res = await request(app)
@@ -148,11 +149,9 @@ describe('Sign-up requires admin approval', () => {
     //
     // The status is changed in the DATABASE here, not through the reject
     // endpoint — that endpoint deliberately refuses an already-approved
-    // account (409 ALREADY_APPROVED; Deactivate is the right action for one of
-    // those, covered by the next test). What is under test is the middleware,
-    // so the state it reacts to is set directly.
-    const { body, res: signup } = await signUp();
-    const id = signup.body.data.user.id;
+    // account (409 ALREADY_APPROVED). What is under test is the middleware, so
+    // the state it reacts to is set directly.
+    const { id, body } = await pendingAccount();
 
     await request(app).post(`/api/admin/users/${id}/approve`).set('Authorization', `Bearer ${adminToken}`);
     const session = await login(body);
@@ -170,8 +169,7 @@ describe('Sign-up requires admin approval', () => {
   test('deactivating an approved account also kills its live token', async () => {
     // The pre-existing half of the same guard, asserted next to the new one so
     // a future edit to that condition cannot quietly drop either.
-    const { body, res: signup } = await signUp();
-    const id = signup.body.data.user.id;
+    const { id, body } = await pendingAccount();
 
     await request(app).post(`/api/admin/users/${id}/approve`).set('Authorization', `Bearer ${adminToken}`);
     const session = await login(body);
@@ -186,8 +184,7 @@ describe('Sign-up requires admin approval', () => {
   });
 
   test('only an admin can approve', async () => {
-    const { res: signup } = await signUp();
-    const id = signup.body.data.user.id;
+    const { id } = await pendingAccount();
 
     const medrep = await request(app).post('/api/auth/login').send({ email: 'medrep@getmeds.ph', password: 'demo123' });
     const res = await request(app)
@@ -199,7 +196,7 @@ describe('Sign-up requires admin approval', () => {
 
   test('pending accounts sort to the top of the admin user list', async () => {
     // A queue buried among eighty alphabetised names is a queue nobody works.
-    await signUp();
+    await pendingAccount();
     const res = await request(app).get('/api/admin/users').set('Authorization', `Bearer ${adminToken}`);
 
     expect(res.status).toBe(200);
@@ -212,66 +209,9 @@ describe('Sign-up requires admin approval', () => {
 
   test('accounts that predate approval are treated as approved', async () => {
     // The column DEFAULTS to 'approved' precisely so that adding it to a live
-    // database does not lock everyone out on deploy. The seeded logins are
+    // database did not lock everyone out on deploy. The seeded logins are
     // exactly that case.
     const res = await request(app).post('/api/auth/login').send({ email: 'finance@getmeds.ph', password: 'demo123' });
     expect(res.status).toBe(200);
-  });
-});
-
-describe('Sub-division is free text', () => {
-  afterAll(async () => {
-    await db.prepare('DELETE FROM users WHERE email LIKE ?').run(`${PREFIX}%`);
-  });
-
-  test('accepts a value that is not on the Division\'s suggestion list', async () => {
-    // HOS has the longest fixed list, and was the worst case: the dropdown
-    // could not express a branch the list had never been updated with.
-    const { res } = await signUp({ division: 'HOS', sub_division: 'A BRANCH NOBODY LISTED' });
-
-    expect(res.status).toBe(201);
-    expect(res.body.data.user.sub_division).toBe('A BRANCH NOBODY LISTED');
-  });
-
-  test('accepts several sub-divisions at once', async () => {
-    // The actual ask: a rep covers more than one, and a <select> cannot say so.
-    const { body, res } = await signUp({ division: 'HOS', sub_division: 'GENSAN, BAGUIO, BICOL' });
-
-    expect(res.status).toBe(201);
-    const row = await db.prepare('SELECT sub_division FROM users WHERE email = ?').get(body.email);
-    expect(row.sub_division).toBe('GENSAN, BAGUIO, BICOL');
-  });
-
-  test('an order carries a multi-value sub-division through to the payload', async () => {
-    // The half that would otherwise be missed: relaxing the account field but
-    // not the order field means every order raised by such an account is
-    // rejected for a value the account is required to hold.
-    const { body, res: signup } = await signUp({ division: 'HOS', sub_division: 'GENSAN, BAGUIO' });
-    await db
-      .prepare("UPDATE users SET approval_status = 'approved' WHERE id = ?")
-      .run(signup.body.data.user.id);
-    const session = await login(body);
-
-    const customer = await db.prepare('SELECT * FROM customers WHERE zoho_contact_id IS NOT NULL AND is_active = 1 LIMIT 1').get();
-    const product = await db.prepare('SELECT * FROM products WHERE is_active = 1 LIMIT 1').get();
-
-    const order = await request(app)
-      .post('/api/orders')
-      .set('Authorization', `Bearer ${session.body.data.token}`)
-      .send({
-        customer_id: customer.id,
-        items: [{ product_id: product.id, quantity: 1, rate: 10 }],
-        delivery_address: '1 Free Text St',
-        is_draft: true,
-        sub_division: 'GENSAN, BAGUIO'
-      });
-
-    expect(order.status).toBe(201);
-    const saved = await db.prepare('SELECT sub_division FROM orders WHERE id = ?').get(order.body.data.order.id);
-    expect(saved.sub_division).toBe('GENSAN, BAGUIO');
-
-    await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(order.body.data.order.id);
-    await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(order.body.data.order.id);
-    await db.prepare('DELETE FROM orders WHERE id = ?').run(order.body.data.order.id);
   });
 });

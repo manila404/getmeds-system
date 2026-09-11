@@ -94,8 +94,6 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
      ZOHO_CLIENT_SECRET=...
      ZOHO_REFRESH_TOKEN=...
      CORS_ALLOWED_ORIGINS=https://getmeds-system.vercel.app
-     SIGNUP_ENABLED=true
-     SIGNUP_ALLOWED_EMAIL_DOMAINS=getmeds.ph
 
   Then generate the two secrets ON THIS MACHINE — do not reuse the
   laptop's, and do not paste them into chat:
@@ -135,9 +133,8 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=getmeds-api
 
-# A single instance, deliberately. zohoAutoSyncService's overlap guard, the
-# signup rate limiter and the salesperson cache are all in-memory and
-# per-process: a second instance means two sync loops walking the same orders
+# A single instance, deliberately. zohoAutoSyncService's overlap guard and the
+# salesperson cache are both in-memory and per-process: a second instance means two sync loops walking the same orders
 # and double the Zoho API budget.
 
 NoNewPrivileges=true

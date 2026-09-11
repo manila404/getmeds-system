@@ -89,15 +89,8 @@ function main() {
     results.push({ key, action: existing === null ? 'added' : 'replaced', show, value });
   }
 
-  // Written explicitly rather than left to the code's defaults, so the
-  // deployed configuration says what it is instead of relying on a fallback
-  // nobody can see.
-  for (const [key, value] of [['SIGNUP_ENABLED', 'true'], ['SIGNUP_ALLOWED_EMAIL_DOMAINS', 'getmeds.ph']]) {
-    if (currentValue(text, key) === null) {
-      text = upsert(text, key, value, eol);
-      results.push({ key, action: 'added', show: true, value });
-    }
-  }
+  // Sep 11, 2026: SIGNUP_ENABLED / SIGNUP_ALLOWED_EMAIL_DOMAINS are no longer
+  // written here — self-service sign-up was removed and nothing reads them.
 
   fs.writeFileSync(ENV_PATH, text);
 

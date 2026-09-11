@@ -35,8 +35,8 @@
 #                    here, just no disk needed for it now.
 #
 #   numInstances: 1  Not a cost decision. zohoAutoSyncService's overlap
-#                    guard and the signup rate limiter are in-memory and
-#                    per-process. A second instance means two sync loops
+#                    guard is in-memory and per-process. A second
+#                    instance means two sync loops
 #                    walking the same orders and double the Zoho API
 #                    budget, with no guard between them (unlike the
 #                    GitHub Actions cron path, which is safe to run
@@ -102,11 +102,6 @@ services:
         value: https://www.zohoapis.com/inventory/v1
       - key: ZOHO_ACCOUNTS_URL
         value: https://accounts.zoho.com
-
-      - key: SIGNUP_ENABLED
-        value: "true"
-      - key: SIGNUP_ALLOWED_EMAIL_DOMAINS
-        value: getmeds.ph
 
       # Exact-match allowlist. Set this to your frontend's production URL
       # (Vercel, wherever it ends up living) with no trailing slash. Preview
