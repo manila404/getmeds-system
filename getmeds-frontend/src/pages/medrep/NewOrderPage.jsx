@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import OrderForm from '../../components/orders/OrderForm';
+import OrderForWhoModal from '../../components/orders/OrderForWhoModal';
 import client from '../../api/client';
 import { AlertTriangle } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
@@ -101,10 +102,53 @@ const SalespersonNotice = () => {
 };
 
 const NewOrderPage = () => {
+  const { user } = useAuth();
+  const isMedrep = (user?.role || '').toLowerCase() === 'medrep';
+
+  /**
+   * Sep 11, 2026: a MedRep answers "who is this order for?" before the form
+   * opens.
+   *
+   * `null` means unanswered — the form is not rendered yet. 'self' and 'other'
+   * are the two answers. Keeping unanswered distinct from 'self' is what stops
+   * an unasked question looking like a decided one.
+   *
+   * The modal decides the MODE only. Which colleague is chosen on the form, in
+   * a searchable picker over this system's accounts.
+   *
+   * Admin and management skip this entirely: they already pick a MedRep inside
+   * the form, alongside the manual Division and Salesperson fields that only
+   * they have.
+   */
+  const [choice, setChoice] = useState(null);
+  const [reopen, setReopen] = useState(false);
+  const needsChoice = isMedrep && (choice === null || reopen);
+
   return (
     <div className="max-w-4xl mx-auto">
+      {needsChoice && (
+        <OrderForWhoModal
+          currentUser={user}
+          onChoose={(mode) => {
+            setChoice(mode);
+            setReopen(false);
+          }}
+        />
+      )}
+
       <SalespersonNotice />
-      <OrderForm />
+
+      {/* Rendered only once the question is answered. Mounting the form behind
+          the modal would let it initialise against the wrong owner and then
+          need resetting. */}
+      {(!isMedrep || choice) && (
+        <OrderForm
+          // 'self' | 'other' | null. The form resolves WHICH colleague, in its
+          // own searchable account picker — see MedrepAccountCombo.
+          orderForMode={choice}
+          onChangeOrderOwner={isMedrep ? () => setReopen(true) : undefined}
+        />
+      )}
     </div>
   );
 };

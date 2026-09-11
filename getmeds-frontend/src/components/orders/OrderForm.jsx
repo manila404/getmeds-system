@@ -6,6 +6,8 @@ import client from '../../api/client';
 import Modal from '../ui/Modal';
 import ProductAutocomplete from './ProductAutocomplete';
 import CustomerAutocomplete from './CustomerAutocomplete';
+import MedrepAccountCombo from './MedrepAccountCombo';
+import ZohoSalespersonCombo from './ZohoSalespersonCombo';
 import {
   Trash2,
   ShoppingCart,
@@ -354,7 +356,7 @@ const SuggestField = ({ value, onChange, suggestions = [], placeholder, classNam
  * - Step 2: Autocomplete integration via <CustomerAutocomplete /> and <ProductAutocomplete />
  * - Step 3: Cart state, per-line discount/tax, .reduce() totals, useMutation to /api/orders, and fast-track debug button.
  */
-const OrderForm = ({ onCancel, onSuccess }) => {
+const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSuccess }) => {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { isDebug } = useDebug();
@@ -505,17 +507,63 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // everyone else, and create() independently ignores `medrep_id` unless the
   // same four conditions hold. Two places would drift; the server's is the
   // one that counts.
+  // Seeded from the pre-form choice (OrderForWhoModal). Back office still sets
+  // it from the dropdown inside the form.
   const [actingMedrepId, setActingMedrepId] = useState('');
+  /**
+   * BOX 1's value — the Zoho Salesperson actually sent.
+   *
+   * Empty means "follow the account", which is what mySalesperson resolves
+   * below. Typed or picked, it wins: a rep covering several Salespersons, or
+   * raising an order that belongs under a different one, says so here.
+   */
+  const [zohoSalespersonChoice, setZohoSalespersonChoice] = useState('');
+
   const { data: medrepPicker } = useQuery({
     queryKey: ['order-medreps'],
     queryFn: async () => (await client.get('/api/orders/meta/medreps')).data.data,
     staleTime: 1000 * 60 * 5
   });
   const canPickMedrep = !!medrepPicker?.enabled;
+  // A MedRep gets the two-way choice; admin and management keep the optional
+  // dropdown, because blank means something different for them.
+  const isRepChoosing = canPickMedrep && (user?.role || '').toLowerCase() === 'medrep';
   const medrepOptions = medrepPicker?.medreps || [];
+  // Themselves excluded — "for myself" is the other answer, and offering it
+  // here invites picking the one that does not clear the mode.
+  const colleagueAccounts = medrepOptions.filter((m) => String(m.id) !== String(user?.id));
   const actingMedrep = canPickMedrep
     ? medrepOptions.find(m => String(m.id) === String(actingMedrepId)) || null
     : null;
+
+  // Seeded from the owner, then left alone.
+  //
+  // Keyed on who the order is FOR, so switching colleague re-seeds — but it
+  // does not run on every render, which would overwrite a rep who deliberately
+  // typed a different Salesperson the moment anything else on the form
+  // changed.
+  const seededFor = useRef(null);
+  useEffect(() => {
+    if (!isRepChoosing) return;
+    const ownerKey = orderForMode === 'other' ? `other:${actingMedrepId}` : 'self';
+    if (seededFor.current === ownerKey) return;
+    const owner = orderForMode === 'other' ? actingMedrep : user;
+    const ownersOwn = (owner?.salesperson || '').trim();
+    // Only re-seed when the new owner HAS one. Otherwise leave what is there:
+    // picking the Salesperson first and the account second is a normal order
+    // of work, and blanking the field at that point silently discards a
+    // deliberate choice — which is exactly what happened when an account with
+    // no Salesperson was selected after one had been picked.
+    if (!ownersOwn) {
+      seededFor.current = ownerKey;
+      return;
+    }
+    seededFor.current = ownerKey;
+    setZohoSalespersonChoice(ownersOwn);
+  }, [isRepChoosing, orderForMode, actingMedrepId, actingMedrep, user]);
+  // The pre-form choice is the only source for a rep, so there is no stale
+  // selection to guard against here any more.
+  const effectiveMedrepId = actingMedrepId;
   // Sep 5, 2026: the picker also appears for management (production pilot
   // use), not just TEST_MODE admin — see /api/orders/meta/medreps.
   //
@@ -541,6 +589,8 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // Sep 11, 2026: the picked MedRep's own Salespersons lead the list — a rep
   // can cover several, and those are the likeliest right answers.
   const actingMedrepSalespersons = (actingMedrep?.salespersons || []).map((s) => s.salesperson);
+  // Zoho's full list, as returned by /api/orders/meta/medreps.
+  const allZohoSalespersons = medrepPicker?.salespersons || [];
   const salespersonSuggestions = [
     ...actingMedrepSalespersons,
     ...(medrepPicker?.salespersons || []).filter((n) => !actingMedrepSalespersons.includes(n))
@@ -557,6 +607,27 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     staleTime: 1000 * 60 * 5
   });
   const myOwnSalespersons = mySalespersonStatus?.salespersons || [];
+
+  /**
+   * The Salespersons belonging to whoever this order is FOR.
+   *
+   * Listed first in the picker and labelled "theirs". Raising an order for a
+   * colleague who covers three Salespersons should not mean searching 198
+   * names for one of the three.
+   */
+  const ownerSalespersons = actingMedrep
+    ? (actingMedrep.salespersons || []).map((x) => x.salesperson).filter(Boolean)
+    // For a rep's own order: their whole list, not just the primary —
+    // /api/orders/meta/salesperson returns every Salesperson on the account.
+    : (myOwnSalespersons.length
+        ? myOwnSalespersons.map((x) => x.salesperson).filter(Boolean)
+        : (user?.salesperson ? [user.salesperson] : []));
+
+  /** Who the order is for, for use in the Salesperson field's own copy. */
+  const ownerOwnerLabel = actingMedrep
+    ? (actingMedrep.display_name || actingMedrep.name)
+    : 'Your account';
+
   const [ownSalespersonChoice, setOwnSalespersonChoice] = useState('');
 
   // Aug 30, 2026: the backend stamps every live Zoho Sales Order created
@@ -604,7 +675,15 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // onBehalfOf audit note), never the Salesperson; the Salesperson is
   // always the picked MedRep, or one Management types manually below.
   const isTestCustomerSelected = !!selectedCustomer && testCustomerGateEnabled;
-  const mySalesperson = ((actingMedrep ? actingMedrep.salesperson : (isBackOffice ? '' : (ownSalespersonChoice || user?.salesperson))) || '').trim();
+  // Box 1 wins when a rep has set it. Otherwise it follows the account the
+  // order belongs to — the colleague's when raising for one, the rep's own
+  // otherwise — which is what box 1 is seeded with below.
+  const mySalesperson = (
+    (isRepChoosing && zohoSalespersonChoice)
+      ? zohoSalespersonChoice
+      : (actingMedrep ? actingMedrep.salesperson : (isBackOffice ? '' : (ownSalespersonChoice || user?.salesperson)))
+    || ''
+  ).trim();
   const displaySalesPerson =
     mySalesperson || (isTestCustomerSelected ? 'TEST | MEDREP' : 'Not set');
 
@@ -961,6 +1040,9 @@ const OrderForm = ({ onCancel, onSuccess }) => {
   // value if present", so this stays a client-side UX guarantee rather
   // than breaking any other caller of POST /api/orders.
   const isFormValid = Boolean(
+    // "Another MedRep" with nobody chosen would silently fall back to the
+    // rep's own account — right on screen, wrong person in Zoho.
+    (!isRepChoosing || orderForMode !== 'other' || actingMedrepId) &&
     customerId &&
     deliveryAddress.trim() &&
     orderSource &&
@@ -1171,7 +1253,11 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         // Sep 2, 2026: only ever sent when the server said the picker is
         // allowed AND one was chosen. The server ignores it otherwise, so
         // this is belt-and-braces rather than the control itself.
-        ...(canPickMedrep && actingMedrepId ? { medrep_id: parseInt(actingMedrepId) } : {}),
+        // effectiveMedrepId, not actingMedrepId: a rep who picked a colleague
+        // and then switched back to "Myself" must not still send them. The
+        // toggle clears it too, so this is the second of two guards rather
+        // than the only one.
+        ...(canPickMedrep && effectiveMedrepId ? { medrep_id: parseInt(effectiveMedrepId) } : {}),
         // Sep 5, 2026 (4): Division/Salesperson manual override — only ever
         // sent by Management (the backend independently ignores these two
         // from anyone else, same belt-and-braces reasoning as medrep_id
@@ -1179,9 +1265,18 @@ const OrderForm = ({ onCancel, onSuccess }) => {
         // there's no separate "clear it" affordance needed here either.
         ...(isBackOffice && divisionOverride.trim() ? { division: divisionOverride.trim() } : {}),
         ...(isBackOffice && salespersonOverride.trim() ? { salesperson: salespersonOverride.trim() } : {}),
-        // Sep 11, 2026: a MedRep's pick among their OWN Salespersons. Only sent
-        // when they actually chose one; left out, the server uses their primary.
-        ...(!isBackOffice && ownSalespersonChoice ? { salesperson: ownSalespersonChoice } : {})
+        // Sep 11, 2026: the Zoho Salesperson the form is showing — box 1.
+        //
+        // This used to send `ownSalespersonChoice`, the old dropdown over the
+        // rep's OWN Salespersons. Once box 1 became a picker over Zoho's whole
+        // list, that left the field on screen and the value sent as two
+        // different things: a rep could choose "HOS | PASAY", submit, and have
+        // the order filed under their primary instead, with nothing to show
+        // the pick had been ignored.
+        //
+        // `mySalesperson` is the one the rest of the form displays, so sending
+        // it is what keeps the screen and the Sales Order in agreement.
+        ...(!isBackOffice && mySalesperson ? { salesperson: mySalesperson } : {})
       });
       const order = createRes.data.data.order;
 
@@ -1366,7 +1461,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                 exactly the same people and that branch could no longer
                 render. Kept as one styling, rather than a condition that
                 always takes the same side. */}
-            {canPickMedrep && (
+            {canPickMedrep && !isRepChoosing && (
               <div className="rounded-lg border border-getmeds-blue/30 bg-getmeds-blue/5 px-4 py-3 flex items-start gap-3">
                 <FlaskConical size={16} className="shrink-0 mt-0.5 text-getmeds-blue-dark" />
                 <div className="flex-1 min-w-0">
@@ -1432,20 +1527,55 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   recognize, same "type anything, but here's what's real"
                   pattern as Delivery Method/Payment Terms, with the
                   difference that this one IS actually checked. */}
+              {/* BOX 2 — the ACCOUNT this order belongs to.
+                  Sep 11, 2026. Not a Zoho name: a person in THIS system, who
+                  can log in and own an order. For a rep raising their own it
+                  is themselves and needs no picking; raising one for a
+                  colleague, it is searchable over accounts by name or email.
+               */}
               <Field
-                label="Salesperson"
+                label={isRepChoosing ? 'MedRep (account)' : 'Salesperson'}
                 required
                 help={
-                  isBackOffice
-                    ? 'Optional — must match a Salesperson Zoho already has. Blank falls back to the picked MedRep\'s own Salesperson, if any.'
-                    : myOwnSalespersons.length > 1
-                      ? 'You cover several Salespersons — pick the one this order is for.'
-                      : mySalesperson
-                        ? 'From your account — sent as the Salesperson on the Zoho Sales Order.'
-                        : 'Not set on your account — ask an administrator to assign one.'
+                  isRepChoosing
+                    ? orderForMode === 'other'
+                      ? 'Search by name or email. Only people with an account here can be given an order.'
+                      : 'Your own account — this order is attributed to you.'
+                    : isBackOffice
+                      ? 'Optional — must match a Salesperson Zoho already has. Blank falls back to the picked MedRep\'s own Salesperson, if any.'
+                      : myOwnSalespersons.length > 1
+                        ? 'You cover several Salespersons — pick the one this order is for.'
+                        : mySalesperson
+                          ? 'From your account — sent as the Salesperson on the Zoho Sales Order.'
+                          : 'Not set on your account — ask an administrator to assign one.'
                 }
               >
-                {isBackOffice ? (
+                {isRepChoosing ? (
+                  orderForMode === 'other' ? (
+                    <>
+                      <MedrepAccountCombo
+                        accounts={colleagueAccounts}
+                        value={actingMedrepId}
+                        onSelect={setActingMedrepId}
+                        placeholder="Search MedReps by name or email…"
+                      />
+                      {/* Only while box 1 is ALSO empty. Warning that the
+                          account has none while the rep has already picked one
+                          above tells them to do something they have done. */}
+                      {actingMedrep && !actingMedrep.salesperson && !zohoSalespersonChoice && (
+                        <p className="text-[11px] mt-1 text-amber-800">
+                          {(actingMedrep.display_name || actingMedrep.name)} has no Zoho Salesperson
+                          on their account — pick one above before submitting.
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <span className={readOnlyPillClass}>
+                      <UserRound size={14} className="text-ink-secondary shrink-0" />
+                      <span>{user?.display_name || user?.name}</span>
+                    </span>
+                  )
+                ) : isBackOffice ? (
                   <SuggestField
                     value={salespersonOverride}
                     onChange={setSalespersonOverride}
@@ -1551,6 +1681,65 @@ const OrderForm = ({ onCancel, onSuccess }) => {
               </Field>
 
             </div>
+
+            {/* BOX 1 — the ZOHO Salesperson.
+                Sep 11, 2026. This is the name that goes on the Zoho Sales
+                Order, and it is editable whichever mode the rep chose: raising
+                an order for yourself does not mean you only ever cover one
+                Salesperson, and raising one for a colleague does not mean
+                theirs is the right pick either.
+                Sourced from Zoho's own list — see salespersonSuggestions. It
+                is NOT the account below; the two do not correspond one to one.
+             */}
+            {isRepChoosing && (
+              <div className="rounded-lg border border-getmeds-blue/30 bg-getmeds-blue/5 px-4 py-3">
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <label className="block text-xs font-bold uppercase tracking-wide text-getmeds-blue-dark">
+                    Zoho Salesperson
+                  </label>
+                  {onChangeOrderOwner && (
+                    <button
+                      type="button"
+                      onClick={onChangeOrderOwner}
+                      className="shrink-0 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
+                    >
+                      Change who this is for
+                    </button>
+                  )}
+                </div>
+
+                {/* ONLY the owner's Salespersons.
+                    Sep 11, 2026: it briefly offered all 198 from Zoho, which
+                    was worse than useless — the server accepts only the ones
+                    on the account this order belongs to
+                    (salespersonService.resolveForUser), so 197 of them were
+                    choices that would come back as a 400. A picker whose
+                    options are mostly invalid teaches people to distrust it. */}
+                {ownerSalespersons.length ? (
+                  <>
+                    <ZohoSalespersonCombo
+                      names={ownerSalespersons}
+                      value={zohoSalespersonChoice}
+                      onSelect={setZohoSalespersonChoice}
+                    />
+                    <p className="text-[11px] mt-1.5 text-getmeds-blue-dark/80">
+                      Sent as the Salesperson on the Zoho Sales Order.
+                      {ownerSalespersons.length > 1
+                        ? ` ${ownerOwnerLabel} covers ${ownerSalespersons.length} — pick the one this order is for.`
+                        : ''}
+                    </p>
+                  </>
+                ) : (
+                  /* No list to pick from. Said here rather than discovered as
+                     a 400 at submit, and it names the fix. */
+                  <p className="text-[12px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                    {ownerOwnerLabel} has no Zoho Salesperson assigned, so this order cannot be
+                    submitted yet. An admin assigns one on the Users page.
+                  </p>
+                )}
+              </div>
+            )}
+
           </div>
 
           {/* ── SECTION 2: CUSTOMER DETAILS ────────────────────────────────

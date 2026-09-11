@@ -91,10 +91,26 @@ async function loadOrder(id) {
     .prepare(
       `SELECT o.id, o.getmeds_order_id, o.status, o.medrep_id, o.zoho_so_id,
               c.name AS customer_name,
-              u.id   AS medrep_user_id
+              u.id   AS medrep_user_id,
+              raiser.raised_by_user_id
          FROM orders o
          LEFT JOIN customers c ON o.customer_id = c.id
          LEFT JOIN users     u ON o.medrep_id  = u.id
+         -- Sep 11, 2026: who RAISED the order, when that is not who owns it.
+         -- A MedRep may now raise an order for a colleague, and the only
+         -- durable record of that is the submit event's metadata. Read here
+         -- rather than in canAttach so the permission check stays synchronous
+         -- and both call sites get it for free.
+         LEFT JOIN LATERAL (
+           SELECT NULLIF(e.metadata::json->>'raisedByUserId', '')::int
+                    AS raised_by_user_id
+             FROM order_events e
+            WHERE e.order_id = o.id
+              AND e.metadata IS NOT NULL
+              AND e.metadata LIKE '%raisedByUserId%'
+            ORDER BY e.id
+            LIMIT 1
+         ) raiser ON TRUE
         WHERE o.id = ?`
     )
     .get(id);
@@ -128,12 +144,23 @@ function normalizeFileType(value) {
  * attachment upload that follows order creation is part of that same flow,
  * so management needs the same access here or their own "create for a
  * MedRep" pilot would be unable to attach anything.
+ *
+ * Sep 11, 2026: the raiser added, which is the same gap reopening. MedReps
+ * can now raise an order for a colleague too, and `medrep_id` is then the
+ * COLLEAGUE's — so the rep who filled the form in failed this check the
+ * instant the form tried to upload the file they had just attached. The order
+ * saved, the file did not, and the only sign was a red toast (GM-20260911-0003).
+ *
+ * Deliberately narrow: it admits the one person the trail names as having
+ * raised THIS order, not "any MedRep who can see it". Ownership still governs
+ * everything else.
  */
 function canAttach(user, order) {
   if (!user) return false;
   const role = (user.role || '').toLowerCase();
   if (role === 'admin' || role === 'management') return true;
-  return order.medrep_id === user.id;
+  if (order.medrep_id === user.id) return true;
+  return Boolean(order.raised_by_user_id) && order.raised_by_user_id === user.id;
 }
 
 const notFound = (res, message) =>

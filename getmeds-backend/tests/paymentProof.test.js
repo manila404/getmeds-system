@@ -143,6 +143,58 @@ describe('proof of payment', () => {
     expect(proofStorage.createUploadUrl).not.toHaveBeenCalled();
   });
 
+  /**
+   * Sep 11, 2026. The regression behind GM-20260911-0003.
+   *
+   * A MedRep may raise an order for a colleague, which makes `medrep_id` the
+   * COLLEAGUE's. The rep who filled the form in was then a stranger to their
+   * own order the instant the browser tried to upload the file attached to
+   * it: the order saved, the file did not, and the only sign was a red toast.
+   *
+   * The same gap was already closed once for management (Sep 5) and reopened
+   * when the on-behalf flow was extended to reps — which is why it is pinned
+   * here rather than left to the permission function's comment.
+   */
+  describe('an order raised on behalf of a colleague', () => {
+    /** Mirrors what orders.controller.js writes on the submit event. */
+    async function makeOrderRaisedBy(raiserId) {
+      const orderId = await makeOrder();
+      await db
+        .prepare(
+          `INSERT INTO order_events (order_id, event_type, actor_id, notes, metadata)
+           VALUES (?, 'STATUS_CHANGE', ?, 'raised on behalf', ?)`
+        )
+        .run(orderId, ownerId, JSON.stringify({ onBehalfOf: true, raisedByUserId: raiserId }));
+      return orderId;
+    }
+
+    test('the rep who raised it can attach, though they do not own it', async () => {
+      const other = await db
+        .prepare('SELECT id FROM users WHERE email = ?')
+        .get('proof-other-rep@getmeds.ph');
+      const orderId = await makeOrderRaisedBy(other.id);
+
+      const { urlRes, confirmRes } = await attachProof(otherRepToken, orderId);
+
+      expect(urlRes.status).toBe(200);
+      expect(confirmRes.status).toBe(200);
+      expect(proofOf(orderId)).toBeTruthy();
+    });
+
+    test('a rep named by no such trail is still refused', async () => {
+      // Narrowness is the point: admitting the raiser must not become
+      // admitting any rep who happens to be looking at the order.
+      const orderId = await makeOrderRaisedBy(999999);
+
+      const res = await request(app)
+        .post(`/api/orders/${orderId}/payment-proof/upload-url`)
+        .set(auth(otherRepToken))
+        .send(JPEG);
+
+      expect(res.status).toBe(403);
+    });
+  });
+
   test('an admin may attach to any order', async () => {
     const orderId = await makeOrder();
     const res = await request(app)

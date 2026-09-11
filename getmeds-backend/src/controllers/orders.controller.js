@@ -178,7 +178,20 @@ async function resolveOrderMedrep(user, requestedMedrepId) {
   //
   // Anyone else: medrep_id is ignored, not refused — same belt-and-braces
   // reasoning as division/salesperson below.
-  const canSelectMedrep = isManagement || isAdmin;
+  // Sep 11, 2026: a MedRep can raise an order for another MedRep.
+  //
+  // Asked for directly: a rep covering for a colleague — on leave, out on
+  // call, sharing a territory — was otherwise stuck. Their only options were
+  // to raise it under their OWN name, which puts the order and its commission
+  // against the wrong person in Zoho, or to wait.
+  //
+  // It IS an expansion of authority: any rep can now create an order
+  // attributed to any other. What makes that acceptable is that it is not
+  // anonymous — an on-behalf order records raisedByUserId and raisedByName on
+  // its trail (see the metadata below), so "who actually typed this" always
+  // has an answer even though the order belongs to someone else.
+  const isMedrep = (user.role || '').toLowerCase() === 'medrep';
+  const canSelectMedrep = isManagement || isAdmin || isMedrep;
   if (!canSelectMedrep) return { actor: fallback, onBehalf: false };
 
   const target = await db
@@ -431,8 +444,11 @@ exports.getMedreps = async (req, res, next) => {
     // Sep 5, 2026: Management role (production) can pick a medrep.
     // Sep 9, 2026: so can Admin, in normal mode — see resolveOrderMedrep's
     // note for why the TEST_MODE-only restriction stopped making sense once
-    // admin got the order form. Other roles: disabled.
-    const enabled = isManagement || isAdmin;
+    // admin got the order form.
+    // Sep 11, 2026: and a MedRep, so one rep can cover for another. Finance
+    // and Dispatch stay disabled — they work orders, they do not raise them.
+    const isMedrep = (req.user.role || '').toLowerCase() === 'medrep';
+    const enabled = isManagement || isAdmin || isMedrep;
     if (!enabled) {
       return res.json({ success: true, data: { enabled: false, medreps: [], salespersons: [] } });
     }
@@ -455,10 +471,39 @@ exports.getMedreps = async (req, res, next) => {
       const names = await salespersonService.loadNames();
       salespersons = names.map((s) => s.salesperson_name).filter(Boolean);
     } catch (err) {
-      // Zoho unreachable — ship an empty suggestions list rather than fail
-      // the whole picker. Typing still works; create() just won't be able
-      // to confirm it matches until Zoho answers again.
-      salespersons = [];
+      // ── Zoho unreachable: fall back to the local copy ────────────────────
+      //
+      // Sep 11, 2026. This used to ship an empty list, on the reasoning that
+      // "typing still works". It does not any more — the field is a PICKER
+      // now, precisely because Zoho CREATES a Salesperson it does not
+      // recognise rather than rejecting it, so free text quietly adds junk to
+      // the org. An empty picker is simply an unusable field.
+      //
+      // And empty was never necessary: zoho_salespersons holds a copy of the
+      // whole list, refreshed on every successful read (see
+      // services/zohoSalespersonSync.js). Today it holds 198 names while Zoho
+      // itself is rate-limited — exactly the situation the fallback is for.
+      //
+      // Inactive ones are included. They are real Salespersons Zoho already
+      // has, an order may legitimately belong under one, and the alternative
+      // is a rep unable to file an order because the colleague they are
+      // covering for has left.
+      console.warn('[SALESPERSONS] Zoho unreachable, using the local copy:', err.message);
+      try {
+        const rows = await db
+          .prepare(
+            `SELECT name FROM zoho_salespersons
+              WHERE removed_at IS NULL AND TRIM(COALESCE(name, '')) <> ''
+              ORDER BY is_active DESC, name`
+          )
+          .all();
+        salespersons = rows.map((r) => r.name);
+      } catch (dbErr) {
+        // The copy is a convenience, not a guarantee. If it cannot be read
+        // either, the picker is empty and says so on screen.
+        console.error('[SALESPERSONS] local copy unreadable:', dbErr.message);
+        salespersons = [];
+      }
     }
 
     res.json({ success: true, data: { enabled: true, medreps, salespersons } });
@@ -1557,9 +1602,24 @@ exports.create = async (req, res, next) => {
           newStatus: 'pending_management_approval',
           actorId: effectiveActor.id,
           actorName: effectiveActor.name,
-          notes: isMedRepDirectSubmit
-            ? 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
-            : `Submitted by ${req.user.name} — B2B order, waiting for Management approval before syncing to Zoho.`
+          notes: onBehalfOf
+            // Sep 11, 2026: name the person who actually raised it.
+            //
+            // This branch is where a MedRep's order lands — their orders are
+            // force-routed to management approval, so the draft branch above
+            // (which has carried onBehalfOf metadata since Sep 7) never runs
+            // for them. When a rep could only raise their OWN orders that made
+            // no difference. Now that a rep can raise one for a colleague, an
+            // order arriving in the approval queue attributed to someone who
+            // never touched it, with nothing recording who did, is exactly the
+            // thing that makes the feature unsafe.
+            ? `${req.user.name} submitted this order for ${effectiveActor.name} — waiting for Management approval before syncing to Zoho.`
+            : isMedRepDirectSubmit
+              ? 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
+              : `Submitted by ${req.user.name} — B2B order, waiting for Management approval before syncing to Zoho.`,
+          metadata: onBehalfOf
+            ? { onBehalfOf: true, raisedByUserId: req.user.id, raisedByName: req.user.name }
+            : undefined
         });
       } else {
         if (isCredit) {

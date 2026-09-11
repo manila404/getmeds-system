@@ -225,7 +225,9 @@ describe('holding customers Zoho cannot accept yet', () => {
           .set('Authorization', `Bearer ${adminToken}`);
         expect(res.statusCode).toBe(200);
         expect(res.body.data.blocked).toBeTruthy();
-        expect(res.body.data.message).toMatch(/has not been reissued/i);
+        // Reworded when the hold widened beyond "the token needs reissuing" —
+        // a throttle or a dropped connection blocks the push just as well.
+        expect(res.body.data.message).toMatch(/not working yet/i);
       } finally {
         spy.mockRestore();
       }

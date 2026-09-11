@@ -8,12 +8,6 @@ router.use(requireAuth);
 router.use(isAdmin);
 
 // Route to get all users: GET /api/admin/users
-// Sep 11, 2026: the sign-up approval queue, as a number the sidebar can show.
-//
-// Declared ABOVE any '/users/:id' route — Express matches in declaration
-// order, so '/users/pending' below one of those would be read as "the user
-// whose id is pending".
-router.get('/users/pending', adminController.getPendingUsers);
 
 router.get('/users', adminController.getAllUsers);
 

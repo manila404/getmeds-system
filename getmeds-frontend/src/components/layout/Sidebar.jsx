@@ -1,7 +1,5 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
 import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff } from 'lucide-react';
@@ -16,32 +14,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   const role = (user.role || '').toLowerCase();
   const isTestMode = import.meta.env.VITE_TEST_MODE === 'true' || isDebug;
 
-  /**
-   * Sep 11, 2026: how many people are waiting to be let in.
-   *
-   * Sign-up creates an account that cannot log in until an admin approves it,
-   * and the only place that was visible was User Management. So a new rep
-   * waited exactly as long as it took somebody to wander onto a screen an
-   * admin opens once a month -- while the rep, quite reasonably, assumed the
-   * system was broken.
-   *
-   * Polled here rather than shown only on the page, because the entire point
-   * is to be seen by someone who was not going there.
-   */
-  const { data: pending } = useQuery({
-    queryKey: ['admin-pending-users'],
-    queryFn: () => client.get('/api/admin/users/pending').then((r) => r.data?.data),
-    // Only an admin can read it, and asking as anyone else is a guaranteed 403
-    // on a timer.
-    enabled: role === 'admin',
-    refetchInterval: 60_000,
-    // A sidebar badge is not worth an error state. If the request fails the
-    // badge simply does not appear, which is the same as there being nobody
-    // waiting -- wrong, but quietly so, and it recovers on the next poll.
-    retry: false,
-    staleTime: 30_000
-  });
-  const pendingCount = pending?.count || 0;
 
   // Desktop rail helpers - scoped to lg: so the mobile drawer keeps full labels
   const hideWhenCollapsed = isCollapsed ? 'lg:hidden' : '';
@@ -295,14 +267,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                             {link.icon}
                           </span>
                           <span className={`truncate ${hideWhenCollapsed}`}>{link.label}</span>
-                          {link.to === '/admin/users' && pendingCount > 0 && (
-                            <span
-                              title={`${pendingCount} sign-up${pendingCount === 1 ? '' : 's'} waiting for approval`}
-                              className="ml-auto inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-amber-500 text-white text-[11px] font-bold"
-                            >
-                              {pendingCount}
-                            </span>
-                          )}
                         </NavLink>
                       </li>
                     ))}
@@ -336,18 +300,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                         >
                           <span className={`mr-3 ${isCollapsed ? 'lg:mr-0' : ''}`}>{link.icon}</span>
                           <span className={`truncate ${hideWhenCollapsed}`}>{link.label}</span>
-                          {/* Shown even on the collapsed rail: a number is
-                              still legible at 20px, and hiding it there would
-                              mean the one person most likely to be working in
-                              a narrow window never sees it. */}
-                          {link.to === '/admin/users' && pendingCount > 0 && (
-                            <span
-                              title={`${pendingCount} sign-up${pendingCount === 1 ? '' : 's'} waiting for approval`}
-                              className="ml-auto inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-amber-500 text-white text-[11px] font-bold"
-                            >
-                              {pendingCount}
-                            </span>
-                          )}
                         </NavLink>
                       </li>
                     ))}

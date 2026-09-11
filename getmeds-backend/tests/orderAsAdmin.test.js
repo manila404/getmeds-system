@@ -142,10 +142,17 @@ describe('Admin raising an order', () => {
       expect(res.body.error.message).toMatch(/division must be one of/);
     });
 
-    test('a MedRep still cannot override their own Division or Salesperson', async () => {
-      // Widening this to admin must not have widened it to everyone — a
-      // MedRep's two values still come from their account, and a stray field
-      // from an old client is ignored rather than honoured.
+    test('a MedRep cannot claim a Salesperson that is not theirs', async () => {
+      // Sep 11, 2026: the contract changed with multi-Salesperson accounts.
+      //
+      // It used to be "a MedRep's Salesperson comes from their account, and a
+      // stray field from an old client is ignored". Now an account can hold
+      // several and the rep PICKS one per order — so the field is read rather
+      // than discarded, and the check is that the pick is one of theirs.
+      //
+      // Rejecting is the better of the two: silently ignoring a named
+      // Salesperson meant an order could go to Zoho under a different name
+      // than the one the form showed, with nothing to indicate it.
       const login = await request(app).post('/api/auth/login').send({ email: 'medrep@getmeds.ph', password: 'demo123' });
       const res = await request(app)
         .post('/api/orders')
@@ -157,6 +164,29 @@ describe('Admin raising an order', () => {
           is_draft: true,
           division: 'HOS',
           salesperson: 'SOMEONE | Else'
+        });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error.message).toMatch(/not one of this account's Salespersons/i);
+    });
+
+    test('a MedRep CAN pick one their account actually holds', async () => {
+      // The other half: the rejection above must be about ownership, not about
+      // MedReps being forbidden to choose at all.
+      const login = await request(app).post('/api/auth/login').send({ email: 'medrep@getmeds.ph', password: 'demo123' });
+      const own = await db
+        .prepare("SELECT salesperson FROM users WHERE email = 'medrep@getmeds.ph'")
+        .get();
+
+      const res = await request(app)
+        .post('/api/orders')
+        .set('Authorization', `Bearer ${login.body.data.token}`)
+        .send({
+          customer_id: customer.id,
+          items: [{ product_id: product.id, quantity: 1, rate: 25 }],
+          delivery_address: '1 MedRep St',
+          is_draft: true,
+          salesperson: own.salesperson
         });
 
       expect(res.statusCode).toBe(201);
@@ -173,5 +203,116 @@ describe('Admin raising an order', () => {
     const res = await createAsAdmin({ medrep_id: medrep.id });
     const saved = await db.prepare('SELECT gm_lead_id FROM orders WHERE id = ?').get(res.body.data.order.id);
     expect(saved.gm_lead_id).toBeTruthy();
+  });
+
+  /**
+   * Sep 11, 2026: a MedRep raising an order for another MedRep.
+   *
+   * Asked for directly — a rep covering for a colleague on leave, out on call,
+   * or sharing a territory. Before this their only options were to raise it
+   * under their OWN name, which puts the order and its commission against the
+   * wrong person in Zoho, or to wait.
+   *
+   * It is a real widening of authority: any rep can now create an order
+   * attributed to any other. The assertions below are about what makes that
+   * acceptable — the order belongs to the colleague, and the trail still says
+   * who actually typed it.
+   */
+  describe('a MedRep raising an order for another MedRep', () => {
+    let me;
+    let colleague;
+
+    beforeAll(async () => {
+      me = await db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get();
+      colleague = await db
+        .prepare("SELECT id, name, salesperson FROM users WHERE role = 'medrep' AND id <> ? AND is_active = 1 LIMIT 1")
+        .get(me.id);
+    });
+
+    const asMedrep = async (body) => {
+      const login = await request(app).post('/api/auth/login').send({ email: 'medrep@getmeds.ph', password: 'demo123' });
+      return request(app)
+        .post('/api/orders')
+        .set('Authorization', `Bearer ${login.body.data.token}`)
+        .send(body);
+    };
+
+    test('the picker is offered to a MedRep at all', async () => {
+      const login = await request(app).post('/api/auth/login').send({ email: 'medrep@getmeds.ph', password: 'demo123' });
+      const res = await request(app)
+        .get('/api/orders/meta/medreps')
+        .set('Authorization', `Bearer ${login.body.data.token}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.body.data.enabled).toBe(true);
+      expect(res.body.data.medreps.length).toBeGreaterThan(0);
+    });
+
+    test('the order belongs to the COLLEAGUE, not the rep who typed it', async () => {
+      if (!colleague) return;
+      const res = await asMedrep({
+        customer_id: customer.id,
+        items: [{ product_id: product.id, quantity: 1, rate: 25 }],
+        delivery_address: '1 Cover St',
+        is_draft: true,
+        medrep_id: colleague.id
+      });
+
+      expect(res.statusCode).toBe(201);
+      createdOrderIds.push(res.body.data.order.id);
+
+      const saved = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(res.body.data.order.id);
+      expect(saved.medrep_id).toBe(colleague.id);
+      expect(saved.medrep_id).not.toBe(me.id);
+    });
+
+    test('the trail records who actually raised it', async () => {
+      // The whole safety argument. An order attributed to someone else with no
+      // record of who created it is untraceable by design.
+      if (!colleague) return;
+      const res = await asMedrep({
+        customer_id: customer.id,
+        items: [{ product_id: product.id, quantity: 1, rate: 25 }],
+        delivery_address: '1 Cover St',
+        is_draft: true,
+        medrep_id: colleague.id
+      });
+      expect(res.statusCode).toBe(201);
+      createdOrderIds.push(res.body.data.order.id);
+
+      const events = await db
+        .prepare('SELECT metadata FROM order_events WHERE order_id = ? AND metadata IS NOT NULL')
+        .all(res.body.data.order.id);
+      const onBehalf = events
+        .map((e) => { try { return JSON.parse(e.metadata); } catch { return null; } })
+        .find((m) => m && m.onBehalfOf);
+
+      expect(onBehalf).toBeTruthy();
+      expect(onBehalf.raisedByUserId).toBe(me.id);
+    });
+
+    test('no medrep_id still means the order is their own', async () => {
+      const res = await asMedrep({
+        customer_id: customer.id,
+        items: [{ product_id: product.id, quantity: 1, rate: 25 }],
+        delivery_address: '1 Own St',
+        is_draft: true
+      });
+      expect(res.statusCode).toBe(201);
+      createdOrderIds.push(res.body.data.order.id);
+
+      const saved = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(res.body.data.order.id);
+      expect(saved.medrep_id).toBe(me.id);
+    });
+
+    test('finance still cannot raise an order for somebody else', async () => {
+      // Widening this to MedReps must not have widened it to every role.
+      const login = await request(app).post('/api/auth/login').send({ email: 'finance@getmeds.ph', password: 'demo123' });
+      if (!login.body?.data?.token) return;
+      const res = await request(app)
+        .get('/api/orders/meta/medreps')
+        .set('Authorization', `Bearer ${login.body.data.token}`);
+      expect(res.body.data.enabled).toBe(false);
+      expect(res.body.data.medreps).toEqual([]);
+    });
   });
 });
