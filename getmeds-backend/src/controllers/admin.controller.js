@@ -5,6 +5,8 @@ const zohoRetryService = require('../services/zohoRetryService');
 const zoho = require('../integrations/zoho');
 // Sep 11, 2026: an account's full Salesperson list (user_salespersons).
 const salespersonService = require('../services/salespersonService');
+// Sep 11, 2026: the live copy of Zoho's Salesperson list, keyed by Zoho's id.
+const zohoSalespersonSync = require('../services/zohoSalespersonSync');
 // Sep 9, 2026: reuse the same Division/Sub-division enums Profile Settings
 // enforces — see auth.controller.js's DIVISIONS comment for why this is an
 // enum (a free-typed division created junk Salespersons in the live Zoho org
@@ -235,11 +237,14 @@ const create = async (req, res, next) => {
  * list" apart from "could not check" — those deserve different answers.
  */
 let salespersonCache = { at: 0, names: null, list: [] };
-const SALESPERSON_CACHE_MS = 5 * 60 * 1000;
+// Sep 11, 2026: 30 seconds, down from 5 minutes, so a Salesperson added or
+// renamed in Zoho reaches this picker within the minute. `force` (the
+// Refresh button) skips the cache entirely.
+const SALESPERSON_CACHE_MS = 30 * 1000;
 
-async function loadZohoSalespersons() {
+async function loadZohoSalespersons({ force = false } = {}) {
   const now = Date.now();
-  if (salespersonCache.names && now - salespersonCache.at < SALESPERSON_CACHE_MS) {
+  if (!force && salespersonCache.names && now - salespersonCache.at < SALESPERSON_CACHE_MS) {
     return salespersonCache;
   }
   try {
@@ -260,6 +265,15 @@ async function loadZohoSalespersons() {
       .filter((s) => s.name)
       .sort((a, b) => a.name.localeCompare(b.name));
     salespersonCache = { at: now, names: new Set(list.map((n) => n.name.toLowerCase())), list };
+
+    // Sep 11, 2026: keep the live copy (and any renames it carries) in step
+    // with what this picker is about to show. Best-effort, like the order
+    // form's read in salespersonService.
+    try {
+      await zohoSalespersonSync.syncFromList(res?.salespersons || []);
+    } catch (syncErr) {
+      console.warn('[ADMIN] could not refresh the Zoho Salesperson copy:', syncErr.message);
+    }
   } catch (err) {
     console.error('[ADMIN] could not read Zoho salespersons:', err.message);
     // Deliberately not cached: a failure should be retried on the next
@@ -321,7 +335,8 @@ async function checkSalespersons(names) {
  */
 const getSalespersons = async (req, res, next) => {
   try {
-    const { names, list } = await loadZohoSalespersons();
+    // ?refresh=true is the Users page's "Refresh from Zoho" button.
+    const { names, list } = await loadZohoSalespersons({ force: req.query.refresh === 'true' });
     if (!names) {
       return res.status(503).json({
         success: false,
@@ -366,7 +381,10 @@ const getSalespersons = async (req, res, next) => {
         // So the screen can say "and 97 more who have left" rather than making
         // someone count what the filter removed.
         active_count: list.filter((sp) => sp.is_active).length,
-        inactive_count: list.filter((sp) => !sp.is_active).length
+        inactive_count: list.filter((sp) => !sp.is_active).length,
+        // Sep 11, 2026: when the list was last synced from Zoho, and what has
+        // changed in it lately (added / renamed / deactivated / removed).
+        sync: await zohoSalespersonSync.status().catch(() => null)
       }
     });
   } catch (err) {

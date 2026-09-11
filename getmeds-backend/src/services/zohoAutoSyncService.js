@@ -1,5 +1,7 @@
 const db = require('../db/database');
 const { reconcileOrderFully } = require('./zohoReconcileService');
+// Sep 11, 2026: the live copy of Zoho's Salesperson list.
+const zohoSalespersonSync = require('./zohoSalespersonSync');
 
 /**
  * Keeps the audit trail current without anyone pressing a button.
@@ -168,6 +170,22 @@ async function reconcileOne(order, source) {
 
 /** One pass over a batch. Never throws — a bad order must not stop the rest. */
 async function runOnce({ limit = BATCH_SIZE, source = 'auto_sync' } = {}) {
+  // Sep 11, 2026: Zoho's Salesperson list first — one read per tick. It goes
+  // BEFORE the orders so a rename is carried to every stored copy of the old
+  // name before any order is compared against Zoho; otherwise each order
+  // reconciled in the same tick would log the rename as a Salesperson edit.
+  try {
+    const summary = await zohoSalespersonSync.refresh();
+    const changed = summary && ['added', 'renamed', 'deactivated', 'reactivated', 'removed', 'restored']
+      .filter((k) => summary[k]).map((k) => `${summary[k]} ${k}`);
+    if (changed && changed.length && !summary.first_run) {
+      console.log(`[ZOHO_AUTO_SYNC] Salesperson list: ${changed.join(', ')}`);
+      require('./salespersonService').clearCache();
+    }
+  } catch (err) {
+    console.warn('[ZOHO_AUTO_SYNC] Salesperson list refresh failed:', err.message);
+  }
+
   const orders = await pickBatch(limit);
   const results = [];
   for (const order of orders) {

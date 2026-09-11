@@ -50,6 +50,11 @@ const UsersPage = () => {
   // legitimate: correcting a historical record, or a rep coming back.
   const [showInactive, setShowInactive] = useState(false);
   const [salespersonCounts, setSalespersonCounts] = useState({ active: 0, inactive: 0 });
+  // Sep 11, 2026: when Zoho's Salesperson list was last synced, and what
+  // changed in it lately -- a rename in Zoho is carried to every account and
+  // order holding the old name, and this is where an admin sees that happen.
+  const [salespersonSync, setSalespersonSync] = useState(null);
+  const [refreshingSalespersons, setRefreshingSalespersons] = useState(false);
 
   // Fetch users on component mount
   useEffect(() => {
@@ -57,10 +62,16 @@ const UsersPage = () => {
     fetchSalespersons();
   }, []);
 
-  const fetchSalespersons = async () => {
+  const fetchSalespersons = async (refresh = false) => {
+    if (refresh) setRefreshingSalespersons(true);
     try {
-      const res = await client.get('/api/admin/salespersons');
+      const res = await client.get('/api/admin/salespersons', {
+        params: refresh ? { refresh: 'true' } : undefined
+      });
       setSalespersons(res.data?.data?.salespersons || []);
+      setSalespersonSync(res.data?.data?.sync || null);
+      // A rename may have rewritten Salespersons on accounts in this table.
+      if (refresh) await fetchUsers();
       setSalespersonCounts({
         active: res.data?.data?.active_count || 0,
         inactive: res.data?.data?.inactive_count || 0
@@ -73,6 +84,20 @@ const UsersPage = () => {
       setSalespersonError(
         err.response?.data?.error?.message || 'Could not load the Zoho Salesperson list.'
       );
+    } finally {
+      setRefreshingSalespersons(false);
+    }
+  };
+
+  const describeChange = (c) => {
+    switch (c.change) {
+      case 'renamed': return `Renamed: ${c.old_value} → ${c.new_value}${c.propagated ? ` (updated ${c.propagated} stored cop${c.propagated === 1 ? 'y' : 'ies'})` : ''}`;
+      case 'added': return `Added: ${c.new_value}`;
+      case 'removed': return `Removed from Zoho: ${c.old_value}`;
+      case 'restored': return `Back in Zoho: ${c.new_value}`;
+      case 'deactivated': return `Marked inactive: ${c.new_value}`;
+      case 'reactivated': return `Active again: ${c.new_value}`;
+      default: return `${c.change}: ${c.new_value || c.old_value}`;
     }
   };
 
@@ -269,6 +294,36 @@ const UsersPage = () => {
           <p className="text-sm text-ink-secondary mt-1">
             Create accounts, assign Zoho Salespersons, and manage who can sign in.
           </p>
+          <p className="text-xs text-ink-secondary mt-1">
+            Zoho Salesperson list{' '}
+            {salespersonSync?.synced_at
+              ? `synced ${new Date(salespersonSync.synced_at).toLocaleString()}`
+              : 'not synced yet'}
+            {' · '}
+            <button
+              type="button"
+              onClick={() => fetchSalespersons(true)}
+              disabled={refreshingSalespersons}
+              className="font-semibold text-getmeds-blue hover:text-getmeds-blue-dark disabled:opacity-50"
+            >
+              {refreshingSalespersons ? 'Refreshing…' : 'Refresh from Zoho'}
+            </button>
+          </p>
+          {salespersonSync?.changes?.length > 0 && (
+            <details className="mt-1 text-xs text-ink-secondary">
+              <summary className="cursor-pointer select-none">
+                Recent changes in Zoho ({salespersonSync.changes.length})
+              </summary>
+              <ul className="mt-1 space-y-0.5 pl-4 list-disc">
+                {salespersonSync.changes.map((c, i) => (
+                  <li key={i}>
+                    {describeChange(c)}
+                    <span className="text-ink-secondary/70"> — {new Date(c.detected_at).toLocaleString()}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button

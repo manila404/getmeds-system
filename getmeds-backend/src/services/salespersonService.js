@@ -1,6 +1,8 @@
 const db = require('../db/database');
 const zoho = require('../integrations/zoho');
 const { normalize, findSalesperson } = require('../integrations/zoho/salespersonName');
+// Sep 11, 2026: the live copy of Zoho's list, keyed by Zoho's id.
+const zohoSalespersonSync = require('./zohoSalespersonSync');
 
 /**
  * The MedRep -> Zoho Salesperson mapping, and the check that it is real.
@@ -85,6 +87,16 @@ async function loadNames({ force = false } = {}) {
   // reported a name as present while the adapter could not resolve its id
   // would be worse than no check.
   const names = (result.salespersons || []).filter((s) => s && (s.salesperson_name || '').trim());
+
+  // Sep 11, 2026: every fresh read also refreshes the live copy of Zoho's
+  // list (zoho_salespersons), so a rename or a new Salesperson is picked up
+  // the next time anybody opens a form — not only on the 5-minute tick.
+  // Best-effort: the order form must never fail because this bookkeeping did.
+  try {
+    await zohoSalespersonSync.syncFromList(result.salespersons || []);
+  } catch (err) {
+    console.warn('[SALESPERSONS] could not refresh the Zoho Salesperson copy:', err.message);
+  }
 
   cache = { names, fetchedAt: Date.now() };
   return names;
