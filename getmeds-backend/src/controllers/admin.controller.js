@@ -9,6 +9,50 @@ const zoho = require('../integrations/zoho');
 // junk Salespersons in the live Zoho org before Sep 5).
 const { DIVISIONS, SUB_DIVISIONS_BY_DIVISION } = require('./auth.controller');
 
+/**
+ * GET /api/admin/users/pending — who is waiting to be let in.
+ *
+ * Sep 11, 2026. Sign-up creates an account that cannot log in until an admin
+ * approves it, and until now the only way to discover one was to open User
+ * Management and look. So a new rep waited exactly as long as it took somebody
+ * to wander onto that page — which, on a screen an admin visits once a month,
+ * could be days, with the rep assuming the system was broken.
+ *
+ * Deliberately small and cheap: a count and a short list, no pagination, no
+ * joins. It is polled from the sidebar on a timer, so it has to stay something
+ * that can run every minute without anyone thinking about it.
+ */
+const getPendingUsers = async (req, res, next) => {
+  try {
+    const pending = await db
+      .prepare(
+        `SELECT id, name, email, role, created_at
+           FROM users
+          WHERE approval_status = 'pending'
+          -- Newest first: "who just signed up" is the question being asked,
+          -- and an admin working the queue wants the person still waiting on
+          -- the page in front of them.
+          ORDER BY created_at DESC
+          LIMIT 20`
+      )
+      .all();
+
+    res.json({
+      success: true,
+      data: {
+        count: pending.length,
+        users: pending.map((u) => ({
+          ...u,
+          display_name: u.name,
+          username: u.email ? u.email.split('@')[0] : `user_${u.id}`
+        }))
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // Get all users with their roles
 const getAllUsers = async (req, res, next) => {
   try {
@@ -483,6 +527,7 @@ module.exports = {
   create,
   update,
   getSalespersons,
+  getPendingUsers,
   getZohoQueue,
   retryZohoQueue
 };

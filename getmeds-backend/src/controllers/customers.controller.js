@@ -4,6 +4,7 @@ const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFl
 const syncJobs = require('../services/syncJobs');
 const { getSyncState, setSyncState } = require('../services/syncState');
 const { setCustomerTin } = require('../services/customerTinService');
+const customerCreate = require('../services/customerCreateService');
 
 // Purely local classification tag for the Clients Directory (Aug 27, 2026).
 // Kept strictly separate from `type` (credit/direct), which continues to
@@ -637,7 +638,208 @@ async function getZohoAddress(req, res, next) {
   } catch (err) { next(err); }
 }
 
+/**
+ * POST /api/customers — create a customer that does not exist yet.
+ *
+ * Sep 11, 2026. Reachable by a MedRep, deliberately: the whole point is a rep
+ * mid-order with a customer Zoho has never seen, and routing that through
+ * somebody with Zoho access is the delay this removes. It is also the only
+ * write to a Zoho CONTACT this app can make (see ZohoAdapter.js's Sep 11
+ * note), so the create is narrow and the duplicate check happens first.
+ *
+ * A likely duplicate answers 409 with the existing customer attached, NOT an
+ * error message. Nothing went wrong -- the customer already exists, and what
+ * the rep needs is to pick it and carry on.
+ */
+const createCustomer = async (req, res, next) => {
+  try {
+    const result = await customerCreate.createCustomer(req.body, req.user);
+
+    if (!result.created) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'CUSTOMER_EXISTS',
+          message:
+            result.duplicates.length === 1
+              ? 'This customer already exists. Select the existing one instead of creating a second.'
+              : 'Customers with these details already exist. Select one instead of creating another.',
+          duplicates: result.duplicates
+        }
+      });
+    }
+
+    // A HELD customer is a success, not a failure — the rep's work is saved and
+    // the order can continue. It is flagged so the UI can say what is still
+    // outstanding rather than implying the customer is fully set up.
+    res.status(201).json({
+      success: true,
+      data: {
+        customer: result.customer,
+        held: !!result.held,
+        message: result.held
+          ? 'Saved here. This customer is not in Zoho yet — an admin will push them once the ' +
+            'Zoho connection is fixed. Orders for them can be raised and approved in the meantime.'
+          : null
+      }
+    });
+  } catch (err) {
+    if (err.code === 'VALIDATION_ERROR') {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: err.message, problems: err.problems }
+      });
+    }
+    if (err.code === 'ZOHO_SCOPE_MISSING') {
+      // 502 as well: the request was fine and the upstream refused it. Kept as
+      // its own code so the UI can say "this needs an admin", not "try again".
+      return res.status(502).json({
+        success: false,
+        error: { code: 'ZOHO_SCOPE_MISSING', message: err.message }
+      });
+    }
+    if (err.code === 'ZOHO_REFUSED') {
+      // 502, not 400: the request was fine, the upstream refused it. A 400
+      // would send a rep back to re-read their own form for a fault that is
+      // not there.
+      return res.status(502).json({
+        success: false,
+        error: { code: 'ZOHO_REFUSED', message: err.message }
+      });
+    }
+    next(err);
+  }
+};
+
+/**
+ * GET /api/customers/pending — customers waiting to reach Zoho.
+ *
+ * Sep 11, 2026. Admin/management only. A held customer is a promise somebody
+ * has to honour, so it needs somewhere to be visible rather than living in a
+ * column nobody queries.
+ */
+const listPendingCustomers = async (req, res, next) => {
+  try {
+    const rows = await customerCreate.listHeldCustomers();
+    res.json({
+      success: true,
+      data: {
+        customers: rows,
+        pending: rows.filter((r) => r.zoho_sync_status === 'pending').length,
+        failed: rows.filter((r) => r.zoho_sync_status === 'failed').length
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/customers/pending/sync — push held customers to Zoho.
+ *
+ * Deliberately a button and not a timer. These are held because an OAuth scope
+ * is missing, and a background retry would generate thousands of guaranteed
+ * failures until somebody reissues the token.
+ *
+ * Stops at the first still-blocked answer. If the scope is still missing, the
+ * second attempt fails exactly like the first, and reporting "47 failed" is
+ * noise around a single fact.
+ */
+const syncPendingCustomers = async (req, res, next) => {
+  try {
+    const rows = await customerCreate.listHeldCustomers();
+    const pending = rows.filter((r) => r.zoho_sync_status === 'pending');
+
+    const results = { synced: [], failed: [], blocked: null };
+    for (const row of pending) {
+      const out = await customerCreate.syncHeldCustomer(row.id);
+      if (out.ok) {
+        results.synced.push({ id: row.id, name: row.name, zoho_contact_id: out.zoho_contact_id });
+        continue;
+      }
+      if (out.stillBlocked) {
+        results.blocked = out.reason;
+        break;
+      }
+      results.failed.push({ id: row.id, name: row.name, reason: out.reason });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        ...results,
+        remaining: pending.length - results.synced.length - results.failed.length,
+        // Sep 11, 2026: "0 pushed" is not a success, and reporting it as one is
+        // how an admin concludes the queue is working while nothing moves.
+        ok: !results.blocked && results.failed.length === 0,
+        message: results.blocked
+          ? 'Zoho still will not accept new customers — the connection is not working yet. ' +
+            'Nothing was lost; they stay queued.'
+          : results.failed.length
+            ? `${results.synced.length} pushed, ${results.failed.length} refused by Zoho — see "Needs attention" below.`
+            : results.synced.length
+              ? `${results.synced.length} customer(s) pushed to Zoho.`
+              : 'Nothing to push.'
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/customers/:id/retry — put a 'failed' customer back in the queue.
+ *
+ * Sep 11, 2026. 'failed' is meant for a refusal that will not fix itself, but
+ * a customer can land there wrongly — this endpoint exists because one did:
+ * while syncHeldCustomer still had its own narrower idea of "unreachable", a
+ * push attempted during a token outage marked the customer as needing
+ * attention rather than leaving it waiting.
+ *
+ * Without a way back, the only remedies were SQL or re-typing the customer.
+ */
+const retryPendingCustomer = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const row = await db
+      .prepare("SELECT id, name, zoho_pending_payload FROM customers WHERE id = ? AND zoho_sync_status = 'failed'")
+      .get(id);
+
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'No customer is marked as needing attention with that id.' }
+      });
+    }
+    // The payload is what a later push replays. Without it there is nothing to
+    // retry, and pretending otherwise just moves the row between two states.
+    if (!row.zoho_pending_payload) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'NO_PAYLOAD',
+          message:
+            'This customer has no stored Zoho payload, so it cannot be pushed automatically. ' +
+            'Create it directly in Zoho and re-sync customers.'
+        }
+      });
+    }
+
+    await db
+      .prepare("UPDATE customers SET zoho_sync_status = 'pending', zoho_sync_error = NULL WHERE id = ?")
+      .run(id);
+
+    res.json({ success: true, data: { id, name: row.name, message: `${row.name} is queued again.` } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
+  createCustomer,
+  retryPendingCustomer,
+  listPendingCustomers,
+  syncPendingCustomers,
   getCustomersOverview,
   syncFromZoho,
   startSyncJob,

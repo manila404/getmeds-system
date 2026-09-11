@@ -258,6 +258,64 @@ class MockZohoAdapter extends ZohoAdapter {
   // requested mode. Still calls `opts.onPage` once so a job started against
   // mock mode reports SOME progress instead of jumping straight from 0% to
   // done with nothing in between.
+  /**
+   * Create a contact, exactly as far as the mock can. Mirrors
+   * LiveZohoAdapter.createContact's contract so the create path can be
+   * exercised end to end without touching a real org.
+   *
+   * It also enforces the two rules the LIVE org enforces, because those are
+   * what the calling code has to handle and a mock that accepts everything
+   * would let both bugs through:
+   *
+   *   - cf_contact_number is mandatory
+   *   - cf_lto_license_number is UNIQUE across contacts
+   */
+  async createContact(customer) {
+    const c = customer || {};
+    const displayName = String(c.display_name || '').trim();
+    if (!displayName) throw new Error('createContact requires a display_name');
+    const contactNumber = String(c.contact_number || '').trim();
+    if (!contactNumber) throw new Error('createContact requires a contact_number');
+
+    const lto = String(c.lto_license_number || '').trim();
+    if (lto) {
+      const clash = [...this._contacts.values()].find(
+        (x) => String(x.cf_lto_license_number || '').trim().toLowerCase() === lto.toLowerCase()
+      );
+      if (clash) {
+        // Shaped like Zoho's own duplicate complaint, so the caller's
+        // handling is tested against something realistic.
+        const err = new Error('The LTO License Number you have entered already exists.');
+        err.zohoCode = 2;
+        throw err;
+      }
+    }
+
+    const contact_id = `MOCK-CONTACT-${this._contacts.size + 1}-${Date.now()}`;
+    const contact = {
+      contact_id,
+      contact_name: displayName,
+      company_name: c.company_name || '',
+      email: c.email || '',
+      phone: c.phone || '',
+      customer_sub_type: c.customer_sub_type === 'individual' ? 'individual' : 'business',
+      contact_type: 'customer',
+      billing_address: c.billing_address || {},
+      shipping_address: c.shipping_address || c.billing_address || {},
+      cf_license_owner: c.license_owner || '',
+      cf_lto_license_number: lto,
+      cf_lto_type: c.lto_type || '',
+      cf_license_issuance_date: c.license_issuance_date || '',
+      cf_license_expiry_date: c.license_expiry_date || '',
+      cf_is_doctor: !!c.is_doctor,
+      cf_contact_number: contactNumber,
+      cf_tin: c.tin || ''
+    };
+    this._contacts.set(contact_id, contact);
+    this._log(`[ZOHO_MOCK] Would POST /contacts: ${displayName}`);
+    return { code: 0, message: 'Contact created successfully', contact };
+  }
+
   async listContacts(params = {}, opts = {}) {
     const contacts = [...this._contacts.values()];
     if (opts.onPage) {

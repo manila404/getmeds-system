@@ -3,8 +3,66 @@ import client from '../../api/client';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import ErrorMessage from '../../components/ui/ErrorMessage';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
-import { Users, UserX, RefreshCw, Shield, Check, UserCheck, Ban, Clock, Briefcase, AlertTriangle } from 'lucide-react';
+import SalespersonCombo from '../../components/admin/SalespersonCombo';
+import { Users, UserX, RefreshCw, Shield, Check, UserCheck, Ban, Clock, Briefcase, AlertTriangle, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import toast from 'react-hot-toast';
+
+/**
+ * Sep 11, 2026: the order roles sort in.
+ *
+ * By privilege, not alphabetically. This screen calls itself "View, audit, and
+ * manage" — the accounts worth looking at first are the ones that can do the
+ * most, and an alphabetical sort buries Admin between Dispatch and Finance for
+ * no reason anybody cares about.
+ *
+ * Anything not listed sorts last rather than first, so a role added to the
+ * system later shows up somewhere obvious instead of silently displacing
+ * admins from the top.
+ */
+/**
+ * Sep 11, 2026: hoisted out of the component.
+ *
+ * It used to be declared near the bottom, which was fine while it was only
+ * called from JSX. The sort below calls it from a useMemo — and a useMemo
+ * factory runs DURING render, at the line it appears on, not later like an
+ * event handler. Left where it was, the first click on a column header threw
+ * "Cannot access 'getUserDisplayName' before initialization": the build was
+ * clean, the page loaded fine, and it broke only on the one interaction.
+ *
+ * It needs no component state, so module scope removes the hazard rather than
+ * relying on nobody reordering the file.
+ */
+const getUserDisplayName = (user) => {
+  if (user.first_name || user.last_name) {
+    return `${user.first_name || ''} ${user.last_name || ''}`.trim();
+  }
+  return user.name || '—';
+};
+
+/**
+ * How long ago, in the roughest useful terms.
+ *
+ * "3 hours ago" is what makes a queue feel urgent or stale; an ISO timestamp
+ * makes the reader do that arithmetic themselves and most will not bother.
+ */
+const timeAgo = (iso) => {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+};
+
+const ROLE_RANK = { admin: 0, management: 1, finance: 2, dispatch: 3, medrep: 4 };
+const rankOf = (user) => {
+  const r = (user.role || user.role_name || '').toLowerCase();
+  return r in ROLE_RANK ? ROLE_RANK[r] : 99;
+};
 
 const roleBadgeColors = {
   admin: 'bg-purple-100 text-purple-800 border-purple-200',
@@ -43,6 +101,24 @@ const UsersPage = () => {
   const [showInactive, setShowInactive] = useState(false);
   const [salespersonCounts, setSalespersonCounts] = useState({ active: 0, inactive: 0 });
 
+  // Sep 11, 2026: sorting, with the approval queue preserved.
+  //
+  // `null` means the server's own order, which is NOT arbitrary: pending
+  // sign-ups first, then by name. That ordering is a queue — a list that
+  // buries three people waiting on an admin among eighty alphabetised names is
+  // a queue nobody works — so it stays the default, and sorting is something
+  // you opt into by clicking a column.
+  const [sort, setSort] = useState(null);
+
+  const toggleSort = (key) =>
+    setSort((current) => {
+      if (current?.key !== key) return { key, dir: 'asc' };
+      // asc -> desc -> back to the queue. The third click is the way out;
+      // without it, clicking a header once is a one-way door.
+      if (current.dir === 'asc') return { key, dir: 'desc' };
+      return null;
+    });
+
   // Fetch users on component mount
   useEffect(() => {
     fetchUsers();
@@ -66,6 +142,89 @@ const UsersPage = () => {
         err.response?.data?.error?.message || 'Could not load the Zoho Salesperson list.'
       );
     }
+  };
+
+  /**
+   * Who is waiting to be let in, newest first.
+   *
+   * Derived from the rows already fetched rather than a second request: the
+   * list is right here, and a separate call could disagree with the table
+   * directly underneath it.
+   */
+  const awaitingApproval = React.useMemo(
+    () =>
+      users
+        .filter((u) => u.approval_status === 'pending')
+        .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)),
+    [users]
+  );
+
+  /**
+   * The rows as displayed.
+   *
+   * Sorted in the browser rather than by refetching: the whole list is already
+   * here, and a round trip per header click would make a sort feel like a page
+   * load for no gain at this size.
+   */
+  const sortedUsers = React.useMemo(() => {
+    if (!sort) return users;
+
+    const value = (u) => {
+      switch (sort.key) {
+        case 'role':
+          return rankOf(u);
+        case 'name':
+          return (getUserDisplayName(u) || '').toLowerCase();
+        case 'salesperson':
+          // Unassigned sorts last in both directions rather than clumping at
+          // whichever end empty strings happen to land — "not set yet" is not
+          // a value, and it is the thing being looked for.
+          return (u.salesperson || '').toLowerCase();
+        case 'status':
+          return u.approval_status === 'pending' ? 0 : u.approval_status === 'rejected' ? 1 : (u.is_active === 1 || u.is_active === true) ? 2 : 3;
+        default:
+          return 0;
+      }
+    };
+
+    const dir = sort.dir === 'desc' ? -1 : 1;
+    return [...users].sort((a, b) => {
+      const av = value(a);
+      const bv = value(b);
+      if (sort.key === 'salesperson') {
+        if (!av && bv) return 1;
+        if (av && !bv) return -1;
+      }
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      // A stable tie-break, so equal roles do not shuffle between renders.
+      return (getUserDisplayName(a) || '').localeCompare(getUserDisplayName(b) || '');
+    });
+  }, [users, sort]);
+
+  /** A column heading you can click. */
+  const SortableHeader = ({ label, sortKey, align = 'left' }) => {
+    const active = sort?.key === sortKey;
+    const Icon = !active ? ArrowUpDown : sort.dir === 'asc' ? ArrowUp : ArrowDown;
+    return (
+      <th scope="col" className={`px-6 py-3 text-${align} text-[13px] font-semibold text-white`}>
+        <button
+          type="button"
+          onClick={() => toggleSort(sortKey)}
+          title={
+            active
+              ? sort.dir === 'asc'
+                ? `Sorted by ${label} — click for reverse`
+                : `Sorted by ${label} — click to clear`
+              : `Sort by ${label}`
+          }
+          className="inline-flex items-center gap-1.5 font-semibold hover:text-white/80 transition-colors"
+        >
+          {label}
+          <Icon className={`w-3.5 h-3.5 ${active ? 'opacity-100' : 'opacity-50'}`} />
+        </button>
+      </th>
+    );
   };
 
   /**
@@ -194,14 +353,6 @@ const UsersPage = () => {
     }
   };
 
-  // Helper to format user display name
-  const getUserDisplayName = (user) => {
-    if (user.first_name || user.last_name) {
-      return `${user.first_name || ''} ${user.last_name || ''}`.trim();
-    }
-    return user.name || '—';
-  };
-
   // Helper to format username
   const getUsername = (user) => {
     if (user.username) return user.username;
@@ -240,6 +391,46 @@ const UsersPage = () => {
       {/* Error state */}
       {error && <ErrorMessage message={error} />}
 
+      {/* Sep 11, 2026: the approval queue, said out loud.
+          The table already sorts pending accounts first and badges them
+          "Awaiting approval", which is enough once you are looking at the
+          right row. This is for the moment before that -- landing on a page of
+          eleven accounts and not registering that two of them are people
+          unable to log in. It names them and says how long they have waited,
+          because "signed up 3 days ago" reads differently from "signed up 4
+          minutes ago" and the row badge says neither. */}
+      {!loading && awaitingApproval.length > 0 && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+          <div className="flex items-start gap-2.5">
+            <Clock className="w-4 h-4 mt-0.5 shrink-0 text-amber-700" />
+            <div className="min-w-0">
+              <p className="text-[13px] font-semibold text-amber-900">
+                {awaitingApproval.length} sign-up{awaitingApproval.length === 1 ? '' : 's'} waiting for approval
+              </p>
+              <ul className="mt-1 space-y-0.5">
+                {awaitingApproval.slice(0, 5).map((u) => (
+                  <li key={u.id} className="text-[13px] text-amber-900/90">
+                    <span className="font-medium">{getUserDisplayName(u)}</span>
+                    <span className="text-amber-900/70"> · {u.email}</span>
+                    {u.created_at && (
+                      <span className="text-amber-900/70"> · signed up {timeAgo(u.created_at)}</span>
+                    )}
+                  </li>
+                ))}
+                {awaitingApproval.length > 5 && (
+                  <li className="text-[13px] text-amber-900/70">
+                    …and {awaitingApproval.length - 5} more, listed first in the table below.
+                  </li>
+                )}
+              </ul>
+              <p className="mt-1.5 text-[12px] text-amber-900/70">
+                They cannot sign in until approved.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Loading state */}
       {loading ? (
         <div className="flex justify-center py-20">
@@ -255,38 +446,30 @@ const UsersPage = () => {
                   <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     ID
                   </th>
-                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
-                    Name
-                  </th>
+                  <SortableHeader label="Name" sortKey="name" />
                   <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     Username
                   </th>
                   <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
                     Email
                   </th>
-                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
-                    Role
-                  </th>
-                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
-                    Zoho Salesperson
-                  </th>
-                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
-                    Status
-                  </th>
+                  <SortableHeader label="Role" sortKey="role" />
+                  <SortableHeader label="Zoho Salesperson" sortKey="salesperson" />
+                  <SortableHeader label="Status" sortKey="status" />
                   <th scope="col" className="px-6 py-3 text-center text-[13px] font-semibold text-white">
                     Actions
                   </th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-slate-100">
-                {users.length === 0 ? (
+                {sortedUsers.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="px-6 py-12 text-center text-ink-secondary">
                       No user accounts found in the system.
                     </td>
                   </tr>
                 ) : (
-                  users.map((user) => {
+                  sortedUsers.map((user) => {
                     const isActive = user.is_active === 1 || user.is_active === true;
                     // Sep 9, 2026: undefined approval_status means an account
                     // that predates the column, which the migration backfilled
@@ -331,55 +514,16 @@ const UsersPage = () => {
                             actually knows the answer. */}
                         <td className="px-6 py-4 text-[13px]">
                           {editingSalesperson === user.id ? (
-                            <div className="flex items-center gap-2">
-                              <select
-                                autoFocus
-                                defaultValue={user.salesperson || ''}
-                                disabled={savingSalesperson}
-                                onChange={(e) => saveSalesperson(user, e.target.value)}
-                                className="max-w-[15rem] text-[13px] border border-slate-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
-                              >
-                                <option value="">-- not assigned --</option>
-                                {optionsFor(user).map((sp) => (
-                                  <option key={sp.name} value={sp.name}>
-                                    {sp.name}
-                                    {/* Marked rather than hidden when shown:
-                                        picking a departed colleague should be
-                                        a decision, not a misread. */}
-                                    {sp.is_active ? '' : ' (inactive)'}
-                                    {/* Two people on one Zoho Salesperson is
-                                        allowed but rarely intended, so it is
-                                        visible at the moment of choosing. */}
-                                    {sp.assigned_to && sp.assigned_to.email !== user.email
-                                      ? ` - taken by ${sp.assigned_to.name}`
-                                      : ''}
-                                  </option>
-                                ))}
-                              </select>
-                              {salespersonCounts.inactive > 0 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setShowInactive((v) => !v)}
-                                  className="text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark whitespace-nowrap"
-                                  title={
-                                    showInactive
-                                      ? 'Show only salespersons who are still active in Zoho'
-                                      : 'Also show salespersons Zoho has marked inactive'
-                                  }
-                                >
-                                  {showInactive
-                                    ? `Hide inactive (${salespersonCounts.inactive})`
-                                    : `Show inactive (${salespersonCounts.inactive})`}
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => setEditingSalesperson(null)}
-                                className="text-xs text-ink-secondary hover:text-ink-primary"
-                              >
-                                Cancel
-                              </button>
-                            </div>
+                            <SalespersonCombo
+                              value={user.salesperson || ''}
+                              options={optionsFor(user)}
+                              inactiveCount={salespersonCounts.inactive}
+                              showInactive={showInactive}
+                              onToggleInactive={() => setShowInactive((v) => !v)}
+                              disabled={savingSalesperson}
+                              onSelect={(name) => saveSalesperson(user, name)}
+                              onCancel={() => setEditingSalesperson(null)}
+                            />
                           ) : (
                             <button
                               type="button"

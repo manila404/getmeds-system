@@ -22,6 +22,7 @@ import ExceptionHubPage from './pages/management/ExceptionHubPage';
 import ClientsPage from './pages/management/ClientsPage';
 import SalespersonMappingPage from './pages/management/SalespersonMappingPage';
 import ManagerScopePage from './pages/management/ManagerScopePage';
+import PendingCustomersPage from './pages/management/PendingCustomersPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import InventoryPage from './pages/admin/InventoryPage';
@@ -206,6 +207,17 @@ function App() {
               access; the SERVER refuses a division-scoped manager, which is
               the check that matters — a restricted manager who could edit
               scopes could lift their own restriction. */}
+          {/* Sep 11, 2026: customers saved here that Zoho has not accepted
+              yet. Admin and management — a MedRep can create one, but pushing
+              it to Zoho is not their call. */}
+          <Route
+            path="/management/pending-customers"
+            element={
+              <ProtectedRoute allowedRoles={['management', 'admin']}>
+                <PendingCustomersPage />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="/management/manager-scopes"
             element={

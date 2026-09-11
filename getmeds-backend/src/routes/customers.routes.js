@@ -10,6 +10,26 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 // to restrict to admin/management.
 router.get('/', requireAuth, requireRole('admin', 'management'), c.getCustomersOverview);
 
+// Sep 11, 2026: create a customer that does not exist in Zoho yet.
+//
+// MedRep as well as admin/management, and that is the point of the feature: a
+// rep taking an order from a new pharmacy could not place it at all, because
+// createSalesOrder needs a Zoho contact id and there was no way to get one.
+// Finance and Dispatch are left out — they work orders, they do not open
+// accounts.
+router.post('/', requireAuth, requireRole('medrep', 'admin', 'management'), c.createCustomer);
+
+// Sep 11, 2026: customers saved here that Zoho has not accepted yet.
+//
+// Declared ABOVE any '/:id' route — Express matches in declaration order, so
+// '/pending' below one of those would be read as "the customer whose id is
+// pending". Admin/management only: pushing to Zoho is not a MedRep's call,
+// even though creating the held customer was.
+router.get('/pending', requireAuth, requireRole('admin', 'management'), c.listPendingCustomers);
+router.post('/pending/sync', requireAuth, requireRole('admin', 'management'), c.syncPendingCustomers);
+// Put a customer wrongly marked 'Needs attention' back in the queue.
+router.post('/:id/retry', requireAuth, requireRole('admin', 'management'), c.retryPendingCustomer);
+
 // One grouped local query for the Clients Directory's KPI cards
 // (Total/Credit/Direct/Uncategorized) — see customers.controller.js's
 // getCustomerStats doc comment. Placed ahead of no functional conflict

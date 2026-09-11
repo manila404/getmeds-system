@@ -743,6 +743,118 @@ class LiveZohoAdapter extends ZohoAdapter {
   }
 
   /**
+   * Create a new contact (customer) in Zoho. See ZohoAdapter.js's Sep 11,
+   * 2026 note for why this create-only exception exists.
+   *
+   * ── THE CUSTOM FIELD IDS ARE NOT GUESSES ──────────────────────────────
+   *
+   * Every id below was read from this exact org via Zoho_Books
+   * list_custom_fields (entity=contact) on Sep 11, 2026. That matters here
+   * more than usual: a wrong customfield_id on a Sales Order once made
+   * every order fail to sync (see commit 81677be, the Division field), and
+   * the failure mode is not a helpful error -- Zoho accepts the write and
+   * puts the value somewhere nobody is looking, or rejects it with a
+   * message that names an internal id rather than a field.
+   *
+   *   cf_license_owner         2254168001901791559  string
+   *   cf_lto_license_number    2254168001901791563  string, UNIQUE in Zoho
+   *   cf_lto_type              2254168001901791567  string
+   *   cf_license_issuance_date 2254168001901791571  date (yyyy-mm-dd)
+   *   cf_license_expiry_date   2254168001901791611  date (yyyy-mm-dd)
+   *   cf_is_doctor             2254168001901843447  check_box (boolean)
+   *   cf_contact_number        2254168001908082659  phone, MANDATORY
+   *   cf_tin                   2254168001928321297  string
+   *
+   * `cf_custom_id` is deliberately absent: it is an autonumber field Zoho
+   * generates itself (GC095238 and so on), and sending a value for it is
+   * either ignored or an error depending on Zoho's mood.
+   *
+   * Empty custom fields are OMITTED rather than sent as "". Zoho treats an
+   * empty string as a value for a unique field, so sending a blank
+   * cf_lto_license_number on two contacts would collide on the second one
+   * -- a duplicate error about a field nobody filled in.
+   */
+  async createContact(customer) {
+    const c = customer || {};
+    const displayName = String(c.display_name || '').trim();
+    if (!displayName) throw new Error('createContact requires a display_name');
+    // Mandatory in this org's Zoho configuration, so failing here gives a
+    // better message than Zoho's will.
+    const contactNumber = String(c.contact_number || '').trim();
+    if (!contactNumber) throw new Error('createContact requires a contact_number');
+
+    const customFields = [];
+    const add = (id, value) => {
+      if (value === undefined || value === null || value === '') return;
+      customFields.push({ customfield_id: id, value });
+    };
+
+    add('2254168001901791559', c.license_owner);
+    add('2254168001901791563', c.lto_license_number);
+    add('2254168001901791567', c.lto_type);
+    add('2254168001901791571', c.license_issuance_date);
+    add('2254168001901791611', c.license_expiry_date);
+    add('2254168001908082659', contactNumber);
+    add('2254168001928321297', c.tin);
+    // A checkbox is sent only when ticked: false is Zoho's own default, and
+    // omitting it keeps the body to what the form actually said.
+    if (c.is_doctor) customFields.push({ customfield_id: '2254168001901843447', value: true });
+
+    const address = (a) => {
+      if (!a) return undefined;
+      const out = {
+        attention: a.attention || undefined,
+        address: a.address || undefined,
+        street2: a.street2 || undefined,
+        city: a.city || undefined,
+        state: a.state || undefined,
+        zip: a.zip || undefined,
+        country: a.country || undefined,
+        phone: a.phone || undefined
+      };
+      return Object.values(out).some(Boolean) ? out : undefined;
+    };
+
+    const body = {
+      contact_name: displayName,
+      // Confirmed with the business (Sep 11, 2026): customers raised from the
+      // order form are businesses. It is also the sub-type whose TIN rule
+      // updateContactTin exists for, so defaulting the other way would create
+      // contacts that then fail at their first Sales Order.
+      customer_sub_type: c.customer_sub_type === 'individual' ? 'individual' : 'business',
+      contact_type: 'customer'
+    };
+
+    if (c.company_name) body.company_name = c.company_name;
+    if (c.email) body.email = c.email;
+    if (c.phone) body.phone = c.phone;
+
+    // Zoho's "Primary Contact" is the first entry in contact_persons.
+    if (c.first_name || c.last_name || c.email) {
+      body.contact_persons = [
+        {
+          salutation: c.salutation || undefined,
+          first_name: c.first_name || undefined,
+          last_name: c.last_name || undefined,
+          email: c.email || undefined,
+          phone: c.phone || undefined,
+          is_primary_contact: true
+        }
+      ];
+    }
+
+    const billing = address(c.billing_address);
+    const shipping = address(c.shipping_address) || billing;
+    if (billing) body.billing_address = billing;
+    if (shipping) body.shipping_address = shipping;
+
+    if (customFields.length) body.custom_fields = customFields;
+
+    const result = await this._request('POST', '/contacts', { body });
+    return { code: 0, message: 'Contact created successfully', contact: result.contact };
+  }
+
+  /**
    * Add ONE file to an existing Zoho Sales Order's "Attach File(s)"
    * section. See ZohoAdapter.js's Sep 8, 2026 (2) note for why this narrow,
    * add-only exception exists.

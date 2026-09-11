@@ -208,11 +208,16 @@ function _resetForTest() {
 // (and any fail-closed throw) happens on first real use, not on require().
 //
 // Aug 27, 2026: trimmed to match the tightened ZohoAdapter contract —
-// createSalesOrder is the ONLY write left (and it creates a plain Draft,
-// never auto-confirmed); everything else here is a read. Methods that used
+// createSalesOrder was the ONLY write left (and it creates a plain Draft,
+// never auto-confirmed); everything else here was a read. Methods that used
 // to confirm/pack/ship a Sales Order, record a payment, add a comment, or
-// create/edit/activate a Zoho Item or Contact have been removed from every
-// layer (base contract, Live, Mock) — see ZohoAdapter.js for the rationale.
+// create/edit/activate a Zoho Item have been removed from every layer (base
+// contract, Live, Mock) — see ZohoAdapter.js for the rationale.
+//
+// Three narrow, individually reviewed writes have been added since:
+// updateContactTin (Sep 8), addSalesOrderAttachment (Sep 8), and
+// createContact (Sep 11). Each is documented at its declaration in
+// ZohoAdapter.js. There is still no delete, no void, and no updateContact.
 const facadeMethods = [
   'createSalesOrder',
   'getSalesOrder',
@@ -240,6 +245,17 @@ const facadeMethods = [
   // MockZohoAdapter; without this line it would still silently be
   // `undefined` through the one thing every controller actually imports.
   'updateContactTin',
+  // Sep 11, 2026: the FOURTH time this list has been the thing that was
+  // forgotten — listSalespersons (Sep 2), updateContactTin and
+  // addSalesOrderAttachment (Sep 8), and this. It was written on the base
+  // contract, the Live adapter and the Mock, and was still `undefined`
+  // through the one module every controller actually imports.
+  //
+  // The tests caught it this time, which is the only reason it is not a
+  // fifth entry in that list. The failure it produces is not obviously a
+  // missing method: the create path answered 502 ZOHO_REFUSED, which reads
+  // as "Zoho said no" rather than "we never asked it".
+  'createContact',
   // Sep 8, 2026 (2): same lesson, same day — addSalesOrderAttachment exists
   // on ZohoAdapter/LiveZohoAdapter/MockZohoAdapter; without this line it
   // would be `undefined` through the facade every controller actually uses.

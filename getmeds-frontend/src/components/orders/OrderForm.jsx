@@ -481,10 +481,12 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     ? HOSPITAL_REQUIRED_ATTACHMENTS.filter(t => !stagedTypes.has(t.value))
     : [];
 
-  // Doctor Name is always required, but only typed when the customer is NOT
-  // the doctor. When they are, the field is the customer's own name — asking
-  // someone to retype what is already on screen is how a form gets a typo
-  // instead of an answer.
+  // Doctor Name is only typed when the customer is NOT the doctor. When they
+  // are, the field is the customer's own name — asking someone to retype what
+  // is already on screen is how a form gets a typo instead of an answer.
+  //
+  // Sep 11, 2026: no longer required on an ordinary order; still required on a
+  // hospital one (see isFormValid).
   const effectiveDoctorName = isDoctor === 'yes'
     ? (selectedCustomer?.name || '')
     : doctorName;
@@ -950,10 +952,22 @@ const OrderForm = ({ onCancel, onSuccess }) => {
     paymentTerms.trim() &&
     expectedShipmentDate &&
     deliveryNotes.trim() &&
-    isDoctor &&
-    effectiveDoctorName.trim() &&
-    // Hospital-only, and only when the customer actually is one.
-    (!isHospitalOrder || (glNumber.trim() && receiverType && missingHospitalAttachments.length === 0)) &&
+    // Sep 11, 2026: "Is the customer the doctor?" and Doctor Name are OPTIONAL
+    // on an ordinary order. Most orders are not placed for a named doctor, and
+    // making every rep answer a question that does not apply produces a filled
+    // box rather than a fact.
+    //
+    // They stay REQUIRED on a hospital order, which is what the Master Form
+    // always specified. That clause is written out here on purpose: the old
+    // code relied on the global requirement above and said so in a comment
+    // ("a hospital order can never be Yes in practice, which is why the
+    // hospital rule needs no separate clause for it"), so simply deleting the
+    // global one would have quietly dropped the hospital requirement too.
+    (!isHospitalOrder ||
+      (effectiveDoctorName.trim() &&
+        glNumber.trim() &&
+        receiverType &&
+        missingHospitalAttachments.length === 0)) &&
     items.length > 0 &&
     items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0) &&
     // Sep 4, 2026: a proof of payment, or a reason there is none. Never neither,
@@ -1568,6 +1582,26 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   🏥 Hospital order — Doctor Name, GL Number, receiver type and four attachments are required below.
                 </p>
               )}
+
+              {/* Sep 11, 2026: an UNCLASSIFIED customer, said out loud.
+                  `category` means "hospital order rules apply" — it is what
+                  turns on the GL Number, the receiver type and the four
+                  attachments. Every one of the 95,063 customers in this
+                  database is currently NULL, so that rule has never fired for
+                  anybody, and the way it fails is silent: the controls are
+                  simply absent and the order submits looking complete.
+                  A visible line is the difference between a control somebody
+                  decided to skip and one nobody knew existed. */}
+              {selectedCustomer && !String(selectedCustomer.category || '').trim() && (
+                <p className="mt-2 inline-flex items-start gap-1.5 px-2 py-1 rounded-md bg-amber-50 text-amber-900 border border-amber-200 text-[11px]">
+                  <span>
+                    This customer is not classified, so hospital rules are{' '}
+                    <strong>not</strong> applied. If this is a hospital order, set them to Hospital in
+                    the Clients Directory first — otherwise GL Number and the four attachments will
+                    not be asked for.
+                  </span>
+                </p>
+              )}
             </Field>
 
             {/* Sep 9, 2026: TIN. Auto-filled from the customer when Zoho has
@@ -1680,7 +1714,7 @@ const OrderForm = ({ onCancel, onSuccess }) => {
                   doctor? Starts unanswered on purpose — a default here would
                   mean most orders quietly carry whichever answer happened to
                   be pre-selected rather than one somebody gave. */}
-              <Field label="Is the customer the doctor?" required>
+              <Field label="Is the customer the doctor?">
                 <div className="flex items-center gap-4 pt-1.5">
                   {[{ v: 'yes', l: 'Yes' }, { v: 'no', l: 'No' }].map(({ v, l }) => (
                     <label key={v} className="inline-flex items-center gap-1.5 text-sm text-ink-primary cursor-pointer select-none">
@@ -1700,13 +1734,15 @@ const OrderForm = ({ onCancel, onSuccess }) => {
 
               {/* Answered Yes, the doctor IS the customer, so the name is
                   already known and shown rather than retyped — retyping what
-                  is on screen produces typos, not answers. Answered No, it has
-                  to be supplied. Required either way; a hospital order can
-                  never be Yes in practice, which is why the hospital rule
-                  needs no separate clause for it. */}
+                  is on screen produces typos, not answers.
+
+                  Sep 11, 2026: optional on an ordinary order, required on a
+                  hospital one. The hospital rule now has its own clause in
+                  isFormValid rather than leaning on a global requirement that
+                  no longer exists. */}
               <Field
                 label="Doctor Name"
-                required
+                required={isHospitalOrder}
                 help={
                   isDoctor === 'yes'
                     ? 'The selected customer is the doctor.'

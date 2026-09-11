@@ -428,4 +428,74 @@ describe('POST /api/auth/register', () => {
       .set('Authorization', `Bearer ${login.body.data.token}`);
     expect(admin.status).toBe(403);
   });
+
+  /**
+   * Sep 11, 2026: the approval queue, as something an admin can be told about
+   * rather than something they have to go and look for.
+   *
+   * Sign-up creates an account that cannot log in until approved, and the only
+   * place that was visible was the User Management page. A new rep therefore
+   * waited as long as it took somebody to wander onto a screen an admin opens
+   * once a month -- while the rep, reasonably, assumed the system was broken.
+   */
+  describe('GET /api/admin/users/pending', () => {
+    test('reports who is waiting, newest first', async () => {
+      const older = validSignup();
+      await request(app).post('/api/auth/register').send(older);
+      const newer = validSignup();
+      await request(app).post('/api/auth/register').send(newer);
+
+      // The older one must not look newer just because it was created in the
+      // same millisecond as the other.
+      await db
+        .prepare("UPDATE users SET created_at = '2020-01-01T00:00:00.000Z' WHERE email = ?")
+        .run(older.email);
+
+      const login = await request(app).post('/api/auth/login').send({ email: 'admin@getmeds.ph', password: 'demo123' });
+      const res = await request(app)
+        .get('/api/admin/users/pending')
+        .set('Authorization', `Bearer ${login.body.data.token}`);
+
+      expect(res.statusCode).toBe(200);
+      const emails = res.body.data.users.map((u) => u.email);
+      expect(emails).toContain(older.email);
+      expect(emails).toContain(newer.email);
+      expect(emails.indexOf(newer.email)).toBeLessThan(emails.indexOf(older.email));
+      expect(res.body.data.count).toBe(res.body.data.users.length);
+    });
+
+    test('an approved account drops off the queue', async () => {
+      const body = validSignup();
+      await request(app).post('/api/auth/register').send(body);
+      await approve(body.email);
+
+      const login = await request(app).post('/api/auth/login').send({ email: 'admin@getmeds.ph', password: 'demo123' });
+      const res = await request(app)
+        .get('/api/admin/users/pending')
+        .set('Authorization', `Bearer ${login.body.data.token}`);
+
+      expect(res.body.data.users.map((u) => u.email)).not.toContain(body.email);
+    });
+
+    test('it is not shadowed by the /users/:id routes', async () => {
+      // Express matches in declaration order, so '/users/pending' registered
+      // after a '/users/:id' route would be read as "the user whose id is
+      // pending" -- a 404 or a cast error that looks like a missing feature
+      // rather than a routing mistake.
+      const login = await request(app).post('/api/auth/login').send({ email: 'admin@getmeds.ph', password: 'demo123' });
+      const res = await request(app)
+        .get('/api/admin/users/pending')
+        .set('Authorization', `Bearer ${login.body.data.token}`);
+      expect(res.statusCode).toBe(200);
+      expect(Array.isArray(res.body.data.users)).toBe(true);
+    });
+
+    test('a medrep cannot read it', async () => {
+      const login = await request(app).post('/api/auth/login').send({ email: 'medrep@getmeds.ph', password: 'demo123' });
+      const res = await request(app)
+        .get('/api/admin/users/pending')
+        .set('Authorization', `Bearer ${login.body.data.token}`);
+      expect([401, 403]).toContain(res.statusCode);
+    });
+  });
 });

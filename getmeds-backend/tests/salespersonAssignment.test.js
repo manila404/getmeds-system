@@ -23,6 +23,8 @@ let adminToken;
 
 /** A name the mock org genuinely has, so the happy path uses a real value. */
 let knownSalesperson;
+/** A different one, so "who holds this name" has exactly one answer. */
+let otherSalesperson;
 
 async function makeUser({ email, role = 'medrep', division = 'B2B', displayName = 'Assign Target' }) {
   const seed = await db.prepare("SELECT password_hash FROM users WHERE email = 'admin@getmeds.ph'").get();
@@ -44,6 +46,14 @@ describe('Salesperson is assigned by an admin from Zoho’s list', () => {
     adminToken = login.body.data.token;
     const list = await zoho.listSalespersons();
     knownSalesperson = (list.salespersons || [])[0]?.salesperson_name;
+    // A SECOND name, used only by the "already taken" test.
+    //
+    // That test asserts which account holds a Salesperson, and two accounts on
+    // one name makes the answer ambiguous — whichever row the query returns
+    // first wins. Other tests in this file park `knownSalesperson` on users
+    // they create, so sharing it made this pass or fail on execution order
+    // alone.
+    otherSalesperson = (list.salespersons || [])[1]?.salesperson_name || knownSalesperson;
   });
 
   afterAll(async () => {
@@ -111,10 +121,10 @@ describe('Salesperson is assigned by an admin from Zoho’s list', () => {
     test('shows which names are already taken', async () => {
       const email = `sp.taken.${Date.now()}@getmeds.ph`;
       const id = await makeUser({ email });
-      await db.prepare('UPDATE users SET salesperson = ? WHERE id = ?').run(knownSalesperson, id);
+      await db.prepare('UPDATE users SET salesperson = ? WHERE id = ?').run(otherSalesperson, id);
 
       const res = await request(app).get('/api/admin/salespersons').set('Authorization', `Bearer ${adminToken}`);
-      const row = res.body.data.salespersons.find((s) => s.name === knownSalesperson);
+      const row = res.body.data.salespersons.find((s) => s.name === otherSalesperson);
       // Two people on one Zoho Salesperson is not an error, but an admin
       // should be able to see it rather than discover it later in a report.
       expect(row.assigned_to).toBeTruthy();

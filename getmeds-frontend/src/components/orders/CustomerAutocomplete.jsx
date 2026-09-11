@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Search, X, Building2, User, Loader2 } from 'lucide-react';
+import { Search, X, Building2, User, Loader2, UserPlus } from 'lucide-react';
 import { fetchCustomers } from '../../api/queries';
+import NewCustomerModal from './NewCustomerModal';
 
 /**
  * CustomerAutocomplete Component
@@ -10,15 +11,19 @@ import { fetchCustomers } from '../../api/queries';
  * MedRep types, matching registered customers are suggested live (by name,
  * contact person, or contact number) instead of scrolling a long list.
  *
- * This still only ever selects an EXISTING registered customer — typing a
- * name that matches nobody shows "no match" rather than letting the order
- * proceed with a made-up customer. That's a hard requirement, not a UI
- * choice: every order needs a real customer_id, and a credit-terms Sales
- * Order additionally needs that customer already linked to a Zoho contact
- * (see LiveZohoAdapter.createSalesOrder, which never creates or searches
- * for a Zoho contact itself). If the person you're looking for isn't
- * appearing, they need to be added/synced first (see customers.controller.js
- * syncFromZoho) rather than typed in here.
+ * This only ever selects a customer that REALLY EXISTS — in this database and
+ * in Zoho. That is a hard requirement, not a UI choice: every order needs a
+ * real customer_id, and the Sales Order needs that customer already linked to
+ * a Zoho contact (see LiveZohoAdapter.createSalesOrder, which never creates or
+ * searches for a contact of its own).
+ *
+ * Sep 11, 2026: what changed is the dead end, not that requirement. Typing a
+ * name that matched nobody used to end at "ask an Admin to add or sync them
+ * from Zoho first" — which meant the order was not placed today, and often not
+ * at all. There is now a Create button on that empty result, which opens
+ * NewCustomerModal, creates the contact in Zoho, and hands back a real
+ * customer with a real zoho_contact_id. Nothing is ever typed straight onto an
+ * order.
  *
  * Sep 2, 2026: the search moved to the SERVER and this component owns it.
  *
@@ -58,6 +63,7 @@ const CustomerAutocomplete = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedTerm, setDebouncedTerm] = useState('');
   const [isOpen, setIsOpen] = useState(false);
+  const [creatingFor, setCreatingFor] = useState(null);
   const containerRef = useRef(null);
 
   useEffect(() => {
@@ -177,8 +183,25 @@ const CustomerAutocomplete = ({
               ) : searchTerm.trim() ? (
                 <>
                   No registered customer matches <span className="font-semibold text-ink-primary">"{searchTerm}"</span>.
-                  <br />
-                  <span className="text-[11px]">Ask an Admin to add or sync them from Zoho first.</span>
+                  {/* Sep 11, 2026: the way out. This used to read "ask an
+                      Admin to add or sync them from Zoho first", which is
+                      advice rather than an action — and the order waited on
+                      somebody else's inbox. */}
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setCreatingFor(searchTerm.trim());
+                      setIsOpen(false);
+                    }}
+                    className="mt-2 mx-auto flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    Create "{searchTerm.trim()}" in Zoho
+                  </button>
+                  <span className="block mt-1.5 text-[11px]">
+                    Adds them to Zoho and selects them for this order.
+                  </span>
                 </>
               ) : (
                 'Start typing to search clients…'
@@ -243,6 +266,18 @@ const CustomerAutocomplete = ({
             </>
           )}
         </ul>
+      )}
+      {creatingFor !== null && (
+        <NewCustomerModal
+          initialName={creatingFor}
+          onClose={() => setCreatingFor(null)}
+          onCreated={(customer) => {
+            setCreatingFor(null);
+            // Straight into the normal selection path, so a freshly created
+            // customer and a long-standing one reach the order the same way.
+            handleSelect(customer);
+          }}
+        />
       )}
     </div>
   );

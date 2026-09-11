@@ -56,6 +56,23 @@
  *   that too should be a deliberate, reviewed addition, not a widening of
  *   this one.
  *
+ *   Sep 11, 2026: `createContact` is a FOURTH deliberate, reviewed
+ *   exception, and the largest one — it creates a permanent record in the
+ *   company's Zoho org.
+ *
+ *   It exists because the alternative was worse. A MedRep taking an order
+ *   from a customer Zoho has never seen had no way forward at all: the
+ *   order form can only pick an existing contact, `createSalesOrder`
+ *   requires a `zoho_customer_id`, and adding one meant asking somebody
+ *   with Zoho access and waiting. The order did not get placed.
+ *
+ *   It is CREATE-ONLY, like `createSalesOrder`. There is still no
+ *   `updateContact`, no delete, and no way to reach an existing contact
+ *   through it — a contact that already exists is found by
+ *   `listContacts` and picked, never overwritten. The narrow
+ *   `updateContactTin` above remains the only edit this app can make to a
+ *   contact, and it still only touches that one field.
+ *
  *   Sep 8, 2026 (2): `addSalesOrderAttachment` is a THIRD deliberate,
  *   reviewed exception, same day, same reasoning. This app already lets
  *   MedRep/Management/Finance attach files to an order locally (Proof of
@@ -245,6 +262,26 @@ class ZohoAdapter {
    * @returns {Promise<{code:number, message:string, contact:object}>}
    */
   async updateContactTin(contactId, tin) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Create a NEW Zoho contact (customer). See the Sep 11, 2026 note above
+   * for why this create-only exception exists.
+   *
+   * Creates only. There is no counterpart that edits or deletes a contact,
+   * and this cannot be pointed at an existing one: Zoho allocates the id,
+   * and a caller that already has an id has no use for this method.
+   *
+   * The caller is expected to have SEARCHED first (`listContacts`) and
+   * found nothing — see services/customerCreateService.js, which also
+   * refuses a create when a likely duplicate exists rather than letting
+   * Zoho decide.
+   *
+   * @param {object} customer - see customerCreateService for the shape
+   * @returns {Promise<{code:number, message:string, contact:object}>}
+   */
+  async createContact(customer) {
     throw new Error('Not implemented');
   }
 

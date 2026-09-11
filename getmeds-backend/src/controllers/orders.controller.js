@@ -1381,7 +1381,27 @@ exports.create = async (req, res, next) => {
     // which is the correct, honest state for "not sent yet". (Sep 8, 2026
     // (3): this now also covers a Management-raised B2B order, not only a
     // MedRep's own submission — see requiresManagementApproval above.)
-    if (!isDraft && !requiresManagementApproval) {
+    // Sep 11, 2026: an order for a customer Zoho has not accepted yet.
+    //
+    // The customer was created here while Zoho's token could not create
+    // contacts (see services/customerCreateService.js), so it has no
+    // zoho_contact_id. createSalesOrder refuses an unmapped customer loudly
+    // and by design, so calling it would fail, queue a retry, and keep failing
+    // on every pass until a human intervenes.
+    //
+    // Skipping the call is not "ignoring the sync": the order is still
+    // created, still submittable, still approvable. It just cannot reach Zoho
+    // until its customer does, and says so rather than sitting in an outbox
+    // looking like a transient network problem.
+    // Read off the customer row already fetched above rather than querying
+    // again — and off `customer`, which is the variable that actually exists
+    // here. (`customerId` does not; the request field is `customer_id`.)
+    const customerHeld = customer.zoho_sync_status === 'pending';
+
+    if (customerHeld) {
+      zohoSyncStatus = 'pending';
+      zohoError = 'Customer is not in Zoho yet — this order will sync once the customer does.';
+    } else if (!isDraft && !requiresManagementApproval) {
       if (isDryRunMode()) {
         // ZOHO_DRY_RUN=true — no HTTP call to Zoho is made at all.
         zohoResult = buildDryRunSalesOrder(zohoPayload);

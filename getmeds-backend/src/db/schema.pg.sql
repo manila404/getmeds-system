@@ -122,6 +122,43 @@ CREATE TABLE IF NOT EXISTS customers (
   source TEXT DEFAULT 'local' CHECK(source IN ('local','zoho')),
   last_synced_at TEXT,
   category TEXT CHECK(category IS NULL OR category IN ('doctor','hospital','distributor','pwd')),
+  -- Sep 11, 2026: captured when a MedRep creates a customer mid-order.
+  --
+  -- `email` is collected by the form and pushed to Zoho; storing it means the
+  -- rep does not type it again the next time somebody needs it.
+  --
+  -- `lto_license_number` is the one that earns its place. It is UNIQUE in
+  -- Zoho, so a duplicate is REJECTED at create time with a message that names
+  -- the field and not the contact already holding it. Keeping it locally lets
+  -- services/customerCreateService.js answer the useful question first --
+  -- "that pharmacy is already here, pick it" -- instead of relaying Zoho's
+  -- complaint about a number the rep cannot look up.
+  email TEXT,
+  lto_license_number TEXT,
+  -- ── Sep 11, 2026: customers created while Zoho cannot accept them ─────────
+  --
+  -- This org's Zoho token grants ZohoInventory.contacts.READ and not .CREATE,
+  -- so creating a customer fails with "You are not authorized to perform this
+  -- operation" and no payload can fix it -- the refresh token has to be
+  -- reissued. Rather than send a MedRep away mid-order, the customer is stored
+  -- here as 'pending' and pushed once the token allows it.
+  --
+  --   synced   this customer exists in Zoho and zoho_contact_id is real
+  --   pending  created here, NOT yet in Zoho, waiting to be pushed
+  --   failed   Zoho refused it for a reason retrying will not fix
+  --
+  -- A 'pending' customer deliberately has NO zoho_contact_id. Inventing a
+  -- placeholder would make it indistinguishable from a real one, and an order
+  -- against it would fail at createSalesOrder -- which refuses an unmapped
+  -- customer loudly, by design.
+  zoho_sync_status TEXT DEFAULT 'synced'
+    CHECK(zoho_sync_status IN ('synced','pending','failed')),
+  -- The full creation payload, as JSON, kept because this table does not hold
+  -- everything Zoho needs: licence dates, LTO type, both addresses, the custom
+  -- fields. Without it, syncing later would mean asking the rep to retype what
+  -- they already entered.
+  zoho_pending_payload TEXT,
+  zoho_sync_error TEXT,
   -- Sep 8, 2026: TIN (Tax Identification Number — a Philippines BIR
   -- requirement). Zoho refuses to create a Sales Order for a "business"
   -- sub-type contact with no cf_tin value, so this exists to fix that from

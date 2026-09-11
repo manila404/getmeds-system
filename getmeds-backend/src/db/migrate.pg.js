@@ -597,6 +597,72 @@ async function reconcileUserSalespersonColumn(client) {
   console.log(`  ✔ users.salesperson converted (${kept[0].n} existing value(s) preserved)`);
 }
 
+/**
+ * Sep 11, 2026: `customers.email` and `customers.lto_license_number`, for
+ * customers created from the order form. See schema.pg.sql for why the
+ * licence number is kept locally rather than left to Zoho's unique index.
+ */
+const CUSTOMER_CREATE_COLUMNS = [
+  ['email', 'TEXT'],
+  ['lto_license_number', 'TEXT'],
+  // Sep 11, 2026: the hold queue for customers Zoho cannot accept yet. See
+  // schema.pg.sql. Existing rows default to 'synced' because they came FROM
+  // Zoho — only ones created here can be pending.
+  ['zoho_sync_status', "TEXT DEFAULT 'synced'"],
+  ['zoho_pending_payload', 'TEXT'],
+  ['zoho_sync_error', 'TEXT'],
+];
+
+async function reconcileCustomerCreateColumns(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'customers'`
+  );
+  const present = new Set(rows.map((r) => r.column_name));
+
+  for (const [name, type] of CUSTOMER_CREATE_COLUMNS) {
+    if (present.has(name)) {
+      console.log(`  ✔ customers.${name} already present`);
+      continue;
+    }
+    console.log(`  ↻ customers.${name} is missing — adding`);
+    await client.query(`ALTER TABLE customers ADD COLUMN ${name} ${type}`);
+    console.log(`  ✔ customers.${name} added`);
+  }
+
+  // Finding a customer by licence is the whole point of storing it.
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS idx_customers_lto ON customers(lower(trim(lto_license_number)))`
+  );
+
+  // The pending queue is read on every admin page load and after every token
+  // change; it must not scan 95,000 rows to find the handful that are waiting.
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS idx_customers_zoho_sync_status
+       ON customers(zoho_sync_status) WHERE zoho_sync_status <> 'synced'`
+  );
+
+  // Added as nullable so the ALTER is instant on a large table, then
+  // constrained once every row has a value. The other order locks the table.
+  const { rows: missing } = await client.query(
+    `SELECT COUNT(*)::int AS n FROM customers WHERE zoho_sync_status IS NULL`
+  );
+  if (missing[0].n) {
+    console.log(`  ↻ backfilling customers.zoho_sync_status for ${missing[0].n} row(s)`);
+    await client.query(`UPDATE customers SET zoho_sync_status = 'synced' WHERE zoho_sync_status IS NULL`);
+  }
+  await client.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'customers_zoho_sync_status_check'
+      ) THEN
+        ALTER TABLE customers ADD CONSTRAINT customers_zoho_sync_status_check
+          CHECK (zoho_sync_status IN ('synced','pending','failed'));
+      END IF;
+    END $$;
+  `);
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -630,6 +696,7 @@ async function main() {
     await reconcileZohoStatusColumns(client);
     await reconcileUserOrderScope(client);
     await reconcileUserSalespersonColumn(client);
+    await reconcileCustomerCreateColumns(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`
