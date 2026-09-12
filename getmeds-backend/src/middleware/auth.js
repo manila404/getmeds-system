@@ -1,5 +1,8 @@
 const jwt = require('jsonwebtoken');
 const db = require('../db/database');
+// Used by blockMedrepWritesOnImported below, so it is required at the top
+// rather than beside the mid-file requires further down.
+const { isImportedRef } = require('../services/orderOrigin');
 
 const SECRET = process.env.JWT_SECRET || 'getmeds_secret_change_in_production';
 
@@ -52,8 +55,11 @@ async function requireAuth(req, res, next) {
  * Scoped as narrowly as it can be:
  *   * MedReps only. Management and admin still act on these orders — they run
  *     the process, and someone has to be able to fix a bad import.
- *   * Imported orders only (getmeds_order_id LIKE 'ZOHO-%'). An order a rep
- *     raised in this app is untouched by this.
+ *   * Imported orders only. An order a rep raised in this app is untouched.
+ *     Sep 12, 2026: the test itself moved to services/orderOrigin.js, which
+ *     the Finance queue also reads to keep imported orders off its default
+ *     tab. One rule now decides both who may edit an imported order and
+ *     whether Finance is shown it, and those must not drift apart.
  *   * Mutating routes only. Every GET stays open, which is the entire point —
  *     they can see everything and change nothing.
  *
@@ -69,7 +75,7 @@ async function blockMedrepWritesOnImported(req, res, next) {
       .get(req.params.id);
     if (!order) return next(); // let the controller answer 404 in its own words
 
-    if (String(order.getmeds_order_id || '').startsWith('ZOHO-')) {
+    if (isImportedRef(order.getmeds_order_id)) {
       return res.status(403).json({
         success: false,
         error: {

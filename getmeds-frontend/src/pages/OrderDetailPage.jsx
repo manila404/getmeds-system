@@ -479,7 +479,15 @@ const OrderDetailPage = () => {
             <p className="text-sm text-ink-secondary mt-1">
               {order.customer_name} · <span className={`capitalize px-2 py-0.5 rounded text-xs font-medium ${order.customer_type === 'credit' ? 'bg-getmeds-blue/10 text-getmeds-blue-dark' : 'bg-state-warning-light text-amber-900 border border-state-warning/30'}`}>{order.customer_type}</span>
             </p>
-            <p className="text-xs text-ink-secondary mt-1">MedRep: {order.medrep_name} · Created: {formatPHT(order.created_at)}</p>
+            <p className="text-xs text-ink-secondary mt-1">
+              MedRep: {order.medrep_name}
+              {/* Sep 12, 2026: an order raised for a colleague has two people
+                  attached to it. Naming only the owner here made the trail's
+                  "X submitted this for Y" look like it contradicted the
+                  header. NULL raised_by_id is the ordinary order. */}
+              {order.raised_by_id && order.raised_by_name ? ` (raised by ${order.raised_by_name})` : ''}
+              {' · '}Created: {formatPHT(order.created_at)}
+            </p>
           </div>
           <div className="flex flex-col items-end gap-2">
             <span className={`px-3 py-1 rounded-full text-sm font-semibold capitalize ${STATUS_COLORS[order.status] || 'bg-slate-100 text-slate-700'}`}>

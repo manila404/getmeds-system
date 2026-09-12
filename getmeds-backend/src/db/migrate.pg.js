@@ -689,6 +689,84 @@ async function reconcileUserSalespersons(client) {
   }
 }
 
+
+/**
+ * Sep 12, 2026: orders.raised_by_id — who FILLED THE FORM IN, when that is not
+ * who the order belongs to.
+ *
+ * A MedRep can raise an order for a colleague. `medrep_id` is then the
+ * colleague's, and until now the raiser's own involvement survived only as
+ * JSON inside the submit event's metadata. That was enough to display a name
+ * in the trail and nothing else: every permission check and every list query
+ * compares against `medrep_id`, so the person who created the order could not
+ * see it, open it, submit it, or attach the file they had just picked
+ * (GM-20260911-0003).
+ *
+ * A real column rather than reading that metadata back, for one reason that
+ * only shows up at scale: the orders list would need a correlated subquery
+ * over order_events for all 60,955 rows to answer "and the ones I raised".
+ * Indexed, it is a join key.
+ *
+ * NULL means the ordinary case — raised by whoever owns it. It is deliberately
+ * NOT backfilled to medrep_id for the other 60,951 rows: "nobody else raised
+ * this" and "the owner raised this" are the same fact, and storing it on every
+ * historical row would only invite a future reader to think the column means
+ * something it does not.
+ */
+async function reconcileOrderRaisedBy(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'orders'
+        AND column_name = 'raised_by_id'`
+  );
+
+  if (rows.length) {
+    console.log('  ✔ orders.raised_by_id already present');
+  } else {
+    console.log('  ↻ orders.raised_by_id is missing — adding');
+    await client.query(
+      'ALTER TABLE orders ADD COLUMN raised_by_id INTEGER REFERENCES users(id)'
+    );
+    console.log('  ✔ orders.raised_by_id added');
+  }
+
+  // Outside the branch above, and NOT in schema.pg.sql: that file is applied
+  // to existing databases too, where CREATE TABLE is a no-op but an index on a
+  // column this function has not added yet still runs, and fails the whole
+  // migration. Here it is correct for a fresh build and a retrofit alike.
+  //
+  // Partial: only on-behalf rows are ever looked up by raiser, and they are a
+  // rounding error against the table. A full index would be mostly NULLs.
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS idx_orders_raised_by
+       ON orders (raised_by_id) WHERE raised_by_id IS NOT NULL`
+  );
+
+  // Backfill from the only place the fact was previously recorded. Idempotent
+  // — it only touches rows still NULL, so re-running cannot overwrite a value
+  // set by create().
+  const filled = await client.query(
+    `UPDATE orders o
+        SET raised_by_id = e.raiser
+       FROM (
+         SELECT DISTINCT ON (order_id)
+                order_id,
+                NULLIF(metadata::json->>'raisedByUserId', '')::int AS raiser
+           FROM order_events
+          WHERE metadata LIKE '%raisedByUserId%'
+          ORDER BY order_id, id
+       ) e
+      WHERE o.id = e.order_id
+        AND o.raised_by_id IS NULL
+        AND e.raiser IS NOT NULL
+        AND e.raiser <> o.medrep_id
+        AND EXISTS (SELECT 1 FROM users u WHERE u.id = e.raiser)`
+  );
+  if (filled.rowCount) {
+    console.log(`  ✔ backfilled raised_by_id on ${filled.rowCount} on-behalf order(s)`);
+  }
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -724,6 +802,7 @@ async function main() {
     await reconcileUserSalespersonColumn(client);
     await reconcileCustomerCreateColumns(client);
     await reconcileUserSalespersons(client);
+    await reconcileOrderRaisedBy(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

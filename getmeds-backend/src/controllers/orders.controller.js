@@ -521,6 +521,38 @@ exports.getSalespersonStatus = async (req, res, next) => {
 
 // ─── LIST / GET ────────────────────────────────────────────────────────────────
 
+/**
+ * Whether a MedRep may see and act on an order.
+ *
+ * Sep 12, 2026. An order has TWO people with a claim to it once a rep can
+ * raise one for a colleague:
+ *
+ *   medrep_id     who it BELONGS to  - whose numbers it counts toward, whose
+ *                                      Salesperson goes to Zoho
+ *   raised_by_id  who FILLED IT IN   - NULL unless those differ
+ *
+ * Both get the same access, and the reason is that anything less is
+ * incoherent: the raiser typed every field, so they are the one who notices
+ * the wrong quantity, chases the sync, and holds the receipt that has to be
+ * attached. An order you can create but not submit is not a feature.
+ *
+ * Written once, here, because the comparison it replaces was inlined at seven
+ * call sites plus a variant in paymentProof.controller.js. The attachment one
+ * was missed when on-behalf ordering shipped, so an order saved while its file
+ * was silently refused (GM-20260911-0003). Seven copies is seven chances to
+ * miss it again.
+ *
+ * Roles that already see everything never reach this - callers checked
+ * `role === 'medrep'` first - but it returns true for them anyway, so it is
+ * safe to call unguarded.
+ */
+function canActOnOrder(user, order) {
+  if (!user || !order) return false;
+  if ((user.role || '').toLowerCase() !== 'medrep') return true;
+  if (order.medrep_id === user.id) return true;
+  return Boolean(order.raised_by_id) && order.raised_by_id === user.id;
+}
+
 exports.getAll = async (req, res, next) => {
   try {
     const { status, customer_type, page = 1, limit = 20 } = req.query;
@@ -531,9 +563,14 @@ exports.getAll = async (req, res, next) => {
 
     // Sep 5, 2026: MedReps only see their own orders. Management sees all.
     // Other roles (finance, dispatch, admin) already see all (no filter).
+    //
+    // Sep 12, 2026: "their own" means owned OR raised. An order a rep raised
+    // for a colleague appears for BOTH of them - it is the colleague's order,
+    // but the rep who typed it in has to be able to find it again. Served by
+    // idx_orders_raised_by, so the OR does not turn this into a scan.
     if (req.user.role === 'medrep') {
-      where.push('o.medrep_id = ?');
-      params.push(req.user.id);
+      where.push('(o.medrep_id = ? OR o.raised_by_id = ?)');
+      params.push(req.user.id, req.user.id);
     }
     if (status) { where.push('o.status = ?'); params.push(status); }
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
@@ -544,10 +581,15 @@ exports.getAll = async (req, res, next) => {
       SELECT o.*, c.name as customer_name, c.type as customer_type_detail,
              u.name as medrep_name,
              p.status as payment_status,
+             r.name as raised_by_name,
              d.status as dispatch_status, d.tracking_number, d.courier
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
+      -- Sep 12, 2026: the raiser's name, so a rep who sees a colleague's order
+      -- in their own list is told WHY it is there rather than left to wonder.
+      -- NULL for the ordinary order, which is what the UI keys off.
+      LEFT JOIN users r ON o.raised_by_id = r.id
       LEFT JOIN payments p ON o.id = p.order_id
       LEFT JOIN dispatch_records d ON o.id = d.order_id
       ${whereClause}
@@ -578,10 +620,12 @@ exports.getById = async (req, res, next) => {
   try {
     const loadOrder = async () => await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_person, c.contact_number,
-             u.name as medrep_name, u.email as medrep_email
+             u.name as medrep_name, u.email as medrep_email,
+             r.name as raised_by_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
+      LEFT JOIN users r ON o.raised_by_id = r.id
       WHERE o.id = ?
     `).get(req.params.id);
 
@@ -591,7 +635,7 @@ exports.getById = async (req, res, next) => {
 
     // Sep 5, 2026: MedReps can only see their own orders. Management can
     // see any medrep's order. Other roles can see all orders.
-    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+    if (!canActOnOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
 
@@ -726,10 +770,10 @@ exports.syncFromZoho = async (req, res, next) => {
     // refresh-on-open path run the exact same code as this button rather than
     // a second copy that would drift. All that is left here is what is
     // genuinely HTTP: who is allowed to ask, and what the response looks like.
-    const owner = await db.prepare('SELECT medrep_id FROM orders WHERE id = ?').get(req.params.id);
+    const owner = await db.prepare('SELECT medrep_id, raised_by_id FROM orders WHERE id = ?').get(req.params.id);
     if (!owner) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 5, 2026: MedReps can sync only their own orders. Management can sync any.
-    if (req.user.role === 'medrep' && owner.medrep_id !== req.user.id) {
+    if (!canActOnOrder(req.user, owner)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
 
@@ -913,7 +957,7 @@ exports.retryZohoSync = async (req, res, next) => {
 
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 5, 2026: MedReps can retry only their own orders. Management can retry any.
-    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+    if (!canActOnOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
     if (order.zoho_sync_status !== 'failed') {
@@ -1488,7 +1532,7 @@ exports.create = async (req, res, next) => {
     const createOrderTxn = db.transaction(async () => {
       const result = await db.prepare(`
         INSERT INTO orders (
-          getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
+          getmeds_order_id, customer_id, medrep_id, raised_by_id, status, customer_type, total_amount,
           delivery_address, delivery_notes,
           intake_courier, intake_doctor, intake_hospital, intake_patient, intake_mop,
           intake_receiver, intake_contact_no, intake_source, intake_pls_give,
@@ -1501,11 +1545,17 @@ exports.create = async (req, res, next) => {
           zoho_so_id, zoho_so_number, zoho_so_status, zoho_sync_status,
           created_at, submitted_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         getmedsOrderId,
         customer_id,
         effectiveActor.id,
+        // Sep 12, 2026: who filled the form in, when that is not the owner
+        // above. NULL for the ordinary case rather than a copy of
+        // effectiveActor.id — see schema.pg.sql. Every ownership check and
+        // the orders list read this alongside medrep_id, which is what makes
+        // an on-behalf order appear for BOTH people.
+        onBehalfOf ? req.user.id : null,
         finalStatus,
         resolvedCustomerType,
         total_amount,
@@ -1968,7 +2018,7 @@ exports.submit = async (req, res, next) => {
 
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 5, 2026: MedReps can submit only their own orders. Management can submit any.
-    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+    if (!canActOnOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
     if (order.status !== 'draft') {
@@ -2335,7 +2385,7 @@ exports.updateDetails = async (req, res, next) => {
     const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 7, 2026: same ownership rule as updateItems.
-    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+    if (!canActOnOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
     if (order.zoho_so_id) {
@@ -2596,7 +2646,7 @@ exports.updateItems = async (req, res, next) => {
     const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 5, 2026: MedReps can edit only their own orders. Management can edit any.
-    if (req.user.role === 'medrep' && order.medrep_id !== req.user.id) {
+    if (!canActOnOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
     if (order.zoho_so_id) {

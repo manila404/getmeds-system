@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { Plus, RefreshCw, Eye } from 'lucide-react';
 import client from '../../api/client';
+import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
 
 const STATUS_COLORS = {
@@ -26,7 +27,28 @@ const STATUS_COLORS = {
 
 const MyOrdersPage = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [statusFilter, setStatusFilter] = useState('');
+
+  /**
+   * Sep 12, 2026. This list now holds two kinds of order: the rep's own, and
+   * the ones they raised for a colleague. Both belong here — the rep who typed
+   * an order in has to be able to find it again — but an unlabelled row under
+   * somebody else's customer reads as a bug, so each says which it is.
+   *
+   * raised_by_id is NULL for an ordinary order, so only genuinely on-behalf
+   * rows are ever labelled.
+   */
+  const behalfLabel = (order) => {
+    if (!order.raised_by_id || !user) return null;
+    if (String(order.raised_by_id) === String(user.id)) {
+      return { text: `for ${order.medrep_name || 'a colleague'}`, own: false };
+    }
+    if (String(order.medrep_id) === String(user.id)) {
+      return { text: `raised by ${order.raised_by_name || 'a colleague'}`, own: true };
+    }
+    return null;
+  };
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['my-orders', statusFilter],
@@ -101,7 +123,20 @@ const MyOrdersPage = () => {
               {orders.map(order => (
                 <tr key={order.id} className="hover:bg-surface transition-colors">
                   <td className="px-4 py-3 text-sm font-mono font-semibold text-getmeds-blue">{order.getmeds_order_id}</td>
-                  <td className="px-4 py-3 text-sm font-medium text-ink-primary">{order.customer_name}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-ink-primary">
+                    {order.customer_name}
+                    {behalfLabel(order) && (
+                      <span
+                        className={`ml-2 align-middle px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
+                          behalfLabel(order).own
+                            ? 'bg-slate-100 text-ink-secondary'
+                            : 'bg-getmeds-blue/10 text-getmeds-blue-dark'
+                        }`}
+                      >
+                        {behalfLabel(order).text}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${STATUS_COLORS[order.status] || 'bg-slate-100 text-slate-700'}`}>
                       {order.status?.replace(/_/g, ' ')}

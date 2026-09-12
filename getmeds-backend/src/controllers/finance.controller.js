@@ -5,6 +5,7 @@ const { setOrderStatus } = require('../services/orderStatusService');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { markVerifiedWithOrder } = require('./paymentProof.controller');
+const { normalizeOrigin, originSql, importedSql } = require('../services/orderOrigin');
 
 
 // ─── Finance visibility (read-only) ────────────────────────────────────────
@@ -43,6 +44,25 @@ exports.getQueue = async (req, res, next) => {
     const scope = await loadScope(req.user);
     const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
     const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
+
+    /**
+     * Sep 12, 2026: imported Zoho orders are separated from orders raised
+     * here, and this queue defaults to the latter.
+     *
+     * The import brought historical Sales Orders in carrying real statuses,
+     * four of which this queue selects on — so Finance opened the page to 138
+     * imported orders and the 4 they were meant to act on. Nothing was broken;
+     * the actionable work was simply buried at a ratio of roughly 35 to 1.
+     *
+     * They are separated rather than excluded. An imported order can still be
+     * the one someone is asking about, and a queue that silently drops rows is
+     * worse than one that is crowded. `origin=zoho` returns them, `origin=all`
+     * returns both, and the counts below are computed over the WHOLE queue so
+     * the page can show what is on the other tab without fetching it.
+     */
+    const origin = normalizeOrigin(req.query.origin);
+    const originClause = originSql(origin, 'o');
+    const originAnd = originClause ? ` AND ${originClause}` : '';
     const orders = await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_number,
              u.name as medrep_name, u.email as medrep_email,
@@ -86,10 +106,34 @@ exports.getQueue = async (req, res, next) => {
         WHERE proofs.file_type = 'payment_proof'
         GROUP BY proofs.order_id
       ) pp ON pp.order_id = o.id
-      WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')${scopeAnd}
+      WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')${scopeAnd}${originAnd}
       ORDER BY o.submitted_at ASC
     `).all(...scopeParams);
-    res.json({ success: true, data: { orders } });
+
+    // Counted over the same status + scope window but WITHOUT the origin
+    // filter, so each tab can show the other's size honestly. Two aggregates
+    // in one pass rather than a second round trip per tab.
+    const counts = await db.prepare(`
+      SELECT
+        COUNT(*) FILTER (WHERE ${importedSql('o')})       AS zoho,
+        COUNT(*) FILTER (WHERE NOT (${importedSql('o')})) AS getmeds,
+        COUNT(*)                                          AS total
+      FROM orders o
+      WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')${scopeAnd}
+    `).get(...scopeParams);
+
+    res.json({
+      success: true,
+      data: {
+        orders,
+        origin,
+        counts: {
+          getmeds: Number(counts?.getmeds || 0),
+          zoho: Number(counts?.zoho || 0),
+          total: Number(counts?.total || 0),
+        },
+      },
+    });
   } catch (err) { next(err); }
 };
 

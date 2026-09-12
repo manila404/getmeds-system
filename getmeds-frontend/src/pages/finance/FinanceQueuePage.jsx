@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt } from 'lucide-react';
 import client from '../../api/client';
@@ -27,12 +27,51 @@ const NO_PROOF_REASONS = {
 
 const FinanceQueuePage = () => {
   const qc = useQueryClient();
+
+  /**
+   * Sep 12, 2026. Two queues, not one.
+   *
+   * The Zoho import brought historical Sales Orders in carrying real statuses,
+   * four of which this page selects on — so Finance opened it to 138 imported
+   * orders and the 4 they were meant to act on. Nothing was broken; the work
+   * was buried at roughly 35 to 1.
+   *
+   * Imported orders are separated rather than hidden. They are still the ones
+   * someone rings up about, and a queue that silently drops rows is worse than
+   * a crowded one — so the other tab is always visible and always carries its
+   * count, even when this one is empty.
+   */
+  const [origin, setOrigin] = useState('getmeds');
+
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['finance-queue'],
-    queryFn: () => client.get('/api/finance/queue').then(r => r.data),
-    refetchInterval: 30000
+    // origin is part of the key: without it the two tabs would serve each
+    // other's cached rows on switch.
+    queryKey: ['finance-queue', origin],
+    queryFn: () => client.get(`/api/finance/queue?origin=${origin}`).then(r => r.data),
+    refetchInterval: 30000,
+    // Keeps the previous tab's rows on screen while the next loads, so
+    // switching does not flash the empty state. v5 spelling: the old
+    // `keepPreviousData: true` option was removed and is silently ignored,
+    // which looks like it works until you switch tabs on a slow connection.
+    placeholderData: keepPreviousData
   });
   const orders = data?.data?.orders || [];
+  const counts = data?.data?.counts || { getmeds: 0, zoho: 0, total: 0 };
+
+  const TABS = [
+    {
+      key: 'getmeds',
+      label: 'Raised in GetMeds',
+      count: counts.getmeds,
+      hint: 'Orders your MedReps submitted here. This is the work.'
+    },
+    {
+      key: 'zoho',
+      label: 'Imported from Zoho',
+      count: counts.zoho,
+      hint: 'Historical Sales Orders brought over by the import. Reference only — they are maintained in Zoho.'
+    }
+  ];
 
   // Which order's reject box is open, and what's been typed into it. Kept as
   // an id rather than a boolean so only one is ever open at a time.
@@ -152,23 +191,74 @@ const FinanceQueuePage = () => {
         </button>
       </div>
 
+      {/* Sep 12, 2026: the split. Both tabs always show, both always carry
+          their count — an empty GetMeds tab beside "Imported from Zoho (138)"
+          says the queue is clear, where a single merged list of 143 said
+          nothing at all. */}
+      <div className="flex flex-wrap gap-2" role="tablist">
+        {TABS.map(t => (
+          <button
+            key={t.key}
+            role="tab"
+            aria-selected={origin === t.key}
+            onClick={() => setOrigin(t.key)}
+            title={t.hint}
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors border ${
+              origin === t.key
+                ? 'bg-getmeds-blue text-white border-getmeds-blue'
+                : 'bg-white text-ink-secondary border-slate-200 hover:bg-surface hover:text-ink-primary'
+            }`}
+          >
+            {t.label}
+            <span className={`ml-1.5 font-normal ${origin === t.key ? 'text-white/80' : 'text-ink-secondary'}`}>
+              ({t.count})
+            </span>
+          </button>
+        ))}
+      </div>
+
       <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
         <div className="px-4 py-3 border-b border-slate-200 bg-surface flex items-center gap-2">
           <Clock className="w-4 h-4 text-state-warning" />
           <h2 className="text-sm font-semibold text-ink-primary">
-            In the Finance queue ({orders.length})
+            {origin === 'zoho' ? 'Imported from Zoho' : 'Raised in GetMeds'} ({orders.length})
             {awaitingCount > 0 && (
               <span className="ml-2 font-normal text-purple-800">· {awaitingCount} needing your account check</span>
             )}
           </h2>
         </div>
 
+        {/* Said once, at the top of the tab, rather than on all 138 rows. */}
+        {origin === 'zoho' && (
+          <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200">
+            <p className="text-[12px] text-ink-secondary">
+              These came from the Zoho import and are kept for reference — they are maintained in
+              Zoho, not here. MedReps can view them but cannot change them.
+            </p>
+          </div>
+        )}
+
         {isLoading ? (
           <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-getmeds-blue" /></div>
         ) : orders.length === 0 ? (
           <div className="text-center py-12 text-ink-secondary">
             <CheckCircle className="w-10 h-10 mx-auto mb-2 text-pharmacy-green" />
-            <p className="text-sm">No orders currently waiting on Finance</p>
+            <p className="text-sm">
+              {origin === 'zoho'
+                ? 'No imported Zoho orders are sitting in the Finance queue'
+                : 'No orders currently waiting on Finance'}
+            </p>
+            {/* An empty GetMeds tab while imported orders are waiting used to
+                be indistinguishable from a broken page. */}
+            {origin === 'getmeds' && counts.zoho > 0 && (
+              <button
+                type="button"
+                onClick={() => setOrigin('zoho')}
+                className="mt-2 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
+              >
+                {counts.zoho} imported Zoho order{counts.zoho === 1 ? '' : 's'} are in this queue too
+              </button>
+            )}
           </div>
         ) : (
           <ul className="divide-y divide-slate-100">

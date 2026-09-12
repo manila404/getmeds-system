@@ -203,6 +203,11 @@ CREATE TABLE IF NOT EXISTS orders (
   getmeds_order_id TEXT UNIQUE NOT NULL,
   customer_id INTEGER NOT NULL REFERENCES customers(id),
   medrep_id INTEGER NOT NULL REFERENCES users(id),
+  -- Sep 12, 2026: who filled the form in, when that is not who owns the order.
+  -- A MedRep may raise an order for a colleague; medrep_id is then the
+  -- colleague's. NULL is the ordinary case (raised by its owner) and is NOT
+  -- backfilled to medrep_id -- see reconcileOrderRaisedBy in migrate.pg.js.
+  raised_by_id INTEGER REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN (
     'draft', 'pending_management_approval', 'submitted', 'validating', 'so_pending', 'so_created',
     'ready_for_finance_verified', 'ready_for_draft_invoice',

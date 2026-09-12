@@ -156,15 +156,10 @@ describe('proof of payment', () => {
    * here rather than left to the permission function's comment.
    */
   describe('an order raised on behalf of a colleague', () => {
-    /** Mirrors what orders.controller.js writes on the submit event. */
+    /** Mirrors what orders.controller.js writes on the order row itself. */
     async function makeOrderRaisedBy(raiserId) {
       const orderId = await makeOrder();
-      await db
-        .prepare(
-          `INSERT INTO order_events (order_id, event_type, actor_id, notes, metadata)
-           VALUES (?, 'STATUS_CHANGE', ?, 'raised on behalf', ?)`
-        )
-        .run(orderId, ownerId, JSON.stringify({ onBehalfOf: true, raisedByUserId: raiserId }));
+      await db.prepare('UPDATE orders SET raised_by_id = ? WHERE id = ?').run(raiserId, orderId);
       return orderId;
     }
 
@@ -181,10 +176,13 @@ describe('proof of payment', () => {
       expect(proofOf(orderId)).toBeTruthy();
     });
 
-    test('a rep named by no such trail is still refused', async () => {
+    test('a rep the order does not name is still refused', async () => {
       // Narrowness is the point: admitting the raiser must not become
-      // admitting any rep who happens to be looking at the order.
-      const orderId = await makeOrderRaisedBy(999999);
+      // admitting any rep who happens to be looking at the order. Raised by a
+      // real third party, because a made-up id is refused by the foreign key
+      // before the permission check is reached and would prove nothing.
+      const third = await db.prepare('SELECT id FROM users WHERE email = ?').get('admin@getmeds.ph');
+      const orderId = await makeOrderRaisedBy(third.id);
 
       const res = await request(app)
         .post(`/api/orders/${orderId}/payment-proof/upload-url`)
