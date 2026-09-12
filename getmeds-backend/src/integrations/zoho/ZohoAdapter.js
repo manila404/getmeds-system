@@ -299,6 +299,34 @@ class ZohoAdapter {
   }
 
   /**
+   * Move a Sales Order from Draft to Confirmed in Zoho.
+   *
+   * Sep 12, 2026. The FOURTH deliberate exception to this adapter's
+   * create-only rule, and the first that changes the state of a document
+   * rather than adding to one.
+   *
+   * Why it earns the exception: this app creates every Sales Order as a
+   * Draft, and a Draft is invisible to the rest of Zoho's pipeline -- it
+   * cannot be invoiced or packed. Until now somebody confirmed each one by
+   * hand in Zoho Books, and the app waited to be told. That made Finance's
+   * verification a record-keeping act that changed nothing, while the step
+   * that actually released the order happened somewhere else entirely, with
+   * no connection between the two.
+   *
+   * Confirming is safe in a way the deletes this adapter refuses are not: it
+   * moves a document forward through the same transition a person would make
+   * in the UI, it is the documented next state for a Draft, and nothing is
+   * destroyed. A confirmed order that should not have been can be voided in
+   * Zoho by a human; a deleted one cannot be recovered by anyone.
+   *
+   * @param {string} salesorderId - an existing Zoho Sales Order id
+   * @returns {Promise<{code:number, message:string}>}
+   */
+  async confirmSalesOrder(salesorderId) {
+    throw new Error('Not implemented');
+  }
+
+  /**
    * Toggle a simulated outage, for demoing "Zoho is down" on demand
    * (Test Mode only calls this). Meaningful only for MockZohoAdapter — the
    * base implementation is a no-op so calling this against LiveZohoAdapter

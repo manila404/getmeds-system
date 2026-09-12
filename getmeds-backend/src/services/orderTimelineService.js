@@ -91,7 +91,12 @@ const SPINE = [
   {
     key: 'approved',
     label: 'Management Approved',
-    types: ['MANAGEMENT_APPROVED'],
+    // Sep 12, 2026: APPROVAL_NOT_REQUIRED satisfies this stage too. An order a
+    // Management or admin user raised themselves never goes to the approval
+    // queue — there is nobody left to approve it to — so waiting for a
+    // MANAGEMENT_APPROVED that can never arrive left the stage unticked and
+    // the order looking stuck.
+    types: ['MANAGEMENT_APPROVED', 'APPROVAL_NOT_REQUIRED'],
     // Introduced by this app. An imported order never passed through it.
     appOnly: true,
     notApplicableNote: 'Not applicable — this order was raised in Zoho, before in-app approval existed.'

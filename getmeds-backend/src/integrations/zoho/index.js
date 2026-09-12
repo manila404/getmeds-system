@@ -260,6 +260,11 @@ const facadeMethods = [
   // on ZohoAdapter/LiveZohoAdapter/MockZohoAdapter; without this line it
   // would be `undefined` through the facade every controller actually uses.
   'addSalesOrderAttachment',
+  // Sep 12, 2026: added in the SAME commit as the method itself, which is the
+  // whole lesson of the four entries above. A method can exist on the base
+  // contract, the Live adapter and the Mock and still be `undefined` here,
+  // and this is the only module any controller imports.
+  'confirmSalesOrder',
   'setSimulatedOutage',
   'isSimulatedOutage'
 ];

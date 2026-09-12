@@ -54,13 +54,22 @@ const TRANSITIONS = {
   // Management/admin submission is untouched: it still goes straight from
   // 'draft' through the Zoho pipeline in one action and never visits this
   // status.
-  draft: ['submitted', 'pending_management_approval', 'cancelled', 'deleted'],
+  // Sep 12, 2026: 'ready_for_finance_verified' and 'ready_for_draft_invoice'
+  // added. A credit order raised by someone who needs no approval is written
+  // straight to Finance now that Finance's verification is what confirms the
+  // Sales Order in Zoho (see finance.controller.js's verifyAccount). Both
+  // create paths set that status with a direct UPDATE, so nothing was
+  // refusing it at runtime -- but a map that does not list a transition the
+  // system performs is a map nobody can trust.
+  draft: ['submitted', 'pending_management_approval', 'ready_for_finance_verified', 'ready_for_draft_invoice', 'cancelled', 'deleted'],
   // Sep 7, 2026 (2): 'draft' added — Management can send a pending order
   // back to the MedRep to fix instead of approving or rejecting it outright
   // (see orders.controller.js's sendBack). The order keeps its
   // getmeds_order_id and goes right back through this same gate once the
   // MedRep edits and resubmits it.
-  pending_management_approval: ['submitted', 'draft', 'on_hold', 'cancelled', 'deleted'],
+  // Sep 12, 2026: approving a credit order now lands it on Finance directly
+  // rather than at 'so_created' waiting for a manual Zoho confirmation.
+  pending_management_approval: ['submitted', 'draft', 'ready_for_finance_verified', 'ready_for_draft_invoice', 'on_hold', 'cancelled', 'deleted'],
   submitted: ['validating', 'exception', 'deleted'],
   validating: ['so_pending', 'exception', 'deleted'],
   so_pending: ['so_created', 'exception', 'deleted'],

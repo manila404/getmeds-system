@@ -163,13 +163,17 @@ const FinanceQueuePage = () => {
       key: 'getmeds',
       label: 'Raised in GetMeds',
       count: counts.getmeds,
-      hint: 'Orders your MedReps submitted here. This is the work.'
+      hint: stage
+        ? `Orders raised here at this stage.`
+        : 'Orders your MedReps submitted here. This is the work.'
     },
     {
       key: 'zoho',
       label: 'Imported from Zoho',
       count: counts.zoho,
-      hint: 'Historical Sales Orders brought over by the import. Reference only — they are maintained in Zoho.'
+      hint: stage
+        ? 'Imported Sales Orders at this stage. Reference only — they are maintained in Zoho.'
+        : 'Historical Sales Orders brought over by the import. Reference only — they are maintained in Zoho.'
     }
   ];
 
@@ -627,7 +631,8 @@ const FinanceQueuePage = () => {
                 onClick={() => chooseOrigin('zoho')}
                 className="mt-2 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
               >
-                {counts.zoho} imported Zoho order{counts.zoho === 1 ? '' : 's'} are in this queue too
+                {counts.zoho} imported Zoho order{counts.zoho === 1 ? '' : 's'}{' '}
+                {counts.zoho === 1 ? 'is' : 'are'} here too
               </button>
             )}
           </div>
@@ -859,10 +864,15 @@ const FinanceQueuePage = () => {
 
       <div className="flex items-start gap-2 text-xs text-ink-secondary bg-surface border border-slate-200 rounded-lg p-3">
         <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-        <p>Verifying here does not create anything in Zoho — it records that the account was checked and
-          clears the order to be invoiced. Raising the Invoice, marking it Sent and recording the Customer
-          Payment all still happen in Zoho Books, and this page follows along automatically. If an invoice
-          appears in Zoho before anyone verifies here, the order moves on anyway and the timeline says so.</p>
+        {/* Sep 12, 2026: this used to say verifying creates nothing in Zoho.
+            It now does — confirming is what moves the Sales Order out of
+            Draft, and leaving the old wording up would have been the screen
+            telling Finance the opposite of what their click does. */}
+        <p>Confirming here checks the customer&rsquo;s account and moves the Sales Order in Zoho from Draft to
+          Confirmed, which is what releases it to be invoiced. Raising the Invoice, marking it Sent and
+          recording the Customer Payment all still happen in Zoho Books, and this page follows along
+          automatically. If Zoho is unreachable the confirmation still stands here and the sync is retried —
+          the timeline says so either way.</p>
       </div>
 
 

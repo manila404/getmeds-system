@@ -1365,7 +1365,18 @@ exports.create = async (req, res, next) => {
     // disagree about where a credit order starts.
     const finalStatus = isDraft
       ? 'draft'
-      : (requiresManagementApproval ? 'pending_management_approval' : (isCredit ? 'so_created' : 'ready_for_draft_invoice'));
+      // Sep 12, 2026: a credit order goes to FINANCE, not to a waiting room.
+      //
+      // It used to stop at 'so_created' until somebody confirmed the Sales
+      // Order by hand in Zoho Books; only then did it reach Finance. That made
+      // Finance's verification a record-keeping act that changed nothing,
+      // while the step which actually released the order happened in another
+      // system with no connection between the two -- and an order nobody
+      // thought to confirm in Zoho simply sat there (GM-20260912-0003).
+      //
+      // Now Finance verifies first and the app confirms the Sales Order in
+      // Zoho on their behalf. See finance.controller.js's verifyAccount.
+      : (requiresManagementApproval ? 'pending_management_approval' : (isCredit ? 'ready_for_finance_verified' : 'ready_for_draft_invoice'));
     const now = new Date().toISOString();
     // "Sales Order Date (Automatic Today)" on the form — always set here,
     // server-side, to today's date. There is no client override; a
@@ -1776,6 +1787,45 @@ exports.create = async (req, res, next) => {
         orderData: orderDataForNotif
       });
     } else if (!isDraft) {
+      /**
+       * Sep 12, 2026: record the approval that raising the order already was.
+       *
+       * requiresManagementApproval is false here, so nothing was ever going to
+       * the approval queue. But the timeline's "Management Approved" stage
+       * fills only from a MANAGEMENT_APPROVED event, and this path emitted
+       * none — so the stage sat unticked forever and the order read as though
+       * it were still waiting on somebody (GM-20260912-0003).
+       *
+       * WHICH event depends on who raised it, and the distinction is real:
+       *
+       *   management / admin  -> MANAGEMENT_APPROVED. A manager raising an
+       *       order IS the management decision. There is no second person to
+       *       route it to, and asking them to approve their own order would be
+       *       a rubber stamp with an audit trail.
+       *
+       *   anyone else         -> APPROVAL_NOT_REQUIRED. Nobody approved this;
+       *       the order simply never needed it. Claiming a management approval
+       *       that no manager made would be a lie in the one record that
+       *       exists to say who decided what.
+       *
+       * Either satisfies the timeline stage. Only the pair tells the truth.
+       */
+      const raiserRole = (req.user.role || '').toLowerCase();
+      const raiserIsManagement = raiserRole === 'management' || raiserRole === 'admin';
+
+      await logEvent({
+        orderId,
+        eventType: raiserIsManagement ? 'MANAGEMENT_APPROVED' : 'APPROVAL_NOT_REQUIRED',
+        oldStatus: finalStatus,
+        newStatus: finalStatus,
+        actorId: req.user.id,
+        actorName: req.user.name,
+        notes: raiserIsManagement
+          ? `Approved on creation — raised by ${req.user.name} (${raiserRole}), so no separate approval step applies.`
+          : `Raised by ${req.user.name} (${raiserRole}) — no Management approval required for this order.`,
+        metadata: { raisedByRole: raiserRole, approvedOnCreation: raiserIsManagement }
+      });
+
       const orderDataForNotif = {
         getmeds_order_id: getmedsOrderId,
         customer_name: customer.name,
@@ -1938,7 +1988,10 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // A DIRECT order still goes to 'ready_for_draft_invoice' — unchanged, so
     // the Finance queue behaves exactly as before.
     const isCredit = (order.customer_type === 'credit' || order.customer_master_type === 'credit');
-    const finalStatus = isCredit ? 'so_created' : 'ready_for_draft_invoice';
+    // Sep 12, 2026: matches the create path above — a credit order goes
+    // straight to Finance rather than waiting for someone to confirm the Sales
+    // Order in Zoho. Two copies of this rule, and they have to agree.
+    const finalStatus = isCredit ? 'ready_for_finance_verified' : 'ready_for_draft_invoice';
 
     // Seed the Zoho-side status as 'draft'. Sep 1, 2026: without this
     // baseline, the first time anyone confirmed the SO in Zoho the

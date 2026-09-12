@@ -104,17 +104,49 @@ describe('MockZohoAdapter', () => {
   });
 });
 
-describe('ZohoAdapter contract — create-only, no confirm/pack/ship/payment/contact-write/item-write', () => {
-  it('the trimmed contract no longer declares findOrCreateContact, adjustStock, confirmSalesOrder, packSalesOrder, shipSalesOrder, addOrderComment, recordPaymentForSalesOrder, createItem, findOrCreateItem, or activateItem', () => {
+describe('ZohoAdapter contract — narrow writes, no pack/ship/payment/item-write', () => {
+  /**
+   * Sep 12, 2026: confirmSalesOrder LEFT this list, deliberately.
+   *
+   * It was trimmed with the rest of the "drive Zoho's pipeline from here"
+   * family, and that principle still stands for the nine below: packing,
+   * shipping, recording payments and writing items are Zoho's to own, and an
+   * app that does them from the outside ends up disagreeing with the system of
+   * record.
+   *
+   * Confirming is the one step that could not stay outside, because this app
+   * creates every Sales Order as a DRAFT. A draft cannot be invoiced or packed
+   * — so an order this app raised was inert in Zoho until a person remembered
+   * to confirm it by hand, and Finance's verification, the step that is
+   * supposed to release it, changed nothing at all. GM-20260912-0003 sat in
+   * exactly that state.
+   *
+   * The distinction that makes it acceptable: confirming moves a document
+   * forward through its documented next state and destroys nothing. A
+   * confirmation made in error can be voided by a human in Zoho. That is not
+   * true of the deletes this adapter still refuses outright — the test above
+   * checks no delete/void/remove method exists anywhere, and it still passes.
+   */
+  it('still declares no pack/ship/payment/contact-create-or-item write', () => {
     const methodNames = Object.getOwnPropertyNames(ZohoAdapter.prototype);
     const removedMethods = [
-      'findOrCreateContact', 'adjustStock', 'confirmSalesOrder', 'packSalesOrder',
+      'findOrCreateContact', 'adjustStock', 'packSalesOrder',
       'shipSalesOrder', 'addOrderComment', 'recordPaymentForSalesOrder', 'createItem',
       'findOrCreateItem', 'activateItem'
     ];
     for (const m of removedMethods) {
       expect(methodNames).not.toContain(m);
     }
+  });
+
+  it('declares confirmSalesOrder, and it is the ONLY lifecycle write', () => {
+    // Pinned as an exact set: a later "while I am here" addition of
+    // packSalesOrder alongside it should fail, not slip through on the
+    // precedent this one sets.
+    const lifecycleWrites = Object.getOwnPropertyNames(ZohoAdapter.prototype).filter((n) =>
+      /^(confirm|pack|ship|void|cancel|invoice|record)[A-Z]/.test(n)
+    );
+    expect(lifecycleWrites).toEqual(['confirmSalesOrder']);
   });
 });
 

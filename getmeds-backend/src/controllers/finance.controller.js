@@ -7,6 +7,7 @@ const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { markVerifiedWithOrder } = require('./paymentProof.controller');
 const { normalizeOrigin, originSql, importedSql } = require('../services/orderOrigin');
 const { STAGE_GROUPS, statusesForStage, ACTIONABLE } = require('../services/financeStages');
+const zoho = require('../integrations/zoho');
 
 
 // ─── Finance visibility (read-only) ────────────────────────────────────────
@@ -173,16 +174,33 @@ exports.getQueue = async (req, res, next) => {
       LIMIT ? OFFSET ?
     `).all(...scopeParams, ...stageParams, limit, offset);
 
-    // Tab sizes: scope-limited but deliberately NOT origin-limited, so each
-    // tab can state the other's size without fetching it.
+    /**
+     * Tab sizes: scope-limited and stage-limited, but deliberately NOT
+     * origin-limited — that last part is what lets each tab state the other's
+     * size without fetching it.
+     *
+     * Sep 12, 2026: the stage filter was missing here, so on a stage page the
+     * tabs counted every order in scope at ANY stage while the list beneath
+     * them counted one stage. The result was "Raised in GetMeds (1)" sitting
+     * directly above a list headed "Raised in GetMeds (0)" — two true numbers
+     * describing different things, which reads as the page being broken.
+     *
+     * On the dashboard `stage` is null, so this is unfiltered exactly as
+     * before and the tabs still mean "everything on that side".
+     */
     const countsQuery = db.prepare(`
       SELECT
         COUNT(*) FILTER (WHERE ${importedSql('o')})       AS zoho,
         COUNT(*) FILTER (WHERE NOT (${importedSql('o')})) AS getmeds,
         COUNT(*)                                          AS total
       FROM orders o
-      WHERE 1 = 1${scopeAnd}
-    `).get(...scopeParams);
+      WHERE 1 = 1${scopeAnd}${stageAnd}
+    `)
+      // One array argument, not spread: db/pg.js's flatten() unwraps a lone
+      // array into the parameter list, so a bare `.get(stageStatuses)` would
+      // send the first status as $1. Bites only when scopeParams is empty,
+      // which is every unscoped user.
+      .get([...scopeParams, ...stageParams]);
 
     /**
      * Per-stage counts for the cards and the filter chips.
@@ -421,9 +439,87 @@ exports.verifyAccount = async (req, res, next) => {
       });
     })();
 
+    /**
+     * Sep 12, 2026: the verification is what confirms the Sales Order in Zoho.
+     *
+     * Every Sales Order this app creates starts as a DRAFT, and a draft is
+     * invisible to the rest of Zoho's pipeline — it cannot be invoiced or
+     * packed. Until now a person confirmed each one by hand in Zoho Books and
+     * this app waited to be told, which made Finance's verification a
+     * record-keeping act that released nothing, while the step that actually
+     * released the order happened in another system with no link between the
+     * two. An order nobody remembered to confirm just sat there.
+     *
+     * OUTSIDE the transaction above, and deliberately:
+     *
+     *   - the verification is already committed, so Zoho being unreachable
+     *     cannot undo a decision a person has made. Finance is never blocked
+     *     by Zoho being down.
+     *   - a failure is recorded on the order and retried, exactly as a failed
+     *     order creation already is (zohoRetryService).
+     *
+     * Only on approval, and only for an order that has a Sales Order to
+     * confirm — a held order has nothing to release, and an order whose sync
+     * failed has no Zoho id yet.
+     */
+    let zohoConfirm = null;
+    if (approved && order.zoho_so_id) {
+      try {
+        const result = await zoho.confirmSalesOrder(order.zoho_so_id);
+        zohoConfirm = { ok: true, alreadyConfirmed: Boolean(result?.alreadyConfirmed) };
+
+        await db
+          .prepare("UPDATE orders SET zoho_so_status = 'confirmed' WHERE id = ?")
+          .run(order.id);
+
+        await logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_SO_CONFIRMED',
+          oldStatus: newStatus,
+          newStatus,
+          actorId: actor.id,
+          actorName: actor.name,
+          notes: result?.alreadyConfirmed
+            ? `Sales Order ${order.zoho_so_number || order.zoho_so_id} was already confirmed in Zoho.`
+            : `Sales Order ${order.zoho_so_number || order.zoho_so_id} confirmed in Zoho by this verification.`,
+          metadata: { zohoSalesOrderId: order.zoho_so_id, alreadyConfirmed: Boolean(result?.alreadyConfirmed) }
+        });
+      } catch (err) {
+        zohoConfirm = { ok: false, error: err.message };
+
+        // Recorded on the order rather than thrown: the verification stands.
+        await db
+          .prepare("UPDATE orders SET zoho_sync_status = 'failed' WHERE id = ?")
+          .run(order.id);
+
+        await logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_SYNC_FAILED',
+          oldStatus: newStatus,
+          newStatus,
+          actorId: actor.id,
+          actorName: actor.name,
+          notes:
+            `Verified here, but the Sales Order could not be confirmed in Zoho: ${err.message} ` +
+            'The order is cleared to invoice; confirm it in Zoho Books, or retry the sync.',
+          metadata: { zohoSalesOrderId: order.zoho_so_id, error: err.message }
+        });
+
+        console.error('[FINANCE_VERIFY] Zoho confirm failed:', err.message);
+      }
+    }
+
     res.json({
       success: true,
-      data: { status: newStatus, approved, paymentProofVerified: verifiedProofs.length > 0 }
+      data: {
+        status: newStatus,
+        approved,
+        paymentProofVerified: verifiedProofs.length > 0,
+        // null when there was nothing to confirm; { ok } otherwise, so the
+        // screen can distinguish "confirmed in Zoho" from "verified here, Zoho
+        // still to catch up".
+        zohoConfirmed: zohoConfirm
+      }
     });
   } catch (err) { next(err); }
 };

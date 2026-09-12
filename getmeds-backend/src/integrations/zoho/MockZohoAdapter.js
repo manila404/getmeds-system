@@ -390,6 +390,31 @@ class MockZohoAdapter extends ZohoAdapter {
     this._log(`[ZOHO_MOCK] Would POST /salesorders/${salesorderId}/attachment: ${document.file_name}`);
     return { code: 0, message: 'Attachment added successfully [MOCK MODE]', document };
   }
+
+  /**
+   * Mirrors LiveZohoAdapter.confirmSalesOrder: flips the seeded order's
+   * status to 'confirmed' and reports an already-confirmed order as success,
+   * exactly as the live call does. See ZohoAdapter.js for why this write is
+   * allowed.
+   */
+  async confirmSalesOrder(salesorderId) {
+    const salesorder = this._salesOrders.get(salesorderId);
+    if (!salesorder) {
+      return { code: 4, message: 'The Sales Order ID given seems to be incorrect. [MOCK MODE]' };
+    }
+
+    if (String(salesorder.status || '').toLowerCase() === 'confirmed') {
+      return {
+        code: 0,
+        message: 'Sales Order was already confirmed [MOCK MODE]',
+        alreadyConfirmed: true
+      };
+    }
+
+    salesorder.status = 'confirmed';
+    this._log(`[ZOHO_MOCK] Would POST /salesorders/${salesorderId}/status/confirmed`);
+    return { code: 0, message: 'Sales Order confirmed [MOCK MODE]' };
+  }
 }
 
 module.exports = MockZohoAdapter;
