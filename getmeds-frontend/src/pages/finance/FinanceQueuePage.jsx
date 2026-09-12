@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt } from 'lucide-react';
+import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch } from 'lucide-react';
 import client from '../../api/client';
+import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 
 // Almost read-only. Every stage below EXCEPT the first is reported by Zoho:
 //   1. MedRep submits an order here -> it syncs to Zoho as a Sales Order.
@@ -42,6 +43,16 @@ const FinanceQueuePage = () => {
    * count, even when this one is empty.
    */
   const [origin, setOrigin] = useState('getmeds');
+
+  /**
+   * Sep 12, 2026: which order is open in the details panel.
+   *
+   * An id rather than the row object, so the panel always fetches fresh
+   * detail and a freshly signed URL per attachment. Holding the row would
+   * mean showing the queue's summary columns back as if they were the whole
+   * order, which is exactly the gap this closes.
+   */
+  const [detailOrderId, setDetailOrderId] = useState(null);
 
   const { data, isLoading, refetch, isFetching } = useQuery({
     // origin is part of the key: without it the two tabs would serve each
@@ -284,6 +295,18 @@ const FinanceQueuePage = () => {
                     <div className="text-right shrink-0">
                       <p className="text-sm font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
                       <p className="text-xs text-ink-secondary font-medium mt-0.5">Waiting {waitingHours(order)}</p>
+                      {/* Sep 12, 2026: the row shows the proof of payment and
+                          nothing else. An order can carry five other document
+                          types, and a hospital order is required to carry four
+                          — so the evidence Finance verifies against was not on
+                          this screen at all. */}
+                      <button
+                        type="button"
+                        onClick={() => setDetailOrderId(order.id)}
+                        className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
+                      >
+                        <FileSearch className="w-3.5 h-3.5" /> Details & files
+                      </button>
                     </div>
                   </div>
                   <div className={`mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${stage.className}`}>
@@ -481,6 +504,12 @@ const FinanceQueuePage = () => {
           Payment all still happen in Zoho Books, and this page follows along automatically. If an invoice
           appears in Zoho before anyone verifies here, the order moves on anyway and the timeline says so.</p>
       </div>
+
+      {/* Mounted once at page level, not per row: 143 rows would otherwise
+          each hold a modal that is almost never open. */}
+      {detailOrderId && (
+        <OrderDetailsModal orderId={detailOrderId} onClose={() => setDetailOrderId(null)} />
+      )}
     </div>
   );
 };

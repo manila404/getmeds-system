@@ -7,6 +7,7 @@ import {
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
+import { ATTACHMENT_TYPES, attachmentLabel } from '../../constants/attachmentTypes';
 
 /**
  * Attachments for one order: proof of payment, and everything else.
@@ -54,18 +55,16 @@ import { formatPHT } from '../../utils/dateUtils';
  * read/upload only, same as before.
  */
 
+// Sep 12, 2026: the type list moved to constants/attachmentTypes.js. This
+// file used to carry its own three-entry copy, so a Guarantee Letter,
+// Prescription or Valid ID uploaded on the order form was displayed here as
+// "Other attachment".
 const MAX_BYTES = 15 * 1024 * 1024;
 const ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf,' +
   'application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,' +
   'application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-const ATTACHMENT_TYPES = [
-  { value: 'payment_proof',  label: 'Proof of Payment' },
-  { value: 'purchase_order', label: 'Purchase Order' },
-  { value: 'other',          label: 'Other' },
-];
-const attachmentLabel = (fileType) =>
-  (ATTACHMENT_TYPES.find((t) => t.value === fileType) || {}).label || 'Other attachment';
+
 
 const PROOF_STATUS = {
   pending: {

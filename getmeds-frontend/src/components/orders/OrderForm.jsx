@@ -33,6 +33,7 @@ import { useAuth } from '../../hooks/useAuth';
 
 import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
+import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
 // paper/spreadsheet-styled "Order Intake Details" block (label-left rows,
@@ -888,21 +889,6 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   const PROOF_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf,' +
     'application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,' +
     'application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-
-  // Sep 9, 2026: 'gl', 'prescription' and 'id' added for the hospital
-  // (PAP/DSWD) intake. Available on every order, not only hospital ones — a
-  // prescription is a prescription whoever the customer is, and hiding the
-  // option would mean tagging it 'other' and losing the distinction.
-  // Mirrors FILE_TYPES in paymentProof.controller.js and the CHECK in
-  // schema.pg.sql; a value here that those reject fails at upload.
-  const ATTACHMENT_TYPES = [
-    { value: 'payment_proof',  label: 'Proof of Payment' },
-    { value: 'gl',             label: 'Guarantee Letter (GL)' },
-    { value: 'prescription',   label: 'Prescription' },
-    { value: 'id',             label: 'Valid ID' },
-    { value: 'purchase_order', label: 'Purchase Order' },
-    { value: 'other',          label: 'Other' },
-  ];
 
   const NO_PROOF_REASONS = [
     { value: 'on_payment_terms',  label: 'Customer is on payment terms' },

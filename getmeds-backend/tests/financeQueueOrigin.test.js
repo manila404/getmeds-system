@@ -150,3 +150,59 @@ describe('GET /api/finance/queue?origin=', () => {
     expect(data.orders.map((o) => o.id)).not.toContain(importedId);
   });
 });
+
+/**
+ * What the Finance details panel depends on.
+ *
+ * Sep 12, 2026. FinanceQueuePage's "Details & files" modal reads two endpoints
+ * that live under /api/orders, not /api/finance — so nothing about the Finance
+ * routes guarantees Finance may call them. They can today because getById and
+ * the attachment list gate on MedRep ownership and wave other roles through.
+ *
+ * That is a quiet dependency: it holds by omission rather than by intent, and
+ * a future tightening of those routes would break the panel with a 403 while
+ * every Finance test still passed. Pinned here so it breaks loudly instead.
+ *
+ * The attachment list matters more than it looks. The queue row reads only
+ * `payment_proof`-type files; at the time of writing, 2 of the 3 attachments
+ * in the system were some other type and therefore invisible to Finance
+ * entirely. This endpoint is the only one that returns all six.
+ */
+describe('the order details a Finance user can read', () => {
+  let financeToken;
+  let orderId;
+  const createdOrderIds = [];
+
+  beforeAll(async () => {
+    financeToken = await loginAs('finance@getmeds.ph');
+    const customerId = (await db.prepare('SELECT id FROM customers LIMIT 1').get()).id;
+    const medrepId = (await db.prepare("SELECT id FROM users WHERE role = 'medrep' LIMIT 1").get()).id;
+    orderId = (await db
+      .prepare(
+        `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status,
+                             customer_type, total_amount, delivery_address)
+         VALUES (?, ?, ?, 'ready_for_finance_verified', 'direct', 1500, '1 Detail St')`
+      )
+      .run(`GM-DETAIL-${Date.now()}`, customerId, medrepId)).lastInsertRowid;
+    createdOrderIds.push(orderId);
+  });
+
+  afterAll(async () => {
+    for (const id of createdOrderIds) await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+  });
+
+  test('Finance can open the order itself', async () => {
+    const res = await request(app).get(`/api/orders/${orderId}`).set(auth(financeToken));
+    expect(res.status).toBe(200);
+    expect(res.body.data.order.id).toBe(orderId);
+    // The panel renders items and the raiser; both come from this response.
+    expect(res.body.data).toHaveProperty('items');
+    expect(res.body.data.order).toHaveProperty('raised_by_name');
+  });
+
+  test('Finance can list every attachment, not only the proof of payment', async () => {
+    const res = await request(app).get(`/api/orders/${orderId}/attachments`).set(auth(financeToken));
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.data.attachments)).toBe(true);
+  });
+});
