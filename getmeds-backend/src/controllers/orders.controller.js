@@ -553,6 +553,31 @@ function canActOnOrder(user, order) {
   return Boolean(order.raised_by_id) && order.raised_by_id === user.id;
 }
 
+/**
+ * Whether a user may CHANGE an order's contents, as opposed to look at it.
+ *
+ * Sep 12, 2026. canActOnOrder above answers "is this order yours", which was
+ * the only question worth asking while the only people who could reach these
+ * endpoints were the MedRep who owned the order and the roles that run the
+ * process. It returns true for every non-MedRep role, so Finance and Dispatch
+ * were free to edit any order that had not yet reached Zoho -- a draft's
+ * delivery notes, its line items, or submitting it on the rep's behalf.
+ *
+ * Nothing in the UI offered them that, so it never happened. But Finance's
+ * screen now lists every order at every stage, and a page that shows someone
+ * an order should not be one permission bug away from letting them rewrite
+ * it. Finance's one power over an order is confirming the customer's account,
+ * which lives in finance.controller.js's verifyAccount and is unaffected.
+ *
+ * Reads still use canActOnOrder: seeing is not acting, and widening what
+ * Finance can see was the whole point of the change that exposed this.
+ */
+function canEditOrder(user, order) {
+  if (!canActOnOrder(user, order)) return false;
+  const role = (user.role || '').toLowerCase();
+  return role === 'medrep' || role === 'admin' || role === 'management';
+}
+
 exports.getAll = async (req, res, next) => {
   try {
     const { status, customer_type, page = 1, limit = 20 } = req.query;
@@ -2018,7 +2043,7 @@ exports.submit = async (req, res, next) => {
 
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 5, 2026: MedReps can submit only their own orders. Management can submit any.
-    if (!canActOnOrder(req.user, order)) {
+    if (!canEditOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
     if (order.status !== 'draft') {
@@ -2385,7 +2410,7 @@ exports.updateDetails = async (req, res, next) => {
     const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 7, 2026: same ownership rule as updateItems.
-    if (!canActOnOrder(req.user, order)) {
+    if (!canEditOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
     if (order.zoho_so_id) {
@@ -2646,7 +2671,7 @@ exports.updateItems = async (req, res, next) => {
     const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 5, 2026: MedReps can edit only their own orders. Management can edit any.
-    if (!canActOnOrder(req.user, order)) {
+    if (!canEditOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
     if (order.zoho_so_id) {

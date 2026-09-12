@@ -1,13 +1,22 @@
-import React from 'react';
-import { NavLink } from 'react-router-dom';
+import React, { useState } from 'react';
+import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff, ChevronDown, ShieldCheck } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
+import { FINANCE_STAGES } from '../../constants/financeStages';
 
 const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollapse }) => {
   const { user } = useAuth();
   const { isDebug } = useDebug();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+
+  // Open when you are already looking at the Finance page, so arriving from a
+  // stage link does not hide the group that link came from.
+  const onFinancePage = location.pathname === '/finance';
+  const [financeOpen, setFinanceOpen] = useState(onFinancePage);
+  const activeStage = onFinancePage ? searchParams.get('stage') : null;
 
   if (!user) return null;
 
@@ -50,7 +59,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       badge: 'Finance',
       badgeClass: 'bg-pharmacy-green/15 text-pharmacy-green-dark',
       links: [
-        { to: '/finance', icon: <CreditCard size={18} />, label: 'Zoho Finance Status', exact: true },
+        { to: '/finance', icon: <CreditCard size={18} />, label: 'Finance Overview', exact: true },
         { to: '/finance/history', icon: <History size={18} />, label: 'Payment History' }
       ]
     },
@@ -105,6 +114,27 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   const mainLinks = [];
   const secondaryLinks = [];
 
+  /**
+   * Sep 12, 2026: "Finance Confirmation" — one nav item per stage.
+   *
+   * The stages were reachable only as cards on the dashboard, which meant
+   * knowing to go there first. As nav items they are where someone looks for
+   * a place to go, and each is a real URL: bookmarkable, shareable, and
+   * restored on a refresh rather than reset.
+   *
+   * Built from constants/financeStages.js so the sidebar cannot end up
+   * offering a stage the dashboard does not have, or vice versa.
+   */
+  // Mirrors the /finance route guard in App.jsx. Showing the group to someone
+  // ProtectedRoute would bounce is worse than not showing it at all.
+  const canSeeFinance = ['finance', 'management', 'admin'].includes(role);
+
+  const financeStageLinks = FINANCE_STAGES.map((g) => ({
+    to: `/finance?stage=${g.key}`,
+    stage: g.key,
+    label: g.navLabel,
+  }));
+
   if (role === 'medrep') {
     mainLinks.push(
       { to: '/medrep/dashboard', icon: <LayoutDashboard size={19} />, label: 'Dashboard' },
@@ -112,12 +142,15 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Orders' }
     );
   } else if (role === 'finance') {
+    // Sep 12, 2026: /finance is no longer a four-status queue — it is Finance's
+    // dashboard over every order, mirroring what the MedRep sees. Named
+    // "Dashboard" to match, and listed first for the same reason the MedRep's
+    // is. 'All Orders Log' is gone from here: it pointed at MyOrdersPage,
+    // which is worded for a MedRep ("orders you have submitted") and listed
+    // all 60,958 orders unscoped. /finance answers that need properly now.
     mainLinks.push(
-      { to: '/finance', icon: <CreditCard size={19} />, label: 'Zoho Finance Status' },
+      { to: '/finance', icon: <LayoutDashboard size={19} />, label: 'Dashboard' },
       { to: '/finance/history', icon: <History size={19} />, label: 'Payment History' }
-    );
-    secondaryLinks.push(
-      { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
     );
   } else if (role === 'dispatch') {
     mainLinks.push(
@@ -305,6 +338,58 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                     ))}
                   </ul>
                 </div>
+
+                {/* Sep 12, 2026: the stages as navigation.
+                    Collapsed by default unless you are already on the page —
+                    six always-open items would crowd out everything else in
+                    the sidebar for the roles that also do other work. */}
+                {financeStageLinks.length > 0 && canSeeFinance && (
+                  <div className={hideWhenCollapsed}>
+                    <button
+                      type="button"
+                      onClick={() => setFinanceOpen((v) => !v)}
+                      aria-expanded={financeOpen}
+                      className="w-full flex items-center px-3 py-2.5 rounded-lg text-sm font-medium text-ink-primary hover:bg-surface transition-all"
+                    >
+                      <span className="mr-2.5"><ShieldCheck size={19} /></span>
+                      <span className="truncate flex-1 text-left">Finance Confirmation</span>
+                      {/* Says there is work behind a group that is shut. */}
+                      {!financeOpen && activeStage && (
+                        <span className="mr-1.5 w-1.5 h-1.5 rounded-full bg-getmeds-blue shrink-0" />
+                      )}
+                      <ChevronDown
+                        size={16}
+                        className={`shrink-0 transition-transform ${financeOpen ? 'rotate-180' : ''}`}
+                      />
+                    </button>
+
+                    {financeOpen && (
+                      <ul className="mt-0.5 space-y-0.5 pl-4">
+                        {financeStageLinks.map((link) => {
+                          // NavLink's own isActive ignores the query string, so
+                          // every stage would light up at once on /finance.
+                          const isActive = activeStage === link.stage;
+                          return (
+                            <li key={link.stage}>
+                              <NavLink
+                                to={link.to}
+                                title={link.label}
+                                onClick={handleLinkClick}
+                                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] transition-all border-l-2 ${
+                                  isActive
+                                    ? 'bg-getmeds-blue/10 text-ink-primary font-semibold border-getmeds-blue'
+                                    : 'text-ink-secondary hover:bg-surface hover:text-ink-primary border-transparent'
+                                }`}
+                              >
+                                <span className="truncate">{link.label}</span>
+                              </NavLink>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                )}
 
                 {secondaryLinks.length > 0 && (
                   <div className="pt-2 border-t border-slate-100">

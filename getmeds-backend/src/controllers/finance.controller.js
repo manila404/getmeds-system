@@ -6,6 +6,7 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { markVerifiedWithOrder } = require('./paymentProof.controller');
 const { normalizeOrigin, originSql, importedSql } = require('../services/orderOrigin');
+const { STAGE_GROUPS, statusesForStage, ACTIONABLE } = require('../services/financeStages');
 
 
 // ─── Finance visibility (read-only) ────────────────────────────────────────
@@ -32,6 +33,60 @@ const { normalizeOrigin, originSql, importedSql } = require('../services/orderOr
 // this queue until the payment is recorded, which is the point Finance's
 // involvement actually ends — issuing the invoice is a step along the way,
 // not the finish line.
+/**
+ * The row shape this page renders: the order, who it is for, who raised it,
+ * and the latest proof of payment aggregated so a row appears exactly once.
+ *
+ * Sep 12, 2026: pulled out of getQueue because two queries now need it --
+ * the paged list, and the short "needs your confirmation" panel above it.
+ * Callers append their own WHERE / ORDER BY / LIMIT. Two copies of a SELECT
+ * this long is two places for the columns the page reads to drift apart.
+ */
+const QUEUE_ROW_SELECT = `
+  SELECT o.*, c.name as customer_name, c.contact_number,
+         u.name as medrep_name, u.email as medrep_email,
+         p.status as payment_status, p.payment_reference, p.amount as payment_amount,
+         -- Sep 4, 2026: the proof of payment rides along, so a row at
+         -- ready_for_finance_verified can show it beside the Verify button
+         -- without a second request per row. NULL simply means none was
+         -- attached — a proof is optional, and Finance decides either way.
+         --
+         -- Sep 5, 2026: payment_proofs can now hold more than one row per
+         -- order (it went from a single UNIQUE-order_id slot to a typed,
+         -- multi-row attachment table — see paymentProof.controller.js).
+         -- A plain LEFT JOIN here would duplicate the order row once per
+         -- matching payment_proof, which is wrong for a queue that must
+         -- list each order exactly once. The subquery below aggregates
+         -- 'payment_proof'-type rows per order FIRST, then joins once, so
+         -- the columns below carry the SAME NAMES and the SAME MEANING
+         -- (the most recently uploaded proof) that FinanceQueuePage.jsx
+         -- already reads — that page needed no changes for this.
+         pp.pending_count as payment_proof_pending_count,
+         pp.latest_status as payment_proof_status,
+         pp.latest_uploaded_at as payment_proof_uploaded_at,
+         pp.latest_file_name as payment_proof_file_name,
+         pp.latest_content_type as payment_proof_content_type,
+         pp.latest_uploaded_by_name as payment_proof_uploaded_by_name
+  FROM orders o
+  LEFT JOIN customers c ON o.customer_id = c.id
+  LEFT JOIN users u ON o.medrep_id = u.id
+  LEFT JOIN payments p ON o.id = p.order_id
+  LEFT JOIN (
+    SELECT
+      proofs.order_id,
+      COUNT(*) FILTER (WHERE proofs.status = 'pending') AS pending_count,
+      (ARRAY_AGG(proofs.status ORDER BY proofs.uploaded_at DESC))[1] AS latest_status,
+      (ARRAY_AGG(proofs.uploaded_at ORDER BY proofs.uploaded_at DESC))[1] AS latest_uploaded_at,
+      (ARRAY_AGG(proofs.file_name ORDER BY proofs.uploaded_at DESC))[1] AS latest_file_name,
+      (ARRAY_AGG(proofs.content_type ORDER BY proofs.uploaded_at DESC))[1] AS latest_content_type,
+      (ARRAY_AGG(ppu2.name ORDER BY proofs.uploaded_at DESC))[1] AS latest_uploaded_by_name
+    FROM payment_proofs proofs
+    LEFT JOIN users ppu2 ON proofs.uploaded_by = ppu2.id
+    WHERE proofs.file_type = 'payment_proof'
+    GROUP BY proofs.order_id
+  ) pp ON pp.order_id = o.id
+`;
+
 exports.getQueue = async (req, res, next) => {
   try {
     // Sep 11, 2026 (Phase C): narrowed to the viewer's divisions.
@@ -63,74 +118,152 @@ exports.getQueue = async (req, res, next) => {
     const origin = normalizeOrigin(req.query.origin);
     const originClause = originSql(origin, 'o');
     const originAnd = originClause ? ` AND ${originClause}` : '';
-    const orders = await db.prepare(`
-      SELECT o.*, c.name as customer_name, c.contact_number,
-             u.name as medrep_name, u.email as medrep_email,
-             p.status as payment_status, p.payment_reference, p.amount as payment_amount,
-             -- Sep 4, 2026: the proof of payment rides along, so a row at
-             -- ready_for_finance_verified can show it beside the Verify button
-             -- without a second request per row. NULL simply means none was
-             -- attached — a proof is optional, and Finance decides either way.
-             --
-             -- Sep 5, 2026: payment_proofs can now hold more than one row per
-             -- order (it went from a single UNIQUE-order_id slot to a typed,
-             -- multi-row attachment table — see paymentProof.controller.js).
-             -- A plain LEFT JOIN here would duplicate the order row once per
-             -- matching payment_proof, which is wrong for a queue that must
-             -- list each order exactly once. The subquery below aggregates
-             -- 'payment_proof'-type rows per order FIRST, then joins once, so
-             -- the columns below carry the SAME NAMES and the SAME MEANING
-             -- (the most recently uploaded proof) that FinanceQueuePage.jsx
-             -- already reads — that page needed no changes for this.
-             pp.pending_count as payment_proof_pending_count,
-             pp.latest_status as payment_proof_status,
-             pp.latest_uploaded_at as payment_proof_uploaded_at,
-             pp.latest_file_name as payment_proof_file_name,
-             pp.latest_content_type as payment_proof_content_type,
-             pp.latest_uploaded_by_name as payment_proof_uploaded_by_name
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      LEFT JOIN users u ON o.medrep_id = u.id
-      LEFT JOIN payments p ON o.id = p.order_id
-      LEFT JOIN (
-        SELECT
-          proofs.order_id,
-          COUNT(*) FILTER (WHERE proofs.status = 'pending') AS pending_count,
-          (ARRAY_AGG(proofs.status ORDER BY proofs.uploaded_at DESC))[1] AS latest_status,
-          (ARRAY_AGG(proofs.uploaded_at ORDER BY proofs.uploaded_at DESC))[1] AS latest_uploaded_at,
-          (ARRAY_AGG(proofs.file_name ORDER BY proofs.uploaded_at DESC))[1] AS latest_file_name,
-          (ARRAY_AGG(proofs.content_type ORDER BY proofs.uploaded_at DESC))[1] AS latest_content_type,
-          (ARRAY_AGG(ppu2.name ORDER BY proofs.uploaded_at DESC))[1] AS latest_uploaded_by_name
-        FROM payment_proofs proofs
-        LEFT JOIN users ppu2 ON proofs.uploaded_by = ppu2.id
-        WHERE proofs.file_type = 'payment_proof'
-        GROUP BY proofs.order_id
-      ) pp ON pp.order_id = o.id
-      WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')${scopeAnd}${originAnd}
-      ORDER BY o.submitted_at ASC
-    `).all(...scopeParams);
 
-    // Counted over the same status + scope window but WITHOUT the origin
-    // filter, so each tab can show the other's size honestly. Two aggregates
-    // in one pass rather than a second round trip per tab.
-    const counts = await db.prepare(`
+    /**
+     * Sep 12, 2026: this stopped being a queue of four statuses and became
+     * Finance's view of every order, at every stage.
+     *
+     * Finance and the MedRep need the same picture -- an order does not stop
+     * existing because it is not currently Finance's to act on, and the four
+     * statuses this used to select meant an order was invisible here right up
+     * until the moment it needed confirming, then invisible again afterwards.
+     * What Finance can DO is unchanged and still narrow: verify, and nothing
+     * else. Seeing is not acting.
+     *
+     * `stage` filters to one of financeStages.js's groups; absent or
+     * unrecognised means no filter, matching how `origin` treats a value it
+     * does not know. The chips are rendered from those same groups, so an
+     * unknown stage can only arrive from a hand-edited URL, and showing
+     * everything there reads better than an empty page that looks broken.
+     */
+    const stage = statusesForStage(req.query.stage).length
+      ? String(req.query.stage).trim().toLowerCase()
+      : null;
+    const stageStatuses = stage ? statusesForStage(stage) : [];
+    const stageAnd = stage ? ' AND o.status = ANY(?)' : '';
+    const stageParams = stage ? [stageStatuses] : [];
+
+    /**
+     * Paginated, and not optionally: widening to every status put 60,948
+     * imported orders behind the Zoho tab. The previous version had no LIMIT
+     * because four statuses could only ever match a few hundred rows.
+     */
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+    /**
+     * The three reads below are independent, so they are issued together.
+     *
+     * Sequentially they cost three round trips to a database in another AWS
+     * region -- about a second on the Zoho tab, on the screen Finance keeps
+     * open all day. The work itself is cheap (58ms + 140ms + 139ms); the
+     * latency was the bill.
+     */
+    const ordersQuery = db.prepare(`${QUEUE_ROW_SELECT}
+      WHERE 1 = 1${scopeAnd}${originAnd}${stageAnd}
+      -- Newest first. The old queue sorted oldest-first because it held only
+      -- work waiting to be done and the oldest was the most overdue; this list
+      -- is now mostly finished orders, where the useful end is the recent one.
+      --
+      -- created_at, not COALESCE(submitted_at, created_at): the COALESCE is
+      -- not indexable, so it seq-scanned and sorted all 60,948 imported orders
+      -- on every page of the Zoho tab. This matches the MedRep list's ordering
+      -- as well, which is the point of the exercise.
+      ORDER BY o.created_at DESC
+      LIMIT ? OFFSET ?
+    `).all(...scopeParams, ...stageParams, limit, offset);
+
+    // Tab sizes: scope-limited but deliberately NOT origin-limited, so each
+    // tab can state the other's size without fetching it.
+    const countsQuery = db.prepare(`
       SELECT
         COUNT(*) FILTER (WHERE ${importedSql('o')})       AS zoho,
         COUNT(*) FILTER (WHERE NOT (${importedSql('o')})) AS getmeds,
         COUNT(*)                                          AS total
       FROM orders o
-      WHERE o.status IN ('ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch')${scopeAnd}
+      WHERE 1 = 1${scopeAnd}
     `).get(...scopeParams);
+
+    /**
+     * Per-stage counts for the cards and the filter chips.
+     *
+     * Within the chosen origin but ACROSS every stage, so selecting one card
+     * does not zero the others -- a filtered view whose own navigation
+     * collapses as you use it is unusable.
+     *
+     * One pass with FILTER rather than a query per group: six round trips to
+     * count six buckets of the same rows is six chances for them to disagree.
+     */
+    const stageCols = STAGE_GROUPS.map(
+      (g) => `COUNT(*) FILTER (WHERE o.status = ANY(?)) AS ${g.key}`
+    ).join(', ');
+    const stageQuery = db.prepare(`
+      SELECT
+        ${stageCols},
+        COUNT(*) AS total
+      FROM orders o
+      WHERE 1 = 1${scopeAnd}${originAnd}
+    `).get(...STAGE_GROUPS.map((g) => g.statuses), ...scopeParams);
+
+    /**
+     * The handful of orders actually waiting on Finance, newest first.
+     *
+     * Sep 12, 2026. Deliberately NOT a slice of the list above:
+     *
+     *   - it ignores the `stage` filter, so the work does not vanish the
+     *     moment someone clicks "Completed" to check something
+     *   - it ignores the page, so it is still there on page 40
+     *
+     * It does follow the origin tab, because that is the one distinction that
+     * changes what counts as work: an imported Zoho order sitting at
+     * ready_for_finance_verified is a historical record, not a thing to do.
+     *
+     * Five, because it is a prompt rather than a worklist -- the card above it
+     * carries the real number, and the list itself is one click away.
+     */
+    const recentQuery = db.prepare(`${QUEUE_ROW_SELECT}
+      WHERE o.status = ANY(?)${scopeAnd}${originAnd}
+      ORDER BY o.created_at DESC
+      LIMIT 5
+    `)
+      // Passed as ONE array argument rather than spread: db/pg.js's flatten()
+      // unwraps a single array argument into the parameter list, so
+      // `.all(ACTIONABLE)` would send the status string as $1 instead of the
+      // array ANY() needs. It only misfires when scopeParams is empty --
+      // which is every Finance user, since they are not division-scoped.
+      .all([ACTIONABLE, ...scopeParams]);
+
+    const [orders, counts, stageRow, recent] = await Promise.all([
+      ordersQuery,
+      countsQuery,
+      stageQuery,
+      recentQuery,
+    ]);
+
+    const stats = {};
+    for (const g of STAGE_GROUPS) stats[g.key] = Number(stageRow?.[g.key] || 0);
+
+    // What the CURRENT filter matches, which is what the pager counts.
+    const filtered = stage ? stats[stage] || 0 : Number(stageRow?.total || 0);
 
     res.json({
       success: true,
       data: {
         orders,
+        recent,
         origin,
+        stage: stage || null,
         counts: {
           getmeds: Number(counts?.getmeds || 0),
           zoho: Number(counts?.zoho || 0),
           total: Number(counts?.total || 0),
+        },
+        stats,
+        pagination: {
+          page,
+          limit,
+          total: filtered,
+          pages: Math.max(1, Math.ceil(filtered / limit)),
         },
       },
     });

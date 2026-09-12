@@ -1,6 +1,6 @@
 import React from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2 } from 'lucide-react';
+import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import { attachmentLabel, HOSPITAL_REQUIRED_TYPES } from '../../constants/attachmentTypes';
@@ -49,7 +49,7 @@ const Section = ({ title, children }) => (
   </div>
 );
 
-const OrderDetailsModal = ({ orderId, onClose }) => {
+const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming }) => {
   const detail = useQuery({
     queryKey: ['finance-order-detail', orderId],
     queryFn: () => client.get(`/api/orders/${orderId}`).then((r) => r.data),
@@ -74,6 +74,14 @@ const OrderDetailsModal = ({ orderId, onClose }) => {
   const missing = isHospital
     ? HOSPITAL_REQUIRED_TYPES.filter((t) => !attachments.some((a) => a.file_type === t))
     : [];
+
+  /**
+   * Confirming is the ONE thing Finance can do to an order, and it is offered
+   * only at the one status where it means anything. Read from the order this
+   * panel fetched rather than from the row that opened it: the row may be
+   * thirty seconds stale, and this is a write.
+   */
+  const canConfirm = Boolean(onConfirm) && order?.status === 'ready_for_finance_verified';
 
   return (
     <div
@@ -327,13 +335,38 @@ const OrderDetailsModal = ({ orderId, onClose }) => {
           </div>
         )}
 
-        <div className="px-5 py-3 border-t border-slate-200 bg-white rounded-b-xl flex justify-end">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-md border border-slate-200 text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
-          >
-            Close
-          </button>
+        <div className="px-5 py-3 border-t border-slate-200 bg-white rounded-b-xl flex items-center justify-between gap-3">
+          {/* Says why there is no Confirm button, rather than leaving its
+              absence to be read as the panel being broken. */}
+          <p className="text-[11px] text-ink-secondary min-w-0">
+            {canConfirm
+              ? 'Confirming clears this order to be invoiced in Zoho.'
+              : order?.status === 'ready_for_finance_verified'
+                ? ''
+                : 'Not awaiting Finance — nothing to confirm at this stage.'}
+          </p>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-md border border-slate-200 text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
+            >
+              Close
+            </button>
+            {canConfirm && (
+              <button
+                onClick={() => onConfirm(order.id)}
+                disabled={confirming}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {confirming ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ShieldCheck className="w-4 h-4" />
+                )}
+                Confirm account
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
