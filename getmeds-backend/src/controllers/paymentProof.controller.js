@@ -4,6 +4,7 @@ const db = require('../db/database');
 const proofStorage = require('../services/paymentProofStorage');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
+const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const zoho = require('../integrations/zoho');
 
 /**
@@ -262,9 +263,25 @@ exports.attach = async (req, res, next) => {
       },
     });
 
-    // Only worth telling Finance when the order is actually sitting on their
-    // desk, and only for the type they act on — an 'other' or 'purchase_order'
-    // attachment (a PO, a contract) is not something Finance needs paging for.
+    /**
+     * Sep 12, 2026: ANY attachment reopens a Finance hold, not just a proof.
+     *
+     * Finance holds an order and asks for something; whatever the MedRep sends
+     * back is the answer to that question. Restricting this to 'payment_proof'
+     * would leave an order held for a missing Guarantee Letter sitting exactly
+     * as stuck as before — and Finance's hold reason is free text, so the file
+     * type cannot be matched against it anyway.
+     *
+     * See services/financeHoldService.js for why this only fires on holds that
+     * Finance itself applied.
+     */
+    const returnedToFinance = await returnToFinanceIfHeld(order, actor, {
+      reason: fileType === 'payment_proof' ? 'Proof of payment attached' : 'File attached',
+    });
+
+    // Tell Finance when the order is on their desk — either because it was
+    // already there, or because the upload above just put it back. (The
+    // return path sends its own, differently worded, notification.)
     if (fileType === 'payment_proof' && order.status === 'ready_for_finance_verified') {
       await notify({
         orderId: order.id,

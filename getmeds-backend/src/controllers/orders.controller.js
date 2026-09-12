@@ -38,6 +38,7 @@ const { setCustomerTin } = require('../services/customerTinService');
 // name>", from sign-up) and the read-only check that Zoho actually knows that
 // name. Zoho has Salesperson as a mandatory Sales Order field here.
 const salespersonService = require('../services/salespersonService');
+const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const { isTestModeEnabled } = require('../middleware/testMode');
 
 // Sep 5, 2026 (3): mirrors auth.controller.js's SUB_DIVISIONS_BY_DIVISION
@@ -2782,6 +2783,14 @@ exports.updateItems = async (req, res, next) => {
       SELECT oi.*, p.name as product_name, p.sku, p.unit
       FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?
     `).all(order.id);
+
+    // Sep 12, 2026: re-pricing or re-lining a held order answers whatever
+    // Finance asked for, so it goes back to them. Reachable only before the
+    // order reaches Zoho (the guard above), which is exactly when a correction
+    // is still possible. Deliberately NOT wired into updateDetails: that
+    // endpoint refuses anything but draft/pending_management_approval, so it
+    // can never see a held order and the call would be dead code.
+    await returnToFinanceIfHeld(order, req.user, { reason: 'Order items updated' });
 
     res.json({ success: true, data: { order: updatedOrder, items: updatedItems } });
   } catch (err) { next(err); }
