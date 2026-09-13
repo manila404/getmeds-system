@@ -120,6 +120,10 @@ const FinanceQueuePage = () => {
   const recent = data?.data?.recent || [];
   const stats = data?.data?.stats || {};
   const pagination = data?.data?.pagination || { page: 1, pages: 1, total: 0, limit: 20 };
+  // Sep 12, 2026: GETMEDS_WORKFLOW_V2, as reported by the server. When on,
+  // Finance's Confirm order acts on the draft Sales Order (so_created) and
+  // confirms it in Zoho from here; the invoice is then Dispatch's.
+  const workflowV2 = Boolean(data?.data?.workflow_v2);
 
   // Changing what is being listed must reset the pager, or switching to a tab
   // with fewer pages lands on an empty one that looks like no results.
@@ -234,6 +238,46 @@ const FinanceQueuePage = () => {
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that')
   });
 
+  /**
+   * Sep 12, 2026 (GETMEDS_WORKFLOW_V2): Confirm order.
+   *
+   * Two ticks — the prices, and the proof of payment — then one button that
+   * confirms the Sales Order in Zoho. The ticks are per order and required by
+   * the server too; they are the record of what Finance actually checked.
+   */
+  const [checks, setChecks] = useState({});
+  const toggleCheck = (id, key) =>
+    setChecks((c) => ({ ...c, [id]: { ...c[id], [key]: !c[id]?.[key] } }));
+
+  const confirmMutation = useMutation({
+    mutationFn: ({ id, approved, reason, pricesChecked, proofChecked }) =>
+      client.post(`/api/finance/orders/${id}/confirm`, { approved, reason, pricesChecked, proofChecked }).then(r => r.data),
+    onSuccess: (res, vars) => {
+      toast.success(vars.approved
+        ? `Confirmed — the Sales Order is confirmed in Zoho and Dispatch can invoice it.${res?.data?.dryRun ? ' (Dry run — Zoho was not contacted.)' : ''}`
+        : 'Put on hold. The reason is on the order timeline.');
+      setRejectingId(null);
+      setRejectReason('');
+      setChecks((c) => { const next = { ...c }; delete next[vars.id]; return next; });
+      qc.invalidateQueries({ queryKey: ['finance-queue'] });
+      qc.invalidateQueries({ queryKey: ['finance-order-detail'] });
+    },
+    onError: (err) => {
+      toast.error(err.response?.data?.error?.message || 'Could not record that', { duration: 8000 });
+      // Usually someone else got there first — show where the order is now.
+      qc.invalidateQueries({ queryKey: ['finance-queue'] });
+    }
+  });
+
+  // Which button an order gets: Confirm order on a draft Sales Order when the
+  // switch is on, or the older Verify on an order at ready_for_finance_verified
+  // (still possible for orders that got there before the switch).
+  const usesConfirmOrder = (order) => workflowV2 && order.status === 'so_created';
+  const awaitingFinance = (order) => usesConfirmOrder(order) || order.status === 'ready_for_finance_verified';
+  const isBusy = (id) =>
+    (verifyMutation.isPending && verifyMutation.variables?.id === id) ||
+    (confirmMutation.isPending && confirmMutation.variables?.id === id);
+
   const waitingHours = (order) => {
     if (!order.submitted_at) return '—';
     const h = (Date.now() - new Date(order.submitted_at).getTime()) / 3600000;
@@ -251,7 +295,12 @@ const FinanceQueuePage = () => {
       icon: ShieldCheck,
       className: 'bg-purple-50 text-purple-800 border-purple-300'
     },
-    ready_for_draft_invoice: {
+    ready_for_draft_invoice: workflowV2 ? {
+      label: 'Confirmed — with Dispatch for invoicing',
+      hint: 'Dispatch creates and sends the invoice from GetMeds. Nothing for Finance until the payment lands.',
+      icon: Banknote,
+      className: 'bg-state-warning-light text-amber-950 border-state-warning'
+    } : {
       label: 'Verified — raise the invoice',
       hint: 'Convert the Sales Order to an Invoice in Zoho Books.',
       icon: Banknote,
@@ -310,7 +359,14 @@ const FinanceQueuePage = () => {
       icon: Clock,
       className: 'bg-slate-100 text-slate-700 border-slate-300'
     },
-    so_created: {
+    // Sep 12, 2026: under GETMEDS_WORKFLOW_V2 this is Finance's step — the
+    // draft Sales Order is confirmed from here, not in Zoho.
+    so_created: workflowV2 ? {
+      label: 'Awaiting your confirmation',
+      hint: 'Sales Order drafted in Zoho. Check the prices and the proof of payment, then Confirm order — that confirms it in Zoho for you.',
+      icon: ShieldCheck,
+      className: 'bg-purple-50 text-purple-800 border-purple-300'
+    } : {
       label: 'Sales Order created',
       hint: 'Raised in Zoho. It reaches Finance once it is confirmed there.',
       icon: Receipt,
@@ -407,9 +463,9 @@ const FinanceQueuePage = () => {
             <>
               <h1 className="text-2xl font-semibold text-ink-primary">Finance Confirmation</h1>
               <p className="text-sm text-ink-secondary mt-1">
-                Every order, at every stage — the same picture the MedRep has. Confirming the
-                customer's account is yours; invoicing and payment happen in Zoho and appear here
-                once Zoho reports them.
+                {workflowV2
+                  ? 'Every order, at every stage — the same picture the MedRep has. Confirming the order is yours, and confirms it in Zoho; Dispatch invoices it, and payments are recorded in Zoho Books.'
+                  : "Every order, at every stage — the same picture the MedRep has. Confirming the customer's account is yours; invoicing and payment happen in Zoho and appear here once Zoho reports them."}
               </p>
             </>
           )}
@@ -534,7 +590,7 @@ const FinanceQueuePage = () => {
 
           <ul className="divide-y divide-purple-100">
             {recent.map(order => {
-              const busy = verifyMutation.isPending && verifyMutation.variables?.id === order.id;
+              const busy = isBusy(order.id);
               return (
                 <li key={order.id} className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
                   <div className="min-w-0 flex-1">
@@ -564,14 +620,19 @@ const FinanceQueuePage = () => {
                     >
                       <FileSearch className="w-3.5 h-3.5" /> Details & files
                     </button>
+                    {/* Confirm order writes to Zoho and needs its two checks,
+                        so from this short panel it opens the details, where
+                        the checks sit beside the evidence. */}
                     <button
                       type="button"
                       disabled={busy}
-                      onClick={() => verifyMutation.mutate({ id: order.id, approved: true })}
+                      onClick={() => (usesConfirmOrder(order)
+                        ? setDetailOrderId(order.id)
+                        : verifyMutation.mutate({ id: order.id, approved: true }))}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <ShieldCheck className="w-3.5 h-3.5" />
-                      {busy ? 'Confirming…' : 'Confirm'}
+                      {busy ? 'Confirming…' : usesConfirmOrder(order) ? 'Check & confirm' : 'Confirm'}
                     </button>
                   </div>
                 </li>
@@ -636,8 +697,10 @@ const FinanceQueuePage = () => {
             {orders.map(order => {
               const stage = stageInfo(order.status);
               const Icon = stage.icon;
-              const needsVerification = order.status === 'ready_for_finance_verified';
-              const busy = verifyMutation.isPending && verifyMutation.variables?.id === order.id;
+              const needsVerification = awaitingFinance(order);
+              const confirmsOrder = usesConfirmOrder(order);
+              const busy = isBusy(order.id);
+              const rowChecks = checks[order.id] || {};
               return (
                 <li key={order.id} className="p-4">
                   <div className="flex justify-between items-start gap-4">
@@ -816,7 +879,8 @@ const FinanceQueuePage = () => {
                           <div className="flex gap-2">
                             <button
                               disabled={!rejectReason.trim() || busy}
-                              onClick={() => verifyMutation.mutate({ id: order.id, approved: false, reason: rejectReason.trim() })}
+                              onClick={() => (confirmsOrder ? confirmMutation : verifyMutation)
+                                .mutate({ id: order.id, approved: false, reason: rejectReason.trim() })}
                               className="px-3 py-1.5 rounded-md bg-state-error text-white text-xs font-semibold disabled:opacity-50"
                             >
                               {busy ? 'Putting on hold…' : 'Put on hold'}
@@ -828,6 +892,52 @@ const FinanceQueuePage = () => {
                               Cancel
                             </button>
                           </div>
+                        </div>
+                      ) : confirmsOrder ? (
+                        <div className="space-y-2">
+                          <fieldset className="space-y-1.5">
+                            <legend className="text-xs font-semibold text-ink-primary">Before confirming</legend>
+                            <label htmlFor={`prices-${order.id}`} className="flex items-start gap-2 text-xs text-ink-primary">
+                              <input
+                                id={`prices-${order.id}`}
+                                type="checkbox"
+                                checked={Boolean(rowChecks.prices)}
+                                onChange={() => toggleCheck(order.id, 'prices')}
+                                className="mt-0.5"
+                              />
+                              I checked the prices on the Sales Order.
+                            </label>
+                            <label htmlFor={`proof-${order.id}`} className="flex items-start gap-2 text-xs text-ink-primary">
+                              <input
+                                id={`proof-${order.id}`}
+                                type="checkbox"
+                                checked={Boolean(rowChecks.proof)}
+                                onChange={() => toggleCheck(order.id, 'proof')}
+                                className="mt-0.5"
+                              />
+                              I checked the proof of payment, or the reason there is none.
+                            </label>
+                          </fieldset>
+                          <div className="flex gap-2">
+                            <button
+                              disabled={busy || !(rowChecks.prices && rowChecks.proof)}
+                              onClick={() => confirmMutation.mutate({ id: order.id, approved: true, pricesChecked: true, proofChecked: true })}
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              {busy ? 'Confirming…' : 'Confirm order'}
+                            </button>
+                            <button
+                              disabled={busy}
+                              onClick={() => { setRejectingId(order.id); setRejectReason(''); }}
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-state-error/40 text-state-error text-xs font-semibold hover:bg-state-error-light disabled:opacity-50"
+                            >
+                              <XCircle className="w-3.5 h-3.5" /> Hold
+                            </button>
+                          </div>
+                          <p className="text-[11px] text-ink-secondary">
+                            Confirms Sales Order {order.zoho_so_number || ''} in Zoho. Dispatch invoices it next.
+                          </p>
                         </div>
                       ) : (
                         <div className="flex gap-2">
@@ -859,10 +969,16 @@ const FinanceQueuePage = () => {
 
       <div className="flex items-start gap-2 text-xs text-ink-secondary bg-surface border border-slate-200 rounded-lg p-3">
         <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-        <p>Verifying here does not create anything in Zoho — it records that the account was checked and
-          clears the order to be invoiced. Raising the Invoice, marking it Sent and recording the Customer
-          Payment all still happen in Zoho Books, and this page follows along automatically. If an invoice
-          appears in Zoho before anyone verifies here, the order moves on anyway and the timeline says so.</p>
+        {workflowV2 ? (
+          <p>Confirm order confirms the Sales Order in Zoho for you — there is no need to confirm it there as
+            well. Dispatch then raises and sends the invoice from GetMeds. Recording the Customer Payment still
+            happens in Zoho Books, and this page follows along automatically.</p>
+        ) : (
+          <p>Verifying here does not create anything in Zoho — it records that the account was checked and
+            clears the order to be invoiced. Raising the Invoice, marking it Sent and recording the Customer
+            Payment all still happen in Zoho Books, and this page follows along automatically. If an invoice
+            appears in Zoho before anyone verifies here, the order moves on anyway and the timeline says so.</p>
+        )}
       </div>
 
 
@@ -908,8 +1024,14 @@ const FinanceQueuePage = () => {
           // attachments are the evidence, and making someone close the
           // evidence to act on it is how people end up confirming from the
           // row without looking.
-          onConfirm={(id) => verifyMutation.mutate({ id, approved: true })}
-          confirming={verifyMutation.isPending}
+          // Sep 12, 2026: the panel passes the two checks when it is offering
+          // Confirm order (switch on, draft Sales Order), and nothing when it
+          // is offering the older Verify.
+          onConfirm={(id, panelChecks) => (panelChecks
+            ? confirmMutation.mutate({ id, approved: true, pricesChecked: panelChecks.prices, proofChecked: panelChecks.proof })
+            : verifyMutation.mutate({ id, approved: true }))}
+          confirming={verifyMutation.isPending || confirmMutation.isPending}
+          workflowV2={workflowV2}
         />
       )}
     </div>

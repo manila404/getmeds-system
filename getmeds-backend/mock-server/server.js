@@ -114,7 +114,7 @@ router.get('/salesorders', (req, res) => {
 router.get('/salesorders/:id', (req, res) => {
   const so = state.salesOrders.get(req.params.id);
   if (!so) return res.status(404).json({ code: 4, message: 'The Sales Order ID given seems to be incorrect.' });
-  res.json({ code: 0, message: 'success', salesorder: so });
+  res.json({ code: 0, message: 'success', salesorder: prepareSalesOrder(so) });
 });
 router.post('/salesorders', (req, res) => {
   const n = soCounter++;
@@ -142,9 +142,22 @@ router.post('/salesorders', (req, res) => {
 // ── Status updates, Comments, Packages, Shipments ──────────────────────
 router.post('/salesorders/:id/status/confirmed', (req, res) => {
   const so = state.salesOrders.get(req.params.id);
-  if (so) so.status = 'confirmed';
+  if (!so) return res.status(404).json({ code: 4, message: 'The Sales Order ID given seems to be incorrect.' });
+  so.status = 'confirmed';
   res.json({ code: 0, message: 'Sales order status has been changed to Confirmed.' });
 });
+
+// Sep 12, 2026: the workflow writes (GETMEDS_WORKFLOW_V2) read the Sales Order
+// back before each step, so what they create has to show up on it — the
+// invoices[] and packages[] arrays and the line ids the real GET returns.
+function prepareSalesOrder(so) {
+  so.invoices = so.invoices || [];
+  so.packages = so.packages || [];
+  (so.line_items || []).forEach((li, i) => {
+    if (!li.line_item_id) li.line_item_id = `${so.salesorder_id}-L${i + 1}`;
+  });
+  return so;
+}
 
 router.post('/salesorders/:id/comments', (req, res) => {
   res.json({ code: 0, message: 'Comment added', comment: { description: req.body.description } });
@@ -156,11 +169,42 @@ router.get('/packages', (req, res) => {
 
 router.post('/packages', (req, res) => {
   const pkgId = `MOCK-PKG-${Date.now()}`;
-  res.status(201).json({ code: 0, message: 'Package created successfully', package: { package_id: pkgId } });
+  const soId = req.query.salesorder_id;
+  const so = soId ? state.salesOrders.get(soId) : null;
+  if (soId && !so) return res.status(404).json({ code: 4, message: 'The Sales Order ID given seems to be incorrect.' });
+  if (so && so.status === 'draft') {
+    return res.status(400).json({ code: 36004, message: 'Packages cannot be created for sales orders in draft status.' });
+  }
+  const pkg = { package_id: pkgId, package_number: `PKG-${pkgId.slice(-5)}`, status: 'not_shipped', salesorder_id: soId, ...req.body };
+  if (so) prepareSalesOrder(so).packages.push({ package_id: pkg.package_id, package_number: pkg.package_number, status: 'not_shipped' });
+  res.status(201).json({ code: 0, message: 'Package created successfully', package: pkg });
 });
 
 router.post('/shipmentorders', (req, res) => {
-  res.status(201).json({ code: 0, message: 'Shipment Order Created Successfully' });
+  const so = req.query.salesorder_id ? state.salesOrders.get(req.query.salesorder_id) : null;
+  const pkg = so ? prepareSalesOrder(so).packages.find((p) => p.package_id === req.query.package_ids) : null;
+  const shipmentorder = {
+    shipment_id: `MOCK-SHP-${Date.now()}`,
+    shipment_number: req.body.shipment_number,
+    status: 'shipped',
+    salesorder_id: req.query.salesorder_id,
+    carrier: req.body.delivery_method,
+    tracking_number: req.body.tracking_number
+  };
+  if (pkg) Object.assign(pkg, { shipment_id: shipmentorder.shipment_id, shipment_number: shipmentorder.shipment_number, shipment_status: 'shipped', status: 'shipped' });
+  res.status(201).json({ code: 0, message: 'Shipment Order Created Successfully', shipmentorder });
+});
+
+router.post('/shipmentorders/:id/status/delivered', (req, res) => {
+  for (const so of state.salesOrders.values()) {
+    const pkg = (so.packages || []).find((p) => p.shipment_id === req.params.id);
+    if (pkg) {
+      pkg.shipment_status = 'delivered';
+      pkg.status = 'delivered';
+      return res.json({ code: 0, message: 'The Shipment Order has been marked as Delivered.' });
+    }
+  }
+  res.status(404).json({ code: 4, message: 'The shipment ID given seems to be incorrect.' });
 });
 
 // ── Invoices & Customer Payments ────────────────────────────────────────
@@ -185,15 +229,28 @@ router.post('/invoices/fromsalesorder', (req, res) => {
 
 router.post('/invoices', (req, res) => {
   const invoiceId = `MOCK-INV-${Date.now()}`;
-  const soId = req.body.salesorder_id;
-  if (soId) {
-    const so = state.salesOrders.get(soId);
-    if (so) {
-      so.invoice_status = 'invoiced';
-      so.invoiced_status = 'invoiced';
-    }
+  // Sep 12, 2026: the workflow links an invoice to its Sales Order line by
+  // line (salesorder_item_id), not with a top-level salesorder_id.
+  const lineIds = (req.body.line_items || []).map((li) => li.salesorder_item_id).filter(Boolean);
+  let so = req.body.salesorder_id ? state.salesOrders.get(req.body.salesorder_id) : null;
+  if (!so && lineIds.length) {
+    so = [...state.salesOrders.values()].find((s) => (s.line_items || []).some((li) => lineIds.includes(li.line_item_id))) || null;
   }
-  res.status(201).json({ code: 0, message: 'Invoice created successfully', invoice: { invoice_id: invoiceId, ...req.body } });
+  const invoice = { invoice_id: invoiceId, invoice_number: `INV-${invoiceId.slice(-5)}`, status: 'draft', ...req.body };
+  if (so) {
+    so.invoice_status = 'invoiced';
+    so.invoiced_status = 'invoiced';
+    prepareSalesOrder(so).invoices.push({ invoice_id: invoiceId, invoice_number: invoice.invoice_number, status: 'draft' });
+  }
+  res.status(201).json({ code: 0, message: 'Invoice created successfully', invoice });
+});
+
+router.post('/invoices/:id/status/sent', (req, res) => {
+  for (const so of state.salesOrders.values()) {
+    const inv = (so.invoices || []).find((i) => i.invoice_id === req.params.id);
+    if (inv) inv.status = 'sent';
+  }
+  res.json({ code: 0, message: 'Invoice status has been changed to Sent.' });
 });
 
 router.post('/customerpayments', (req, res) => {

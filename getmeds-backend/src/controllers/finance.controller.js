@@ -6,7 +6,10 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { markVerifiedWithOrder } = require('./paymentProof.controller');
 const { normalizeOrigin, originSql, importedSql } = require('../services/orderOrigin');
-const { STAGE_GROUPS, statusesForStage, ACTIONABLE } = require('../services/financeStages');
+const { stageGroups, statusesForStage } = require('../services/financeStages');
+const { isWorkflowV2Enabled } = require('../services/workflowFlags');
+const workflow = require('../services/workflowV2Service');
+const { workflowAction } = require('./workflowAction');
 
 
 // ─── Finance visibility (read-only) ────────────────────────────────────────
@@ -136,10 +139,16 @@ exports.getQueue = async (req, res, next) => {
      * unknown stage can only arrive from a hand-edited URL, and showing
      * everything there reads better than an empty page that looks broken.
      */
-    const stage = statusesForStage(req.query.stage).length
+    // Sep 12, 2026: read once per request — under GETMEDS_WORKFLOW_V2 the
+    // groups move (Finance acts on so_created), see financeStages.js.
+    const v2 = isWorkflowV2Enabled();
+    const groups = stageGroups();
+    const actionable = groups.find((g) => g.key === 'actionable').statuses;
+
+    const stage = statusesForStage(req.query.stage, groups).length
       ? String(req.query.stage).trim().toLowerCase()
       : null;
-    const stageStatuses = stage ? statusesForStage(stage) : [];
+    const stageStatuses = stage ? statusesForStage(stage, groups) : [];
     const stageAnd = stage ? ' AND o.status = ANY(?)' : '';
     const stageParams = stage ? [stageStatuses] : [];
 
@@ -194,7 +203,7 @@ exports.getQueue = async (req, res, next) => {
      * One pass with FILTER rather than a query per group: six round trips to
      * count six buckets of the same rows is six chances for them to disagree.
      */
-    const stageCols = STAGE_GROUPS.map(
+    const stageCols = groups.map(
       (g) => `COUNT(*) FILTER (WHERE o.status = ANY(?)) AS ${g.key}`
     ).join(', ');
     const stageQuery = db.prepare(`
@@ -203,7 +212,7 @@ exports.getQueue = async (req, res, next) => {
         COUNT(*) AS total
       FROM orders o
       WHERE 1 = 1${scopeAnd}${originAnd}
-    `).get(...STAGE_GROUPS.map((g) => g.statuses), ...scopeParams);
+    `).get(...groups.map((g) => g.statuses), ...scopeParams);
 
     /**
      * The handful of orders actually waiting on Finance, newest first.
@@ -231,7 +240,7 @@ exports.getQueue = async (req, res, next) => {
       // `.all(ACTIONABLE)` would send the status string as $1 instead of the
       // array ANY() needs. It only misfires when scopeParams is empty --
       // which is every Finance user, since they are not division-scoped.
-      .all([ACTIONABLE, ...scopeParams]);
+      .all([actionable, ...scopeParams]);
 
     const [orders, counts, stageRow, recent] = await Promise.all([
       ordersQuery,
@@ -241,7 +250,7 @@ exports.getQueue = async (req, res, next) => {
     ]);
 
     const stats = {};
-    for (const g of STAGE_GROUPS) stats[g.key] = Number(stageRow?.[g.key] || 0);
+    for (const g of groups) stats[g.key] = Number(stageRow?.[g.key] || 0);
 
     // What the CURRENT filter matches, which is what the pager counts.
     const filtered = stage ? stats[stage] || 0 : Number(stageRow?.total || 0);
@@ -259,6 +268,10 @@ exports.getQueue = async (req, res, next) => {
           total: Number(counts?.total || 0),
         },
         stats,
+        // Sep 12, 2026: tells the page which buttons to draw — Confirm order
+        // (on so_created) with the switch on, Verify (on
+        // ready_for_finance_verified) as before with it off.
+        workflow_v2: v2,
         pagination: {
           page,
           limit,
@@ -427,3 +440,24 @@ exports.verifyAccount = async (req, res, next) => {
     });
   } catch (err) { next(err); }
 };
+
+// ─── CONFIRM ORDER (Sep 12, 2026, GETMEDS_WORKFLOW_V2) ───────────────────────
+//
+// Finance's one button under the new workflow. Replaces "confirm the Sales
+// Order in Zoho, then press Verify here" with a single step taken here: tick
+// that the prices and the proof of payment were checked, press Confirm order,
+// and this app confirms the Sales Order in Zoho (services/workflowV2Service.js).
+// Or put the order on hold with a reason, which touches nothing in Zoho.
+//
+// Body: { approved: true, pricesChecked: true, proofChecked: true }
+//    or { approved: false, reason: '...' }
+exports.confirmOrder = workflowAction((req) => {
+  const { approved, pricesChecked, proofChecked, reason } = req.body || {};
+  if (approved === false) {
+    return workflow.holdOrder({ orderId: req.params.id, user: req.user, reason });
+  }
+  if (approved !== true) {
+    throw new workflow.WorkflowError(400, 'VALIDATION_ERROR', 'approved must be true (confirm) or false (hold).');
+  }
+  return workflow.confirmOrder({ orderId: req.params.id, user: req.user, pricesChecked, proofChecked });
+});

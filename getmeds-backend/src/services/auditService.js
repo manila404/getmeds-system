@@ -1,4 +1,5 @@
 const db = require('../db/database');
+const { mirrorAuditEvent } = require('./discordAuditService');
 
 // 1. Prepare the statement once at module load for better performance
 // Sep 10, 2026: `created_at` is now a parameter rather than 'now'.
@@ -60,6 +61,12 @@ async function logEvent(
       // from Zoho — see the note on insertEventStmt above.
       occurredAt || new Date().toISOString()
     );
+
+    // Sep 13, 2026: mirror to the order's Discord thread once the event is
+    // committed (services/discordAuditService.js). Only who, what and when are
+    // handed over: notes and metadata can hold customer details, so they are
+    // not passed at all. A no-op unless DISCORD_AUDIT_ENABLED=true.
+    db.afterCommit(() => mirrorAuditEvent({ orderId, eventType, oldStatus, newStatus, actorId, actorName, occurredAt }));
   } catch (error) {
     // 5. Handle potential database errors (e.g., constraint violations)
     console.error(`Failed to log order event for orderId: ${orderId}`, error);

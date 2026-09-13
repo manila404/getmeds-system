@@ -359,6 +359,12 @@ CREATE TABLE IF NOT EXISTS orders (
   -- orders.controller.js's gmLeadId note). Sent to Zoho's "GM Lead ID"
   -- custom field (cf_gm_lead_id, confirmed live on this org).
   gm_lead_id TEXT,
+  -- Sep 12, 2026: "only the first click wins" for the Finance and Dispatch
+  -- actions that write to Zoho (services/orderClaimService.js). Holds who is
+  -- acting and since when; cleared when the action finishes. Existing
+  -- databases get these from migrate.pg.js's reconcileWorkflowV2Columns.
+  action_claim TEXT,
+  action_claim_at TEXT,
   created_at TEXT DEFAULT iso_now(),
   submitted_at TEXT,
   updated_at TEXT DEFAULT iso_now()
@@ -400,6 +406,15 @@ CREATE TABLE IF NOT EXISTS dispatch_records (
   dispatch_notes TEXT,
   dispatched_by INTEGER REFERENCES users(id),
   dispatched_at TEXT,
+  -- Sep 12, 2026: what Dispatch made in Zoho from this app, and the delivery
+  -- (GETMEDS_WORKFLOW_V2). Existing databases get these from migrate.pg.js's
+  -- reconcileWorkflowV2Columns.
+  zoho_package_id TEXT,
+  zoho_package_number TEXT,
+  zoho_shipment_id TEXT,
+  zoho_shipment_number TEXT,
+  delivered_at TEXT,
+  delivered_by INTEGER REFERENCES users(id),
   created_at TEXT DEFAULT iso_now()
 );
 
@@ -485,6 +500,19 @@ CREATE TABLE IF NOT EXISTS order_events (
   actor_name TEXT,
   notes TEXT,
   metadata TEXT,
+  created_at TEXT DEFAULT iso_now()
+);
+
+-- Sep 13, 2026: each order's audit thread in Discord, for
+-- services/discordAuditService.js. One row per order that has one.
+--
+-- The starter message is saved BEFORE the thread is started, with thread_id
+-- still NULL, so a failure between the two retries on that same message rather
+-- than posting a second starter for the order.
+CREATE TABLE IF NOT EXISTS order_audit_threads (
+  order_id INTEGER PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+  starter_message_id TEXT NOT NULL,
+  thread_id TEXT,
   created_at TEXT DEFAULT iso_now()
 );
 

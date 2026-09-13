@@ -18,6 +18,10 @@ describe('Getmeds Order State Machine', () => {
       // Sep 1, 2026 (8): confirmation hands off to Finance for account
       // verification before anything is invoiced.
       ['so_created', 'ready_for_finance_verified'],
+      // Sep 12, 2026: under GETMEDS_WORKFLOW_V2 Finance's Confirm order does
+      // the checks and confirms the Sales Order in one step, so the draft
+      // Sales Order goes straight to "needs invoice".
+      ['so_created', 'ready_for_draft_invoice'],
       ['ready_for_finance_verified', 'ready_for_draft_invoice'],
       ['ready_for_finance_verified', 'on_hold'],
       ['on_hold', 'ready_for_finance_verified'],
@@ -99,8 +103,6 @@ describe('Getmeds Order State Machine', () => {
       ['payment_verified', 'ready_for_dispatch'],
       ['so_created', 'ready_for_dispatch'],
       ['so_created', 'picking_packing'],
-      // Confirmation cannot skip the verification stage.
-      ['so_created', 'ready_for_draft_invoice'],
 
       // completed is terminal and must stay that way — reaching it means the
       // order is genuinely shipped and paid, so no webhook may reopen it.

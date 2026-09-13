@@ -302,12 +302,15 @@ const db = {
       if (existing) return fn(...args); // already inside a transaction
 
       const client = await getPool().connect();
+      const afterCommit = [];   // filled by db.afterCommit() while this transaction runs
+      client._afterCommit = afterCommit;
+      let result;
       try {
         await client.query('BEGIN');
-        const result = await txStore.run(client, () => fn(...args));
+        result = await txStore.run(client, () => fn(...args));
         await client.query('COMMIT');
-        return result;
       } catch (err) {
+        afterCommit.length = 0;   // rolled back: there is nothing to announce
         try {
           await client.query('ROLLBACK');
         } catch (rollbackErr) {
@@ -315,9 +318,34 @@ const db = {
         }
         throw err;
       } finally {
+        client._afterCommit = null;
         client.release();
       }
+      for (const cb of afterCommit) {
+        Promise.resolve().then(cb).catch((err) => console.error('[db] after-commit callback failed:', err.message));
+      }
+      return result;
     };
+  },
+
+  /**
+   * Run fn once the current transaction has committed, or right away when
+   * there is no transaction. Dropped if the transaction rolls back.
+   *
+   * Sep 13, 2026. For side effects outside the database, like the Discord
+   * audit post (services/discordAuditService.js): announcing an event that a
+   * rollback then undid would put a step in the audit channel that never
+   * happened. fn runs outside the transaction, after its client is released,
+   * so anything it queries goes to the pool rather than a finished transaction.
+   * Errors are logged, never thrown back into the request.
+   */
+  afterCommit(fn) {
+    const client = txStore.getStore();
+    if (client?._afterCommit) {
+      client._afterCommit.push(fn);
+      return;
+    }
+    Promise.resolve().then(fn).catch((err) => console.error('[db] after-commit callback failed:', err.message));
   },
 
   /**

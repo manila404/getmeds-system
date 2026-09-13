@@ -29,6 +29,12 @@ router.get('/orders/:id/payment', c.getPayment);
 // made it, and it writes only to this app; nothing is pushed to Zoho.
 router.post('/orders/:id/verify', c.verifyAccount);
 
+// Sep 12, 2026: the second exception, and the first that writes to Zoho.
+// Under GETMEDS_WORKFLOW_V2, Confirm order checks prices and proof of payment
+// AND confirms the draft Sales Order in Zoho, in one step taken here. With the
+// switch off it answers 404 FEATURE_OFF and /verify above is the only action.
+router.post('/orders/:id/confirm', c.confirmOrder);
+
 // Sep 4, 2026: proof of payment. Reject only — there is deliberately no
 // approve here.
 //

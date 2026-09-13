@@ -218,6 +218,11 @@ function _resetForTest() {
 // updateContactTin (Sep 8), addSalesOrderAttachment (Sep 8), and
 // createContact (Sep 11). Each is documented at its declaration in
 // ZohoAdapter.js. There is still no delete, no void, and no updateContact.
+//
+// Sep 12, 2026: and the six workflow writes behind GETMEDS_WORKFLOW_V2 —
+// confirm the Sales Order, create and send the invoice, package, ship, mark
+// delivered. Named, single-purpose, and called only from
+// services/workflowV2Service.js; see their block in ZohoAdapter.js.
 const facadeMethods = [
   'createSalesOrder',
   'getSalesOrder',
@@ -260,6 +265,16 @@ const facadeMethods = [
   // on ZohoAdapter/LiveZohoAdapter/MockZohoAdapter; without this line it
   // would be `undefined` through the facade every controller actually uses.
   'addSalesOrderAttachment',
+  // Sep 12, 2026: the workflow writes (see ZohoAdapter.js), added HERE on the
+  // same day as the adapters — the four earlier entries above record what it
+  // costs to remember this list a week later. tests/zohoAdapter.test.js now
+  // also checks every one of these is reachable through the facade.
+  'markSalesOrderConfirmed',
+  'createInvoiceFromSalesOrder',
+  'markInvoiceSent',
+  'createPackageForSalesOrder',
+  'createShipmentForPackage',
+  'markShipmentDelivered',
   'setSimulatedOutage',
   'isSimulatedOutage'
 ];

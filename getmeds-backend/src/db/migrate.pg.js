@@ -767,6 +767,37 @@ async function reconcileOrderRaisedBy(client) {
   }
 }
 
+/**
+ * Sep 12, 2026: columns for the Finance-confirms / Dispatch-in-Getmeds workflow
+ * (services/workflowV2Service.js, behind GETMEDS_WORKFLOW_V2).
+ *
+ *   orders.action_claim, action_claim_at      who is acting on the order right
+ *                                             now — "only the first click wins"
+ *   dispatch_records.zoho_package_id/_number  the Zoho package Dispatch created
+ *   dispatch_records.zoho_shipment_id/_number the Zoho shipment
+ *   dispatch_records.delivered_at, delivered_by  when, and by whom, it arrived
+ *
+ * ADD COLUMN IF NOT EXISTS, so this is a no-op on a database built from
+ * schema.pg.sql, which already carries them, and safe to run on every boot.
+ * All nullable with no default: existing rows simply have nothing recorded.
+ */
+async function reconcileWorkflowV2Columns(client) {
+  const columns = [
+    ['orders', 'action_claim', 'TEXT'],
+    ['orders', 'action_claim_at', 'TEXT'],
+    ['dispatch_records', 'zoho_package_id', 'TEXT'],
+    ['dispatch_records', 'zoho_package_number', 'TEXT'],
+    ['dispatch_records', 'zoho_shipment_id', 'TEXT'],
+    ['dispatch_records', 'zoho_shipment_number', 'TEXT'],
+    ['dispatch_records', 'delivered_at', 'TEXT'],
+    ['dispatch_records', 'delivered_by', 'INTEGER REFERENCES users(id)'],
+  ];
+  for (const [table, column, type] of columns) {
+    await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${type}`);
+  }
+  console.log('  ✔ workflow columns present (orders.action_claim*, dispatch_records Zoho ids and delivery)');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -803,6 +834,7 @@ async function main() {
     await reconcileCustomerCreateColumns(client);
     await reconcileUserSalespersons(client);
     await reconcileOrderRaisedBy(client);
+    await reconcileWorkflowV2Columns(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

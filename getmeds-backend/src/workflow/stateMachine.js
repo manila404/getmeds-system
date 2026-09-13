@@ -67,7 +67,15 @@ const TRANSITIONS = {
 
   // Where BOTH customer types wait after the app has created a Draft Sales
   // Order in Zoho. Nothing moves until Zoho reports it confirmed.
-  so_created: ['ready_for_finance_verified', 'on_hold', 'cancelled', 'deleted'],
+  //
+  // Sep 12, 2026: 'ready_for_draft_invoice' added for GETMEDS_WORKFLOW_V2. Under
+  // that switch Finance presses Confirm order in this app, which checks the
+  // prices and proof of payment and confirms the Sales Order in Zoho in one
+  // step (services/workflowV2Service.js confirmOrder), so the order goes from
+  // its draft Sales Order straight to "needs invoice". It is also the hop the
+  // direct-customer submit path has always logged (orders.controller.js
+  // statusPath) — until now through a raw UPDATE the map would have refused.
+  so_created: ['ready_for_finance_verified', 'ready_for_draft_invoice', 'on_hold', 'cancelled', 'deleted'],
 
   // Sep 1, 2026 (8): the one stage Zoho has no record of. Finance checks the
   // customer's account in Zoho Books — overdue balance, account problems —

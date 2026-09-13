@@ -390,6 +390,175 @@ class MockZohoAdapter extends ZohoAdapter {
     this._log(`[ZOHO_MOCK] Would POST /salesorders/${salesorderId}/attachment: ${document.file_name}`);
     return { code: 0, message: 'Attachment added successfully [MOCK MODE]', document };
   }
+
+  // ─── Sep 12, 2026: the workflow writes (see ZohoAdapter.js) ──────────────
+  //
+  // Each one changes the in-memory Sales Order the way Zoho would, so
+  // getSalesOrder afterwards shows the invoice, package or shipment — which is
+  // what workflowV2Service's "look before writing" step reads. The rules the
+  // real org enforces are enforced here too, for the reason the rest of this
+  // file gives: a mock that accepts everything lets the calling code's bugs
+  // through. Zoho will not pack or invoice a draft Sales Order, and refuses a
+  // shipment without its required fields.
+
+  _workflowOutage(name) {
+    if (this._simulatedOutage) {
+      throw new Error(`Simulated Zoho API outage (Test Mode) — ${name} rejected on purpose.`);
+    }
+  }
+
+  /** The stored Sales Order, with the line ids and progress counters Zoho returns. */
+  _workflowSalesOrder(salesorderId) {
+    const so = this._salesOrders.get(salesorderId);
+    if (!so) {
+      const err = new Error('The Sales Order ID given seems to be incorrect. [MOCK MODE]');
+      err.httpStatus = 404;
+      throw err;
+    }
+    so.invoices = so.invoices || [];
+    so.packages = so.packages || [];
+    (so.line_items || []).forEach((li, i) => {
+      if (!li.line_item_id) li.line_item_id = `${so.salesorder_id}-L${i + 1}`;
+      li.quantity_invoiced = li.quantity_invoiced || 0;
+      li.quantity_packed = li.quantity_packed || 0;
+      li.quantity_shipped = li.quantity_shipped || 0;
+    });
+    return so;
+  }
+
+  _nextDocNumber() {
+    this._docCounter = (this._docCounter || 0) + 1;
+    return String(this._docCounter).padStart(5, '0');
+  }
+
+  async markSalesOrderConfirmed(salesorderId) {
+    this._workflowOutage('markSalesOrderConfirmed');
+    const so = this._workflowSalesOrder(salesorderId);
+    so.status = 'confirmed';
+    this._log(`[ZOHO_MOCK] Would POST /salesorders/${salesorderId}/status/confirmed`);
+    return { code: 0, message: "Sales order status has been changed to 'Confirmed'. [MOCK MODE]" };
+  }
+
+  async createInvoiceFromSalesOrder(salesorder, opts = {}) {
+    this._workflowOutage('createInvoiceFromSalesOrder');
+    const so = this._workflowSalesOrder(salesorder && salesorder.salesorder_id);
+    if (String(so.status || '').toLowerCase() === 'draft') {
+      throw new Error('Mock Zoho: an invoice was requested for a Sales Order that is still a draft.');
+    }
+    const lines = so.line_items
+      .map((li) => ({ li, quantity: Number(li.quantity || 0) - Number(li.quantity_invoiced || 0) }))
+      .filter((x) => x.quantity > 0);
+    if (!lines.length) throw new Error('Mock Zoho: nothing left to invoice on this Sales Order.');
+
+    const n = this._nextDocNumber();
+    const invoice = {
+      invoice_id: `MOCK-INV-${n}`,
+      invoice_number: `INV-${n}`,
+      status: 'draft',
+      date: opts.date || new Date().toISOString().slice(0, 10),
+      customer_id: so.customer_id,
+      reference_number: so.reference_number,
+      total: so.total,
+      line_items: lines.map((x) => ({ salesorder_item_id: x.li.line_item_id, quantity: x.quantity, rate: x.li.rate }))
+    };
+    lines.forEach((x) => { x.li.quantity_invoiced += x.quantity; });
+    so.invoices.push({ invoice_id: invoice.invoice_id, invoice_number: invoice.invoice_number, status: 'draft', date: invoice.date, total: invoice.total });
+    this._log(`[ZOHO_MOCK] Would POST /invoices for ${so.salesorder_number}`);
+    return { code: 0, message: 'The invoice has been created. [MOCK MODE]', invoice };
+  }
+
+  async markInvoiceSent(invoiceId) {
+    this._workflowOutage('markInvoiceSent');
+    for (const so of this._salesOrders.values()) {
+      const inv = (so.invoices || []).find((i) => i.invoice_id === invoiceId);
+      if (inv) {
+        inv.status = 'sent';
+        this._log(`[ZOHO_MOCK] Would POST /invoices/${invoiceId}/status/sent`);
+        return { code: 0, message: 'Invoice status has been changed to Sent. [MOCK MODE]' };
+      }
+    }
+    const err = new Error('The invoice ID given seems to be incorrect. [MOCK MODE]');
+    err.httpStatus = 404;
+    throw err;
+  }
+
+  async createPackageForSalesOrder(salesorder, opts = {}) {
+    this._workflowOutage('createPackageForSalesOrder');
+    const so = this._workflowSalesOrder(salesorder && salesorder.salesorder_id);
+    if (String(so.status || '').toLowerCase() === 'draft') {
+      throw new Error('Mock Zoho: a draft Sales Order cannot be packaged — confirm it first.');
+    }
+    const lines = so.line_items
+      .map((li) => ({ li, quantity: Number(li.quantity || 0) - Number(li.quantity_packed || 0) }))
+      .filter((x) => x.quantity > 0);
+    if (!lines.length) throw new Error('Mock Zoho: nothing left to pack on this Sales Order.');
+
+    const n = this._nextDocNumber();
+    const pkg = {
+      package_id: `MOCK-PKG-${n}`,
+      package_number: `PKG-${n}`,
+      salesorder_id: so.salesorder_id,
+      status: 'not_shipped',
+      date: opts.date || new Date().toISOString().slice(0, 10),
+      line_items: lines.map((x) => ({ so_line_item_id: x.li.line_item_id, quantity: x.quantity }))
+    };
+    lines.forEach((x) => { x.li.quantity_packed += x.quantity; });
+    so.packages.push({ package_id: pkg.package_id, package_number: pkg.package_number, status: 'not_shipped' });
+    this._log(`[ZOHO_MOCK] Would POST /packages?salesorder_id=${so.salesorder_id}`);
+    return { code: 0, message: 'Package created successfully. [MOCK MODE]', package: pkg };
+  }
+
+  async createShipmentForPackage({ salesorderId, packageId, shipmentNumber, date, deliveryMethod, trackingNumber } = {}) {
+    this._workflowOutage('createShipmentForPackage');
+    if (!shipmentNumber || !date || !deliveryMethod || !trackingNumber) {
+      throw new Error('Mock Zoho: shipment_number, date, delivery_method and tracking_number are all required.');
+    }
+    const so = this._workflowSalesOrder(salesorderId);
+    const pkg = so.packages.find((p) => p.package_id === packageId);
+    if (!pkg) throw new Error(`Mock Zoho: package ${packageId} is not on Sales Order ${so.salesorder_number}.`);
+    if (pkg.shipment_id) throw new Error(`Mock Zoho: package ${pkg.package_number} has already been shipped.`);
+
+    const n = this._nextDocNumber();
+    Object.assign(pkg, {
+      shipment_id: `MOCK-SHP-${n}`,
+      shipment_number: shipmentNumber,
+      shipment_status: 'shipped',
+      status: 'shipped',
+      carrier: deliveryMethod,
+      tracking_number: trackingNumber,
+      shipment_date: date
+    });
+    so.line_items.forEach((li) => { li.quantity_shipped = li.quantity_packed; });
+    this._log(`[ZOHO_MOCK] Would POST /shipmentorders?package_ids=${packageId}&salesorder_id=${so.salesorder_id}`);
+    return {
+      code: 0,
+      message: 'Shipment created successfully. [MOCK MODE]',
+      shipmentorder: {
+        shipment_id: pkg.shipment_id,
+        shipment_number: shipmentNumber,
+        status: 'shipped',
+        salesorder_id: so.salesorder_id,
+        carrier: deliveryMethod,
+        tracking_number: trackingNumber
+      }
+    };
+  }
+
+  async markShipmentDelivered(shipmentId) {
+    this._workflowOutage('markShipmentDelivered');
+    for (const so of this._salesOrders.values()) {
+      const pkg = (so.packages || []).find((p) => p.shipment_id === shipmentId);
+      if (pkg) {
+        pkg.shipment_status = 'delivered';
+        pkg.status = 'delivered';
+        this._log(`[ZOHO_MOCK] Would POST /shipmentorders/${shipmentId}/status/delivered`);
+        return { code: 0, message: 'The Shipment Order has been marked as Delivered. [MOCK MODE]' };
+      }
+    }
+    const err = new Error('The shipment ID given seems to be incorrect. [MOCK MODE]');
+    err.httpStatus = 404;
+    throw err;
+  }
 }
 
 module.exports = MockZohoAdapter;

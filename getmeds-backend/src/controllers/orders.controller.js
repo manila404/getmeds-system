@@ -6,6 +6,9 @@ const { notify, getUserIdsByRole } = require('../services/notificationService');
 const zoho = require('../integrations/zoho');
 const zohoRetryService = require('../services/zohoRetryService');
 const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
+// Sep 12, 2026: under this switch a direct order also stops at so_created, for
+// Finance's Confirm order. See services/workflowV2Service.js.
+const { isWorkflowV2Enabled } = require('../services/workflowFlags');
 // Sep 1, 2026: syncFromZoho below is the manual mirror of every webhook
 // branch, so it uses the same two services the live handler does — status
 // writes through the state machine, and one shared shipped-AND-paid rule.
@@ -1363,9 +1366,14 @@ exports.create = async (req, res, next) => {
     // path (create-and-submit in one call) had its own copy of the rule, so
     // it had to be fixed in both places or the two entry points would
     // disagree about where a credit order starts.
+    //
+    // Sep 12, 2026: under GETMEDS_WORKFLOW_V2 a direct order stops at
+    // 'so_created' as well. Finance's Confirm order acts on the draft Sales
+    // Order there, whatever the customer type — there is no longer a path where
+    // an order is invoiced before anyone in Finance has looked at it.
     const finalStatus = isDraft
       ? 'draft'
-      : (requiresManagementApproval ? 'pending_management_approval' : (isCredit ? 'so_created' : 'ready_for_draft_invoice'));
+      : (requiresManagementApproval ? 'pending_management_approval' : ((isCredit || isWorkflowV2Enabled()) ? 'so_created' : 'ready_for_draft_invoice'));
     const now = new Date().toISOString();
     // "Sales Order Date (Automatic Today)" on the form — always set here,
     // server-side, to today's date. There is no client override; a
@@ -1937,8 +1945,12 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     //
     // A DIRECT order still goes to 'ready_for_draft_invoice' — unchanged, so
     // the Finance queue behaves exactly as before.
+    //
+    // Sep 12, 2026: under GETMEDS_WORKFLOW_V2 a direct order waits at
+    // 'so_created' too, for Finance's Confirm order (see createOrder above).
     const isCredit = (order.customer_type === 'credit' || order.customer_master_type === 'credit');
-    const finalStatus = isCredit ? 'so_created' : 'ready_for_draft_invoice';
+    const stopsAtSalesOrder = isCredit || isWorkflowV2Enabled();
+    const finalStatus = stopsAtSalesOrder ? 'so_created' : 'ready_for_draft_invoice';
 
     // Seed the Zoho-side status as 'draft'. Sep 1, 2026: without this
     // baseline, the first time anyone confirmed the SO in Zoho the
@@ -1984,7 +1996,7 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // Audit trail — log all status hops. Sep 1, 2026: the credit path now
     // ends at so_created; ready_for_dispatch is logged later, by the
     // salesorder.confirmed webhook that actually earns it.
-    const statusPath = isCredit
+    const statusPath = stopsAtSalesOrder
       ? ['submitted', 'validating', 'so_pending', 'so_created']
       : ['submitted', 'validating', 'so_pending', 'so_created', 'ready_for_draft_invoice'];
 

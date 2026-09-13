@@ -275,8 +275,70 @@ exports.handleZohoWebhook = async (req, res, next) => {
         rawEvent.includes('package_created') ||
         (rawEvent.includes('package') && !rawEvent.includes('shipment')));
 
+    // Sep 12, 2026: is Zoho telling us something this app already knows?
+    //
+    // Under GETMEDS_WORKFLOW_V2 this app confirms Sales Orders and creates
+    // invoices, packages and shipments in Zoho itself (services/
+    // workflowV2Service.js), and Zoho then reports each of those changes back
+    // here like any other. Without this check every button press would log its
+    // step twice and email everyone twice. It also closed an older gap: nothing
+    // here was idempotent, so a webhook Zoho delivered twice did the same.
+    //
+    // Two ways a change counts as known:
+    //   - already recorded: a history line of the same kind carries the same
+    //     Zoho document id — from this app's button, or an earlier webhook
+    //   - in progress: someone is pressing that button right now (the order
+    //     holds a fresh action claim, services/orderClaimService.js), and the
+    //     button records the step itself as soon as Zoho answers it
+    //
+    // Payment is never skipped (this app does not record payments), nor are
+    // void, delete and edit — those are Zoho-side decisions this app must hear.
+    let echo = null;
+    const echoable = !isPaymentEvent && (isInvoiceSent || isInvoiceDrafted || isSalesOrderConfirmed || isShipmentEvent || isPackageEvent);
+    if (echoable) {
+      const recorded = async (eventTypes, key, value) => {
+        if (!value) return false;
+        // logEvent stores metadata as JSON.stringify output, so a key/value
+        // pair always reads exactly `"key":"value"` — no spaces.
+        const row = await db.prepare(
+          'SELECT 1 AS hit FROM order_events WHERE order_id = ? AND event_type = ANY(?) AND metadata LIKE ? LIMIT 1'
+        ).get(order.id, eventTypes, `%"${key}":${JSON.stringify(String(value))}%`);
+        return Boolean(row);
+      };
+      if (isInvoiceSent) {
+        if (await recorded(['ZOHO_INVOICE_SENT'], 'zohoInvoiceId', invoice?.invoice_id)) echo = 'already_recorded';
+      } else if (isInvoiceDrafted) {
+        if (await recorded(['ZOHO_INVOICE_DRAFTED', 'ZOHO_INVOICE_SENT'], 'zohoInvoiceId', invoice?.invoice_id)) echo = 'already_recorded';
+      } else if (isSalesOrderConfirmed) {
+        if (await recorded(['ZOHO_SO_CONFIRMED'], 'zohoSoId', salesorder?.salesorder_id || order.zoho_so_id)) echo = 'already_recorded';
+      } else if (isShipmentEvent) {
+        // A shipment first reported without a tracking number and then again
+        // with one is news the second time, so the tracking number has to
+        // match as well.
+        if (await recorded(['ZOHO_DISPATCHED'], 'zohoShipmentId', shipment?.shipment_id)) {
+          const d = await db.prepare('SELECT tracking_number FROM dispatch_records WHERE order_id = ?').get(order.id);
+          const incoming = shipment?.tracking_number || null;
+          if (!incoming || (d && d.tracking_number === incoming)) echo = 'already_recorded';
+        }
+      } else if (isPackageEvent) {
+        if (await recorded(['ZOHO_PACKAGE_CREATED'], 'zohoPackageId', zohoPackage?.package_id)) echo = 'already_recorded';
+      }
+      if (!echo) {
+        const { CLAIM_TTL_MS } = require('../services/orderClaimService');
+        const claim = await db.prepare('SELECT action_claim, action_claim_at FROM orders WHERE id = ?').get(order.id);
+        if (claim && claim.action_claim && new Date(claim.action_claim_at).getTime() > Date.now() - CLAIM_TTL_MS) {
+          echo = 'getmeds_action_in_progress';
+        }
+      }
+    }
+
+    if (echo) {
+      console.log(`[ZOHO_WEBHOOK] ${rawEvent} for ${order.getmeds_order_id}: ${echo === 'already_recorded' ? 'already recorded' : 'a Getmeds action is recording it'} — skipped.`);
+      actionTaken = echo === 'already_recorded' ? 'ALREADY_RECORDED' : 'DEFERRED_TO_GETMEDS_ACTION';
+    }
+
     // Process Payment Event
-    if (isPaymentEvent) {
+    else if (isPaymentEvent) {
       const paymentAmount = payment?.amount || invoice?.payment_made || order.total_amount;
       const paymentRef = payment?.payment_number || payment?.reference_number || payment?.payment_id || 'ZOHO-PAYMENT';
       const paymentDate = payment?.date || now.split('T')[0];
@@ -616,7 +678,8 @@ exports.handleZohoWebhook = async (req, res, next) => {
           notes: trackingNumber
             ? `Shipment created in Zoho — Tracking: ${trackingNumber} (${courier || 'courier TBD'})`
             : 'Shipment created in Zoho — tracking details pending',
-          metadata: { trackingNumber, courier }
+          // Sep 12, 2026: the shipment id, for the duplicate check above.
+          metadata: { trackingNumber, courier, zohoShipmentId: shipment?.shipment_id || null }
         });
 
         // Aug 31, 2026 (3): stop at tracking_shared — do NOT auto-advance to
@@ -674,11 +737,19 @@ exports.handleZohoWebhook = async (req, res, next) => {
     // checkpoint only, same pattern as Invoice Drafted for Finance.
     else if (isPackageEvent) {
       await db.transaction(async () => {
+        const packageId = zohoPackage?.package_id || null;
+        const packageNumber = zohoPackage?.package_number || null;
         const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
         if (existingDispatch) {
-          await db.prepare(`UPDATE dispatch_records SET status = 'packing' WHERE order_id = ?`).run(order.id);
+          // Sep 12, 2026: never backwards. Zoho does not promise to deliver
+          // webhooks in order, and a package report arriving after the
+          // shipment's used to put a dispatched record back to 'packing'.
+          await db.prepare(`UPDATE dispatch_records SET status = 'packing' WHERE order_id = ? AND status IN ('queued', 'picking', 'packing')`).run(order.id);
+          await db.prepare('UPDATE dispatch_records SET zoho_package_id = COALESCE(zoho_package_id, ?), zoho_package_number = COALESCE(zoho_package_number, ?) WHERE order_id = ?')
+            .run(packageId, packageNumber, order.id);
         } else {
-          await db.prepare(`INSERT INTO dispatch_records (order_id, status, created_at) VALUES (?, 'packing', ?)`).run(order.id, now);
+          await db.prepare(`INSERT INTO dispatch_records (order_id, status, zoho_package_id, zoho_package_number, created_at) VALUES (?, 'packing', ?, ?, ?)`)
+            .run(order.id, packageId, packageNumber, now);
         }
 
         // Aug 31, 2026 (5): 'ready_for_invoice_sent' added — per the confirmed
@@ -705,7 +776,9 @@ exports.handleZohoWebhook = async (req, res, next) => {
           actorId: null,
           actorName: 'Zoho Webhook',
           notes: 'Package created in Zoho — items picked & packed, awaiting shipment',
-          metadata: { rawEvent }
+          // Sep 12, 2026: the package id, so a second report of the same
+          // package is recognised (the duplicate check above).
+          metadata: { rawEvent, zohoPackageId: packageId, zohoPackageNumber: packageNumber }
         });
 
         await notify({

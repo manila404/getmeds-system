@@ -104,8 +104,12 @@ describe('MockZohoAdapter', () => {
   });
 });
 
-describe('ZohoAdapter contract — create-only, no confirm/pack/ship/payment/contact-write/item-write', () => {
-  it('the trimmed contract no longer declares findOrCreateContact, adjustStock, confirmSalesOrder, packSalesOrder, shipSalesOrder, addOrderComment, recordPaymentForSalesOrder, createItem, findOrCreateItem, or activateItem', () => {
+// Sep 12, 2026: confirm / invoice / pack / ship / deliver came back as named,
+// single-purpose methods for GETMEDS_WORKFLOW_V2 (see ZohoAdapter.js). The
+// old catch-all names stay forbidden, and payment, contact and item writes
+// stay out entirely.
+describe('ZohoAdapter contract — no payment/contact-write/item-write, and none of the old catch-all names', () => {
+  it('does not declare findOrCreateContact, adjustStock, confirmSalesOrder, packSalesOrder, shipSalesOrder, addOrderComment, recordPaymentForSalesOrder, createItem, findOrCreateItem, or activateItem', () => {
     const methodNames = Object.getOwnPropertyNames(ZohoAdapter.prototype);
     const removedMethods = [
       'findOrCreateContact', 'adjustStock', 'confirmSalesOrder', 'packSalesOrder',
@@ -115,6 +119,66 @@ describe('ZohoAdapter contract — create-only, no confirm/pack/ship/payment/con
     for (const m of removedMethods) {
       expect(methodNames).not.toContain(m);
     }
+  });
+
+  const WORKFLOW_METHODS = [
+    'markSalesOrderConfirmed', 'createInvoiceFromSalesOrder', 'markInvoiceSent',
+    'createPackageForSalesOrder', 'createShipmentForPackage', 'markShipmentDelivered'
+  ];
+
+  it('declares the six workflow writes on the contract, both adapters, and the facade', () => {
+    const LiveZohoAdapter = require('../src/integrations/zoho/LiveZohoAdapter');
+    const zoho = require('../src/integrations/zoho');
+    for (const m of WORKFLOW_METHODS) {
+      expect(Object.getOwnPropertyNames(ZohoAdapter.prototype)).toContain(m);
+      expect(Object.getOwnPropertyNames(LiveZohoAdapter.prototype)).toContain(m);
+      expect(Object.getOwnPropertyNames(MockZohoAdapter.prototype)).toContain(m);
+      // The facade is what the app actually calls — a method missing from its
+      // list is undefined everywhere, however well the adapters implement it.
+      expect(typeof zoho[m]).toBe('function');
+    }
+  });
+
+  it('the mock refuses to invoice or pack a draft Sales Order, like the real org', async () => {
+    const adapter = new MockZohoAdapter();
+    const knownContactId = [...adapter._contacts.keys()][0];
+    const { salesorder } = await adapter.createSalesOrder({ ...sampleOrderData, zoho_customer_id: knownContactId });
+    const { salesorder: draft } = await adapter.getSalesOrder(salesorder.salesorder_id);
+    await expect(adapter.createInvoiceFromSalesOrder(draft)).rejects.toThrow(/draft/);
+    await expect(adapter.createPackageForSalesOrder(draft)).rejects.toThrow(/draft/);
+  });
+
+  it('the mock walks a Sales Order through confirm → invoice → package → shipment → delivered', async () => {
+    const adapter = new MockZohoAdapter();
+    const knownContactId = [...adapter._contacts.keys()][0];
+    const { salesorder } = await adapter.createSalesOrder({ ...sampleOrderData, zoho_customer_id: knownContactId });
+    const id = salesorder.salesorder_id;
+
+    await adapter.markSalesOrderConfirmed(id);
+    let { salesorder: so } = await adapter.getSalesOrder(id);
+    expect(so.status).toBe('confirmed');
+
+    const { invoice } = await adapter.createInvoiceFromSalesOrder(so, { date: '2026-09-12' });
+    expect(invoice.line_items[0].salesorder_item_id).toBe(so.line_items[0].line_item_id);
+    await adapter.markInvoiceSent(invoice.invoice_id);
+
+    ({ salesorder: so } = await adapter.getSalesOrder(id));
+    expect(so.invoices).toEqual([expect.objectContaining({ invoice_id: invoice.invoice_id, status: 'sent' })]);
+    await expect(adapter.createInvoiceFromSalesOrder(so)).rejects.toThrow(/nothing left to invoice/);
+
+    const { package: pkg } = await adapter.createPackageForSalesOrder(so, { date: '2026-09-12' });
+    await expect(adapter.createShipmentForPackage({ salesorderId: id, packageId: pkg.package_id }))
+      .rejects.toThrow(/required/);
+    const { shipmentorder } = await adapter.createShipmentForPackage({
+      salesorderId: id, packageId: pkg.package_id, shipmentNumber: 'SH-TEST',
+      date: '2026-09-12', deliveryMethod: 'LBC', trackingNumber: 'TRK-1'
+    });
+    await adapter.markShipmentDelivered(shipmentorder.shipment_id);
+
+    ({ salesorder: so } = await adapter.getSalesOrder(id));
+    expect(so.packages[0]).toEqual(expect.objectContaining({
+      package_id: pkg.package_id, shipment_id: shipmentorder.shipment_id, shipment_status: 'delivered'
+    }));
   });
 });
 

@@ -298,6 +298,81 @@ class ZohoAdapter {
     throw new Error('Not implemented');
   }
 
+  /*
+   * Sep 12, 2026: the workflow writes — a FIFTH deliberate, reviewed exception
+   * to "createSalesOrder is the ONLY write" in the header above, and the end of
+   * the Aug 27 rule that nothing here confirms, packs or ships.
+   *
+   * Under GETMEDS_WORKFLOW_V2 (services/workflowFlags.js) Finance confirms the
+   * Sales Order from this app, and Dispatch creates the invoice, the package,
+   * the shipment and the delivery from this app (field guide, chapter 12,
+   * "Build plan"). Each method below makes exactly one of those changes and is
+   * called from ONE place, services/workflowV2Service.js, which claims the
+   * order first, re-reads the Sales Order before writing, and passes every call
+   * through services/zohoWriteGuard.js so ZOHO_DRY_RUN and
+   * ZOHO_TEST_CUSTOMER_IDS cover these writes too.
+   *
+   * Still absent, on purpose: void, delete, editing a Sales Order's lines,
+   * recording a payment (Finance keeps doing that in Zoho Books), and any item
+   * or stock write.
+   */
+
+  /**
+   * Mark a draft Sales Order confirmed (`POST /salesorders/{id}/status/confirmed`).
+   * @returns {Promise<{code:number, message:string}>}
+   */
+  async markSalesOrderConfirmed(salesorderId) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Create the invoice for a confirmed Sales Order (`POST /invoices`), linked
+   * line by line through `salesorder_item_id` so Zoho counts the order as
+   * invoiced. Only the quantity not yet invoiced is billed.
+   * @param {object} salesorder - as returned by getSalesOrder
+   * @param {{date?: string}} opts
+   * @returns {Promise<{code:number, message:string, invoice:object}>}
+   */
+  async createInvoiceFromSalesOrder(salesorder, opts = {}) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Mark a draft invoice sent — issued to the customer (`POST /invoices/{id}/status/sent`).
+   * @returns {Promise<{code:number, message:string}>}
+   */
+  async markInvoiceSent(invoiceId) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Create one package for every line still to pack (`POST /packages?salesorder_id=`).
+   * Zoho only packs a confirmed Sales Order.
+   * @param {object} salesorder - as returned by getSalesOrder
+   * @param {{date?: string}} opts
+   * @returns {Promise<{code:number, message:string, package:object}>}
+   */
+  async createPackageForSalesOrder(salesorder, opts = {}) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Ship a package (`POST /shipmentorders?package_ids=&salesorder_id=`). Zoho
+   * requires the shipment number, date, delivery method and tracking number.
+   * @returns {Promise<{code:number, message:string, shipmentorder:object}>}
+   */
+  async createShipmentForPackage({ salesorderId, packageId, shipmentNumber, date, deliveryMethod, trackingNumber }) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Mark a shipment delivered (`POST /shipmentorders/{id}/status/delivered`).
+   * @returns {Promise<{code:number, message:string}>}
+   */
+  async markShipmentDelivered(shipmentId) {
+    throw new Error('Not implemented');
+  }
+
   /**
    * Toggle a simulated outage, for demoing "Zoho is down" on demand
    * (Test Mode only calls this). Meaningful only for MockZohoAdapter — the

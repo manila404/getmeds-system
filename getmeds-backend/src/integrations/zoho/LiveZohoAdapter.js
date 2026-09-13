@@ -923,6 +923,95 @@ class LiveZohoAdapter extends ZohoAdapter {
     }
     return { code: 0, message: 'Attachment added successfully', document: json.document || json };
   }
+
+  // ─── Sep 12, 2026: the workflow writes (see ZohoAdapter.js) ──────────────
+  //
+  // Every one is a single POST through _request, so none is ever retried: a
+  // network error on a POST does not say whether Zoho made the change, and a
+  // blind retry could raise a second invoice or package. The caller,
+  // workflowV2Service, re-reads the Sales Order before its next attempt and
+  // adopts whatever the first attempt did make.
+  //
+  // Needs ZohoInventory.invoices, .packages and .shipmentorders (CREATE and
+  // READ) on the refresh token, alongside .salesorders.
+
+  async markSalesOrderConfirmed(salesorderId) {
+    const result = await this._request('POST', `/salesorders/${salesorderId}/status/confirmed`);
+    return { code: 0, message: result.message || 'Sales order confirmed' };
+  }
+
+  async createInvoiceFromSalesOrder(salesorder, opts = {}) {
+    const lineItems = (salesorder.line_items || [])
+      .map((li) => ({
+        salesorder_item_id: li.line_item_id,
+        item_id: li.item_id,
+        name: li.name,
+        rate: li.rate,
+        quantity: Number(li.quantity || 0) - Number(li.quantity_invoiced || 0)
+      }))
+      .filter((li) => li.quantity > 0)
+      // Zoho rejects `item_id: undefined` just as it rejects a bad id, so an
+      // unmapped line goes without it — the same rule createSalesOrder uses.
+      .map((li) => (li.item_id ? li : (({ item_id, ...rest }) => rest)(li)));
+    if (!lineItems.length) {
+      throw new Error(`Sales Order ${salesorder.salesorder_number} has nothing left to invoice.`);
+    }
+
+    const body = {
+      customer_id: salesorder.customer_id,
+      reference_number: salesorder.reference_number || salesorder.salesorder_number,
+      date: opts.date,
+      line_items: lineItems
+    };
+    if (salesorder.salesperson_id) body.salesperson_id = salesorder.salesperson_id;
+    if (!body.date) delete body.date;
+
+    const result = await this._request('POST', '/invoices', { body });
+    return { code: 0, message: result.message || 'Invoice created', invoice: result.invoice };
+  }
+
+  async markInvoiceSent(invoiceId) {
+    const result = await this._request('POST', `/invoices/${invoiceId}/status/sent`);
+    return { code: 0, message: result.message || 'Invoice marked as sent' };
+  }
+
+  async createPackageForSalesOrder(salesorder, opts = {}) {
+    const lineItems = (salesorder.line_items || [])
+      .map((li) => ({
+        so_line_item_id: li.line_item_id,
+        quantity: Number(li.quantity || 0) - Number(li.quantity_packed || 0)
+      }))
+      .filter((li) => li.quantity > 0);
+    if (!lineItems.length) {
+      throw new Error(`Sales Order ${salesorder.salesorder_number} has nothing left to pack.`);
+    }
+
+    const body = { line_items: lineItems };
+    if (opts.date) body.date = opts.date;
+    const result = await this._request('POST', '/packages', {
+      query: { salesorder_id: salesorder.salesorder_id },
+      body
+    });
+    return { code: 0, message: result.message || 'Package created', package: result.package };
+  }
+
+  async createShipmentForPackage({ salesorderId, packageId, shipmentNumber, date, deliveryMethod, trackingNumber }) {
+    const result = await this._request('POST', '/shipmentorders', {
+      query: { package_ids: packageId, salesorder_id: salesorderId },
+      body: {
+        shipment_number: shipmentNumber,
+        date,
+        delivery_method: deliveryMethod,
+        tracking_number: trackingNumber
+      }
+    });
+    return { code: 0, message: result.message || 'Shipment created', shipmentorder: result.shipmentorder || result.shipment_order };
+  }
+
+  async markShipmentDelivered(shipmentId) {
+    const result = await this._request('POST', `/shipmentorders/${shipmentId}/status/delivered`);
+    return { code: 0, message: result.message || 'Shipment marked as delivered' };
+  }
 }
 
 module.exports = LiveZohoAdapter;
