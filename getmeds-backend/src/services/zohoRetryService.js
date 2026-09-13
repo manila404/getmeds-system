@@ -58,6 +58,18 @@ async function listQueue() {
 
 async function processOne(row) {
   try {
+    // Sep 14, 2026: never a second Sales Order. This retries a CREATE, and
+    // an order that already carries a Zoho id has been created — by an earlier
+    // attempt, or by a retry that raced this one. Re-creating would put a
+    // second Sales Order in Zoho and point the order at it, stranding the
+    // first. The row's job is done, so it is closed as such.
+    const existing = await db.prepare('SELECT zoho_so_id, zoho_so_number FROM orders WHERE id = ?').get(row.order_id);
+    if (existing && existing.zoho_so_id) {
+      await db.prepare(`UPDATE zoho_sync_queue SET status = 'succeeded', updated_at = ? WHERE id = ?`)
+        .run(new Date().toISOString(), row.id);
+      return { orderId: row.order_id, queueId: row.id, outcome: 'already_in_zoho', zohoSoNumber: existing.zoho_so_number };
+    }
+
     // Aug 31, 2026: rebuilt fresh from the order's CURRENT state (customer +
     // live order_items) on every attempt — not JSON.parse(row.payload), the
     // one-time snapshot frozen at the moment of the original failure. That

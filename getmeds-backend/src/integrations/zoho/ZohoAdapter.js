@@ -299,14 +299,17 @@ class ZohoAdapter {
   }
 
   /*
-   * Sep 12, 2026: the workflow writes — a FIFTH deliberate, reviewed exception
-   * to "createSalesOrder is the ONLY write" in the header above, and the end of
-   * the Aug 27 rule that nothing here confirms, packs or ships.
+   * Sep 12, 2026: the Dispatch writes — the FIFTH deliberate, reviewed
+   * exception to "createSalesOrder is the ONLY write" in the header above,
+   * after confirmSalesOrder below (the fourth). With them this adapter
+   * invoices, packs and ships after all, which the Aug 27 rule said it never
+   * would; tests/zohoAdapter.test.js pins the exact set so nothing joins them
+   * unnoticed.
    *
-   * Under GETMEDS_WORKFLOW_V2 (services/workflowFlags.js) Finance confirms the
-   * Sales Order from this app, and Dispatch creates the invoice, the package,
-   * the shipment and the delivery from this app (field guide, chapter 12,
-   * "Build plan"). Each method below makes exactly one of those changes and is
+   * Under GETMEDS_WORKFLOW_V2 (services/workflowFlags.js) Dispatch creates the
+   * invoice, the package, the shipment and the delivery from this app (field
+   * guide, chapter 12, "Build plan"), starting where Finance's Verify leaves
+   * an order. Each method below makes exactly one of those changes and is
    * called from ONE place, services/workflowV2Service.js, which claims the
    * order first, re-reads the Sales Order before writing, and passes every call
    * through services/zohoWriteGuard.js so ZOHO_DRY_RUN and
@@ -316,14 +319,6 @@ class ZohoAdapter {
    * recording a payment (Finance keeps doing that in Zoho Books), and any item
    * or stock write.
    */
-
-  /**
-   * Mark a draft Sales Order confirmed (`POST /salesorders/{id}/status/confirmed`).
-   * @returns {Promise<{code:number, message:string}>}
-   */
-  async markSalesOrderConfirmed(salesorderId) {
-    throw new Error('Not implemented');
-  }
 
   /**
    * Create the invoice for a confirmed Sales Order (`POST /invoices`), linked
@@ -370,6 +365,34 @@ class ZohoAdapter {
    * @returns {Promise<{code:number, message:string}>}
    */
   async markShipmentDelivered(shipmentId) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Move a Sales Order from Draft to Confirmed in Zoho.
+   *
+   * Sep 12, 2026. The FOURTH deliberate exception to this adapter's
+   * create-only rule, and the first that changes the state of a document
+   * rather than adding to one.
+   *
+   * Why it earns the exception: this app creates every Sales Order as a
+   * Draft, and a Draft is invisible to the rest of Zoho's pipeline -- it
+   * cannot be invoiced or packed. Until now somebody confirmed each one by
+   * hand in Zoho Books, and the app waited to be told. That made Finance's
+   * verification a record-keeping act that changed nothing, while the step
+   * that actually released the order happened somewhere else entirely, with
+   * no connection between the two.
+   *
+   * Confirming is safe in a way the deletes this adapter refuses are not: it
+   * moves a document forward through the same transition a person would make
+   * in the UI, it is the documented next state for a Draft, and nothing is
+   * destroyed. A confirmed order that should not have been can be voided in
+   * Zoho by a human; a deleted one cannot be recovered by anyone.
+   *
+   * @param {string} salesorderId - an existing Zoho Sales Order id
+   * @returns {Promise<{code:number, message:string}>}
+   */
+  async confirmSalesOrder(salesorderId) {
     throw new Error('Not implemented');
   }
 

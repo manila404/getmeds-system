@@ -999,6 +999,21 @@ exports.retryZohoSync = async (req, res, next) => {
       });
     }
 
+    // Sep 14, 2026: 'failed' no longer always means "the Sales Order was never
+    // created". Finance's Verify also records 'failed' when CONFIRMING an
+    // existing Sales Order fails (finance.controller.js), and this retry
+    // re-creates — which would put a second Sales Order in Zoho and point the
+    // order at it. zohoRetryService refuses that too; this says why, here.
+    if (order.zoho_so_id) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'ALREADY_IN_ZOHO',
+          message: `This order already has Sales Order ${order.zoho_so_number || order.zoho_so_id} in Zoho, so there is nothing to create again. What failed was confirming it — confirm it in Zoho Books.`
+        }
+      });
+    }
+
     // Most recent queue row for this order, regardless of its own status —
     // deliberately not filtered to status='pending' so a row that already
     // hit 'failed_permanent' (5 automatic attempts exhausted) can still be
@@ -1366,14 +1381,27 @@ exports.create = async (req, res, next) => {
     // path (create-and-submit in one call) had its own copy of the rule, so
     // it had to be fixed in both places or the two entry points would
     // disagree about where a credit order starts.
-    //
-    // Sep 12, 2026: under GETMEDS_WORKFLOW_V2 a direct order stops at
-    // 'so_created' as well. Finance's Confirm order acts on the draft Sales
-    // Order there, whatever the customer type — there is no longer a path where
-    // an order is invoiced before anyone in Finance has looked at it.
     const finalStatus = isDraft
       ? 'draft'
-      : (requiresManagementApproval ? 'pending_management_approval' : ((isCredit || isWorkflowV2Enabled()) ? 'so_created' : 'ready_for_draft_invoice'));
+      // Sep 12, 2026: a credit order goes to FINANCE, not to a waiting room.
+      //
+      // It used to stop at 'so_created' until somebody confirmed the Sales
+      // Order by hand in Zoho Books; only then did it reach Finance. That made
+      // Finance's verification a record-keeping act that changed nothing,
+      // while the step which actually released the order happened in another
+      // system with no connection between the two -- and an order nobody
+      // thought to confirm in Zoho simply sat there (GM-20260912-0003).
+      //
+      // Now Finance verifies first and the app confirms the Sales Order in
+      // Zoho on their behalf. See finance.controller.js's verifyAccount.
+      //
+      // Sep 14, 2026: under GETMEDS_WORKFLOW_V2 a direct order goes to Finance
+      // too. Dispatch invoices from this app under that switch, so this is
+      // the one place anybody checks the price and the proof of payment
+      // before the invoice is raised — and every order needs that.
+      : (requiresManagementApproval
+          ? 'pending_management_approval'
+          : ((isCredit || isWorkflowV2Enabled()) ? 'ready_for_finance_verified' : 'ready_for_draft_invoice'));
     const now = new Date().toISOString();
     // "Sales Order Date (Automatic Today)" on the form — always set here,
     // server-side, to today's date. There is no client override; a
@@ -1784,6 +1812,45 @@ exports.create = async (req, res, next) => {
         orderData: orderDataForNotif
       });
     } else if (!isDraft) {
+      /**
+       * Sep 12, 2026: record the approval that raising the order already was.
+       *
+       * requiresManagementApproval is false here, so nothing was ever going to
+       * the approval queue. But the timeline's "Management Approved" stage
+       * fills only from a MANAGEMENT_APPROVED event, and this path emitted
+       * none — so the stage sat unticked forever and the order read as though
+       * it were still waiting on somebody (GM-20260912-0003).
+       *
+       * WHICH event depends on who raised it, and the distinction is real:
+       *
+       *   management / admin  -> MANAGEMENT_APPROVED. A manager raising an
+       *       order IS the management decision. There is no second person to
+       *       route it to, and asking them to approve their own order would be
+       *       a rubber stamp with an audit trail.
+       *
+       *   anyone else         -> APPROVAL_NOT_REQUIRED. Nobody approved this;
+       *       the order simply never needed it. Claiming a management approval
+       *       that no manager made would be a lie in the one record that
+       *       exists to say who decided what.
+       *
+       * Either satisfies the timeline stage. Only the pair tells the truth.
+       */
+      const raiserRole = (req.user.role || '').toLowerCase();
+      const raiserIsManagement = raiserRole === 'management' || raiserRole === 'admin';
+
+      await logEvent({
+        orderId,
+        eventType: raiserIsManagement ? 'MANAGEMENT_APPROVED' : 'APPROVAL_NOT_REQUIRED',
+        oldStatus: finalStatus,
+        newStatus: finalStatus,
+        actorId: req.user.id,
+        actorName: req.user.name,
+        notes: raiserIsManagement
+          ? `Approved on creation — raised by ${req.user.name} (${raiserRole}), so no separate approval step applies.`
+          : `Raised by ${req.user.name} (${raiserRole}) — no Management approval required for this order.`,
+        metadata: { raisedByRole: raiserRole, approvedOnCreation: raiserIsManagement }
+      });
+
       const orderDataForNotif = {
         getmeds_order_id: getmedsOrderId,
         customer_name: customer.name,
@@ -1945,12 +2012,15 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     //
     // A DIRECT order still goes to 'ready_for_draft_invoice' — unchanged, so
     // the Finance queue behaves exactly as before.
-    //
-    // Sep 12, 2026: under GETMEDS_WORKFLOW_V2 a direct order waits at
-    // 'so_created' too, for Finance's Confirm order (see createOrder above).
     const isCredit = (order.customer_type === 'credit' || order.customer_master_type === 'credit');
-    const stopsAtSalesOrder = isCredit || isWorkflowV2Enabled();
-    const finalStatus = stopsAtSalesOrder ? 'so_created' : 'ready_for_draft_invoice';
+    // Sep 12, 2026: matches the create path above — a credit order goes
+    // straight to Finance rather than waiting for someone to confirm the Sales
+    // Order in Zoho. Two copies of this rule, and they have to agree.
+    //
+    // Sep 14, 2026: and under GETMEDS_WORKFLOW_V2 a direct order goes to
+    // Finance too (see createOrder above).
+    const toFinance = isCredit || isWorkflowV2Enabled();
+    const finalStatus = toFinance ? 'ready_for_finance_verified' : 'ready_for_draft_invoice';
 
     // Seed the Zoho-side status as 'draft'. Sep 1, 2026: without this
     // baseline, the first time anyone confirmed the SO in Zoho the
@@ -1996,7 +2066,7 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // Audit trail — log all status hops. Sep 1, 2026: the credit path now
     // ends at so_created; ready_for_dispatch is logged later, by the
     // salesorder.confirmed webhook that actually earns it.
-    const statusPath = stopsAtSalesOrder
+    const statusPath = toFinance
       ? ['submitted', 'validating', 'so_pending', 'so_created']
       : ['submitted', 'validating', 'so_pending', 'so_created', 'ready_for_draft_invoice'];
 

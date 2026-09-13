@@ -8,13 +8,19 @@ const { claimOrder, releaseClaim, describeClaim } = require('./orderClaimService
 const { zohoWriteMode } = require('./zohoWriteGuard');
 
 /**
- * Finance confirms, Dispatch works in Getmeds — the actions behind the new
- * buttons (field guide, chapter 12, "Build plan").
+ * Dispatch works in Getmeds — the actions behind the Dispatch buttons (field
+ * guide, chapter 12, "Build plan").
  *
- * Sep 12, 2026. Until now Finance confirmed Sales Orders and Dispatch invoiced,
- * packed and shipped inside Zoho, and this app only heard about it afterwards.
- * Under GETMEDS_WORKFLOW_V2 those steps are pressed here and this app makes the
- * matching change in Zoho.
+ * Sep 12, 2026. Until now Dispatch invoiced, packed and shipped inside Zoho,
+ * and this app only heard about it afterwards. Under GETMEDS_WORKFLOW_V2 those
+ * steps are pressed here and this app makes the matching change in Zoho.
+ *
+ * Sep 14, 2026: Finance's half is NOT in this file. It was, as a "Confirm
+ * order" button; merging with the Sep 12 change that made Finance's Verify
+ * confirm the Sales Order in Zoho (finance.controller.js verifyAccount)
+ * replaced it. Dispatch picks up exactly where Verify leaves an order,
+ * ready_for_draft_invoice — and Create invoice finishes the confirmation
+ * itself if Verify's call to Zoho failed.
  *
  * Every action runs the same five steps, in this order, and the order matters:
  *
@@ -135,6 +141,23 @@ async function inZoho(what, fn) {
   }
 }
 
+/** Confirm through Aaron's adapter method, treating Zoho's error body as the failure it is. */
+async function confirmInZoho(salesorderId) {
+  const res = await zoho.confirmSalesOrder(salesorderId);
+  // The mock answers an unknown id with code 4 instead of throwing, the way
+  // Zoho's own error body does; that is a refusal, not a confirmation.
+  if (res && res.code && res.code !== 0) throw new Error(res.message || 'Zoho refused the confirmation');
+  return res;
+}
+
+/** Has Finance verified this order? Their Verify leaves exactly one of these. */
+async function financeVerified(orderId) {
+  const row = await db
+    .prepare(`SELECT 1 AS hit FROM order_events WHERE order_id = ? AND event_type = 'FINANCE_VERIFIED' LIMIT 1`)
+    .get(orderId);
+  return Boolean(row);
+}
+
 /** Step 5. A failed notification is logged, never allowed to undo the step. */
 async function notifySafely(args) {
   try {
@@ -186,84 +209,6 @@ async function runStep({ orderId, user, actorRole, label, fromStatuses, needsZoh
   }
 }
 
-// ─── Finance ────────────────────────────────────────────────────────────────
-
-/**
- * Finance's one button: prices and proof of payment checked, so confirm the
- * Sales Order in Zoho. Replaces "confirm in Zoho, then Verify account here".
- */
-async function confirmOrder({ orderId, user, pricesChecked, proofChecked }) {
-  if (pricesChecked !== true || proofChecked !== true) {
-    throw new WorkflowError(400, 'CHECKS_REQUIRED', 'Tick both checks before confirming — the prices, and the proof of payment.');
-  }
-  return runStep({ orderId, user, actorRole: 'finance', label: 'Confirm order', fromStatuses: ['so_created'] }, async ({ order, actor, token, dryRun, so, now }) => {
-    let adopted = false;
-    if (!dryRun) {
-      if (String(so.status || '').toLowerCase() === 'draft') {
-        await inZoho('confirm the Sales Order', () => zoho.markSalesOrderConfirmed(order.zoho_so_id));
-      } else {
-        adopted = true; // already confirmed in Zoho by someone — record it, don't re-confirm
-      }
-    }
-
-    const { markVerifiedWithOrder } = require('../controllers/paymentProof.controller');
-    let verifiedProofs = [];
-    await db.transaction(async () => {
-      await moveStatus(order, token, 'ready_for_draft_invoice', now);
-      await db.prepare(`UPDATE orders SET zoho_so_status = 'confirmed', zoho_sync_status = 'synced' WHERE id = ?`).run(order.id);
-      verifiedProofs = await markVerifiedWithOrder(order.id, actor.id, now);
-      await logEvent({
-        orderId: order.id, eventType: 'ZOHO_SO_CONFIRMED', oldStatus: order.status, newStatus: 'ready_for_draft_invoice',
-        actorId: actor.id, actorName: actor.name,
-        notes: `Sales Order ${order.zoho_so_number || ''} confirmed from Getmeds${adopted ? ' (it was already confirmed in Zoho)' : ''}${dryRun ? ' — dry run, Zoho not contacted' : ''}.`,
-        metadata: { zohoSoId: order.zoho_so_id, zohoSoNumber: order.zoho_so_number, source: 'getmeds', adopted, dryRun }
-      });
-      await logEvent({
-        orderId: order.id, eventType: 'FINANCE_VERIFIED', oldStatus: order.status, newStatus: 'ready_for_draft_invoice',
-        actorId: actor.id, actorName: actor.name,
-        notes: `Prices and proof of payment checked; order confirmed.${verifiedProofs.length ? ` Proof of payment verified with it.` : ''}`,
-        metadata: { pricesChecked: true, proofChecked: true, via: 'confirm_order', paymentProofVerified: verifiedProofs.length > 0 }
-      });
-    })();
-
-    const watchers = await getUserIdsByRole('management', 'dispatch');
-    await notifySafely({
-      orderId: order.id,
-      recipientIds: Array.from(new Set([order.medrep_user_id, ...watchers].filter(Boolean))),
-      message: `Order ${order.getmeds_order_id} was confirmed by Finance and is ready for invoicing.`,
-      eventType: 'FINANCE_VERIFIED',
-      orderData: { ...order, status: 'ready_for_draft_invoice' }
-    });
-    return { status: 'ready_for_draft_invoice', adopted, dryRun };
-  });
-}
-
-/** Finance's other outcome: put the order on hold, with the reason. No Zoho write. */
-async function holdOrder({ orderId, user, reason }) {
-  const why = String(reason || '').trim();
-  if (!why) throw new WorkflowError(400, 'VALIDATION_ERROR', 'A reason is required — it is what the next person acts on.');
-  return runStep({ orderId, user, actorRole: 'finance', label: 'Hold', fromStatuses: ['so_created'], needsZoho: false }, async ({ order, actor, token, now }) => {
-    await db.transaction(async () => {
-      await moveStatus(order, token, 'on_hold', now);
-      await db.prepare('UPDATE orders SET exception_reason = ? WHERE id = ?').run(why, order.id);
-      await logEvent({
-        orderId: order.id, eventType: 'FINANCE_REJECTED', oldStatus: order.status, newStatus: 'on_hold',
-        actorId: actor.id, actorName: actor.name, notes: `Put on hold by Finance: ${why}`,
-        metadata: { approved: false, reason: why, via: 'confirm_order' }
-      });
-    })();
-    const watchers = await getUserIdsByRole('management');
-    await notifySafely({
-      orderId: order.id,
-      recipientIds: Array.from(new Set([order.medrep_user_id, ...watchers].filter(Boolean))),
-      message: `Order ${order.getmeds_order_id} was put on hold by Finance: ${why}`,
-      eventType: 'FINANCE_REJECTED',
-      orderData: { ...order, status: 'on_hold' }
-    });
-    return { status: 'on_hold' };
-  });
-}
-
 // ─── Dispatch ───────────────────────────────────────────────────────────────
 
 /**
@@ -276,6 +221,7 @@ async function createInvoice({ orderId, user }) {
     let invoice;
     let adopted = false;
     let sendError = null;
+    let confirmedHere = false;
 
     if (dryRun) {
       invoice = { invoice_id: `DRYRUN-INV-${order.getmeds_order_id}`, invoice_number: `DRYRUN-INV-${order.getmeds_order_id}`, status: 'sent' };
@@ -286,7 +232,26 @@ async function createInvoice({ orderId, user }) {
         adopted = true;
       } else {
         if (String(so.status || '').toLowerCase() === 'draft') {
-          throw new WorkflowError(409, 'NOT_CONFIRMED_IN_ZOHO', 'The Sales Order is still a draft in Zoho. Finance needs to confirm the order first.');
+          // Sep 14, 2026: Finance verified this order but Zoho never confirmed
+          // it — Verify's call to Zoho failed, and finance.controller.js
+          // records that and moves on, deliberately. Nothing retries it on its
+          // own, so it is finished here rather than stranding the order at
+          // this step: Finance's decision is on the record, and releasing the
+          // Sales Order is exactly what that decision was for.
+          //
+          // Without a verification on the record it stays Finance's call — an
+          // order that reached this step some other way (a direct order from
+          // before the switch was turned on) is not Dispatch's to release.
+          if (!(await financeVerified(order.id))) {
+            throw new WorkflowError(
+              409,
+              'NOT_CONFIRMED_IN_ZOHO',
+              'The Sales Order is still a draft in Zoho, and Finance has not verified this order. Confirm it in Zoho Books first.'
+            );
+          }
+          await inZoho('confirm the Sales Order', () => confirmInZoho(order.zoho_so_id));
+          so = { ...so, status: 'confirmed' };
+          confirmedHere = true;
         }
         const created = await inZoho('create the invoice', () => zoho.createInvoiceFromSalesOrder(so, { date: zohoToday() }));
         invoice = created.invoice;
@@ -307,6 +272,21 @@ async function createInvoice({ orderId, user }) {
       await moveStatus(order, token, target, now);
       await db.prepare('UPDATE orders SET zoho_invoice_id = ?, zoho_invoice_number = ? WHERE id = ?')
         .run(invoice.invoice_id, invoice.invoice_number || null, order.id);
+      if (confirmedHere) {
+        // The 'failed' Verify left behind was about this confirmation, and it
+        // has now happened — an order with a Zoho id cannot have failed to be
+        // created.
+        await db.prepare(`
+          UPDATE orders SET zoho_so_status = 'confirmed',
+                 zoho_sync_status = CASE WHEN zoho_sync_status = 'failed' THEN 'synced' ELSE zoho_sync_status END
+           WHERE id = ?`).run(order.id);
+        await logEvent({
+          orderId: order.id, eventType: 'ZOHO_SO_CONFIRMED', oldStatus: order.status, newStatus: order.status,
+          actorId: actor.id, actorName: actor.name,
+          notes: `Sales Order ${order.zoho_so_number || ''} confirmed in Zoho by Create invoice — Finance had verified the order, but Zoho had not confirmed it yet.`,
+          metadata: { zohoSoId: order.zoho_so_id, zohoSoNumber: order.zoho_so_number, source: 'getmeds', via: 'create_invoice' }
+        });
+      }
       await logEvent({
         orderId: order.id,
         eventType: issued ? 'ZOHO_INVOICE_SENT' : 'ZOHO_INVOICE_DRAFTED',
@@ -506,8 +486,6 @@ async function markDelivered({ orderId, user }) {
 
 module.exports = {
   WorkflowError,
-  confirmOrder,
-  holdOrder,
   createInvoice,
   markPacked,
   ship,

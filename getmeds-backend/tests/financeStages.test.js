@@ -174,6 +174,38 @@ describe('GET /api/finance/queue across every stage', () => {
     expect(filtered.stats.completed).toBeGreaterThan(0);
   });
 
+  test('the tab counts agree with the list beneath them', async () => {
+    /**
+     * Sep 12, 2026. The tabs sit directly above the list, so their numbers are
+     * read as describing it. They did not: the counts ignored the stage
+     * filter, so a stage page showed "Raised in GetMeds (1)" above a list
+     * headed "Raised in GetMeds (0)" — two true numbers describing different
+     * sets, which reads as the page being broken.
+     *
+     * Checked on a stage where the two ORIGINS differ, so a version that
+     * simply returned the same number twice would still fail.
+     */
+    for (const stage of ['actionable', 'upstream', 'completed']) {
+      const here = await queue(`?origin=getmeds&stage=${stage}`);
+      expect(here.counts.getmeds).toBe(here.pagination.total);
+
+      const zoho = await queue(`?origin=zoho&stage=${stage}`);
+      expect(zoho.counts.zoho).toBe(zoho.pagination.total);
+
+      // Same stage, either tab: the pair of counts is the same either side.
+      expect(here.counts).toEqual(zoho.counts);
+      expect(here.counts.total).toBe(here.counts.getmeds + here.counts.zoho);
+    }
+  });
+
+  test('on the dashboard the counts still cover every stage', async () => {
+    // The tabs there mean "everything on that side", which is what makes an
+    // empty GetMeds tab beside a large Zoho one readable.
+    const dash = await queue();
+    const actionable = await queue('?stage=actionable');
+    expect(dash.counts.total).toBeGreaterThanOrEqual(actionable.counts.total);
+  });
+
   test('results are paginated, and the total reflects the filter not the page', async () => {
     const data = await queue('?limit=2');
     expect(data.orders.length).toBeLessThanOrEqual(2);

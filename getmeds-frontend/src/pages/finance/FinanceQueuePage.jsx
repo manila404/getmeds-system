@@ -167,13 +167,17 @@ const FinanceQueuePage = () => {
       key: 'getmeds',
       label: 'Raised in GetMeds',
       count: counts.getmeds,
-      hint: 'Orders your MedReps submitted here. This is the work.'
+      hint: stage
+        ? `Orders raised here at this stage.`
+        : 'Orders your MedReps submitted here. This is the work.'
     },
     {
       key: 'zoho',
       label: 'Imported from Zoho',
       count: counts.zoho,
-      hint: 'Historical Sales Orders brought over by the import. Reference only — they are maintained in Zoho.'
+      hint: stage
+        ? 'Imported Sales Orders at this stage. Reference only — they are maintained in Zoho.'
+        : 'Historical Sales Orders brought over by the import. Reference only — they are maintained in Zoho.'
     }
   ];
 
@@ -219,17 +223,39 @@ const FinanceQueuePage = () => {
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that')
   });
 
+  /**
+   * Sep 14, 2026 (GETMEDS_WORKFLOW_V2): the two ticks — the prices, and the
+   * proof of payment — that confirming asks for when the switch is on, because
+   * Dispatch raises the invoice straight after it. Per order, and required by
+   * the server too; they are the record of what Finance actually checked.
+   */
+  const [checks, setChecks] = useState({});
+  const toggleCheck = (id, key) =>
+    setChecks((c) => ({ ...c, [id]: { ...c[id], [key]: !c[id]?.[key] } }));
+
   const verifyMutation = useMutation({
-    mutationFn: ({ id, approved, reason }) =>
-      client.post(`/api/finance/orders/${id}/verify`, { approved, reason }).then(r => r.data),
-    onSuccess: (res) => {
-      toast.success(res?.data?.approved
-        ? (res?.data?.paymentProofVerified
-            ? 'Verified with its proof of payment — cleared to invoice in Zoho.'
-            : 'Verified — cleared to invoice in Zoho.')
-        : 'Put on hold. The reason is on the order timeline.');
+    mutationFn: ({ id, approved, reason, pricesChecked, proofChecked }) =>
+      client.post(`/api/finance/orders/${id}/verify`, { approved, reason, pricesChecked, proofChecked }).then(r => r.data),
+    onSuccess: (res, vars) => {
+      const zohoConfirm = res?.data?.zohoConfirmed;
+      if (res?.data?.approved && zohoConfirm && zohoConfirm.ok === false) {
+        // The verification stands; Zoho just has not caught up. Say so, and
+        // say what finishes it, rather than a green tick that hides it.
+        toast.error(
+          `Verified — but the Sales Order is not confirmed in Zoho yet (${zohoConfirm.error || 'Zoho did not answer'}). ` +
+            (workflowV2 ? "Dispatch's Create invoice will confirm it." : 'Confirm it in Zoho Books.'),
+          { duration: 9000 }
+        );
+      } else {
+        toast.success(res?.data?.approved
+          ? (res?.data?.paymentProofVerified
+              ? 'Verified with its proof of payment — the Sales Order is confirmed in Zoho.'
+              : 'Verified — the Sales Order is confirmed in Zoho.')
+          : 'Put on hold. The reason is on the order timeline.');
+      }
       setRejectingId(null);
       setRejectReason('');
+      setChecks((c) => { const next = { ...c }; delete next[vars.id]; return next; });
       qc.invalidateQueries({ queryKey: ['finance-queue'] });
       // The details panel holds its own copy of the order; without this it
       // would still offer Confirm on an order just confirmed.
@@ -238,45 +264,8 @@ const FinanceQueuePage = () => {
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that')
   });
 
-  /**
-   * Sep 12, 2026 (GETMEDS_WORKFLOW_V2): Confirm order.
-   *
-   * Two ticks — the prices, and the proof of payment — then one button that
-   * confirms the Sales Order in Zoho. The ticks are per order and required by
-   * the server too; they are the record of what Finance actually checked.
-   */
-  const [checks, setChecks] = useState({});
-  const toggleCheck = (id, key) =>
-    setChecks((c) => ({ ...c, [id]: { ...c[id], [key]: !c[id]?.[key] } }));
-
-  const confirmMutation = useMutation({
-    mutationFn: ({ id, approved, reason, pricesChecked, proofChecked }) =>
-      client.post(`/api/finance/orders/${id}/confirm`, { approved, reason, pricesChecked, proofChecked }).then(r => r.data),
-    onSuccess: (res, vars) => {
-      toast.success(vars.approved
-        ? `Confirmed — the Sales Order is confirmed in Zoho and Dispatch can invoice it.${res?.data?.dryRun ? ' (Dry run — Zoho was not contacted.)' : ''}`
-        : 'Put on hold. The reason is on the order timeline.');
-      setRejectingId(null);
-      setRejectReason('');
-      setChecks((c) => { const next = { ...c }; delete next[vars.id]; return next; });
-      qc.invalidateQueries({ queryKey: ['finance-queue'] });
-      qc.invalidateQueries({ queryKey: ['finance-order-detail'] });
-    },
-    onError: (err) => {
-      toast.error(err.response?.data?.error?.message || 'Could not record that', { duration: 8000 });
-      // Usually someone else got there first — show where the order is now.
-      qc.invalidateQueries({ queryKey: ['finance-queue'] });
-    }
-  });
-
-  // Which button an order gets: Confirm order on a draft Sales Order when the
-  // switch is on, or the older Verify on an order at ready_for_finance_verified
-  // (still possible for orders that got there before the switch).
-  const usesConfirmOrder = (order) => workflowV2 && order.status === 'so_created';
-  const awaitingFinance = (order) => usesConfirmOrder(order) || order.status === 'ready_for_finance_verified';
-  const isBusy = (id) =>
-    (verifyMutation.isPending && verifyMutation.variables?.id === id) ||
-    (confirmMutation.isPending && confirmMutation.variables?.id === id);
+  const awaitingFinance = (order) => order.status === 'ready_for_finance_verified';
+  const isBusy = (id) => verifyMutation.isPending && verifyMutation.variables?.id === id;
 
   const waitingHours = (order) => {
     if (!order.submitted_at) return '—';
@@ -359,14 +348,7 @@ const FinanceQueuePage = () => {
       icon: Clock,
       className: 'bg-slate-100 text-slate-700 border-slate-300'
     },
-    // Sep 12, 2026: under GETMEDS_WORKFLOW_V2 this is Finance's step — the
-    // draft Sales Order is confirmed from here, not in Zoho.
-    so_created: workflowV2 ? {
-      label: 'Awaiting your confirmation',
-      hint: 'Sales Order drafted in Zoho. Check the prices and the proof of payment, then Confirm order — that confirms it in Zoho for you.',
-      icon: ShieldCheck,
-      className: 'bg-purple-50 text-purple-800 border-purple-300'
-    } : {
+    so_created: {
       label: 'Sales Order created',
       hint: 'Raised in Zoho. It reaches Finance once it is confirmed there.',
       icon: Receipt,
@@ -620,19 +602,19 @@ const FinanceQueuePage = () => {
                     >
                       <FileSearch className="w-3.5 h-3.5" /> Details & files
                     </button>
-                    {/* Confirm order writes to Zoho and needs its two checks,
-                        so from this short panel it opens the details, where
-                        the checks sit beside the evidence. */}
+                    {/* With the switch on, confirming needs its two ticks, so
+                        from this short panel it opens the details, where the
+                        ticks sit beside the evidence. */}
                     <button
                       type="button"
                       disabled={busy}
-                      onClick={() => (usesConfirmOrder(order)
+                      onClick={() => (workflowV2
                         ? setDetailOrderId(order.id)
                         : verifyMutation.mutate({ id: order.id, approved: true }))}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <ShieldCheck className="w-3.5 h-3.5" />
-                      {busy ? 'Confirming…' : usesConfirmOrder(order) ? 'Check & confirm' : 'Confirm'}
+                      {busy ? 'Confirming…' : workflowV2 ? 'Check & confirm' : 'Confirm'}
                     </button>
                   </div>
                 </li>
@@ -688,7 +670,8 @@ const FinanceQueuePage = () => {
                 onClick={() => chooseOrigin('zoho')}
                 className="mt-2 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
               >
-                {counts.zoho} imported Zoho order{counts.zoho === 1 ? '' : 's'} are in this queue too
+                {counts.zoho} imported Zoho order{counts.zoho === 1 ? '' : 's'}{' '}
+                {counts.zoho === 1 ? 'is' : 'are'} here too
               </button>
             )}
           </div>
@@ -698,7 +681,7 @@ const FinanceQueuePage = () => {
               const stage = stageInfo(order.status);
               const Icon = stage.icon;
               const needsVerification = awaitingFinance(order);
-              const confirmsOrder = usesConfirmOrder(order);
+              const confirmsOrder = needsVerification && workflowV2;
               const busy = isBusy(order.id);
               const rowChecks = checks[order.id] || {};
               return (
@@ -879,8 +862,7 @@ const FinanceQueuePage = () => {
                           <div className="flex gap-2">
                             <button
                               disabled={!rejectReason.trim() || busy}
-                              onClick={() => (confirmsOrder ? confirmMutation : verifyMutation)
-                                .mutate({ id: order.id, approved: false, reason: rejectReason.trim() })}
+                              onClick={() => verifyMutation.mutate({ id: order.id, approved: false, reason: rejectReason.trim() })}
                               className="px-3 py-1.5 rounded-md bg-state-error text-white text-xs font-semibold disabled:opacity-50"
                             >
                               {busy ? 'Putting on hold…' : 'Put on hold'}
@@ -921,7 +903,7 @@ const FinanceQueuePage = () => {
                           <div className="flex gap-2">
                             <button
                               disabled={busy || !(rowChecks.prices && rowChecks.proof)}
-                              onClick={() => confirmMutation.mutate({ id: order.id, approved: true, pricesChecked: true, proofChecked: true })}
+                              onClick={() => verifyMutation.mutate({ id: order.id, approved: true, pricesChecked: true, proofChecked: true })}
                               className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               <ShieldCheck className="w-3.5 h-3.5" />
@@ -969,15 +951,26 @@ const FinanceQueuePage = () => {
 
       <div className="flex items-start gap-2 text-xs text-ink-secondary bg-surface border border-slate-200 rounded-lg p-3">
         <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+        {/* Sep 12, 2026: this used to say verifying creates nothing in Zoho.
+            It now does — confirming is what moves the Sales Order out of
+            Draft, and leaving the old wording up would have been the screen
+            telling Finance the opposite of what their click does.
+
+            Sep 14, 2026: "the sync is retried" was not true — nothing retries
+            a failed confirmation on its own. With the switch on, Dispatch's
+            Create invoice finishes it; otherwise it is confirmed in Zoho Books. */}
         {workflowV2 ? (
-          <p>Confirm order confirms the Sales Order in Zoho for you — there is no need to confirm it there as
-            well. Dispatch then raises and sends the invoice from GetMeds. Recording the Customer Payment still
-            happens in Zoho Books, and this page follows along automatically.</p>
+          <p>Confirming here checks the order and moves the Sales Order in Zoho from Draft to Confirmed — there
+            is no need to confirm it there as well. Dispatch then raises and sends the invoice from GetMeds.
+            Recording the Customer Payment still happens in Zoho Books, and this page follows along
+            automatically. If Zoho is unreachable the confirmation still stands here, and Dispatch&rsquo;s
+            Create invoice finishes it.</p>
         ) : (
-          <p>Verifying here does not create anything in Zoho — it records that the account was checked and
-            clears the order to be invoiced. Raising the Invoice, marking it Sent and recording the Customer
-            Payment all still happen in Zoho Books, and this page follows along automatically. If an invoice
-            appears in Zoho before anyone verifies here, the order moves on anyway and the timeline says so.</p>
+          <p>Confirming here checks the customer&rsquo;s account and moves the Sales Order in Zoho from Draft to
+            Confirmed, which is what releases it to be invoiced. Raising the Invoice, marking it Sent and
+            recording the Customer Payment all still happen in Zoho Books, and this page follows along
+            automatically. If Zoho is unreachable the confirmation still stands here and the timeline says so —
+            confirm it in Zoho Books.</p>
         )}
       </div>
 
@@ -1024,13 +1017,12 @@ const FinanceQueuePage = () => {
           // attachments are the evidence, and making someone close the
           // evidence to act on it is how people end up confirming from the
           // row without looking.
-          // Sep 12, 2026: the panel passes the two checks when it is offering
-          // Confirm order (switch on, draft Sales Order), and nothing when it
-          // is offering the older Verify.
-          onConfirm={(id, panelChecks) => (panelChecks
-            ? confirmMutation.mutate({ id, approved: true, pricesChecked: panelChecks.prices, proofChecked: panelChecks.proof })
-            : verifyMutation.mutate({ id, approved: true }))}
-          confirming={verifyMutation.isPending || confirmMutation.isPending}
+          // Sep 14, 2026: with the switch on the panel passes its two ticks;
+          // with it off it passes nothing and the server asks for none.
+          onConfirm={(id, panelChecks) => verifyMutation.mutate({
+            id, approved: true, pricesChecked: panelChecks?.prices, proofChecked: panelChecks?.proof
+          })}
+          confirming={verifyMutation.isPending}
           workflowV2={workflowV2}
         />
       )}

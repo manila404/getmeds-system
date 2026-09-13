@@ -82,11 +82,11 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
    * thirty seconds stale, and this is a write.
    */
   //
-  // Sep 12, 2026 (GETMEDS_WORKFLOW_V2): on a draft Sales Order the button is
-  // Confirm order instead, which confirms it in Zoho — so it takes the same two
-  // checks the queue row asks for, and they reset for each order opened.
-  const confirmsSalesOrder = Boolean(onConfirm) && workflowV2 && order?.status === 'so_created';
-  const canConfirm = Boolean(onConfirm) && (order?.status === 'ready_for_finance_verified' || confirmsSalesOrder);
+  // Sep 14, 2026 (GETMEDS_WORKFLOW_V2): with the switch on, confirming takes
+  // the same two ticks the queue row asks for — prices and proof of payment —
+  // because Dispatch invoices straight after it. They reset for each order.
+  const canConfirm = Boolean(onConfirm) && order?.status === 'ready_for_finance_verified';
+  const confirmsSalesOrder = canConfirm && workflowV2;
   const [checks, setChecks] = useState({ prices: false, proof: false });
   useEffect(() => { setChecks({ prices: false, proof: false }); }, [orderId]);
   const checksDone = checks.prices && checks.proof;
@@ -375,7 +375,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
           ) : (
             <p className="text-[11px] text-ink-secondary min-w-0">
               {canConfirm
-                ? 'Confirming clears this order to be invoiced in Zoho.'
+                ? 'Confirming moves the Sales Order in Zoho from Draft to Confirmed, which releases it to be invoiced.'
                 : order?.status === 'ready_for_finance_verified'
                   ? ''
                   : 'Not awaiting Finance — nothing to confirm at this stage.'}

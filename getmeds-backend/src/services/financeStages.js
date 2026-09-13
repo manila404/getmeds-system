@@ -56,41 +56,12 @@ const STAGE_GROUPS = [
   { key: 'exceptions', label: 'Needs attention',            statuses: EXCEPTIONS },
 ];
 
-/**
- * Sep 12, 2026: the same six groups under GETMEDS_WORKFLOW_V2, where Finance's
- * Confirm order acts on the draft Sales Order itself (so_created) and the
- * invoice is raised by Dispatch from this app rather than in Zoho. Same keys,
- * so the page's cards and chips need no second mapping; only what falls in
- * each group, and two labels, move.
- *
- * ready_for_finance_verified stays actionable: an order that reached it before
- * the switch was turned on still needs the old Verify button, and should not
- * drop out of sight on the day of the change.
- */
-const V2_ACTIONABLE = ['so_created', 'ready_for_finance_verified'];
-const V2_STAGE_GROUPS = [
-  { key: 'actionable', label: 'Awaiting your confirmation', statuses: V2_ACTIONABLE },
-  { key: 'upstream',   label: 'Not yet with Finance',       statuses: UPSTREAM.filter((s) => s !== 'so_created') },
-  { key: 'invoicing',  label: 'Invoicing by Dispatch',      statuses: INVOICING },
-  { key: 'fulfilling', label: 'In fulfilment',              statuses: FULFILLING },
-  { key: 'completed',  label: 'Completed',                  statuses: COMPLETED },
-  { key: 'exceptions', label: 'Needs attention',            statuses: EXCEPTIONS },
-];
-
-/** The groups in force right now — read per request, so flipping the switch needs no code change. */
-function stageGroups() {
-  // Required here rather than at the top so this file stays loadable on its own
-  // by anything that only wants the constants.
-  const { isWorkflowV2Enabled } = require('./workflowFlags');
-  return isWorkflowV2Enabled() ? V2_STAGE_GROUPS : STAGE_GROUPS;
-}
-
 /** Every status a group claims, for validating a ?stage= filter. */
 const ALL_GROUPED = STAGE_GROUPS.flatMap((g) => g.statuses);
 
 /** The statuses behind a stage key, or [] for one that does not exist. */
-function statusesForStage(stage, groups = stageGroups()) {
-  const g = groups.find((x) => x.key === String(stage || '').trim().toLowerCase());
+function statusesForStage(stage) {
+  const g = STAGE_GROUPS.find((x) => x.key === String(stage || '').trim().toLowerCase());
   return g ? g.statuses : [];
 }
 
@@ -102,9 +73,6 @@ module.exports = {
   COMPLETED,
   EXCEPTIONS,
   STAGE_GROUPS,
-  V2_ACTIONABLE,
-  V2_STAGE_GROUPS,
-  stageGroups,
   ALL_GROUPED,
   statusesForStage,
 };

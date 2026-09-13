@@ -391,7 +391,7 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'Attachment added successfully [MOCK MODE]', document };
   }
 
-  // ─── Sep 12, 2026: the workflow writes (see ZohoAdapter.js) ──────────────
+  // ─── Sep 12, 2026: the Dispatch writes (see ZohoAdapter.js) ──────────────
   //
   // Each one changes the in-memory Sales Order the way Zoho would, so
   // getSalesOrder afterwards shows the invoice, package or shipment — which is
@@ -429,14 +429,6 @@ class MockZohoAdapter extends ZohoAdapter {
   _nextDocNumber() {
     this._docCounter = (this._docCounter || 0) + 1;
     return String(this._docCounter).padStart(5, '0');
-  }
-
-  async markSalesOrderConfirmed(salesorderId) {
-    this._workflowOutage('markSalesOrderConfirmed');
-    const so = this._workflowSalesOrder(salesorderId);
-    so.status = 'confirmed';
-    this._log(`[ZOHO_MOCK] Would POST /salesorders/${salesorderId}/status/confirmed`);
-    return { code: 0, message: "Sales order status has been changed to 'Confirmed'. [MOCK MODE]" };
   }
 
   async createInvoiceFromSalesOrder(salesorder, opts = {}) {
@@ -558,6 +550,31 @@ class MockZohoAdapter extends ZohoAdapter {
     const err = new Error('The shipment ID given seems to be incorrect. [MOCK MODE]');
     err.httpStatus = 404;
     throw err;
+  }
+
+  /**
+   * Mirrors LiveZohoAdapter.confirmSalesOrder: flips the seeded order's
+   * status to 'confirmed' and reports an already-confirmed order as success,
+   * exactly as the live call does. See ZohoAdapter.js for why this write is
+   * allowed.
+   */
+  async confirmSalesOrder(salesorderId) {
+    const salesorder = this._salesOrders.get(salesorderId);
+    if (!salesorder) {
+      return { code: 4, message: 'The Sales Order ID given seems to be incorrect. [MOCK MODE]' };
+    }
+
+    if (String(salesorder.status || '').toLowerCase() === 'confirmed') {
+      return {
+        code: 0,
+        message: 'Sales Order was already confirmed [MOCK MODE]',
+        alreadyConfirmed: true
+      };
+    }
+
+    salesorder.status = 'confirmed';
+    this._log(`[ZOHO_MOCK] Would POST /salesorders/${salesorderId}/status/confirmed`);
+    return { code: 0, message: 'Sales Order confirmed [MOCK MODE]' };
   }
 }
 

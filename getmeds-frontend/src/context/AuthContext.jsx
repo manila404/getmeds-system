@@ -1,5 +1,6 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import client from '../api/client';
+import toast from 'react-hot-toast';
 
 export const AuthContext = createContext();
 
@@ -29,6 +30,66 @@ export const AuthProvider = ({ children }) => {
       }
     };
     fetchUser();
+  }, [token]);
+
+  /**
+   * Sep 12, 2026: notice when this account's role changes underneath us.
+   *
+   * The effect above runs only when the TOKEN changes — on login, or a full
+   * page load. So an admin changing someone's role reached the server
+   * immediately (requireAuth re-reads the user on every request) but never
+   * reached that person's open tab: their badge, their navigation and every
+   * route guard kept using the role they had when they signed in.
+   *
+   * The visible symptom was an admin changing a role, watching nothing happen,
+   * and changing it again. The database was right the whole time.
+   *
+   * Checked on focus rather than only on a timer, because the realistic
+   * sequence is someone being told "I've changed your role" and switching back
+   * to the tab. The interval is the backstop for a tab left open all day.
+   *
+   * Deliberately does NOT log out on failure: a transient network error is not
+   * a revoked session, and signing someone out mid-order to be safe is worse
+   * than being a minute late to a role change. The 401 path that DOES mean
+   * "your account was disabled" is already handled by the API client.
+   */
+  useEffect(() => {
+    if (!token) return undefined;
+
+    let cancelled = false;
+
+    const recheck = async () => {
+      try {
+        const { data } = await client.get('/api/auth/me');
+        const fresh = data.data.user;
+        if (cancelled || !fresh) return;
+
+        setUser((current) => {
+          if (!current) return fresh;
+          if (current.role === fresh.role) return current;
+
+          // Said out loud: the navigation and the pages available are about to
+          // change, and without this it reads as the app breaking.
+          toast(`Your role is now ${fresh.role}. What you can see has changed.`, {
+            icon: '🔑',
+            duration: 6000,
+          });
+          return fresh;
+        });
+      } catch {
+        // Ignored on purpose — see the note above.
+      }
+    };
+
+    const onFocus = () => recheck();
+    window.addEventListener('focus', onFocus);
+    const timer = setInterval(recheck, 60_000);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', onFocus);
+      clearInterval(timer);
+    };
   }, [token]);
 
   // Shared by login/quickLogin: both return the same { token, user }

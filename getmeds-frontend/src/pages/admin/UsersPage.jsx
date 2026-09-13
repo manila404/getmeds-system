@@ -6,6 +6,7 @@ import ConfirmDialog from '../../components/ui/ConfirmDialog';
 import CreateUserModal from '../../components/admin/CreateUserModal';
 import { Users, UserX, UserPlus, RefreshCw, Shield, Check, UserCheck, Ban, Clock, Briefcase, AlertTriangle, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { ROLES, roleCan } from '../../constants/roles';
 
 /**
  * Sep 11, 2026: hoisted out of the component.
@@ -222,6 +223,49 @@ const UsersPage = () => {
       );
     } finally {
       setSavingSalesperson(false);
+    }
+  };
+
+  /**
+   * Sep 12, 2026: changing an account's role.
+   *
+   * The server has always accepted this on PATCH /api/admin/users/:id; there
+   * was simply no way to reach it except by creating the account again with a
+   * different role. So a MedRep who moved to Finance kept raising orders they
+   * were no longer supposed to raise, and somebody made them a second account.
+   *
+   * Held in two pieces of state rather than applied on change: a role is not a
+   * preference, it decides what a person can see across the whole system, and
+   * a select that acts the instant it is touched is the wrong control for
+   * that. `pendingRole` is what was chosen; nothing happens until it is
+   * confirmed.
+   */
+  const [pendingRole, setPendingRole] = useState(null); // { user, role }
+  const [savingRole, setSavingRole] = useState(false);
+
+  const applyRoleChange = async () => {
+    if (!pendingRole) return;
+    setSavingRole(true);
+    try {
+      await client.patch(`/api/admin/users/${pendingRole.user.id}`, { role: pendingRole.role });
+      toast.success(
+        `${getUserDisplayName(pendingRole.user)} is now ${
+          (ROLES.find((r) => r.value === pendingRole.role) || {}).label || pendingRole.role
+        }.`
+      );
+      setPendingRole(null);
+      await fetchUsers();
+    } catch (err) {
+      // The server refuses two things this screen cannot know in advance:
+      // demoting the protected admin, and a role it does not recognise. Both
+      // come back with a message worth showing verbatim.
+      toast.error(
+        err.response?.data?.error?.message ||
+          err.response?.data?.message ||
+          'Could not change the role.'
+      );
+    } finally {
+      setSavingRole(false);
     }
   };
 
@@ -527,10 +571,48 @@ const UsersPage = () => {
                           {user.email}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${badgeColor}`}>
-                            <Shield className="w-3 h-3 mr-1" />
-                            {getRoleName(user)}
-                          </span>
+                          {/* Sep 12, 2026: the role is editable here.
+                              Admin rows are not: the server refuses to demote
+                              one (it is what stops the system being locked out
+                              of its own administration), so offering the
+                              control would only produce a 403. */}
+                          {roleKey === 'admin' ? (
+                            <span
+                              title="Admin accounts cannot be changed to another role — this is what stops the system being locked out of its own administration."
+                              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${badgeColor}`}
+                            >
+                              <Shield className="w-3 h-3 mr-1" />
+                              {getRoleName(user)}
+                            </span>
+                          ) : (
+                            <select
+                              value={roleKey}
+                              disabled={savingRole}
+                              onChange={(e) => {
+                                if (e.target.value === roleKey) return;
+                                setPendingRole({ user, role: e.target.value });
+                              }}
+                              aria-label={`Role for ${getUserDisplayName(user)}`}
+                              className={`text-xs font-semibold rounded-full border pl-2.5 pr-7 py-1 cursor-pointer appearance-none bg-no-repeat focus:outline-none focus:ring-2 focus:ring-getmeds-blue disabled:opacity-50 ${badgeColor}`}
+                              style={{
+                                backgroundImage:
+                                  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%2364748B'%3E%3Cpath d='M4.5 6.5L8 10l3.5-3.5z'/%3E%3C/svg%3E\")",
+                                backgroundPosition: 'right 0.4rem center',
+                                backgroundSize: '1rem',
+                              }}
+                            >
+                              {/* Admin is offered. It is a one-way door — an
+                                  admin cannot later be demoted or deactivated
+                                  from here — but hiding it would leave someone
+                                  hunting for a control that does exist on the
+                                  server. The confirmation says what it costs. */}
+                              {ROLES.map((r) => (
+                                <option key={r.value} value={r.value}>
+                                  {r.label}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                         </td>
                         {/* Sep 11, 2026: the name Zoho files this account's
                             orders under. Not derived from anything -- an admin
@@ -802,6 +884,29 @@ const UsersPage = () => {
         confirmText="Deactivate User"
         cancelText="Cancel"
         variant="danger"
+      />
+
+      {/* Sep 12, 2026: a role change states the consequence before it happens.
+          Not danger-styled — this is a routine administrative act, and colouring
+          every confirmation red teaches people to click through them. */}
+      <ConfirmDialog
+        isOpen={Boolean(pendingRole)}
+        onClose={() => setPendingRole(null)}
+        onConfirm={applyRoleChange}
+        title="Change this account's role?"
+        message={
+          pendingRole
+            ? `${getUserDisplayName(pendingRole.user)} becomes ${
+                (ROLES.find((r) => r.value === pendingRole.role) || {}).label || pendingRole.role
+              }. ${roleCan(pendingRole.role)} They keep their orders and history, but what they can see and do changes as soon as they next sign in.` +
+              (pendingRole.role === 'admin'
+                ? ' This one cannot be undone here: an admin account cannot afterwards be changed to another role or deactivated from this screen.'
+                : '')
+            : ''
+        }
+        confirmText={savingRole ? 'Changing…' : 'Change role'}
+        cancelText="Cancel"
+        variant={pendingRole?.role === 'admin' ? 'danger' : 'primary'}
       />
     </div>
   );

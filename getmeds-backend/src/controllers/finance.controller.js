@@ -6,10 +6,13 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { markVerifiedWithOrder } = require('./paymentProof.controller');
 const { normalizeOrigin, originSql, importedSql } = require('../services/orderOrigin');
-const { stageGroups, statusesForStage } = require('../services/financeStages');
+const { STAGE_GROUPS, statusesForStage, ACTIONABLE } = require('../services/financeStages');
+const zoho = require('../integrations/zoho');
+// Sep 14, 2026: GETMEDS_WORKFLOW_V2 (Dispatch works in this app) adds two
+// ticks to Verify, and Verify's Zoho call now honours the same dry-run and
+// test-customer switches every other write to Zoho does.
 const { isWorkflowV2Enabled } = require('../services/workflowFlags');
-const workflow = require('../services/workflowV2Service');
-const { workflowAction } = require('./workflowAction');
+const { zohoWriteMode } = require('../services/zohoWriteGuard');
 
 
 // ─── Finance visibility (read-only) ────────────────────────────────────────
@@ -139,16 +142,10 @@ exports.getQueue = async (req, res, next) => {
      * unknown stage can only arrive from a hand-edited URL, and showing
      * everything there reads better than an empty page that looks broken.
      */
-    // Sep 12, 2026: read once per request — under GETMEDS_WORKFLOW_V2 the
-    // groups move (Finance acts on so_created), see financeStages.js.
-    const v2 = isWorkflowV2Enabled();
-    const groups = stageGroups();
-    const actionable = groups.find((g) => g.key === 'actionable').statuses;
-
-    const stage = statusesForStage(req.query.stage, groups).length
+    const stage = statusesForStage(req.query.stage).length
       ? String(req.query.stage).trim().toLowerCase()
       : null;
-    const stageStatuses = stage ? statusesForStage(stage, groups) : [];
+    const stageStatuses = stage ? statusesForStage(stage) : [];
     const stageAnd = stage ? ' AND o.status = ANY(?)' : '';
     const stageParams = stage ? [stageStatuses] : [];
 
@@ -182,16 +179,33 @@ exports.getQueue = async (req, res, next) => {
       LIMIT ? OFFSET ?
     `).all(...scopeParams, ...stageParams, limit, offset);
 
-    // Tab sizes: scope-limited but deliberately NOT origin-limited, so each
-    // tab can state the other's size without fetching it.
+    /**
+     * Tab sizes: scope-limited and stage-limited, but deliberately NOT
+     * origin-limited — that last part is what lets each tab state the other's
+     * size without fetching it.
+     *
+     * Sep 12, 2026: the stage filter was missing here, so on a stage page the
+     * tabs counted every order in scope at ANY stage while the list beneath
+     * them counted one stage. The result was "Raised in GetMeds (1)" sitting
+     * directly above a list headed "Raised in GetMeds (0)" — two true numbers
+     * describing different things, which reads as the page being broken.
+     *
+     * On the dashboard `stage` is null, so this is unfiltered exactly as
+     * before and the tabs still mean "everything on that side".
+     */
     const countsQuery = db.prepare(`
       SELECT
         COUNT(*) FILTER (WHERE ${importedSql('o')})       AS zoho,
         COUNT(*) FILTER (WHERE NOT (${importedSql('o')})) AS getmeds,
         COUNT(*)                                          AS total
       FROM orders o
-      WHERE 1 = 1${scopeAnd}
-    `).get(...scopeParams);
+      WHERE 1 = 1${scopeAnd}${stageAnd}
+    `)
+      // One array argument, not spread: db/pg.js's flatten() unwraps a lone
+      // array into the parameter list, so a bare `.get(stageStatuses)` would
+      // send the first status as $1. Bites only when scopeParams is empty,
+      // which is every unscoped user.
+      .get([...scopeParams, ...stageParams]);
 
     /**
      * Per-stage counts for the cards and the filter chips.
@@ -203,7 +217,7 @@ exports.getQueue = async (req, res, next) => {
      * One pass with FILTER rather than a query per group: six round trips to
      * count six buckets of the same rows is six chances for them to disagree.
      */
-    const stageCols = groups.map(
+    const stageCols = STAGE_GROUPS.map(
       (g) => `COUNT(*) FILTER (WHERE o.status = ANY(?)) AS ${g.key}`
     ).join(', ');
     const stageQuery = db.prepare(`
@@ -212,7 +226,7 @@ exports.getQueue = async (req, res, next) => {
         COUNT(*) AS total
       FROM orders o
       WHERE 1 = 1${scopeAnd}${originAnd}
-    `).get(...groups.map((g) => g.statuses), ...scopeParams);
+    `).get(...STAGE_GROUPS.map((g) => g.statuses), ...scopeParams);
 
     /**
      * The handful of orders actually waiting on Finance, newest first.
@@ -240,7 +254,7 @@ exports.getQueue = async (req, res, next) => {
       // `.all(ACTIONABLE)` would send the status string as $1 instead of the
       // array ANY() needs. It only misfires when scopeParams is empty --
       // which is every Finance user, since they are not division-scoped.
-      .all([actionable, ...scopeParams]);
+      .all([ACTIONABLE, ...scopeParams]);
 
     const [orders, counts, stageRow, recent] = await Promise.all([
       ordersQuery,
@@ -250,7 +264,7 @@ exports.getQueue = async (req, res, next) => {
     ]);
 
     const stats = {};
-    for (const g of groups) stats[g.key] = Number(stageRow?.[g.key] || 0);
+    for (const g of STAGE_GROUPS) stats[g.key] = Number(stageRow?.[g.key] || 0);
 
     // What the CURRENT filter matches, which is what the pager counts.
     const filtered = stage ? stats[stage] || 0 : Number(stageRow?.total || 0);
@@ -268,10 +282,9 @@ exports.getQueue = async (req, res, next) => {
           total: Number(counts?.total || 0),
         },
         stats,
-        // Sep 12, 2026: tells the page which buttons to draw — Confirm order
-        // (on so_created) with the switch on, Verify (on
-        // ready_for_finance_verified) as before with it off.
-        workflow_v2: v2,
+        // Sep 14, 2026: tells the page to draw the two ticks beside Confirm —
+        // under GETMEDS_WORKFLOW_V2 Dispatch invoices straight after it.
+        workflow_v2: isWorkflowV2Enabled(),
         pagination: {
           page,
           limit,
@@ -315,11 +328,22 @@ exports.getPayment = async (req, res, next) => {
 // stuck in this app while Zoho carried on without them.
 exports.verifyAccount = async (req, res, next) => {
   try {
-    const { approved, reason } = req.body || {};
+    const { approved, reason, pricesChecked, proofChecked } = req.body || {};
     if (typeof approved !== 'boolean') {
       return res.status(400).json({
         success: false,
         error: { code: 'VALIDATION_ERROR', message: 'approved must be true (verify) or false (reject).' }
+      });
+    }
+    // Sep 14, 2026: under GETMEDS_WORKFLOW_V2 Dispatch raises the invoice from
+    // this app straight after this step, so this is the one place anybody
+    // checks the price and the proof of payment first. The ticks are the
+    // record that somebody did. A hold needs none — nothing is released.
+    const v2 = isWorkflowV2Enabled();
+    if (approved && v2 && (pricesChecked !== true || proofChecked !== true)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'CHECKS_REQUIRED', message: 'Tick both checks before confirming — the prices, and the proof of payment.' }
       });
     }
     // A rejection without a reason is useless to whoever picks the order up
@@ -332,7 +356,7 @@ exports.verifyAccount = async (req, res, next) => {
     }
 
     const order = await db.prepare(`
-      SELECT o.*, c.name as customer_name, u.id as medrep_user_id
+      SELECT o.*, c.name as customer_name, c.zoho_contact_id as customer_zoho_contact_id, u.id as medrep_user_id
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
@@ -418,7 +442,8 @@ exports.verifyAccount = async (req, res, next) => {
           // moment of the decision — including that there was none, which is
           // the point of a soft gate.
           paymentProofVerified: verifiedProofs.length > 0,
-          paymentProofPaths: verifiedProofs.map((p) => p.storage_path)
+          paymentProofPaths: verifiedProofs.map((p) => p.storage_path),
+          ...(approved && v2 ? { pricesChecked: true, proofChecked: true } : {})
         }
       });
 
@@ -434,30 +459,130 @@ exports.verifyAccount = async (req, res, next) => {
       });
     })();
 
+    /**
+     * Sep 12, 2026: the verification is what confirms the Sales Order in Zoho.
+     *
+     * Every Sales Order this app creates starts as a DRAFT, and a draft is
+     * invisible to the rest of Zoho's pipeline — it cannot be invoiced or
+     * packed. Until now a person confirmed each one by hand in Zoho Books and
+     * this app waited to be told, which made Finance's verification a
+     * record-keeping act that released nothing, while the step that actually
+     * released the order happened in another system with no link between the
+     * two. An order nobody remembered to confirm just sat there.
+     *
+     * OUTSIDE the transaction above, and deliberately:
+     *
+     *   - the verification is already committed, so Zoho being unreachable
+     *     cannot undo a decision a person has made. Finance is never blocked
+     *     by Zoho being down.
+     *   - a failure is recorded on the order and retried, exactly as a failed
+     *     order creation already is (zohoRetryService).
+     *
+     * Sep 14, 2026: that last point was not so. zohoRetryService retries a
+     * CREATE, and would have made a second Sales Order for an order that
+     * already has one — it now refuses (see processOne). Nothing retries a
+     * failed confirmation on its own: with GETMEDS_WORKFLOW_V2 on, Dispatch's
+     * Create invoice finishes it; otherwise it is confirmed in Zoho Books.
+     *
+     * Only on approval, and only for an order that has a Sales Order to
+     * confirm — a held order has nothing to release, and an order whose sync
+     * failed has no Zoho id yet.
+     *
+     * Sep 14, 2026: and only when the safety switches allow it — the same
+     * ZOHO_DRY_RUN and ZOHO_TEST_CUSTOMER_IDS every other Zoho write honours
+     * (services/zohoWriteGuard.js). In a dry run the Sales Order id is a
+     * DRYRUN- stand-in, and sending that to the real org is exactly the
+     * request dry run promises never to make.
+     */
+    let zohoConfirm = null;
+    const guard = approved && order.zoho_so_id ? zohoWriteMode(order.customer_zoho_contact_id) : null;
+    if (guard && guard.mode === 'dry-run') {
+      zohoConfirm = { ok: true, alreadyConfirmed: false, dryRun: true };
+      await db.prepare("UPDATE orders SET zoho_so_status = 'confirmed' WHERE id = ?").run(order.id);
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ZOHO_SO_CONFIRMED',
+        oldStatus: newStatus,
+        newStatus,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Sales Order ${order.zoho_so_number || order.zoho_so_id} treated as confirmed — dry run, Zoho not contacted.`,
+        metadata: { zohoSalesOrderId: order.zoho_so_id, dryRun: true }
+      });
+    } else if (guard && guard.mode === 'blocked') {
+      // The verification stands; the switch only keeps this write away from a
+      // customer outside the test list. Not a failure, so nothing is marked
+      // failed for someone to chase.
+      zohoConfirm = { ok: false, skipped: true, error: guard.message };
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ZOHO_SYNC_SKIPPED',
+        oldStatus: newStatus,
+        newStatus,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Verified here; the Sales Order was not confirmed in Zoho — ${guard.message}`,
+        metadata: { zohoSalesOrderId: order.zoho_so_id, reason: guard.code }
+      });
+    } else if (approved && order.zoho_so_id) {
+      try {
+        const result = await zoho.confirmSalesOrder(order.zoho_so_id);
+        zohoConfirm = { ok: true, alreadyConfirmed: Boolean(result?.alreadyConfirmed) };
+
+        await db
+          .prepare("UPDATE orders SET zoho_so_status = 'confirmed' WHERE id = ?")
+          .run(order.id);
+
+        await logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_SO_CONFIRMED',
+          oldStatus: newStatus,
+          newStatus,
+          actorId: actor.id,
+          actorName: actor.name,
+          notes: result?.alreadyConfirmed
+            ? `Sales Order ${order.zoho_so_number || order.zoho_so_id} was already confirmed in Zoho.`
+            : `Sales Order ${order.zoho_so_number || order.zoho_so_id} confirmed in Zoho by this verification.`,
+          metadata: { zohoSalesOrderId: order.zoho_so_id, alreadyConfirmed: Boolean(result?.alreadyConfirmed) }
+        });
+      } catch (err) {
+        zohoConfirm = { ok: false, error: err.message };
+
+        // Recorded on the order rather than thrown: the verification stands.
+        await db
+          .prepare("UPDATE orders SET zoho_sync_status = 'failed' WHERE id = ?")
+          .run(order.id);
+
+        await logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_SYNC_FAILED',
+          oldStatus: newStatus,
+          newStatus,
+          actorId: actor.id,
+          actorName: actor.name,
+          notes:
+            `Verified here, but the Sales Order could not be confirmed in Zoho: ${err.message} ` +
+            (v2
+              ? "The order is cleared to invoice; Dispatch's Create invoice will confirm it, or confirm it in Zoho Books."
+              : 'The order is cleared to invoice; confirm it in Zoho Books.'),
+          metadata: { zohoSalesOrderId: order.zoho_so_id, error: err.message }
+        });
+
+        console.error('[FINANCE_VERIFY] Zoho confirm failed:', err.message);
+      }
+    }
+
     res.json({
       success: true,
-      data: { status: newStatus, approved, paymentProofVerified: verifiedProofs.length > 0 }
+      data: {
+        status: newStatus,
+        approved,
+        paymentProofVerified: verifiedProofs.length > 0,
+        // null when there was nothing to confirm; { ok } otherwise, so the
+        // screen can distinguish "confirmed in Zoho" from "verified here, Zoho
+        // still to catch up".
+        zohoConfirmed: zohoConfirm
+      }
     });
   } catch (err) { next(err); }
 };
-
-// ─── CONFIRM ORDER (Sep 12, 2026, GETMEDS_WORKFLOW_V2) ───────────────────────
-//
-// Finance's one button under the new workflow. Replaces "confirm the Sales
-// Order in Zoho, then press Verify here" with a single step taken here: tick
-// that the prices and the proof of payment were checked, press Confirm order,
-// and this app confirms the Sales Order in Zoho (services/workflowV2Service.js).
-// Or put the order on hold with a reason, which touches nothing in Zoho.
-//
-// Body: { approved: true, pricesChecked: true, proofChecked: true }
-//    or { approved: false, reason: '...' }
-exports.confirmOrder = workflowAction((req) => {
-  const { approved, pricesChecked, proofChecked, reason } = req.body || {};
-  if (approved === false) {
-    return workflow.holdOrder({ orderId: req.params.id, user: req.user, reason });
-  }
-  if (approved !== true) {
-    throw new workflow.WorkflowError(400, 'VALIDATION_ERROR', 'approved must be true (confirm) or false (hold).');
-  }
-  return workflow.confirmOrder({ orderId: req.params.id, user: req.user, pricesChecked, proofChecked });
-});

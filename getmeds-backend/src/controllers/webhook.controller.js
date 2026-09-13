@@ -310,7 +310,14 @@ exports.handleZohoWebhook = async (req, res, next) => {
       } else if (isInvoiceDrafted) {
         if (await recorded(['ZOHO_INVOICE_DRAFTED', 'ZOHO_INVOICE_SENT'], 'zohoInvoiceId', invoice?.invoice_id)) echo = 'already_recorded';
       } else if (isSalesOrderConfirmed) {
-        if (await recorded(['ZOHO_SO_CONFIRMED'], 'zohoSoId', salesorder?.salesorder_id || order.zoho_so_id)) echo = 'already_recorded';
+        // Two labels for the same id: Dispatch's steps (workflowV2Service.js)
+        // write zohoSoId, and Finance's Verify (finance.controller.js) writes
+        // zohoSalesOrderId. Either one means this confirmation is known.
+        const confirmedSoId = salesorder?.salesorder_id || order.zoho_so_id;
+        if (
+          (await recorded(['ZOHO_SO_CONFIRMED'], 'zohoSoId', confirmedSoId)) ||
+          (await recorded(['ZOHO_SO_CONFIRMED'], 'zohoSalesOrderId', confirmedSoId))
+        ) echo = 'already_recorded';
       } else if (isShipmentEvent) {
         // A shipment first reported without a tracking number and then again
         // with one is news the second time, so the tracking number has to

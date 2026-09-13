@@ -924,7 +924,7 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'Attachment added successfully', document: json.document || json };
   }
 
-  // ─── Sep 12, 2026: the workflow writes (see ZohoAdapter.js) ──────────────
+  // ─── Sep 12, 2026: the Dispatch writes (see ZohoAdapter.js) ──────────────
   //
   // Every one is a single POST through _request, so none is ever retried: a
   // network error on a POST does not say whether Zoho made the change, and a
@@ -932,13 +932,11 @@ class LiveZohoAdapter extends ZohoAdapter {
   // workflowV2Service, re-reads the Sales Order before its next attempt and
   // adopts whatever the first attempt did make.
   //
+  // Confirming the Sales Order is confirmSalesOrder, below — the one Finance's
+  // Verify uses, and the one Dispatch falls back on if that confirm failed.
+  //
   // Needs ZohoInventory.invoices, .packages and .shipmentorders (CREATE and
   // READ) on the refresh token, alongside .salesorders.
-
-  async markSalesOrderConfirmed(salesorderId) {
-    const result = await this._request('POST', `/salesorders/${salesorderId}/status/confirmed`);
-    return { code: 0, message: result.message || 'Sales order confirmed' };
-  }
 
   async createInvoiceFromSalesOrder(salesorder, opts = {}) {
     const lineItems = (salesorder.line_items || [])
@@ -1011,6 +1009,67 @@ class LiveZohoAdapter extends ZohoAdapter {
   async markShipmentDelivered(shipmentId) {
     const result = await this._request('POST', `/shipmentorders/${shipmentId}/status/delivered`);
     return { code: 0, message: result.message || 'Shipment marked as delivered' };
+  }
+
+  /**
+   * Draft -> Confirmed on an existing Sales Order.
+   *
+   * Sep 12, 2026. See ZohoAdapter.confirmSalesOrder for why this is allowed
+   * at all. Zoho's endpoint takes no body: the status is in the path.
+   *
+   * Already-confirmed is treated as SUCCESS, not failure. Somebody may well
+   * have confirmed it in Zoho Books a minute earlier, and the caller's intent
+   * -- "this order should be confirmed" -- is satisfied either way. Reporting
+   * a failure there would put a sync error on an order that is in exactly the
+   * state everyone wanted.
+   */
+  async confirmSalesOrder(salesorderId) {
+    if (!salesorderId) throw new Error('confirmSalesOrder requires a Zoho Sales Order id');
+
+    this._assertOrgAllowed();
+    const token = await this.getAccessToken();
+    const params = new URLSearchParams({ organization_id: this.organizationId });
+    const url = `${this.baseUrl}/salesorders/${salesorderId}/status/confirmed?${params.toString()}`;
+
+    this._log(
+      `[ZOHO_${this._modeLabel.toUpperCase()}] POST /salesorders/${salesorderId}/status/confirmed ` +
+        `(org=${this.organizationId})`
+    );
+
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Zoho-oauthtoken ${token}`,
+          'Content-Type': 'application/json'
+        },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      });
+    } catch (err) {
+      // Not retried here, same reasoning as createSalesOrder's POST: a network
+      // error does not say whether Zoho applied the change, and confirming
+      // twice is not free of consequence the way a read is. The caller queues
+      // a retry that re-reads the order's status first.
+      throw describeNetworkError(err, url, 'POST');
+    }
+
+    const json = await resp.json().catch(() => ({}));
+
+    if (!resp.ok) {
+      // Zoho answers an already-confirmed order with a 400 whose message says
+      // so. That is the outcome we wanted, reached by somebody else.
+      const already = /already.*(confirmed|been confirmed)/i.test(String(json.message || ''));
+      if (already) {
+        return { code: 0, message: 'Sales Order was already confirmed in Zoho', alreadyConfirmed: true };
+      }
+      const err = new Error(json.message || `Zoho API error (HTTP ${resp.status})`);
+      err.zohoResponse = json;
+      err.httpStatus = resp.status;
+      throw err;
+    }
+
+    return { code: 0, message: json.message || 'Sales Order confirmed' };
   }
 }
 

@@ -12,6 +12,7 @@ const zohoSalespersonSync = require('../services/zohoSalespersonSync');
 // enum (a free-typed division created junk Salespersons in the live Zoho org
 // before Sep 5).
 const { DIVISIONS, SUB_DIVISIONS_BY_DIVISION, MIN_PASSWORD_LENGTH } = require('./auth.controller');
+const { ROLES, isValidRole } = require('../constants/roles');
 
 // Get all users with their roles
 const getAllUsers = async (req, res, next) => {
@@ -400,6 +401,29 @@ const update = async (req, res, next) => {
 
     const blocked = adminProtection(user, { role, is_active });
     if (blocked) return refuseAdminChange(res, blocked);
+
+    /**
+     * Sep 12, 2026: check the role before the database does.
+     *
+     * users.role carries a CHECK constraint, so an unknown value was already
+     * impossible to store — but it reached the database first and came back as
+     * a raw Postgres error, which this controller returned to the caller as a
+     * 500 carrying the constraint name and a stack trace. Wrong status, no
+     * usable message, and more of the schema than anyone outside needs.
+     *
+     * Now that an admin can change a role from the Users screen rather than
+     * only at account creation, a typo is something a person can actually
+     * make.
+     */
+    if (role !== undefined && !isValidRole(role)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'INVALID_ROLE',
+          message: `"${role}" is not a role. Valid roles are: ${ROLES.join(', ')}.`
+        }
+      });
+    }
 
     // Sep 11, 2026: the Salespersons an admin picked from Zoho's list.
     //

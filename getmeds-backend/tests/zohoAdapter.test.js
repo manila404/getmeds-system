@@ -104,15 +104,37 @@ describe('MockZohoAdapter', () => {
   });
 });
 
-// Sep 12, 2026: confirm / invoice / pack / ship / deliver came back as named,
-// single-purpose methods for GETMEDS_WORKFLOW_V2 (see ZohoAdapter.js). The
-// old catch-all names stay forbidden, and payment, contact and item writes
-// stay out entirely.
-describe('ZohoAdapter contract — no payment/contact-write/item-write, and none of the old catch-all names', () => {
-  it('does not declare findOrCreateContact, adjustStock, confirmSalesOrder, packSalesOrder, shipSalesOrder, addOrderComment, recordPaymentForSalesOrder, createItem, findOrCreateItem, or activateItem', () => {
+describe('ZohoAdapter contract — named workflow writes only; no payment, contact-create or item write', () => {
+  /**
+   * Sep 12, 2026: confirmSalesOrder LEFT this list, deliberately.
+   *
+   * It was trimmed with the rest of the "drive Zoho's pipeline from here"
+   * family, and that principle still stands for the nine below: packing,
+   * shipping, recording payments and writing items are Zoho's to own, and an
+   * app that does them from the outside ends up disagreeing with the system of
+   * record.
+   *
+   * Confirming is the one step that could not stay outside, because this app
+   * creates every Sales Order as a DRAFT. A draft cannot be invoiced or packed
+   * — so an order this app raised was inert in Zoho until a person remembered
+   * to confirm it by hand, and Finance's verification, the step that is
+   * supposed to release it, changed nothing at all. GM-20260912-0003 sat in
+   * exactly that state.
+   *
+   * The distinction that makes it acceptable: confirming moves a document
+   * forward through its documented next state and destroys nothing. A
+   * confirmation made in error can be voided by a human in Zoho. That is not
+   * true of the deletes this adapter still refuses outright — the test above
+   * checks no delete/void/remove method exists anywhere, and it still passes.
+   *
+   * Sep 14, 2026: packing and shipping moved after all — see the exact-set
+   * test at the end of this block for what changed and why. The old
+   * catch-all names below stay forbidden.
+   */
+  it('still declares none of the old catch-all writes, and no payment, contact-create or item write', () => {
     const methodNames = Object.getOwnPropertyNames(ZohoAdapter.prototype);
     const removedMethods = [
-      'findOrCreateContact', 'adjustStock', 'confirmSalesOrder', 'packSalesOrder',
+      'findOrCreateContact', 'adjustStock', 'packSalesOrder',
       'shipSalesOrder', 'addOrderComment', 'recordPaymentForSalesOrder', 'createItem',
       'findOrCreateItem', 'activateItem'
     ];
@@ -122,7 +144,7 @@ describe('ZohoAdapter contract — no payment/contact-write/item-write, and none
   });
 
   const WORKFLOW_METHODS = [
-    'markSalesOrderConfirmed', 'createInvoiceFromSalesOrder', 'markInvoiceSent',
+    'confirmSalesOrder', 'createInvoiceFromSalesOrder', 'markInvoiceSent',
     'createPackageForSalesOrder', 'createShipmentForPackage', 'markShipmentDelivered'
   ];
 
@@ -154,7 +176,7 @@ describe('ZohoAdapter contract — no payment/contact-write/item-write, and none
     const { salesorder } = await adapter.createSalesOrder({ ...sampleOrderData, zoho_customer_id: knownContactId });
     const id = salesorder.salesorder_id;
 
-    await adapter.markSalesOrderConfirmed(id);
+    await adapter.confirmSalesOrder(id);
     let { salesorder: so } = await adapter.getSalesOrder(id);
     expect(so.status).toBe('confirmed');
 
@@ -179,6 +201,28 @@ describe('ZohoAdapter contract — no payment/contact-write/item-write, and none
     expect(so.packages[0]).toEqual(expect.objectContaining({
       package_id: pkg.package_id, shipment_id: shipmentorder.shipment_id, shipment_status: 'delivered'
     }));
+  });
+
+  it('these six are the ONLY lifecycle writes — pinned as an exact set', () => {
+    /**
+     * Sep 14, 2026: rewritten, openly.
+     *
+     * The Sep 12 version pinned confirmSalesOrder as the only lifecycle write,
+     * on the principle that invoicing, packing and shipping are Zoho's to own.
+     * The direction agreed since (field guide, chapter 12: Dispatch works in
+     * Getmeds) moves those steps into this app behind GETMEDS_WORKFLOW_V2, so
+     * the set grows to the six below. It grows HERE, on purpose, rather than
+     * by giving the new methods names the old pattern happened not to match.
+     *
+     * The pattern is widened to catch those names too, so anything added
+     * beyond these six still fails exactly as the Sep 12 test intended. Void,
+     * cancel and recording a payment stay out.
+     */
+    const lifecycleWrites = Object.getOwnPropertyNames(ZohoAdapter.prototype).filter((n) =>
+      /^(confirm|pack|ship|void|cancel|invoice|record|mark|deliver)[A-Z]/.test(n) ||
+      /^create(Invoice|Package|Shipment|Payment)/.test(n)
+    );
+    expect([...lifecycleWrites].sort()).toEqual([...WORKFLOW_METHODS].sort());
   });
 });
 

@@ -219,10 +219,11 @@ function _resetForTest() {
 // createContact (Sep 11). Each is documented at its declaration in
 // ZohoAdapter.js. There is still no delete, no void, and no updateContact.
 //
-// Sep 12, 2026: and the six workflow writes behind GETMEDS_WORKFLOW_V2 —
-// confirm the Sales Order, create and send the invoice, package, ship, mark
-// delivered. Named, single-purpose, and called only from
-// services/workflowV2Service.js; see their block in ZohoAdapter.js.
+// Sep 12, 2026: and confirmSalesOrder (Finance's Verify confirms the draft
+// Sales Order), plus the five Dispatch writes behind GETMEDS_WORKFLOW_V2 —
+// create and send the invoice, package, ship, mark delivered. Named,
+// single-purpose, and called only from services/workflowV2Service.js; see
+// their block in ZohoAdapter.js.
 const facadeMethods = [
   'createSalesOrder',
   'getSalesOrder',
@@ -265,11 +266,14 @@ const facadeMethods = [
   // on ZohoAdapter/LiveZohoAdapter/MockZohoAdapter; without this line it
   // would be `undefined` through the facade every controller actually uses.
   'addSalesOrderAttachment',
-  // Sep 12, 2026: the workflow writes (see ZohoAdapter.js), added HERE on the
-  // same day as the adapters — the four earlier entries above record what it
-  // costs to remember this list a week later. tests/zohoAdapter.test.js now
-  // also checks every one of these is reachable through the facade.
-  'markSalesOrderConfirmed',
+  // Sep 12, 2026: added in the SAME commit as the method itself, which is the
+  // whole lesson of the four entries above. A method can exist on the base
+  // contract, the Live adapter and the Mock and still be `undefined` here,
+  // and this is the only module any controller imports.
+  'confirmSalesOrder',
+  // Sep 12, 2026: the Dispatch writes (see ZohoAdapter.js), added HERE on the
+  // same day as the adapters, for the same reason. tests/zohoAdapter.test.js
+  // checks every one of these is reachable through the facade.
   'createInvoiceFromSalesOrder',
   'markInvoiceSent',
   'createPackageForSalesOrder',
