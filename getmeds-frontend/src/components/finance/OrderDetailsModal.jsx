@@ -169,6 +169,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
                 <Row label="Submitted" value={order.submitted_at ? formatPHT(order.submitted_at) : null} />
                 <Row label="Division" value={order.division} />
                 <Row label="Sub-division" value={order.sub_division} />
+                <Row label="Headquarter" value={order.headquarter} />
                 <Row label="Salesperson" value={order.salesperson} />
               </Section>
 

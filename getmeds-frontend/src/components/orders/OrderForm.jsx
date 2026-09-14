@@ -716,6 +716,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // switching MedRep never silently carries over a Sub-division that
   // belonged to a different Division. From there the field can be freely
   // edited before submitting.
+  // Sep 14, 2026: Headquarter — per order, free text, no account default.
+  // Sent as Zoho's "Headquarter" custom field; blank is not sent.
+  const [headquarterInput, setHeadquarterInput] = useState('');
   const [subDivisionInput, setSubDivisionInput] = useState(mySubDivision);
   useEffect(() => {
     setSubDivisionInput(mySubDivision);
@@ -1244,6 +1247,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         // (orders.controller.js falls back to the account default), so
         // there is no separate "clear it" affordance needed here.
         sub_division: subDivisionInput,
+        headquarter: headquarterInput.trim(),
         // Only ever sent when no proof-type file was staged — staging one
         // clears these (see handleFilesSelected).
         no_payment_proof_reason: hasStagedProof ? null : (noProofReason || null),
@@ -1676,6 +1680,19 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                     onChange={(e) => setSubDivisionInput(e.target.value)}
                   />
                 )}
+              </Field>
+
+              <Field
+                label="Headquarter"
+                help="Sent as Headquarter on the Zoho Sales Order. Optional — blank is not sent."
+              >
+                <input
+                  type="text"
+                  className={inputClass}
+                  placeholder="Enter headquarter"
+                  value={headquarterInput}
+                  onChange={(e) => setHeadquarterInput(e.target.value)}
+                />
               </Field>
 
             </div>
@@ -2524,6 +2541,12 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
               <div className="flex justify-between items-center">
                 <span className="text-xs text-ink-secondary font-medium">Sub-division:</span>
                 <span className="font-medium text-ink-primary">{subDivisionInput}</span>
+              </div>
+            )}
+            {headquarterInput.trim() && (
+              <div className="flex justify-between items-center">
+                <span className="text-xs text-ink-secondary font-medium">Headquarter:</span>
+                <span className="font-medium text-ink-primary">{headquarterInput.trim()}</span>
               </div>
             )}
             <div className="flex justify-between items-center">

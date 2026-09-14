@@ -445,6 +445,7 @@ const OrderDetailPage = () => {
     setDraftDetails({
       division: o.division || '',
       sub_division: o.sub_division || '',
+      headquarter: o.headquarter || '',
       salesperson: o.salesperson || '',
       delivery_address: o.delivery_address || '',
       delivery_notes: o.delivery_notes || '',
@@ -475,7 +476,8 @@ const OrderDetailPage = () => {
       terms: draftDetails.terms,
       payment_terms: draftDetails.payment_terms,
       invoicing_from: draftDetails.invoicing_from,
-      sub_division: draftDetails.sub_division
+      sub_division: draftDetails.sub_division,
+      headquarter: draftDetails.headquarter
     };
     // Sep 7, 2026 (2): Division/Salesperson are Management-only on the
     // backend (mirrors create()'s own rule) — only send them from a
@@ -640,6 +642,7 @@ const OrderDetailPage = () => {
                 {[
                   ['Division', order.division || '—'],
                   ['Sub-division', order.sub_division || '—'],
+                  ['Headquarter', order.headquarter || '—'],
                   ['Salesperson', order.salesperson || '—'],
                   ['Doctor', order.intake_doctor || '—'],
                   ['Receiver', order.intake_receiver || '—'],
@@ -721,6 +724,14 @@ const OrderDetailPage = () => {
                         placeholder="Enter sub-division"
                         className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
                     )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">Headquarter</label>
+                    <input type="text" value={draftDetails.headquarter}
+                      onChange={(e) => updateDraftDetail('headquarter', e.target.value)}
+                      placeholder="Enter headquarter"
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
                   </div>
 
                   {isManagementUser && (
