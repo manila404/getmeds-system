@@ -251,6 +251,9 @@ const facadeMethods = [
   // MockZohoAdapter; without this line it would still silently be
   // `undefined` through the one thing every controller actually imports.
   'updateContactTin',
+  // Sep 14, 2026: "Update customer" on a waiting customer Zoho already has.
+  // Added in the same change as the adapters — the lesson of every entry here.
+  'updateContact',
   // Sep 11, 2026: the FOURTH time this list has been the thing that was
   // forgotten — listSalespersons (Sep 2), updateContactTin and
   // addSalesOrderAttachment (Sep 8), and this. It was written on the base

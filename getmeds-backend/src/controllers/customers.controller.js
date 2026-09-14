@@ -5,6 +5,7 @@ const syncJobs = require('../services/syncJobs');
 const { getSyncState, setSyncState } = require('../services/syncState');
 const { setCustomerTin } = require('../services/customerTinService');
 const customerCreate = require('../services/customerCreateService');
+const customerZohoUpdate = require('../services/customerZohoUpdateService');
 
 // Purely local classification tag for the Clients Directory (Aug 27, 2026).
 // Kept strictly separate from `type` (credit/direct), which continues to
@@ -721,10 +722,21 @@ const createCustomer = async (req, res, next) => {
 const listPendingCustomers = async (req, res, next) => {
   try {
     const rows = await customerCreate.listHeldCustomers();
+    // Sep 14, 2026: each waiting customer with the Zoho customers it looks
+    // like, so the screen can ask "is this the same one?" before anything is
+    // pushed. A handful of rows, each a few indexed lookups.
+    const customers = [];
+    for (const r of rows) {
+      customers.push({
+        ...r,
+        order_count: Number(r.order_count) || 0,
+        matches: await customerCreate.findZohoMatches(r)
+      });
+    }
     res.json({
       success: true,
       data: {
-        customers: rows,
+        customers,
         pending: rows.filter((r) => r.zoho_sync_status === 'pending').length,
         failed: rows.filter((r) => r.zoho_sync_status === 'failed').length
       }
@@ -750,11 +762,18 @@ const syncPendingCustomers = async (req, res, next) => {
     const rows = await customerCreate.listHeldCustomers();
     const pending = rows.filter((r) => r.zoho_sync_status === 'pending');
 
-    const results = { synced: [], failed: [], blocked: null };
+    // Sep 14, 2026: `needs_review` — customers held back WITHOUT asking Zoho,
+    // because they look like one Zoho already has. Checked before the push, so
+    // they are reported even while Zoho is unreachable.
+    const results = { synced: [], failed: [], needs_review: [], blocked: null };
     for (const row of pending) {
       const out = await customerCreate.syncHeldCustomer(row.id);
       if (out.ok) {
         results.synced.push({ id: row.id, name: row.name, zoho_contact_id: out.zoho_contact_id });
+        continue;
+      }
+      if (out.needsReview) {
+        results.needs_review.push({ id: row.id, name: row.name, matches: out.matches.map((m) => m.name) });
         continue;
       }
       if (out.stillBlocked) {
@@ -764,6 +783,15 @@ const syncPendingCustomers = async (req, res, next) => {
       results.failed.push({ id: row.id, name: row.name, reason: out.reason });
     }
 
+    const review = results.needs_review.length;
+    const reviewNote = review
+      ? `${review} held back — already looks like a customer in Zoho; choose what to do with ${review === 1 ? 'it' : 'them'} below.`
+      : '';
+    const parts = [];
+    if (results.synced.length) parts.push(`${results.synced.length} customer(s) pushed to Zoho.`);
+    if (results.failed.length) parts.push(`${results.failed.length} refused by Zoho — see "Needs attention" below.`);
+    if (reviewNote) parts.push(reviewNote);
+
     res.json({
       success: true,
       data: {
@@ -771,15 +799,13 @@ const syncPendingCustomers = async (req, res, next) => {
         remaining: pending.length - results.synced.length - results.failed.length,
         // Sep 11, 2026: "0 pushed" is not a success, and reporting it as one is
         // how an admin concludes the queue is working while nothing moves.
-        ok: !results.blocked && results.failed.length === 0,
+        ok: !results.blocked && results.failed.length === 0 && review === 0,
         message: results.blocked
           ? 'Zoho still will not accept new customers — the connection is not working yet. ' +
-            'Nothing was lost; they stay queued.'
-          : results.failed.length
-            ? `${results.synced.length} pushed, ${results.failed.length} refused by Zoho — see "Needs attention" below.`
-            : results.synced.length
-              ? `${results.synced.length} customer(s) pushed to Zoho.`
-              : 'Nothing to push.'
+            'Nothing was lost; they stay queued.' + (reviewNote ? ` ${reviewNote}` : '')
+          : parts.length
+            ? parts.join(' ')
+            : 'Nothing to push.'
       }
     });
   } catch (err) {
@@ -835,9 +861,103 @@ const retryPendingCustomer = async (req, res, next) => {
   }
 };
 
+/**
+ * The three answers to "this waiting customer looks like one Zoho already has".
+ *
+ * Sep 14, 2026. The push holds a likely duplicate back (see findZohoMatches in
+ * customerCreateService.js); these are what a person does about it. None of
+ * them deletes or edits anything in Zoho.
+ */
+const sendOutcome = (res, out, okData) => {
+  if (out.ok) return res.json({ success: true, data: okData });
+  return res.status(out.status || 409).json({
+    success: false,
+    error: { code: out.code || 'REFUSED', message: out.reason, matches: out.matches }
+  });
+};
+
+/** POST /api/customers/:id/push — push one; { confirm_new: true } after reviewing a match. */
+const pushPendingCustomer = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const out = await customerCreate.syncHeldCustomer(id, { allowMatches: req.body?.confirm_new === true });
+    if (out.ok) {
+      return res.json({
+        success: true,
+        data: { ...out, message: 'Created in Zoho as a new customer.' + (out.released ? ` ${out.released} order(s) queued.` : '') }
+      });
+    }
+    if (out.needsReview) return sendOutcome(res, { ...out, status: 409, code: 'LIKELY_DUPLICATE' });
+    if (out.stillBlocked) {
+      return sendOutcome(res, {
+        status: 503,
+        code: 'ZOHO_UNREACHABLE',
+        reason: `Zoho still will not accept new customers: ${out.reason}. It stays queued.`
+      });
+    }
+    return sendOutcome(res, { status: /not a pending/i.test(out.reason) ? 404 : 422, reason: out.reason });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/customers/:id/link { target_id, update? } — use the customer Zoho
+ * already has. With `update` (the "Update customer" form), the Zoho customer's
+ * details are corrected from it first; see customerZohoUpdateService.js.
+ */
+const linkPendingCustomer = async (req, res, next) => {
+  try {
+    const heldId = parseInt(req.params.id, 10);
+    const targetId = parseInt(req.body?.target_id, 10);
+    const update = req.body?.update;
+    const out = update && typeof update === 'object'
+      ? await customerZohoUpdate.updateAndLink(heldId, targetId, update, req.user)
+      : await customerCreate.linkHeldToExisting(heldId, targetId, req.user);
+    const updated = out.zoho_updated || [];
+    return sendOutcome(res, out, {
+      ...out,
+      message:
+        (update
+          ? updated.length
+            ? `${out.target?.name} updated in Zoho (${updated.join(', ')}).`
+            : `${out.target?.name} already had these details in Zoho — nothing needed changing there.`
+          : `Now using ${out.target?.name}, already in Zoho.`) +
+        (out.moved ? ` ${out.moved} order(s) moved to it.` : '') +
+        ' The waiting copy was deleted.'
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** GET /api/customers/:id/zoho-compare?target_id= — the waiting customer next to the live Zoho one. */
+const getZohoComparison = async (req, res, next) => {
+  try {
+    const out = await customerZohoUpdate.getComparison(parseInt(req.params.id, 10), parseInt(req.query.target_id, 10));
+    return sendOutcome(res, out, out);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** DELETE /api/customers/:id/pending — stop pushing it; delete the waiting copy. */
+const discardPendingCustomer = async (req, res, next) => {
+  try {
+    const out = await customerCreate.discardHeldCustomer(parseInt(req.params.id, 10), req.user);
+    return sendOutcome(res, out, { ...out, message: `${out.name} deleted — it will not be pushed to Zoho.` });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   createCustomer,
   retryPendingCustomer,
+  pushPendingCustomer,
+  linkPendingCustomer,
+  getZohoComparison,
+  discardPendingCustomer,
   listPendingCustomers,
   syncPendingCustomers,
   getCustomersOverview,

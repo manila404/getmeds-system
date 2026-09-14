@@ -751,6 +751,46 @@ class LiveZohoAdapter extends ZohoAdapter {
   }
 
   /**
+   * Update an existing contact's details. See ZohoAdapter.js's Sep 14, 2026
+   * note. Zoho's Update a Contact only changes what the body carries, so a
+   * field this does not send is left exactly as it is.
+   *
+   * Custom field ids are the ones createContact below documents, read from
+   * this org. `contact_persons` is never sent: in an update, Zoho reads an
+   * entry without an id as a NEW person, so sending one would add duplicates.
+   */
+  async updateContact(contactId, fields = {}) {
+    if (!contactId) throw new Error('updateContact requires a Zoho contact id');
+    const CUSTOM_FIELD_IDS = {
+      license_owner: '2254168001901791559',
+      lto_license_number: '2254168001901791563',
+      lto_type: '2254168001901791567',
+      license_issuance_date: '2254168001901791571',
+      license_expiry_date: '2254168001901791611',
+      contact_number: '2254168001908082659',
+      tin: '2254168001928321297'
+    };
+    const f = fields || {};
+    const has = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+
+    const body = {};
+    for (const key of ['contact_name', 'company_name', 'email', 'phone']) {
+      if (has(f[key])) body[key] = String(f[key]).trim();
+    }
+    if (f.billing_address) body.billing_address = f.billing_address;
+    if (f.shipping_address) body.shipping_address = f.shipping_address;
+    const customFields = [];
+    for (const [key, id] of Object.entries(CUSTOM_FIELD_IDS)) {
+      if (has(f.custom?.[key])) customFields.push({ customfield_id: id, value: String(f.custom[key]).trim() });
+    }
+    if (customFields.length) body.custom_fields = customFields;
+
+    if (!Object.keys(body).length) return { code: 0, message: 'Nothing to update', contact: null };
+    const result = await this._request('PUT', `/contacts/${contactId}`, { body });
+    return { code: 0, message: 'Contact updated successfully', contact: result.contact };
+  }
+
+  /**
    * Create a new contact (customer) in Zoho. See ZohoAdapter.js's Sep 11,
    * 2026 note for why this create-only exception exists.
    *

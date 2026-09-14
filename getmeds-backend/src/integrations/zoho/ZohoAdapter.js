@@ -266,6 +266,33 @@ class ZohoAdapter {
   }
 
   /**
+   * Update an EXISTING contact's details.
+   *
+   * Sep 14, 2026. A customer waiting here to be pushed turned out to be one
+   * Zoho already had (1ST SPECIALITY PHARMA / 1ST SPECIALTY PHARMA), and the
+   * business asked for "Update customer": correct the Zoho customer from what
+   * the rep typed instead of creating a second one. Called only from
+   * services/customerZohoUpdateService.js, after a person has reviewed every
+   * field in a form.
+   *
+   * Narrow on purpose:
+   *   - never creates a contact; `contactId` must already exist
+   *   - sends only fields that have a value — an empty one is omitted, never
+   *     sent as "" (that would clear it, and Zoho treats "" as a value for the
+   *     UNIQUE cf_lto_license_number)
+   *   - never touches contact persons, and never deletes anything
+   *
+   * @param {string} contactId - an existing Zoho contact id
+   * @param {{contact_name?, company_name?, email?, phone?, billing_address?, shipping_address?,
+   *          custom?: {contact_number?, tin?, lto_license_number?, lto_type?, license_owner?,
+   *                    license_issuance_date?, license_expiry_date?}}} fields
+   * @returns {Promise<{code:number, message:string, contact:object|null}>}
+   */
+  async updateContact(contactId, fields) {
+    throw new Error('Not implemented');
+  }
+
+  /**
    * Create a NEW Zoho contact (customer). See the Sep 11, 2026 note above
    * for why this create-only exception exists.
    *

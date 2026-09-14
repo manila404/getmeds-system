@@ -25,14 +25,21 @@ let adminToken;
 
 const uniq = () => `${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
-const validCustomer = (overrides = {}) => ({
-  display_name: `Held Pharmacy ${uniq()}`,
-  phone: '+639171234567',
-  contact_number: '+639171234567',
-  billing_address: { address: '1 Held St', city: 'Manila', phone: '+639171234567' },
-  shipping_same_as_billing: true,
-  ...overrides
-});
+// Sep 14, 2026: a phone of its own per customer. A push now holds back a
+// waiting customer whose phone matches one Zoho already has (a likely
+// duplicate — see customerDuplicateReview.test.js), and these fixtures used to
+// share one number.
+const validCustomer = (overrides = {}) => {
+  const phone = `+63917${String(uniq()).slice(-7)}`;
+  return {
+    display_name: `Held Pharmacy ${uniq()}`,
+    phone,
+    contact_number: phone,
+    billing_address: { address: '1 Held St', city: 'Manila', phone },
+    shipping_same_as_billing: true,
+    ...overrides
+  };
+};
 
 /** Zoho's answer when the contacts.CREATE scope is missing. */
 const scopeError = () => new Error('You are not authorized to perform this operation');

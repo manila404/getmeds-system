@@ -368,6 +368,38 @@ class MockZohoAdapter extends ZohoAdapter {
   }
 
   /**
+   * Mirrors LiveZohoAdapter.updateContact: changes only the fields given a
+   * value, and refuses an LTO licence another contact already holds, as Zoho
+   * does. See ZohoAdapter.js's Sep 14, 2026 note.
+   */
+  async updateContact(contactId, fields = {}) {
+    if (!contactId) throw new Error('updateContact requires a Zoho contact id');
+    const contact = this._contacts.get(contactId);
+    if (!contact) throw new Error('The contact ID given seems to be incorrect. [MOCK MODE]');
+    const has = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+
+    const lto = fields.custom?.lto_license_number;
+    if (has(lto)) {
+      const clash = [...this._contacts.values()].find(
+        (x) => x.contact_id !== contactId &&
+          String(x.cf_lto_license_number || '').trim().toLowerCase() === String(lto).trim().toLowerCase()
+      );
+      if (clash) throw new Error('The LTO License Number you have entered already exists.');
+    }
+
+    for (const key of ['contact_name', 'company_name', 'email', 'phone']) {
+      if (has(fields[key])) contact[key] = String(fields[key]).trim();
+    }
+    if (fields.billing_address) contact.billing_address = { ...(contact.billing_address || {}), ...fields.billing_address };
+    if (fields.shipping_address) contact.shipping_address = { ...(contact.shipping_address || {}), ...fields.shipping_address };
+    for (const [key, value] of Object.entries(fields.custom || {})) {
+      if (has(value)) contact[`cf_${key}`] = String(value).trim();
+    }
+    this._log(`[ZOHO_MOCK] Would PUT /contacts/${contactId}: ${Object.keys(fields).join(', ')}`);
+    return { code: 0, message: 'Contact updated successfully [MOCK MODE]', contact };
+  }
+
+  /**
    * Mirrors LiveZohoAdapter.addSalesOrderAttachment: records the file
    * against the seeded in-memory Sales Order, adds nothing else, never
    * touches an existing attachment. See ZohoAdapter.js's Sep 8, 2026 (2)

@@ -29,6 +29,16 @@ router.get('/pending', requireAuth, requireRole('admin', 'management'), c.listPe
 router.post('/pending/sync', requireAuth, requireRole('admin', 'management'), c.syncPendingCustomers);
 // Put a customer wrongly marked 'Needs attention' back in the queue.
 router.post('/:id/retry', requireAuth, requireRole('admin', 'management'), c.retryPendingCustomer);
+// Sep 14, 2026: a waiting customer that looks like one Zoho already has is
+// held back from the push. Push it as new anyway, use the Zoho customer
+// instead (its orders move across), or delete the waiting copy. Nothing here
+// deletes or edits anything in Zoho.
+router.post('/:id/push', requireAuth, requireRole('admin', 'management'), c.pushPendingCustomer);
+router.post('/:id/link', requireAuth, requireRole('admin', 'management'), c.linkPendingCustomer);
+// The same review, read live from Zoho — the local copy of a Zoho customer
+// lacks its TIN, licence and address. Read-only.
+router.get('/:id/zoho-compare', requireAuth, requireRole('admin', 'management'), c.getZohoComparison);
+router.delete('/:id/pending', requireAuth, requireRole('admin', 'management'), c.discardPendingCustomer);
 
 // One grouped local query for the Clients Directory's KPI cards
 // (Total/Credit/Direct/Uncategorized) — see customers.controller.js's

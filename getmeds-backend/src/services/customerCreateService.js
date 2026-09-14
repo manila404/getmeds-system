@@ -152,6 +152,329 @@ async function findDuplicates({ display_name: displayName, lto_license_number: l
   return hits;
 }
 
+// ── Is a WAITING customer already in Zoho? ──────────────────────────────────
+//
+// Sep 14, 2026. findDuplicates above runs when a customer is created, and only
+// on an exact name or licence. Two gaps let a duplicate through to the queue:
+// the customer is created in Zoho by hand while the local one waits, or the
+// names differ by a letter. 1ST SPECIALITY PHARMA waited here while someone
+// created "1ST SPECIALTY PHARMA" directly in Zoho and raised two Sales Orders
+// against it; pushing the waiting one would have put the same business in
+// Zoho twice.
+//
+// So every push first compares the waiting customer with the customers Zoho
+// already has (the local copy, kept current by the customer pull), on more
+// than the name, and a likely match is held back for a person to decide:
+// use the Zoho customer, push as new anyway, or delete the waiting one.
+
+/** Letters and digits only: "1ST SPECIALITY PHARMA" -> "1stspecialitypharma". */
+const compact = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const digitsOf = (v) => String(v || '').replace(/\D/g, '');
+/** The name's words long enough to mean something — "1st", "of", "co" are not. */
+const nameWords = (v) => normalise(v).split(' ').map(compact).filter((w) => w.length >= 4);
+
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/**
+ * How alike two names are, for "is this the same business".
+ *   'same_name'     identical once case, spacing and punctuation are ignored
+ *   'similar_name'  a letter or two apart (SPECIALITY / SPECIALTY), or one
+ *                   name's words all inside the other's ("Mercury Drug Taft" /
+ *                   "Mercury Drug Taft Branch")
+ */
+function compareNames(a, b) {
+  const x = compact(a);
+  const y = compact(b);
+  if (!x || !y) return null;
+  if (x === y) return 'same_name';
+  // Numbers are identity, not spelling: "Branch 12" and "Branch 13" are one
+  // letter apart and two different customers.
+  if (digitsOf(a) !== digitsOf(b)) return null;
+  if (Math.min(x.length, y.length) >= 6 && 1 - editDistance(x, y) / Math.max(x.length, y.length) >= 0.85) {
+    return 'similar_name';
+  }
+  const wa = nameWords(a);
+  const wb = nameWords(b);
+  const within = (small, big) => small.length >= 2 && small.every((w) => big.includes(w));
+  if (within(wa, wb) || within(wb, wa)) return 'similar_name';
+  return null;
+}
+
+// Strongest evidence first. A licence or TIN is one business; a phone can be a
+// shared switchboard, so on its own it only asks the question.
+const MATCH_WEIGHT = { lto: 5, tin: 5, same_name: 4, email: 3, similar_name: 3, phone: 2 };
+// More Zoho customers than this on one phone number and it is not evidence.
+// Production has 09123456789 on five unrelated customers.
+const MAX_SHARED_PHONE = 3;
+
+/**
+ * Customers Zoho already has that look like this waiting one. Never the
+ * waiting customer itself, never another local-only one — only rows with a
+ * zoho_contact_id, because "use the existing customer" has to mean one Zoho
+ * actually holds.
+ */
+async function findZohoMatches(held) {
+  const found = new Map();
+  const add = (row, reason) => {
+    if (!row || row.id === held.id) return;
+    const entry = found.get(row.id) || { row, matched: new Set() };
+    entry.matched.add(reason);
+    found.set(row.id, entry);
+  };
+  const base = 'SELECT * FROM customers WHERE zoho_contact_id IS NOT NULL AND id <> ?';
+
+  // Name. The LIKE narrows 95,000 rows to the few sharing every meaningful
+  // word's first letters; compareNames decides.
+  const words = nameWords(held.name);
+  const nameRows = words.length
+    ? await db
+        .prepare(`${base} AND ${words.map(() => 'lower(name) LIKE ?').join(' AND ')} LIMIT 500`)
+        .all(held.id, ...words.map((w) => `%${w.slice(0, 4)}%`))
+    : await db.prepare(`${base} AND lower(trim(name)) = ? LIMIT 20`).all(held.id, String(held.name || '').trim().toLowerCase());
+  for (const r of nameRows) {
+    const how = compareNames(held.name, r.name);
+    if (how) add(r, how);
+  }
+
+  // Phone, by its last ten digits: "+63 917 590 7923" and "0917-590-7923" are
+  // the same number.
+  const phone = digitsOf(held.contact_number).slice(-10);
+  if (phone.length === 10) {
+    const rows = await db
+      .prepare(`${base} AND contact_number LIKE ? LIMIT 500`)
+      .all(held.id, `%${phone.slice(-4)}`);
+    const same = rows.filter((r) => digitsOf(r.contact_number).slice(-10) === phone);
+    // A number several Zoho customers share is a placeholder (09123456789) or
+    // a switchboard, and says nothing about which business this is.
+    if (same.length <= MAX_SHARED_PHONE) for (const r of same) add(r, 'phone');
+  }
+
+  // TIN, by its first nine digits — the branch code after them varies.
+  const tin = digitsOf(held.tin);
+  if (tin.length >= 9) {
+    const rows = await db.prepare(`${base} AND tin LIKE ? LIMIT 500`).all(held.id, `${tin.slice(0, 3)}%`);
+    for (const r of rows) if (digitsOf(r.tin).slice(0, 9) === tin.slice(0, 9)) add(r, 'tin');
+  }
+
+  const lto = String(held.lto_license_number || '').trim().toLowerCase();
+  if (lto) {
+    const rows = await db.prepare(`${base} AND lower(trim(lto_license_number)) = ? LIMIT 20`).all(held.id, lto);
+    for (const r of rows) add(r, 'lto');
+  }
+
+  const email = String(held.email || '').trim().toLowerCase();
+  if (email) {
+    const rows = await db.prepare(`${base} AND lower(trim(email)) = ? LIMIT 20`).all(held.id, email);
+    for (const r of rows) add(r, 'email');
+  }
+
+  const score = (e) => [...e.matched].reduce((s, m) => s + (MATCH_WEIGHT[m] || 0), 0);
+  const top = [...found.values()].sort((a, b) => score(b) - score(a)).slice(0, 5);
+  if (!top.length) return [];
+
+  const ids = top.map((e) => e.row.id);
+  const counts = await db
+    .prepare(`SELECT customer_id, COUNT(*) AS c FROM orders WHERE customer_id IN (${ids.map(() => '?').join(',')}) GROUP BY customer_id`)
+    .all(...ids);
+  const orderCount = new Map(counts.map((r) => [r.customer_id, Number(r.c)]));
+
+  return top.map(({ row, matched }) => ({
+    id: row.id,
+    name: row.name,
+    contact_person: row.contact_person,
+    contact_number: row.contact_number,
+    email: row.email,
+    tin: row.tin,
+    lto_license_number: row.lto_license_number,
+    category: row.category,
+    type: row.type,
+    address: row.address,
+    is_active: row.is_active,
+    zoho_contact_id: row.zoho_contact_id,
+    order_count: orderCount.get(row.id) || 0,
+    matched: [...matched].sort((a, b) => (MATCH_WEIGHT[b] || 0) - (MATCH_WEIGHT[a] || 0))
+  }));
+}
+
+/** A customer still waiting for Zoho, or null. */
+function getHeldCustomer(id) {
+  return db
+    .prepare(
+      `SELECT * FROM customers
+        WHERE id = ? AND zoho_contact_id IS NULL AND zoho_sync_status IN ('pending','failed')`
+    )
+    .get(id);
+}
+
+/**
+ * Hand orders that never reached Zoho to the retry service, now that their
+ * customer has a zoho_contact_id.
+ *
+ * Deliberately only orders that never reached Zoho and are still 'pending': an
+ * order already 'synced' or 'failed' for its own reasons is not this
+ * function's business, and re-queueing one would create a second Sales Order.
+ */
+async function releaseWaitingOrders(customerId, onlyOrderIds = null) {
+  const zohoRetry = require('./zohoRetryService');
+  let waiting = await db
+    .prepare(
+      `SELECT id, getmeds_order_id FROM orders
+        WHERE customer_id = ? AND zoho_sync_status = 'pending' AND zoho_so_id IS NULL`
+    )
+    .all(customerId);
+  if (onlyOrderIds) waiting = waiting.filter((o) => onlyOrderIds.includes(o.id));
+
+  let released = 0;
+  for (const order of waiting) {
+    try {
+      const payload = await buildZohoSalesOrderPayload(order.id);
+      await zohoRetry.enqueue({
+        orderId: order.id,
+        payload,
+        error: 'Customer was registered in Zoho — order queued for its Sales Order.'
+      });
+      released++;
+    } catch (err) {
+      // One order that cannot be queued must not stop the rest, and must not
+      // undo the customer work that already succeeded.
+      console.error(`[CUSTOMER_SYNC] could not queue ${order.getmeds_order_id}:`, err.message);
+    }
+  }
+  return released;
+}
+
+/**
+ * "This is the customer Zoho already has": move the waiting customer's orders
+ * onto the Zoho one and delete the waiting copy. Nothing is created in Zoho.
+ *
+ * The Zoho customer's EMPTY fields are filled from the waiting one (phone,
+ * TIN, licence, ...), locally only — the waiting copy often carries what the
+ * rep typed, which a customer created by hand in Zoho may lack. Fields it
+ * already has are never overwritten.
+ */
+async function linkHeldToExisting(heldId, targetId, actor, { details = null, zohoChanged = [] } = {}) {
+  const { logEvent } = require('./auditService');
+  const held = await getHeldCustomer(heldId);
+  if (!held) return { ok: false, status: 404, reason: 'That customer is not waiting for Zoho.' };
+  const target = await db.prepare('SELECT * FROM customers WHERE id = ? AND zoho_contact_id IS NOT NULL').get(targetId);
+  if (!target) return { ok: false, status: 404, reason: 'The customer to use instead is not in Zoho.' };
+
+  const orders = await db.prepare('SELECT id, getmeds_order_id, status FROM orders WHERE customer_id = ?').all(held.id);
+  const now = new Date().toISOString();
+
+  await db.transaction(async () => {
+    await db.prepare('UPDATE orders SET customer_id = ?, updated_at = ? WHERE customer_id = ?').run(target.id, now, held.id);
+    // Deleted before the fill below, so the two rows never hold the same
+    // licence at once.
+    await db.prepare('DELETE FROM customers WHERE id = ?').run(held.id);
+    if (details) {
+      // "Update customer": a person reviewed every field in the form, so what
+      // it says wins — except a field left empty, which keeps what is there.
+      const v = (x) => (x === undefined || x === null ? '' : String(x).trim());
+      const addressLine = [v(details.address), v(details.city)].filter(Boolean).join(', ');
+      await db
+        .prepare(
+          `UPDATE customers
+              SET name               = COALESCE(NULLIF(?, ''), name),
+                  contact_number     = COALESCE(NULLIF(?, ''), contact_number),
+                  email              = COALESCE(NULLIF(?, ''), email),
+                  tin                = COALESCE(NULLIF(?, ''), tin),
+                  lto_license_number = COALESCE(NULLIF(?, ''), lto_license_number),
+                  contact_person     = COALESCE(NULLIF(?, ''), contact_person),
+                  category           = COALESCE(NULLIF(?, ''), category),
+                  address            = COALESCE(NULLIF(?, ''), address)
+            WHERE id = ?`
+        )
+        .run(
+          v(details.name),
+          v(details.contact_number),
+          v(details.email),
+          v(details.tin),
+          v(details.lto_license_number),
+          v(details.contact_person),
+          v(details.category),
+          addressLine,
+          target.id
+        );
+    } else {
+      await db
+        .prepare(
+          `UPDATE customers
+              SET contact_number     = COALESCE(NULLIF(contact_number, ''), ?),
+                  email              = COALESCE(NULLIF(email, ''), ?),
+                  tin                = COALESCE(NULLIF(tin, ''), ?),
+                  lto_license_number = COALESCE(NULLIF(lto_license_number, ''), ?),
+                  contact_person     = COALESCE(NULLIF(contact_person, ''), ?),
+                  category           = COALESCE(category, ?)
+            WHERE id = ?`
+        )
+        .run(
+          held.contact_number || null,
+          held.email || null,
+          held.tin || null,
+          held.lto_license_number || null,
+          held.contact_person || null,
+          held.category || null,
+          target.id
+        );
+    }
+    for (const o of orders) {
+      await logEvent({
+        orderId: o.id,
+        eventType: 'CUSTOMER_LINKED_TO_ZOHO',
+        oldStatus: o.status,
+        newStatus: o.status,
+        actorId: actor?.id || null,
+        actorName: actor?.name || actor?.email || 'System',
+        notes:
+          `Customer changed from "${held.name}" (waiting for Zoho, never created there) to "${target.name}", ` +
+          'which Zoho already has — so the same business is not created in Zoho twice.' +
+          (zohoChanged.length ? ` Its details were updated in Zoho: ${zohoChanged.join(', ')}.` : ''),
+        metadata: { from_customer_id: held.id, to_customer_id: target.id, zoho_contact_id: target.zoho_contact_id }
+      });
+    }
+  })();
+
+  const released = await releaseWaitingOrders(target.id, orders.map((o) => o.id));
+  return { ok: true, moved: orders.length, released, target: { id: target.id, name: target.name } };
+}
+
+/**
+ * "Stop pushing this one": delete a waiting customer. Local only — it was
+ * never in Zoho, so there is nothing there to delete.
+ *
+ * Refused while orders point at it: deleting would leave them without a
+ * customer. Those are moved with linkHeldToExisting instead.
+ */
+async function discardHeldCustomer(heldId, actor) {
+  const held = await getHeldCustomer(heldId);
+  if (!held) return { ok: false, status: 404, reason: 'That customer is not waiting for Zoho.' };
+  const { c } = await db.prepare('SELECT COUNT(*) AS c FROM orders WHERE customer_id = ?').get(held.id);
+  if (Number(c) > 0) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'HAS_ORDERS',
+      reason:
+        `${held.name} has ${c} order(s), which would be left without a customer. ` +
+        'Use the matching Zoho customer instead — the orders move with it.'
+    };
+  }
+  await db.prepare('DELETE FROM customers WHERE id = ?').run(held.id);
+  console.info(`[CUSTOMER_DISCARD] ${actor?.name || actor?.email || 'unknown'} deleted waiting customer ${held.id} "${held.name}"`);
+  return { ok: true, name: held.name };
+}
+
 /** What the caller must provide, checked before anything is written anywhere. */
 function validate(input) {
   const c = input || {};
@@ -397,15 +720,20 @@ async function holdCustomer(input, payload, reason) {
  * timer: the reason these are held is a missing OAuth scope, and a background
  * retry would produce thousands of guaranteed failures and a log nobody reads.
  */
-async function syncHeldCustomer(customerId) {
-  // Required here rather than at the top: zohoRetryService pulls in the order
-  // payload builder and the audit service, and a module-level require closes a
-  // cycle in which one of them is still `undefined` when this file loads.
-  const zohoRetry = require('./zohoRetryService');
-
+async function syncHeldCustomer(customerId, { allowMatches = false } = {}) {
   const row = await db
     .prepare("SELECT * FROM customers WHERE id = ? AND zoho_sync_status = 'pending'").get(customerId);
   if (!row) return { ok: false, reason: 'Not a pending customer.' };
+
+  // Sep 14, 2026: never create what Zoho may already have. A likely match is
+  // held back for a person — see findZohoMatches. `allowMatches` is that
+  // person having looked and said "not the same, push it".
+  if (!allowMatches) {
+    const matches = await findZohoMatches(row);
+    if (matches.length) {
+      return { ok: false, needsReview: true, matches, reason: 'Looks like a customer Zoho already has.' };
+    }
+  }
 
   let payload;
   try {
@@ -432,36 +760,8 @@ async function syncHeldCustomer(customerId) {
     //
     // Without this, a synced customer leaves its orders sitting at
     // zoho_sync_status 'pending' forever, and somebody has to notice each one
-    // and push it by hand. Queueing them hands them to the retry service that
-    // already exists for orders, which will now succeed because the customer
-    // finally has a zoho_contact_id.
-    //
-    // Deliberately only orders that never reached Zoho: an order already
-    // 'synced' or 'failed' for its own reasons is not this function's
-    // business, and re-queueing one would create a second Sales Order.
-    const waiting = await db
-      .prepare(
-        `SELECT id, getmeds_order_id FROM orders
-          WHERE customer_id = ? AND zoho_sync_status = 'pending' AND zoho_so_id IS NULL`
-      )
-      .all(customerId);
-
-    let released = 0;
-    for (const order of waiting) {
-      try {
-        const payload = await buildZohoSalesOrderPayload(order.id);
-        await zohoRetry.enqueue({
-          orderId: order.id,
-          payload,
-          error: 'Customer was registered in Zoho — order queued for its Sales Order.'
-        });
-        released++;
-      } catch (err) {
-        // One order that cannot be queued must not stop the rest, and must not
-        // undo the customer sync that already succeeded.
-        console.error(`[CUSTOMER_SYNC] could not queue ${order.getmeds_order_id}:`, err.message);
-      }
-    }
+    // and push it by hand. See releaseWaitingOrders.
+    const released = await releaseWaitingOrders(customerId);
 
     return { ok: true, zoho_contact_id: contactId, released };
   } catch (err) {
@@ -481,7 +781,9 @@ async function syncHeldCustomer(customerId) {
 async function listHeldCustomers() {
   return db
     .prepare(
-      `SELECT id, name, contact_number, email, category, created_at, zoho_sync_status, zoho_sync_error
+      `SELECT id, name, contact_person, contact_number, email, tin, lto_license_number, category, type,
+              address, created_at, zoho_sync_status, zoho_sync_error,
+              (SELECT COUNT(*) FROM orders o WHERE o.customer_id = customers.id) AS order_count
          FROM customers
         WHERE zoho_sync_status IN ('pending','failed')
         ORDER BY zoho_sync_status DESC, created_at ASC`
@@ -498,5 +800,10 @@ module.exports = {
   holdCustomer,
   syncHeldCustomer,
   listHeldCustomers,
-  isZohoUnreachable
+  isZohoUnreachable,
+  findZohoMatches,
+  compareNames,
+  getHeldCustomer,
+  linkHeldToExisting,
+  discardHeldCustomer
 };
