@@ -188,8 +188,17 @@ export const SyncJobsProvider = ({ children }) => {
 
   // Mirror each running job's latest status out of the query cache, so
   // consumers get it without subscribing to the query themselves.
+  //
+  // Deferred to a microtask: the cache notifies subscribers synchronously, and
+  // one of its notifications — a query being ADDED — happens while JobWatcher
+  // is rendering its useQuery for a new job. Setting state here in that moment
+  // is a provider update during a child's render, which React warns about
+  // ("Cannot update a component (SyncJobsProvider) while rendering a different
+  // component (JobWatcher)"). A microtask runs once that render has finished.
   useEffect(() => {
-    const unsubscribe = qc.getQueryCache().subscribe(() => {
+    let cancelled = false;
+    const mirror = () => {
+      if (cancelled) return;
       const next = {};
       for (const [kind, id] of Object.entries(jobIds)) {
         if (!id) continue;
@@ -197,8 +206,15 @@ export const SyncJobsProvider = ({ children }) => {
         if (cached?.data) next[kind] = cached.data;
       }
       setJobs((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    };
+    const unsubscribe = qc.getQueryCache().subscribe((event) => {
+      if (event?.query?.queryKey?.[0] !== 'sync-job') return;
+      queueMicrotask(mirror);
     });
-    return unsubscribe;
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, [qc, jobIds]);
 
   const clear = (kind) => {
