@@ -34,6 +34,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
+import { TAX_OPTIONS, getTaxOption, lineTaxLabel, computeLineAmounts } from '../../utils/orderLines';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
 // paper/spreadsheet-styled "Order Intake Details" block (label-left rows,
@@ -240,44 +241,6 @@ const PAYMENT_TERMS_SUGGESTIONS = [
 // VAT-Exempt both compute to ₱0 tax but are kept as distinct choices since
 // they mean different things for Finance's own records — which one applies
 // isn't something this form should guess, so nothing is pre-selected.
-const TAX_OPTIONS = [
-  { value: 'none', label: 'No Tax', percent: 0 },
-  { value: 'vat12', label: 'VAT 12%', percent: 12 },
-  { value: 'zero_rated', label: 'Zero-Rated (0%)', percent: 0 },
-  { value: 'vat_exempt', label: 'VAT-Exempt', percent: 0 }
-];
-const getTaxOption = (value) => TAX_OPTIONS.find((t) => t.value === value) || TAX_OPTIONS[0];
-
-// Sep 14, 2026: a line's tax as Zoho has it for that item — "Vat (12%)",
-// "No Tax (0%)" — or, for a product not yet pulled from Zoho, the old preset.
-const lineTaxLabel = (item) =>
-  item.taxLabel != null
-    ? `${item.taxLabel}${item.taxPercent != null ? ` (${Number(item.taxPercent)}%)` : ''}`
-    : getTaxOption(item.taxOption).label;
-
-/**
- * Sep 14, 2026: mirrors the backend's services/lineAmounts.js exactly — the
- * server recomputes every total, so any difference here would show one amount
- * on the form and store another.
- *
- *   exclusive  VAT is added on top of the discounted line
- *   inclusive  the rate already contains VAT; the tax is the part that is VAT
- */
-const computeLineAmounts = (item, inclusive = false) => {
-  const qty = Number(item.quantity) || 0;
-  const rate = Number(item.rate) || 0;
-  const subtotal = qty * rate;
-  const discount = Math.min(subtotal, Math.max(0, Number(item.discount) || 0));
-  const net = subtotal - discount;
-  const taxPercent = item.taxPercent != null ? Number(item.taxPercent) : getTaxOption(item.taxOption).percent;
-  if (inclusive) {
-    const taxAmount = taxPercent > 0 ? (net * taxPercent) / (100 + taxPercent) : 0;
-    return { subtotal, discount, taxAmount, amount: net };
-  }
-  const taxAmount = net * (taxPercent / 100);
-  return { subtotal, discount, taxAmount, amount: net + taxAmount };
-};
-
 // Shared field wrapper — label on top, optional required marker and helper
 // text underneath. Used throughout the redesigned "Order Details" card so
 // every field reads the same way instead of the old spreadsheet grid.

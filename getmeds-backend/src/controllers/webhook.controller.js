@@ -8,6 +8,7 @@ const { diffSalesOrderFields, summarizeChanges } = require('../services/zohoEdit
 // whichever event happened to be last. See both services for the full why.
 const { setOrderStatus, advanceTo } = require('../services/orderStatusService');
 const { evaluateCompletion } = require('../services/orderCompletionService');
+const { syncLineItemsFromZoho } = require('../services/zohoLineSyncService');
 
 /**
  * Validates optional Zoho Webhook secret / token.
@@ -985,6 +986,16 @@ exports.handleZohoWebhook = async (req, res, next) => {
             metadata: { rawEvent, zohoSoId, changes, zohoStatus: { from: previousZohoStatus, to: liveZohoStatus } }
           });
         })();
+
+        // Sep 14, 2026: the line items and the total. The diff above covers
+        // seven header fields only, so an item swapped or re-priced in Zoho
+        // was logged as "edited" while the order kept its old lines. Uses the
+        // Sales Order already re-fetched above. See zohoLineSyncService.js.
+        try {
+          await syncLineItemsFromZoho({ order, salesorder: liveSalesOrder, actorName: 'Zoho Webhook' });
+        } catch (syncErr) {
+          console.error('[ZOHO_WEBHOOK] line-item sync failed:', syncErr.message);
+        }
 
         if (changes.length || zohoStatusChanged) {
           const financeIds = await getUserIdsByRole('finance');

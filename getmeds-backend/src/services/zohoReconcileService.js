@@ -13,6 +13,7 @@ const { diffSalesOrderFields, summarizeChanges } = require('./zohoEditDiffServic
 // raised on 31 Jan showed Confirmed / Invoiced / Paid / Packed all at 08:08 on
 // 10 Sep — a log of when this app looked, not of what happened.
 const { firstIso, notBefore } = require('./zohoDates');
+const { syncLineItemsFromZoho } = require('./zohoLineSyncService');
 
 /** The later of two ISO timestamps, ignoring nulls. */
 function latestOf(...isos) {
@@ -312,6 +313,17 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       })();
 
       if (fieldChanges.length) action = 'EDIT_BACKFILLED';
+    }
+
+    // Sep 14, 2026: the line items and the total, which the field diff above
+    // has never covered — an item swapped or re-priced in Zoho left this order
+    // showing the old lines forever. See services/zohoLineSyncService.js.
+    // Best-effort: a failure here must not stop the status chain below.
+    try {
+      const itemSync = await syncLineItemsFromZoho({ order, salesorder, actorName: ZOHO_ACTOR });
+      if (itemSync === 'synced' && action === 'NOTHING_NEW') action = 'ITEMS_SYNCED';
+    } catch (syncErr) {
+      console.error(`[ZOHO_RECONCILE] line-item sync failed for order ${order.id}:`, syncErr.message);
     }
 
     if (isConfirmed && !(await alreadyLogged('ZOHO_SO_CONFIRMED'))) {

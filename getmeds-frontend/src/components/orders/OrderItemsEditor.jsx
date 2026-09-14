@@ -1,0 +1,263 @@
+import React from 'react';
+import { Trash2, AlertCircle } from 'lucide-react';
+import ProductAutocomplete from './ProductAutocomplete';
+import { TAX_OPTIONS, computeLineAmounts } from '../../utils/orderLines';
+
+/**
+ * Edit an existing order's lines, in the same table the order form uses.
+ *
+ * Sep 14, 2026. The order page's editor was a stack of cards — a product
+ * search per line, a quantity box, and (for Management) separate price and
+ * discount boxes underneath — with a total that ignored tax. Editing an order
+ * should look like raising one, so this is the form's table: search and add on
+ * top, then Qty / Rate / Discount / Tax / Amount per line, and the same
+ * Subtotal / Discount / Tax / Grand Total footer.
+ *
+ * Priced by utils/orderLines.js, the same arithmetic the form and the server
+ * use, under the ORDER's own tax preference — the server re-prices an edit
+ * that way (updateItems), so the preference is shown here, not offered as a
+ * choice that would not stick.
+ *
+ * Stateless: the page owns the draft rows and passes changes back up, so the
+ * existing keystroke rules (keep what is typed, settle on blur) and the save
+ * path are untouched.
+ */
+
+const peso = (n) =>
+  `₱${Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const inputClass =
+  'text-center border border-slate-300 rounded py-1 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue';
+
+// The tax a line carries: the item's own Zoho tax once known, e.g. "Vat (12%)".
+const rowTaxLabel = (row) => {
+  const pct = Number(row.tax_percent) || 0;
+  if (row.tax_label) return `${row.tax_label} (${pct}%)`;
+  return pct > 0 ? `VAT ${pct}%` : 'No Tax';
+};
+
+const OrderItemsEditor = ({
+  rows,
+  products,
+  inclusive,
+  canEditPrice,
+  activeProductIds,
+  onChange,
+  onBlurField,
+  onRemove,
+  onAdd,
+  onCancel,
+  onSave,
+  saving
+}) => {
+  const lines = rows.map((r) =>
+    computeLineAmounts({ quantity: r.quantity, rate: r.rate, discount: r.discount, taxPercent: r.tax_percent }, inclusive)
+  );
+  const totals = lines.reduce(
+    (acc, l) => ({
+      subtotal: acc.subtotal + l.subtotal,
+      discount: acc.discount + l.discount,
+      tax: acc.tax + l.taxAmount,
+      grand: acc.grand + l.amount
+    }),
+    { subtotal: 0, discount: 0, tax: 0, grand: 0 }
+  );
+  const hasInactive = rows.some((r) => !activeProductIds.has(String(r.product_id)));
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-getmeds-blue/5 border border-getmeds-blue/20 rounded-lg p-3 text-xs text-ink-secondary">
+        Editing items here only — nothing is sent to Zoho until the order syncs.
+        {hasInactive && ' A row in red is no longer an active product in Zoho: remove it and add a replacement before saving.'}
+      </div>
+
+      {/* Same search-and-add box as the order form. */}
+      <div className="bg-surface p-4 rounded-xl border border-slate-200/80">
+        <label className="block text-xs font-bold uppercase tracking-wider text-ink-primary mb-2">
+          Quick Product Search &amp; Add
+        </label>
+        <ProductAutocomplete
+          products={products}
+          onSelect={onAdd}
+          placeholder="Type to search medicine name, SKU, or category (e.g. Paracetamol, Amoxicillin)..."
+        />
+      </div>
+
+      {/* The order's tax preference, shown rather than offered: an edit is
+          re-priced under the preference the order was raised with. */}
+      <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+        <span className="text-[11px] text-ink-secondary">
+          {inclusive ? 'Rates already include VAT.' : 'VAT is added on top of the rates.'}
+        </span>
+        <span className="text-xs font-semibold text-ink-secondary">Item tax preference</span>
+        <span
+          title="Set when the order was raised"
+          className="border border-slate-200 bg-surface rounded-md py-1 px-2 text-xs font-semibold text-ink-primary"
+        >
+          {inclusive ? 'Tax Inclusive' : 'Tax Exclusive'}
+        </span>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="text-center py-8 border-2 border-dashed border-slate-200 rounded-xl bg-white text-ink-secondary text-sm">
+          No items. Use the search box above to add one.
+        </div>
+      ) : (
+        <div className="border border-slate-200 rounded-xl overflow-x-auto shadow-2xs">
+          <table className="min-w-full divide-y divide-slate-200 text-xs sm:text-sm">
+            <thead className="bg-surface">
+              <tr>
+                <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Item Details</th>
+                <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Qty</th>
+                <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Rate</th>
+                <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Discount</th>
+                <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Tax</th>
+                <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Amount</th>
+                <th className="px-3 py-3 w-12"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 bg-white">
+              {rows.map((row, idx) => {
+                const inactive = !activeProductIds.has(String(row.product_id));
+                return (
+                  <tr key={idx} className={inactive ? 'bg-state-error-light/40' : 'hover:bg-surface/50 transition-colors'}>
+                    <td className="px-4 py-3">
+                      <p className="font-semibold text-ink-primary whitespace-nowrap">{row.name}</p>
+                      <span className="text-[11px] font-mono text-ink-secondary">{row.sku}</span>
+                      {inactive && (
+                        <p className="text-[11px] text-red-700 mt-1 flex items-center gap-1 font-medium">
+                          <AlertCircle className="w-3.5 h-3.5" /> No longer active in Zoho
+                        </p>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 text-center">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={row.quantity}
+                        onChange={(e) => onChange(idx, 'quantity', e.target.value)}
+                        onBlur={() => onBlurField(idx, 'quantity')}
+                        onFocus={(e) => e.target.select()}
+                        className={`w-16 ${inputClass}`}
+                      />
+                    </td>
+                    {/* Price and discount: Management only. A MedRep sets the
+                        price when raising the order; changing it afterwards is
+                        Management's call. */}
+                    <td className="px-3 py-3 text-right">
+                      {canEditPrice ? (
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={row.rate}
+                          onChange={(e) => onChange(idx, 'rate', e.target.value)}
+                          onBlur={() => onBlurField(idx, 'rate')}
+                          onFocus={(e) => e.target.select()}
+                          className={`w-24 !text-right px-1.5 ${inputClass}`}
+                        />
+                      ) : (
+                        <span className="font-semibold text-ink-primary">{peso(row.rate)}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {canEditPrice ? (
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={row.discount}
+                          onChange={(e) => onChange(idx, 'discount', e.target.value)}
+                          onBlur={() => onBlurField(idx, 'discount')}
+                          onFocus={(e) => e.target.select()}
+                          className={`w-20 !text-right px-1.5 ${inputClass}`}
+                        />
+                      ) : (
+                        <span className="text-ink-secondary">{peso(row.discount)}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 text-center">
+                      {/* The item's own Zoho tax. Only a product nobody has
+                          pulled from Zoho yet offers a choice — same rule as
+                          the order form. */}
+                      {row.taxUnknown ? (
+                        <select
+                          value={row.taxOption || 'none'}
+                          onChange={(e) => onChange(idx, 'taxOption', e.target.value)}
+                          className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                        >
+                          {TAX_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                        </select>
+                      ) : (
+                        <span className="inline-block rounded bg-surface border border-slate-200 px-1.5 py-1 text-[11px] font-semibold text-ink-primary whitespace-nowrap">
+                          {rowTaxLabel(row)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">
+                      {peso(lines[idx].amount)}
+                    </td>
+                    <td className="px-3 py-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => onRemove(idx)}
+                        title="Remove this line"
+                        className="text-slate-400 hover:text-red-600 p-1"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot className="bg-surface/80 border-t-2 border-slate-200">
+              <tr>
+                <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Subtotal</td>
+                <td colSpan={2} className="px-4 py-2 text-right font-semibold text-ink-primary font-mono text-xs">{peso(totals.subtotal)}</td>
+              </tr>
+              {totals.discount > 0 && (
+                <tr>
+                  <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Total Discount</td>
+                  <td colSpan={2} className="px-4 py-2 text-right font-semibold text-state-error font-mono text-xs">-{peso(totals.discount)}</td>
+                </tr>
+              )}
+              {totals.tax > 0 && (
+                <tr>
+                  <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">
+                    {inclusive ? 'Tax (included in the rates above)' : 'Total Tax'}
+                  </td>
+                  <td colSpan={2} className={`px-4 py-2 text-right font-semibold font-mono text-xs ${inclusive ? 'text-ink-secondary' : 'text-ink-primary'}`}>
+                    {inclusive ? '' : '+'}{peso(totals.tax)}
+                  </td>
+                </tr>
+              )}
+              <tr>
+                <td colSpan={5} className="px-4 py-3.5 text-right font-bold text-ink-primary uppercase tracking-wider text-xs">Grand Total:</td>
+                <td colSpan={2} className="px-4 py-3.5 text-right font-extrabold text-getmeds-blue text-base font-mono">{peso(totals.grand)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-3 py-1.5 text-xs border border-slate-300 text-ink-secondary rounded hover:bg-surface"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={onSave}
+          className="px-3 py-1.5 text-xs font-semibold bg-getmeds-blue text-white rounded hover:bg-getmeds-blue-dark disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : 'Save Changes'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default OrderItemsEditor;

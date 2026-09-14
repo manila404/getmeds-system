@@ -13,6 +13,8 @@ import OrderPipeline from '../components/orders/OrderPipeline';
 import { useProducts } from '../hooks/useOrderData';
 import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
+import OrderItemsEditor from '../components/orders/OrderItemsEditor';
+import { TAX_OPTIONS } from '../utils/orderLines';
 
 // Sep 7, 2026 (2): mirrors orders.controller.js's / OrderForm.jsx's exact
 // lists for the new "Edit Details" panel below — kept as a duplicate
@@ -367,6 +369,45 @@ const OrderDetailPage = () => {
     }));
   };
 
+  // Sep 14, 2026: Management can change a line's price and discount before
+  // the order reaches Zoho. The server has always accepted both on this edit
+  // (orders.controller.js updateItems); the editor simply never offered them,
+  // so the only way to correct a price was to cancel and re-raise the order.
+  // Same keystroke rule as the order form: keep what is typed, settle on blur.
+  const updateDraftMoney = (index, field, value) => {
+    if (!/^\d*\.?\d{0,2}$/.test(value)) return;
+    setDraftItems((rows) => rows.map((row, i) => (i === index ? { ...row, [field]: value } : row)));
+  };
+
+  const normalizeDraftMoney = (index, field) => {
+    setDraftItems((rows) => rows.map((row, i) => {
+      if (i !== index) return row;
+      const n = Number(row[field]);
+      return { ...row, [field]: Number.isFinite(n) && n >= 0 ? n : 0 };
+    }));
+  };
+
+  // What a line comes to before any VAT the server adds on top. Numbers are
+  // coerced because a field mid-edit holds a string.
+  const draftNet = (row) =>
+    Math.max(0, (Number(row.quantity) || 0) * (Number(row.rate) || 0) - (Number(row.discount) || 0));
+
+  // Sep 14, 2026: the editor reports changes as (row, field, value); these
+  // route them to the existing keystroke rules above.
+  const changeDraftField = (index, field, value) => {
+    if (field === 'quantity') return updateDraftQuantity(index, value);
+    if (field === 'rate' || field === 'discount') return updateDraftMoney(index, field, value);
+    if (field === 'taxOption') {
+      const opt = TAX_OPTIONS.find((t) => t.value === value) || TAX_OPTIONS[0];
+      setDraftItems((rows) => rows.map((row, i) => (i === index
+        ? { ...row, taxOption: value, tax_percent: opt.percent, tax_label: opt.label }
+        : row)));
+    }
+    return undefined;
+  };
+  const blurDraftField = (index, field) =>
+    field === 'quantity' ? normalizeDraftQuantity(index) : normalizeDraftMoney(index, field);
+
   const removeDraftRow = (index) => {
     setDraftItems((rows) => rows.filter((_, i) => i !== index));
   };
@@ -374,7 +415,11 @@ const OrderDetailPage = () => {
   const addDraftProduct = (product) => {
     setDraftItems((rows) => [...rows, {
       product_id: product.id, name: product.name, sku: product.sku, unit: product.unit,
-      quantity: 1, rate: product.unit_price, discount: 0, tax_percent: 0, tax_label: null
+      quantity: 1, rate: product.unit_price, discount: 0,
+      // Sep 14, 2026: the item's own Zoho tax, as the order form uses. A product
+      // nobody has pulled from Zoho yet offers the old preset instead.
+      tax_percent: product.tax_percentage ?? 0, tax_label: product.tax_name ?? null,
+      taxUnknown: product.tax_percentage == null, taxOption: 'none'
     }]);
   };
 
@@ -387,8 +432,8 @@ const OrderDetailPage = () => {
     updateItemsMutation.mutate(draftItems.map((row) => ({
       product_id: row.product_id,
       quantity: Math.max(1, parseInt(row.quantity, 10) || 1),
-      rate: row.rate,
-      discount: row.discount,
+      rate: Number(row.rate) || 0,
+      discount: Number(row.discount) || 0,
       tax_percent: row.tax_percent,
       tax_label: row.tax_label
     })));
@@ -566,8 +611,16 @@ const OrderDetailPage = () => {
         {/* Order Details — Sep 7, 2026 (2): everything besides line items,
             editable in place before this order reaches Zoho. Same "only
             before Zoho exists" gate and Save/Cancel pattern as Edit Items
-            on the Items tab below. */}
-        {!order.zoho_so_id && ['draft', 'pending_management_approval'].includes(order.status) && (
+            on the Items tab below.
+
+            Sep 14, 2026: shown for ANY order Zoho does not have yet, not only
+            draft / awaiting approval — the server has allowed that since the
+            edit window became "until Zoho has it", so a held or
+            awaiting-Finance order that never synced (GM-20260913-0002) had an
+            edit the API would accept and no way to reach it. Finished orders
+            are still read-only. Once an order IS in Zoho, it is edited there
+            and the change is copied back automatically. */}
+        {!order.zoho_so_id && !['completed', 'cancelled', 'deleted'].includes(order.status) && (
           <div className="mt-4 pt-4 border-t border-gray-100">
             <div className="flex items-center justify-between mb-3">
               <p className="text-xs font-medium text-ink-secondary uppercase">Order Details</p>
@@ -862,11 +915,14 @@ const OrderDetailPage = () => {
               {!isEditingItems && (
                 <div className="flex items-center justify-between mb-3">
                   <p className="text-xs text-ink-secondary">
+                    {/* Sep 14, 2026: says where to go, not just "no". Edits made in
+                        Zoho are copied into these items and the total
+                        automatically (zohoLineSyncService). */}
                     {order.zoho_so_id
-                      ? 'Items can no longer be edited — a Zoho Sales Order already exists for this order.'
+                      ? `This order is in Zoho${order.zoho_so_number ? ` (${order.zoho_so_number})` : ''} — edit its items there. Changes made in Zoho are copied here automatically; use Sync from Zoho to pull them now.`
                       : ''}
                   </p>
-                  {!order.zoho_so_id && order.status !== 'cancelled' && (
+                  {!order.zoho_so_id && !['completed', 'cancelled', 'deleted'].includes(order.status) && (
                     <button
                       type="button"
                       onClick={() => startEditingItems(items)}
@@ -910,92 +966,21 @@ const OrderDetailPage = () => {
                   </tfoot>
                 </table>
               ) : (
-                <div className="space-y-3">
-                  <div className="bg-getmeds-blue/5 border border-getmeds-blue/20 rounded p-3 text-xs text-ink-secondary">
-                    Editing items locally only — nothing is sent to Zoho until you retry the sync. A row highlighted
-                    in red is no longer an active product in Zoho and must be replaced before saving.
-                  </div>
-
-                  {draftItems.map((row, index) => {
-                    const isInactive = !activeProductIds.has(String(row.product_id));
-                    return (
-                      <div
-                        key={index}
-                        className={`p-3 rounded border ${isInactive ? 'border-state-error/50 bg-state-error-light/30' : 'border-slate-200'}`}
-                      >
-                        <div className="flex items-start justify-between gap-2 mb-2">
-                          <div>
-                            <p className="text-sm font-semibold text-ink-primary">{row.name}</p>
-                            <p className="text-xs text-ink-secondary">SKU: {row.sku} · Unit: {row.unit}</p>
-                            {isInactive && (
-                              <p className="text-xs text-red-700 mt-1 flex items-center gap-1 font-medium">
-                                <AlertCircle className="w-3.5 h-3.5" /> No longer active in Zoho — pick a replacement below.
-                              </p>
-                            )}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => removeDraftRow(index)}
-                            className="text-red-600 hover:text-red-800 p-1"
-                            title="Remove this line"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-start">
-                          <div className="md:col-span-3">
-                            <ProductAutocomplete
-                              products={products}
-                              placeholder="Search to replace this product..."
-                              onSelect={(p) => replaceDraftProduct(index, p)}
-                            />
-                          </div>
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            value={row.quantity}
-                            onChange={(e) => updateDraftQuantity(index, e.target.value)}
-                            onBlur={() => normalizeDraftQuantity(index)}
-                            onFocus={(e) => e.target.select()}
-                            className="border border-slate-300 rounded-md px-2 py-2 text-sm w-full"
-                            placeholder="Qty"
-                          />
-                        </div>
-                        <p className="text-xs text-ink-secondary mt-1.5">
-                          {row.quantity} × ₱{Number(row.rate || 0).toFixed(2)} = <span className="font-semibold text-ink-primary">₱{(row.quantity * (row.rate || 0)).toFixed(2)}</span>
-                        </p>
-                      </div>
-                    );
-                  })}
-
-                  <div className="border border-dashed border-slate-300 rounded p-3">
-                    <p className="text-xs font-medium text-ink-secondary uppercase mb-1.5">Add another item</p>
-                    <ProductAutocomplete products={products} placeholder="Search products to add..." onSelect={addDraftProduct} />
-                  </div>
-
-                  <div className="flex items-center justify-between pt-2 border-t border-slate-200">
-                    <p className="text-sm font-semibold text-ink-primary">
-                      New Total: ₱{draftItems.reduce((sum, r) => sum + r.quantity * (r.rate || 0), 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-                    </p>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setIsEditingItems(false)}
-                        className="px-3 py-1.5 text-xs border border-slate-300 text-ink-secondary rounded hover:bg-surface"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="button"
-                        disabled={updateItemsMutation.isPending}
-                        onClick={saveDraftItems}
-                        className="px-3 py-1.5 text-xs font-semibold bg-getmeds-blue text-white rounded hover:bg-getmeds-blue-dark disabled:opacity-50"
-                      >
-                        {updateItemsMutation.isPending ? 'Saving...' : 'Save Changes'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                /* Sep 14, 2026: the same table as raising an order. */
+                <OrderItemsEditor
+                  rows={draftItems}
+                  products={products}
+                  inclusive={order.is_inclusive_tax == null ? true : Boolean(Number(order.is_inclusive_tax))}
+                  canEditPrice={isManagementUser}
+                  activeProductIds={activeProductIds}
+                  onChange={changeDraftField}
+                  onBlurField={blurDraftField}
+                  onRemove={removeDraftRow}
+                  onAdd={addDraftProduct}
+                  onCancel={() => setIsEditingItems(false)}
+                  onSave={saveDraftItems}
+                  saving={updateItemsMutation.isPending}
+                />
               )}
             </div>
           )}
