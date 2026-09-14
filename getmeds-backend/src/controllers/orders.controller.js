@@ -8,7 +8,6 @@ const zohoRetryService = require('../services/zohoRetryService');
 const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
 // Sep 12, 2026: under this switch a direct order also stops at so_created, for
 // Finance's Confirm order. See services/workflowV2Service.js.
-const { isWorkflowV2Enabled } = require('../services/workflowFlags');
 // Sep 1, 2026: syncFromZoho below is the manual mirror of every webhook
 // branch, so it uses the same two services the live handler does — status
 // writes through the state machine, and one shared shipped-AND-paid rule.
@@ -43,6 +42,8 @@ const { setCustomerTin } = require('../services/customerTinService');
 const salespersonService = require('../services/salespersonService');
 const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const { isTestModeEnabled } = require('../middleware/testMode');
+const { computeLine, parseInclusiveTax } = require('../services/lineAmounts');
+const { hasColumn } = require('../services/schemaColumns');
 
 // Sep 5, 2026 (3): mirrors auth.controller.js's SUB_DIVISIONS_BY_DIVISION
 // exactly — see that file's comment for why only these four Divisions have
@@ -1287,6 +1288,14 @@ exports.create = async (req, res, next) => {
     if (gateError) return res.status(403).json({ success: false, error: gateError });
 
     const resolvedCustomerType = customer.type || customer_type || 'direct';
+    // Sep 14, 2026: Zoho's "Item Tax Preference". Absent means INCLUSIVE.
+    // Read back from the live org: every Sales Order this app has created was
+    // priced by Zoho with VAT inside the rate, so an order that does not say
+    // otherwise is priced the way the customer is actually billed.
+    const taxPref = req.body.is_inclusive_tax;
+    const isInclusiveTax = taxPref === undefined || taxPref === null || taxPref === ''
+      ? true
+      : parseInclusiveTax(taxPref);
 
     // Calculate totals and validate products
     let total_amount = 0;
@@ -1328,11 +1337,18 @@ exports.create = async (req, res, next) => {
       // preset, e.g. "VAT 12%") — both default to zero/none, so an item
       // that doesn't send them produces line_total === subtotal, unchanged
       // from before this field existed.
-      const discountAmount = Math.min(subtotal, Math.max(0, Number(item.discount) || 0));
-      const taxPercent = Math.max(0, Number(item.tax_percent) || 0);
-      const taxableBase = subtotal - discountAmount;
-      const taxAmount = taxableBase * (taxPercent / 100);
-      const lineTotal = taxableBase + taxAmount;
+      // Sep 14, 2026: one helper for both create and updateItems, so the
+      // Tax Inclusive / Exclusive rule cannot drift between them.
+      // Sep 14, 2026 (2): the tax is the ITEM's own, as Zoho has it. Zoho
+      // applies the item's tax to a Sales Order line whatever the app sends,
+      // so the app mirrors it rather than trusting a per-line pick. Falls back
+      // to what the client sent only for a product not yet pulled from Zoho.
+      const { discountAmount, taxPercent, lineTotal } = computeLine({
+        subtotal,
+        discount: item.discount,
+        taxPercent: product.tax_percentage != null ? product.tax_percentage : item.tax_percent,
+        inclusive: isInclusiveTax
+      });
 
       total_amount += lineTotal;
       resolvedItems.push({
@@ -1342,7 +1358,7 @@ exports.create = async (req, res, next) => {
         subtotal,
         discount_amount: discountAmount,
         tax_percent: taxPercent,
-        tax_label: clean(item.tax_label),
+        tax_label: product.tax_name ? clean(product.tax_name) : clean(item.tax_label),
         line_total: lineTotal,
         sku: product.sku,
         name: product.name,
@@ -1399,9 +1415,14 @@ exports.create = async (req, res, next) => {
       // too. Dispatch invoices from this app under that switch, so this is
       // the one place anybody checks the price and the proof of payment
       // before the invoice is raised — and every order needs that.
-      : (requiresManagementApproval
-          ? 'pending_management_approval'
-          : ((isCredit || isWorkflowV2Enabled()) ? 'ready_for_finance_verified' : 'ready_for_draft_invoice'));
+      //
+      // Sep 14, 2026 (2): EVERY order goes to Finance now, switch or not. With
+      // the switch off, a direct order went straight to 'ready_for_draft_invoice'
+      // and nobody checked it after Management approved it (GM-20260914-0006).
+      // Approval is Management's decision about the order; Finance's check is
+      // about the customer's account and payment. Neither stands in for the
+      // other, so neither can be skipped.
+      : (requiresManagementApproval ? 'pending_management_approval' : 'ready_for_finance_verified');
     const now = new Date().toISOString();
     // "Sales Order Date (Automatic Today)" on the form — always set here,
     // server-side, to today's date. There is no client override; a
@@ -1458,6 +1479,9 @@ exports.create = async (req, res, next) => {
       total_amount,
       delivery_address,
       items: resolvedItems,
+      // Sep 14, 2026: the order's tax preference, so Zoho puts the item's VAT
+      // inside the rate or on top of it exactly as this app priced it.
+      is_inclusive_tax: isInclusiveTax,
       // Aug 30, 2026 (3): wired to Zoho's "Doctor Name" / "Source" custom
       // fields on the Sales Order (see LiveZohoAdapter.createSalesOrder —
       // confirmed live via ZohoInventory_get_sales_order that this org
@@ -1662,6 +1686,17 @@ exports.create = async (req, res, next) => {
       );
 
       const orderId = result.lastInsertRowid;
+
+      // Sep 14, 2026: the column is DEFAULT 0 (exclusive — how every order
+      // before this was priced here), so only an inclusive order needs the
+      // write. Guarded on the column existing, because this runs inside the
+      // order's transaction: in Postgres a failed statement aborts the whole
+      // transaction even when caught, so a deploy that lands before the
+      // migration must SKIP this write rather than attempt it. See
+      // services/schemaColumns.js.
+      if (isInclusiveTax && (await hasColumn('orders', 'is_inclusive_tax'))) {
+        await db.prepare('UPDATE orders SET is_inclusive_tax = 1 WHERE id = ?').run(orderId);
+      }
 
       // Insert line items
       const insItem = db.prepare(`
@@ -1928,6 +1963,10 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     total_amount: order.total_amount,
     delivery_address: order.delivery_address,
     items,
+    // Sep 14, 2026: the stored preference. Unknown (no column yet) is sent as
+    // nothing at all, so Zoho falls back to VAT inside the rate — which is
+    // also this app's default, so the two still agree.
+    is_inclusive_tax: order.is_inclusive_tax == null ? undefined : Boolean(Number(order.is_inclusive_tax)),
     // Same wiring as `create` above — pulled from the draft row this
     // order was created from rather than req.body, since this acts
     // on an already-stored draft.
@@ -2010,17 +2049,17 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // advance, so confirming in Zoho changed nothing. Credit orders are
     // now released by that webhook (see webhook.controller.js).
     //
-    // A DIRECT order still goes to 'ready_for_draft_invoice' — unchanged, so
-    // the Finance queue behaves exactly as before.
+    // (Until Sep 14, 2026 a DIRECT order went to 'ready_for_draft_invoice'
+    // here and skipped Finance. It now goes to Finance like every order.)
     const isCredit = (order.customer_type === 'credit' || order.customer_master_type === 'credit');
     // Sep 12, 2026: matches the create path above — a credit order goes
     // straight to Finance rather than waiting for someone to confirm the Sales
     // Order in Zoho. Two copies of this rule, and they have to agree.
     //
-    // Sep 14, 2026: and under GETMEDS_WORKFLOW_V2 a direct order goes to
-    // Finance too (see createOrder above).
-    const toFinance = isCredit || isWorkflowV2Enabled();
-    const finalStatus = toFinance ? 'ready_for_finance_verified' : 'ready_for_draft_invoice';
+    // Sep 14, 2026 (2): every order, direct or credit, switch or not — see the
+    // create path above. A direct order Management approved used to skip
+    // straight to invoicing here with no Finance check at all.
+    const finalStatus = 'ready_for_finance_verified';
 
     // Seed the Zoho-side status as 'draft'. Sep 1, 2026: without this
     // baseline, the first time anyone confirmed the SO in Zoho the
@@ -2066,9 +2105,11 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // Audit trail — log all status hops. Sep 1, 2026: the credit path now
     // ends at so_created; ready_for_dispatch is logged later, by the
     // salesorder.confirmed webhook that actually earns it.
-    const statusPath = toFinance
-      ? ['submitted', 'validating', 'so_pending', 'so_created']
-      : ['submitted', 'validating', 'so_pending', 'so_created', 'ready_for_draft_invoice'];
+    // Every order now ends these hops at so_created and is written straight to
+    // 'ready_for_finance_verified' above; the old branch that also logged a
+    // 'ready_for_draft_invoice' hop belonged to the direct path that skipped
+    // Finance, and went with it.
+    const statusPath = ['submitted', 'validating', 'so_pending', 'so_created'];
 
     // Sep 7, 2026: the hop BEFORE this one is either 'draft' (a direct
     // Management/admin submission) or 'pending_management_approval' (a
@@ -2788,6 +2829,13 @@ exports.updateItems = async (req, res, next) => {
     }
 
     const { items } = req.body;
+    // Sep 14, 2026: an edit re-prices under the order's OWN preference.
+    // Reading it from the request instead would let the first edit quietly
+    // put VAT on top of rates that already contained it. With no stored value
+    // (a database that has not run the migration) it reads as inclusive, the
+    // default — and only an order not yet in Zoho can be edited at all, which
+    // in practice means a new one.
+    const isInclusiveTax = order.is_inclusive_tax == null ? true : Boolean(Number(order.is_inclusive_tax));
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'At least one order item is required' } });
     }
@@ -2826,11 +2874,18 @@ exports.updateItems = async (req, res, next) => {
         : product.unit_price;
       const subtotal = rate * item.quantity;
 
-      const discountAmount = Math.min(subtotal, Math.max(0, Number(item.discount) || 0));
-      const taxPercent = Math.max(0, Number(item.tax_percent) || 0);
-      const taxableBase = subtotal - discountAmount;
-      const taxAmount = taxableBase * (taxPercent / 100);
-      const lineTotal = taxableBase + taxAmount;
+      // Sep 14, 2026: one helper for both create and updateItems, so the
+      // Tax Inclusive / Exclusive rule cannot drift between them.
+      // Sep 14, 2026 (2): the tax is the ITEM's own, as Zoho has it. Zoho
+      // applies the item's tax to a Sales Order line whatever the app sends,
+      // so the app mirrors it rather than trusting a per-line pick. Falls back
+      // to what the client sent only for a product not yet pulled from Zoho.
+      const { discountAmount, taxPercent, lineTotal } = computeLine({
+        subtotal,
+        discount: item.discount,
+        taxPercent: product.tax_percentage != null ? product.tax_percentage : item.tax_percent,
+        inclusive: isInclusiveTax
+      });
 
       total_amount += lineTotal;
       resolvedItems.push({
@@ -2840,7 +2895,7 @@ exports.updateItems = async (req, res, next) => {
         subtotal,
         discount_amount: discountAmount,
         tax_percent: taxPercent,
-        tax_label: (typeof item.tax_label === 'string' && item.tax_label.trim()) ? item.tax_label.trim() : null,
+        tax_label: product.tax_name || ((typeof item.tax_label === 'string' && item.tax_label.trim()) ? item.tax_label.trim() : null),
         line_total: lineTotal,
         name: product.name
       });

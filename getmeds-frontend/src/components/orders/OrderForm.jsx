@@ -248,16 +248,34 @@ const TAX_OPTIONS = [
 ];
 const getTaxOption = (value) => TAX_OPTIONS.find((t) => t.value === value) || TAX_OPTIONS[0];
 
-const computeLineAmounts = (item) => {
+// Sep 14, 2026: a line's tax as Zoho has it for that item — "Vat (12%)",
+// "No Tax (0%)" — or, for a product not yet pulled from Zoho, the old preset.
+const lineTaxLabel = (item) =>
+  item.taxLabel != null
+    ? `${item.taxLabel}${item.taxPercent != null ? ` (${Number(item.taxPercent)}%)` : ''}`
+    : getTaxOption(item.taxOption).label;
+
+/**
+ * Sep 14, 2026: mirrors the backend's services/lineAmounts.js exactly — the
+ * server recomputes every total, so any difference here would show one amount
+ * on the form and store another.
+ *
+ *   exclusive  VAT is added on top of the discounted line
+ *   inclusive  the rate already contains VAT; the tax is the part that is VAT
+ */
+const computeLineAmounts = (item, inclusive = false) => {
   const qty = Number(item.quantity) || 0;
   const rate = Number(item.rate) || 0;
-  const discount = Math.min(qty * rate, Math.max(0, Number(item.discount) || 0));
   const subtotal = qty * rate;
-  const taxableBase = subtotal - discount;
-  const taxPercent = getTaxOption(item.taxOption).percent;
-  const taxAmount = taxableBase * (taxPercent / 100);
-  const amount = taxableBase + taxAmount;
-  return { subtotal, discount, taxAmount, amount };
+  const discount = Math.min(subtotal, Math.max(0, Number(item.discount) || 0));
+  const net = subtotal - discount;
+  const taxPercent = item.taxPercent != null ? Number(item.taxPercent) : getTaxOption(item.taxOption).percent;
+  if (inclusive) {
+    const taxAmount = taxPercent > 0 ? (net * taxPercent) / (100 + taxPercent) : 0;
+    return { subtotal, discount, taxAmount, amount: net };
+  }
+  const taxAmount = net * (taxPercent / 100);
+  return { subtotal, discount, taxAmount, amount: net + taxAmount };
 };
 
 // Shared field wrapper — label on top, optional required marker and helper
@@ -430,6 +448,10 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
 
   // Cart State: [{ productId, name, sku, quantity, rate, discount, taxOption }]
   const [items, setItems] = useState([]);
+  // Sep 14, 2026: Zoho's "Item Tax Preference" for the whole order. Inclusive
+  // by default: read back from the live org, Zoho has priced every order this
+  // app sent with VAT inside the rate, so this is how customers are billed.
+  const [taxInclusive, setTaxInclusive] = useState(true);
 
   // Post-submission success state
   const [submittedOrder, setSubmittedOrder] = useState(null);
@@ -838,9 +860,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   const handleProductSelect = (product) => {
     const existingIndex = items.findIndex(i => String(i.productId) === String(product.id));
     if (existingIndex > -1) {
-      const updated = [...items];
-      updated[existingIndex].quantity += 1;
-      setItems(updated);
+      // A quantity mid-edit is a string now (see handleUpdateItemField), and
+      // "5" += 1 is "51" — so it is parsed before adding.
+      setItems((rows) => rows.map((row, i) => (i === existingIndex
+        ? { ...row, quantity: (parseInt(row.quantity, 10) || 0) + 1 }
+        : row)));
       toast.success(`Incremented quantity for ${product.name}`);
     } else {
       setItems([
@@ -853,7 +877,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           unit: product.unit || 'unit',
           quantity: 1,
           discount: 0,
-          taxOption: 'none'
+          taxOption: 'none',
+          // Sep 14, 2026: the item's own Zoho tax. Zoho applies THIS to the line
+          // whatever the app sends, so the form shows it instead of asking.
+          taxPercent: product.tax_percentage ?? null,
+          taxLabel: product.tax_name ?? null
         }
       ]);
       toast.success(`Added ${product.name} to order`);
@@ -862,20 +890,38 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
 
   // Generic per-line field updater — used by Quantity, Rate, Discount, and
   // Tax so all four share the exact same update/validation path.
+  /**
+   * Sep 14, 2026: keep what is typed; settle it when the field is left.
+   *
+   * This used to validate every keystroke. Clearing Qty produced "", which
+   * parses to NaN, so the change was refused and the field snapped straight
+   * back to 1 — the 1 could never be deleted. Rate and Discount turned "" into
+   * 0 on the spot, so their 0 could never be deleted either. Typing over a
+   * value is how everyone edits a number, and it was impossible here.
+   *
+   * Now any in-progress entry is allowed (digits only for Qty; digits and one
+   * decimal point for money), and handleNormalizeItemField below puts a blank
+   * or invalid value right when the field loses focus. Also immutable now: the
+   * old version edited the row objects inside state in place.
+   */
   const handleUpdateItemField = (index, field, value) => {
-    const updated = [...items];
-    if (field === 'quantity') {
-      const qty = parseInt(value, 10);
-      if (isNaN(qty) || qty < 1) return;
-      updated[index].quantity = qty;
-    } else if (field === 'rate' || field === 'discount') {
-      const num = value === '' ? 0 : Number(value);
-      if (isNaN(num) || num < 0) return;
-      updated[index][field] = num;
-    } else if (field === 'taxOption') {
-      updated[index].taxOption = value;
-    }
-    setItems(updated);
+    if (field === 'quantity' && !/^\d*$/.test(value)) return;
+    if ((field === 'rate' || field === 'discount') && !/^\d*\.?\d{0,2}$/.test(value)) return;
+    setItems((rows) => rows.map((row, i) => (i === index ? { ...row, [field]: value } : row)));
+  };
+
+  // A blank quantity becomes 1 and a blank rate or discount becomes 0 — the
+  // same values the old handler forced, but only once the person has finished.
+  const handleNormalizeItemField = (index, field) => {
+    setItems((rows) => rows.map((row, i) => {
+      if (i !== index) return row;
+      if (field === 'quantity') {
+        const q = parseInt(row.quantity, 10);
+        return { ...row, quantity: Number.isFinite(q) && q >= 1 ? q : 1 };
+      }
+      const n = Number(row[field]);
+      return { ...row, [field]: Number.isFinite(n) && n >= 0 ? n : 0 };
+    }));
   };
 
   const handleRemoveItem = (index) => {
@@ -1006,7 +1052,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // Step 3: Dynamic totals — Subtotal / Discount / Tax / Grand Total, each
   // summed from the per-line computation so the breakdown footer and the
   // Grand Total always agree with what each line actually shows.
-  const lineAmounts = items.map(computeLineAmounts);
+  const lineAmounts = items.map((i) => computeLineAmounts(i, taxInclusive));
   const totals = lineAmounts.reduce(
     (acc, l) => ({
       subtotal: acc.subtotal + l.subtotal,
@@ -1193,9 +1239,12 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           quantity: parseInt(i.quantity),
           rate: Number(i.rate),
           discount: Number(i.discount || 0),
-          tax_percent: getTaxOption(i.taxOption).percent,
-          tax_label: getTaxOption(i.taxOption).label
+          tax_percent: i.taxPercent != null ? Number(i.taxPercent) : getTaxOption(i.taxOption).percent,
+          tax_label: i.taxLabel != null ? i.taxLabel : getTaxOption(i.taxOption).label
         })),
+        // Sep 14, 2026: the order's tax preference. The server recomputes every
+        // line under it, so this is what decides the stored total.
+        is_inclusive_tax: taxInclusive,
         delivery_address: deliveryAddress,
         delivery_notes: deliveryNotes,
         customer_type: customerType,
@@ -2059,6 +2108,30 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
               </p>
             </div>
 
+            {/* Sep 14, 2026: Item Tax Preference, as on Zoho's own Sales Order.
+                One setting for the whole order, like Zoho's, rather than per
+                line: a single order mixing both would be one nobody could read
+                back. */}
+            {items.length > 0 && (
+              <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 mb-2">
+                <span className="text-[11px] text-ink-secondary">
+                  {taxInclusive ? 'Rates already include VAT.' : 'VAT is added on top of the rates.'}
+                </span>
+                <label htmlFor="tax-preference" className="text-xs font-semibold text-ink-secondary">
+                  Item tax preference
+                </label>
+                <select
+                  id="tax-preference"
+                  value={taxInclusive ? 'inclusive' : 'exclusive'}
+                  onChange={(e) => setTaxInclusive(e.target.value === 'inclusive')}
+                  className="border border-slate-300 rounded-md py-1 px-2 text-xs font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                >
+                  <option value="exclusive">Tax Exclusive</option>
+                  <option value="inclusive">Tax Inclusive</option>
+                </select>
+              </div>
+            )}
+
             {/* Cart Line Items Table */}
             {items.length === 0 ? (
               <div className="text-center py-10 border-2 border-dashed border-slate-200 rounded-xl bg-white text-ink-secondary text-sm">
@@ -2091,41 +2164,59 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                           </td>
                           <td className="px-3 py-3 text-center">
                             <input
-                              type="number"
-                              min="1"
+                              type="text"
+                              inputMode="numeric"
                               value={item.quantity}
                               onChange={e => handleUpdateItemField(idx, 'quantity', e.target.value)}
+                              onBlur={() => handleNormalizeItemField(idx, 'quantity')}
+                              onFocus={e => e.target.select()}
                               className="w-16 text-center border border-slate-300 rounded py-1 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
                             />
                           </td>
                           <td className="px-3 py-3 text-right">
                             <input
-                              type="number"
-                              min="0"
-                              step="0.01"
+                              type="text"
+                              inputMode="decimal"
                               value={item.rate}
                               onChange={e => handleUpdateItemField(idx, 'rate', e.target.value)}
+                              onBlur={() => handleNormalizeItemField(idx, 'rate')}
+                              onFocus={e => e.target.select()}
                               className="w-20 text-right border border-slate-300 rounded py-1 px-1.5 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
                             />
                           </td>
                           <td className="px-3 py-3 text-right">
                             <input
-                              type="number"
-                              min="0"
-                              step="0.01"
+                              type="text"
+                              inputMode="decimal"
                               value={item.discount}
                               onChange={e => handleUpdateItemField(idx, 'discount', e.target.value)}
+                              onBlur={() => handleNormalizeItemField(idx, 'discount')}
+                              onFocus={e => e.target.select()}
                               className="w-20 text-right border border-slate-300 rounded py-1 px-1.5 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
                             />
                           </td>
                           <td className="px-3 py-3 text-center">
-                            <select
-                              value={item.taxOption}
-                              onChange={e => handleUpdateItemField(idx, 'taxOption', e.target.value)}
-                              className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
-                            >
-                              {TAX_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                            </select>
+                            {/* Sep 14, 2026: the item's own Zoho tax, shown rather than
+                                picked. Zoho applies the item's tax to the line whatever
+                                the app sends, so a per-line choice here could only
+                                disagree with what the customer is billed. The old preset
+                                remains only for a product not yet pulled from Zoho. */}
+                            {item.taxLabel != null ? (
+                              <span
+                                title="Set on this item in Zoho"
+                                className="inline-block rounded bg-surface border border-slate-200 px-1.5 py-1 text-[11px] font-semibold text-ink-primary whitespace-nowrap"
+                              >
+                                {lineTaxLabel(item)}
+                              </span>
+                            ) : (
+                              <select
+                                value={item.taxOption}
+                                onChange={e => handleUpdateItemField(idx, 'taxOption', e.target.value)}
+                                className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                              >
+                                {TAX_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                              </select>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">
                             {peso(line.amount)}
@@ -2158,8 +2249,14 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                     )}
                     {totals.tax > 0 && (
                       <tr>
-                        <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Total Tax</td>
-                        <td colSpan={2} className="px-4 py-2 text-right font-semibold text-ink-primary font-mono text-xs">+{peso(totals.tax)}</td>
+                        {/* Inclusive: the VAT is already inside the amounts above,
+                            so it is shown for information and NOT added again. */}
+                        <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">
+                          {taxInclusive ? 'Tax (included in the rates above)' : 'Total Tax'}
+                        </td>
+                        <td colSpan={2} className={`px-4 py-2 text-right font-semibold font-mono text-xs ${taxInclusive ? 'text-ink-secondary' : 'text-ink-primary'}`}>
+                          {taxInclusive ? '' : '+'}{peso(totals.tax)}
+                        </td>
                       </tr>
                     )}
                     <tr>
@@ -2553,7 +2650,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                       <td className="px-2 py-2 text-center text-ink-primary font-bold">{item.quantity}</td>
                       <td className="px-3 py-2 text-right text-ink-secondary">{peso(item.rate)}</td>
                       <td className="px-3 py-2 text-right text-ink-secondary">{item.discount > 0 ? `-${peso(item.discount)}` : '—'}</td>
-                      <td className="px-3 py-2 text-center text-ink-secondary">{getTaxOption(item.taxOption).label}</td>
+                      <td className="px-3 py-2 text-center text-ink-secondary">{lineTaxLabel(item)}</td>
                       <td className="px-3 py-2 text-right font-bold text-ink-primary">
                         {peso(lineAmounts[idx].amount)}
                       </td>

@@ -186,6 +186,12 @@ CREATE TABLE IF NOT EXISTS products (
   unit TEXT DEFAULT 'pc',
   stock INTEGER DEFAULT 0 CHECK(stock >= 0),
   zoho_item_id TEXT,
+  -- Sep 14, 2026: the item's own sales tax, as Zoho has it. Zoho applies THIS
+  -- to a Sales Order line regardless of anything the app sends, so the app
+  -- reads it rather than asking the MedRep. Filled by the "Pull from Zoho" sync.
+  zoho_tax_id TEXT,
+  tax_name TEXT,
+  tax_percentage DOUBLE PRECISION,
   zoho_stock DOUBLE PRECISION,
   zoho_price DOUBLE PRECISION,
   last_synced_at TEXT,
@@ -208,6 +214,10 @@ CREATE TABLE IF NOT EXISTS orders (
   -- colleague's. NULL is the ordinary case (raised by its owner) and is NOT
   -- backfilled to medrep_id -- see reconcileOrderRaisedBy in migrate.pg.js.
   raised_by_id INTEGER REFERENCES users(id),
+  -- Sep 14, 2026: Zoho's "Item Tax Preference". 0 = Tax Exclusive (the rate is
+  -- before VAT, which is added on top), 1 = Tax Inclusive (the rate already
+  -- contains VAT). See services/lineAmounts.js.
+  is_inclusive_tax INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN (
     'draft', 'pending_management_approval', 'submitted', 'validating', 'so_pending', 'so_created',
     'ready_for_finance_verified', 'ready_for_draft_invoice',

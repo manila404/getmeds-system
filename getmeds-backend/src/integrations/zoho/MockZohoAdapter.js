@@ -125,6 +125,8 @@ class MockZohoAdapter extends ZohoAdapter {
     this._log('[ZOHO_MOCK] Would POST /inventory/v1/salesorders:', {
       customer_id: contact.contact_id,
       reference_number: orderData.getmeds_order_id,
+      // Mirrors Zoho: an order that states no preference is VAT-inclusive.
+      is_inclusive_tax: typeof orderData.is_inclusive_tax === 'boolean' ? orderData.is_inclusive_tax : true,
       line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity }))
     });
 

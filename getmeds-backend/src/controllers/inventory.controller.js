@@ -2,6 +2,7 @@ const db = require('../db/database');
 const zoho = require('../integrations/zoho');
 const syncJobs = require('../services/syncJobs');
 const { getSyncState, setSyncState } = require('../services/syncState');
+const { hasColumn } = require('../services/schemaColumns');
 
 /**
  * GET /api/inventory/status
@@ -143,9 +144,19 @@ async function reconcileItems(zohoItems, opts = {}) {
   // the literal "inactive" (including a missing status, e.g. the test
   // fixtures in fixtures.js, which don't all set one) as active, so this
   // never flips a product off just because a field was absent.
-  const updateStmt = db.prepare(`
-    UPDATE products SET stock = ?, zoho_stock = ?, zoho_price = ?, zoho_item_id = ?, is_active = ?, last_synced_at = datetime('now') WHERE id = ?
-  `);
+  // Sep 14, 2026: each item's Zoho sales tax rides along in the SAME
+  // statements, not a second UPDATE per item: this loop already costs one
+  // round trip per item against Supabase, and a separate tax write would
+  // double a sync that was cut four-fold to get here (see syncTx below).
+  //
+  // Only once the columns exist. A deploy ahead of the migration keeps the
+  // exact statements it had before, so "Pull from Zoho" never breaks on a
+  // column that is not there yet — see services/schemaColumns.js.
+  const withTax = await hasColumn('products', 'tax_percentage');
+  const updateStmt = db.prepare(withTax
+    ? `UPDATE products SET stock = ?, zoho_stock = ?, zoho_price = ?, zoho_item_id = ?, is_active = ?,
+              zoho_tax_id = ?, tax_name = ?, tax_percentage = ?, last_synced_at = datetime('now') WHERE id = ?`
+    : `UPDATE products SET stock = ?, zoho_stock = ?, zoho_price = ?, zoho_item_id = ?, is_active = ?, last_synced_at = datetime('now') WHERE id = ?`);
   // Sep 3, 2026: ON CONFLICT DO NOTHING, rather than letting the insert throw
   // and catching it.
   //
@@ -161,11 +172,14 @@ async function reconcileItems(zohoItems, opts = {}) {
   // through the remaining items — and then failed at COMMIT, losing the entire
   // sync. `sku` is the only UNIQUE column on this table, so naming it as the
   // conflict target covers exactly the case the catch was written for.
-  const insertStmt = db.prepare(`
-    INSERT INTO products (name, sku, unit_price, unit, stock, zoho_stock, zoho_price, zoho_item_id, is_active, last_synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-    ON CONFLICT (sku) DO NOTHING
-  `);
+  const insertStmt = db.prepare(withTax
+    ? `INSERT INTO products (name, sku, unit_price, unit, stock, zoho_stock, zoho_price, zoho_item_id, is_active,
+                             zoho_tax_id, tax_name, tax_percentage, last_synced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT (sku) DO NOTHING`
+    : `INSERT INTO products (name, sku, unit_price, unit, stock, zoho_stock, zoho_price, zoho_item_id, is_active, last_synced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT (sku) DO NOTHING`);
 
   let updatedCount = 0;
   let createdCount = 0;
@@ -223,6 +237,15 @@ async function reconcileItems(zohoItems, opts = {}) {
       const zohoPrice = item.rate ?? item.price ?? null;
       const isActiveFromZoho = item.status === 'inactive' ? 0 : 1;
 
+      // The item's own sales tax, exactly as Zoho reports it on the item list
+      // ("Vat" 12%, "No Tax" 0%). Zoho applies this to a Sales Order line
+      // whatever the app sends, so the order form mirrors it.
+      const taxId = item.tax_id ? String(item.tax_id) : null;
+      const taxName = item.tax_name || null;
+      const taxPct = item.tax_percentage === undefined || item.tax_percentage === null || item.tax_percentage === ''
+        ? null
+        : Number(item.tax_percentage);
+
       // Sep 3, 2026: `stock` is clamped at zero; `zoho_stock` is not.
       //
       // Zoho reports a NEGATIVE stock_on_hand for an oversold or backordered
@@ -251,7 +274,9 @@ async function reconcileItems(zohoItems, opts = {}) {
         // counted as newly deactivated a second time, exactly as the old
         // per-item re-read behaved.
         if (!isActiveFromZoho && existing.is_active) deactivatedCount++;
-        await updateStmt.run(localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, existing.id);
+        await updateStmt.run(...(withTax
+          ? [localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, taxId, taxName, taxPct, existing.id]
+          : [localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, existing.id]));
         existing.is_active = isActiveFromZoho;
         if (item.item_id) {
           existing.zoho_item_id = item.item_id;
@@ -271,9 +296,9 @@ async function reconcileItems(zohoItems, opts = {}) {
       const unitPrice = Number(zohoPrice ?? 0) || 0;
       const unit = item.unit || 'pc';
 
-      const ins = await insertStmt.run(
-        name, sku, unitPrice, unit, localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho
-      );
+      const ins = await insertStmt.run(...(withTax
+        ? [name, sku, unitPrice, unit, localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, taxId, taxName, taxPct]
+        : [name, sku, unitPrice, unit, localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho]));
       if (ins.changes > 0) {
         createdCount++;
         // Visible to the rest of this loop, same as the old per-item re-query

@@ -351,9 +351,20 @@ const OrderDetailPage = () => {
       : row));
   };
 
+  // Sep 14, 2026: same fix as the order form. This forced every keystroke
+  // through Math.max(1, Number(value) || 1), so clearing the field put 1 back
+  // before anything could be typed. Keep what is typed; settle it on blur.
   const updateDraftQuantity = (index, value) => {
-    const qty = Math.max(1, Number(value) || 1);
-    setDraftItems((rows) => rows.map((row, i) => i === index ? { ...row, quantity: qty } : row));
+    if (!/^\d*$/.test(value)) return;
+    setDraftItems((rows) => rows.map((row, i) => i === index ? { ...row, quantity: value } : row));
+  };
+
+  const normalizeDraftQuantity = (index) => {
+    setDraftItems((rows) => rows.map((row, i) => {
+      if (i !== index) return row;
+      const q = parseInt(row.quantity, 10);
+      return { ...row, quantity: Number.isFinite(q) && q >= 1 ? q : 1 };
+    }));
   };
 
   const removeDraftRow = (index) => {
@@ -375,7 +386,7 @@ const OrderDetailPage = () => {
     if (hasInactiveDraftRow) { toast.error('Replace the flagged item(s) before saving — they are no longer active in Zoho.'); return; }
     updateItemsMutation.mutate(draftItems.map((row) => ({
       product_id: row.product_id,
-      quantity: row.quantity,
+      quantity: Math.max(1, parseInt(row.quantity, 10) || 1),
       rate: row.rate,
       discount: row.discount,
       tax_percent: row.tax_percent,
@@ -940,10 +951,12 @@ const OrderDetailPage = () => {
                             />
                           </div>
                           <input
-                            type="number"
-                            min="1"
+                            type="text"
+                            inputMode="numeric"
                             value={row.quantity}
                             onChange={(e) => updateDraftQuantity(index, e.target.value)}
+                            onBlur={() => normalizeDraftQuantity(index)}
+                            onFocus={(e) => e.target.select()}
                             className="border border-slate-300 rounded-md px-2 py-2 text-sm w-full"
                             placeholder="Qty"
                           />

@@ -269,6 +269,14 @@ class LiveZohoAdapter extends ZohoAdapter {
       line_items: lineItems
     };
 
+    // Sep 14, 2026: Zoho's "Item Tax Preference" for the order, sent only when
+    // the order states one. Zoho applies each line's tax from the ITEM itself
+    // (this app mirrors that tax rather than sending its own), so this flag is
+    // the one thing that decides whether the VAT sits inside the rate or goes
+    // on top. Left out when unknown, so Zoho does what it has always done
+    // here: VAT inside the rate.
+    if (typeof orderData.is_inclusive_tax === 'boolean') body.is_inclusive_tax = orderData.is_inclusive_tax;
+
     // Sep 8, 2026: Delivery Method and Terms — plain top-level fields Zoho's
     // Sales Order create API already accepts; they were simply never set
     // here before, so nothing this app collected on the order form ever

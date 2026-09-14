@@ -251,7 +251,7 @@ describe('Workflow v2 — Finance', () => {
     expect(row.zoho_sync_status).not.toBe('failed');
   });
 
-  test('a direct order goes to Finance under the switch, and straight to invoicing without it', async () => {
+  test('a direct order goes to Finance, with the switch on or off', async () => {
     const raise = () => request(app).post('/api/orders').set(as(managementToken)).send({
       customer_id: customerId,
       medrep_id: medrepId,
@@ -270,8 +270,12 @@ describe('Workflow v2 — Finance', () => {
     };
 
     expect(await statusOf(await raise())).toBe('ready_for_finance_verified');
+    // Sep 14, 2026: this used to pin a direct order skipping Finance with the
+    // switch off. That is the gap GM-20260914-0006 fell through — approved by
+    // Management, then on to invoicing with nobody checking the account — so
+    // the rule is unconditional now, and so is this expectation.
     process.env.GETMEDS_WORKFLOW_V2 = 'false';
-    expect(await statusOf(await raise())).toBe('ready_for_draft_invoice');
+    expect(await statusOf(await raise())).toBe('ready_for_finance_verified');
   });
 });
 

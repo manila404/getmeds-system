@@ -165,7 +165,9 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(next).not.toHaveBeenCalled();
     const order = res.body.data.order;
     createdOrderIds.push(order.id);
-    expect(order.status).toBe('ready_for_draft_invoice');
+    // Sep 14, 2026: a direct order goes to Finance for verification, like
+    // every order — which is what this test's own title always said.
+    expect(order.status).toBe('ready_for_finance_verified');
     expect(order.zoho_sync_status).toBe('synced');
 
     const payment = await db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
@@ -188,7 +190,7 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
 
     const order = res.body.data.order;
     createdOrderIds.push(order.id);
-    expect(order.status).toBe('ready_for_draft_invoice'); // internal workflow is not gated on Zoho
+    expect(order.status).toBe('ready_for_finance_verified'); // internal workflow is not gated on Zoho
     expect(order.zoho_sync_status).toBe('failed');
     expect(order.zoho_so_id).toBeNull();
 
@@ -252,7 +254,7 @@ describe('orders.controller — Zoho call sequencing (create/submit)', () => {
     expect(submitRes.body.data.zoho_sync_status).toBe('failed');
 
     const reloaded = await db.prepare('SELECT * FROM orders WHERE id = ?').get(draftOrder.id);
-    expect(reloaded.status).toBe('ready_for_draft_invoice'); // advanced normally, not stuck in draft
+    expect(reloaded.status).toBe('ready_for_finance_verified'); // advanced normally, not stuck in draft
     expect(reloaded.zoho_sync_status).toBe('failed');
 
     const queued = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(draftOrder.id);

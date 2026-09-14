@@ -798,6 +798,38 @@ async function reconcileWorkflowV2Columns(client) {
   console.log('  ✔ workflow columns present (orders.action_claim*, dispatch_records Zoho ids and delivery)');
 }
 
+
+/**
+ * Sep 14, 2026: orders.is_inclusive_tax — Tax Exclusive (0) or Inclusive (1).
+ *
+ * Every existing order is exclusive, which is exactly what DEFAULT 0 says, so
+ * the column arrives already correct for all 60,000-odd rows. On Postgres 11+
+ * a constant default is recorded in the catalogue rather than written into
+ * each row, so this is instant on a large table.
+ */
+async function reconcileOrderTaxPreference(client) {
+  await client.query(
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_inclusive_tax INTEGER NOT NULL DEFAULT 0'
+  );
+  console.log('  ✔ orders.is_inclusive_tax present');
+}
+
+
+/**
+ * Sep 14, 2026: each product's Zoho sales tax (id, name, percentage).
+ *
+ * Zoho applies the ITEM's own tax to a Sales Order line and ignores anything
+ * this app sends for it, so the app mirrors the item's tax instead of asking
+ * the MedRep. Nullable: a product nobody has pulled from Zoho since this
+ * shipped simply has no tax recorded yet, and falls back to what it did before.
+ */
+async function reconcileProductTaxColumns(client) {
+  for (const [name, type] of [['zoho_tax_id', 'TEXT'], ['tax_name', 'TEXT'], ['tax_percentage', 'DOUBLE PRECISION']]) {
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ${name} ${type}`);
+  }
+  console.log('  ✔ products tax columns present');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -835,6 +867,8 @@ async function main() {
     await reconcileUserSalespersons(client);
     await reconcileOrderRaisedBy(client);
     await reconcileWorkflowV2Columns(client);
+    await reconcileOrderTaxPreference(client);
+    await reconcileProductTaxColumns(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`
