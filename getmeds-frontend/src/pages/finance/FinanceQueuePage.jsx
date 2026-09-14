@@ -184,6 +184,21 @@ const FinanceQueuePage = () => {
   // Which order's reject box is open, and what's been typed into it. Kept as
   // an id rather than a boolean so only one is ever open at a time.
   const [rejectingId, setRejectingId] = useState(null);
+
+  /**
+   * Sep 12, 2026: lifting a hold Finance itself applied.
+   *
+   * The MedRep already has a way back — attach or correct something and the
+   * order returns on its own. This is the other case: Finance holds an order,
+   * sorts the account out themselves, and would otherwise have to ask the rep
+   * to touch it just so it reappears on Finance's own queue.
+   *
+   * Same shape as the hold it undoes: an id for which row is open, and a
+   * reason, because an order that silently reappears with no account of why is
+   * worse than one that never left.
+   */
+  const [reopeningId, setReopeningId] = useState(null);
+  const [reopenReason, setReopenReason] = useState('');
   const [rejectReason, setRejectReason] = useState('');
 
   // Sep 4, 2026: proof of payment. Signed view URLs are short-lived and minted
@@ -232,6 +247,27 @@ const FinanceQueuePage = () => {
   const [checks, setChecks] = useState({});
   const toggleCheck = (id, key) =>
     setChecks((c) => ({ ...c, [id]: { ...c[id], [key]: !c[id]?.[key] } }));
+
+  const reopenMutation = useMutation({
+    mutationFn: ({ id, reason }) =>
+      client.post(`/api/finance/orders/${id}/reopen`, { reason }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Back in the queue for confirmation.');
+      setReopeningId(null);
+      setReopenReason('');
+      qc.invalidateQueries({ queryKey: ['finance-queue'] });
+      qc.invalidateQueries({ queryKey: ['finance-order-detail'] });
+    },
+    onError: (err) => {
+      // The server refuses a hold Finance did not apply, and says so in terms
+      // worth repeating verbatim — the fix is to talk to whoever held it.
+      toast.error(
+        err.response?.data?.error?.message ||
+          err.response?.data?.message ||
+          'Could not reopen this order.'
+      );
+    }
+  });
 
   const verifyMutation = useMutation({
     mutationFn: ({ id, approved, reason, pricesChecked, proofChecked }) =>
@@ -684,6 +720,8 @@ const FinanceQueuePage = () => {
               const confirmsOrder = needsVerification && workflowV2;
               const busy = isBusy(order.id);
               const rowChecks = checks[order.id] || {};
+              // Sep 12, 2026: a held order Finance can pull back itself.
+              const isHeld = order.status === 'on_hold';
               return (
                 <li key={order.id} className="p-4">
                   <div className="flex justify-between items-start gap-4">
@@ -840,6 +878,53 @@ const FinanceQueuePage = () => {
                       </div>
                     );
                   })()}
+
+                  {/* Sep 12, 2026: the way out of a hold Finance applied.
+                      The MedRep's way back is to attach or correct something,
+                      which leaves a record of WHAT changed; this one records
+                      why Finance decided the hold could be lifted. */}
+                  {isHeld && (
+                    <div className="mt-3">
+                      {reopeningId === order.id ? (
+                        <div className="rounded-md border border-getmeds-blue/40 bg-getmeds-blue/5 p-3 space-y-2">
+                          <label className="block text-xs font-semibold text-getmeds-blue-dark">
+                            Why is this going back for confirmation?
+                          </label>
+                          <textarea
+                            autoFocus
+                            rows={2}
+                            value={reopenReason}
+                            onChange={(e) => setReopenReason(e.target.value)}
+                            placeholder="e.g. spoke to the customer — payment posted in Zoho this morning"
+                            className="w-full text-sm rounded-md border border-getmeds-blue/40 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              disabled={!reopenReason.trim() || reopenMutation.isPending}
+                              onClick={() => reopenMutation.mutate({ id: order.id, reason: reopenReason.trim() })}
+                              className="px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold disabled:opacity-50"
+                            >
+                              {reopenMutation.isPending ? 'Reopening…' : 'Return for confirmation'}
+                            </button>
+                            <button
+                              onClick={() => { setReopeningId(null); setReopenReason(''); }}
+                              className="px-3 py-1.5 rounded-md border border-slate-200 text-xs font-semibold text-ink-secondary hover:bg-surface"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => { setReopeningId(order.id); setReopenReason(''); }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-getmeds-blue/40 text-getmeds-blue text-xs font-semibold hover:bg-getmeds-blue/5"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" /> Return for confirmation
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   {needsVerification && (
                     <div className="mt-3">

@@ -13,6 +13,7 @@ const zoho = require('../integrations/zoho');
 // test-customer switches every other write to Zoho does.
 const { isWorkflowV2Enabled } = require('../services/workflowFlags');
 const { zohoWriteMode } = require('../services/zohoWriteGuard');
+const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 
 
 // ─── Finance visibility (read-only) ────────────────────────────────────────
@@ -294,6 +295,89 @@ exports.getQueue = async (req, res, next) => {
       },
     });
   } catch (err) { next(err); }
+};
+
+/**
+ * Pull a held order back for another look.
+ *
+ * Sep 12, 2026. Finance can put an order on hold; until now only the MedRep
+ * could get it back, by attaching or correcting something (see
+ * services/financeHoldService.js). That left the obvious case with no route:
+ * Finance holds an order, sorts the account out themselves — rings the
+ * customer, finds the payment already posted, decides the balance is fine —
+ * and then has to ask the rep to touch the order so it reappears on their own
+ * queue. Every one of those is a person working around the software.
+ *
+ * Narrow in the same way the automatic return is: only a hold that Finance
+ * applied. A picking-and-packing hold is the warehouse's, and pulling it into
+ * the Finance queue would drag the order backwards through the pipeline.
+ *
+ * A reason is required. A hold was recorded with one, and an order that
+ * silently reappears in the queue with no account of why is worse than one
+ * that never left it.
+ */
+exports.reopenForVerification = async (req, res, next) => {
+  try {
+    const { reason } = req.body || {};
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Say why this is going back for verification — it goes on the order timeline.'
+        }
+      });
+    }
+
+    const order = await db
+      .prepare(
+        `SELECT o.*, c.name AS customer_name, u.id AS medrep_user_id
+           FROM orders o
+           LEFT JOIN customers c ON o.customer_id = c.id
+           LEFT JOIN users u ON o.medrep_id = u.id
+          WHERE o.id = ?`
+      )
+      .get(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    }
+
+    if (order.status !== 'on_hold') {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'NOT_ON_HOLD',
+          message: `This order is at "${order.status}", not on hold. There is nothing to reopen.`
+        }
+      });
+    }
+
+    const actor = await resolveActor(req);
+    const reopened = await returnToFinanceIfHeld(order, actor, {
+      reason: `Reopened by Finance: ${String(reason).trim()}`
+    });
+
+    // returnToFinanceIfHeld declines a hold somebody else applied. Said
+    // plainly rather than reported as a generic failure, because the fix is to
+    // talk to whoever put it on hold, not to try again.
+    if (!reopened) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'NOT_A_FINANCE_HOLD',
+          message:
+            'This hold was not applied by Finance, so it is not yours to lift. ' +
+            'The order timeline says who put it on hold and why.'
+        }
+      });
+    }
+
+    const updated = await db.prepare('SELECT status FROM orders WHERE id = ?').get(order.id);
+    res.json({ success: true, data: { status: updated.status, reopened: true } });
+  } catch (err) {
+    next(err);
+  }
 };
 
 // Payment details for a specific order — populated by the Zoho webhook once

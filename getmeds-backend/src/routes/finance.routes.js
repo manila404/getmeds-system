@@ -26,8 +26,21 @@ router.get('/orders/:id/payment', c.getPayment);
 // verification — checking the customer's account before an invoice is raised —
 // is the one stage Zoho has no record of, because it is a judgement about the
 // account rather than a document. So it is recorded here, by the person who
-// made it, and it writes only to this app; nothing is pushed to Zoho.
+// made it.
+//
+// Sep 12, 2026: it now also CONFIRMS the Sales Order in Zoho. The line that
+// used to end this note — "nothing is pushed to Zoho" — stopped being true.
+// Every Sales Order this app creates is a Draft, and a Draft cannot be
+// invoiced or packed, so a verification that pushed nothing released nothing.
+// See verifyAccount, and ZohoAdapter.confirmSalesOrder for why that write is
+// allowed where pack/ship/payment still are not.
 router.post('/orders/:id/verify', c.verifyAccount);
+
+// Sep 12, 2026: lift a hold Finance itself applied and put the order back in
+// the queue. The MedRep can already do this by attaching or correcting
+// something; this is for when Finance resolves the account themselves and
+// would otherwise have to ask the rep to touch the order so it reappears.
+router.post('/orders/:id/reopen', c.reopenForVerification);
 
 // Sep 4, 2026: proof of payment. Reject only — there is deliberately no
 // approve here.

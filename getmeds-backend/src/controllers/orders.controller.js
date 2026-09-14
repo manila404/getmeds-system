@@ -2506,10 +2506,26 @@ exports.updateDetails = async (req, res, next) => {
         }
       });
     }
-    if (!['draft', 'pending_management_approval'].includes(order.status)) {
+    /**
+     * Sep 12, 2026: editable until Zoho has it — the same rule updateItems
+     * uses, instead of a narrow list of two statuses.
+     *
+     * The two endpoints disagreed, and in the worse direction. A held order
+     * that had not reached Zoho would accept a change to its LINE ITEMS (the
+     * money) and refuse a change to its DETAILS. So a MedRep held with
+     * "walang shipment date" could edit the price but not add the shipment
+     * date they were being asked for (GM-20260912-0004).
+     *
+     * The Zoho guard above is the real boundary: once a Sales Order exists,
+     * editing here would silently diverge from the record everyone else works
+     * from. Before that, the order is this app's alone and a correction is
+     * exactly what should happen. Terminal statuses are still refused —
+     * cancelled and deleted orders are finished, whatever Zoho knows.
+     */
+    if (stateMachine.isTerminal(order.status)) {
       return res.status(409).json({
         success: false,
-        error: { code: 'CONFLICT', message: `Order is at "${order.status}" — details can only be edited while draft or awaiting Management approval.` }
+        error: { code: 'CONFLICT', message: `Order is ${order.status} — it can no longer be edited.` }
       });
     }
 
