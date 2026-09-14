@@ -71,6 +71,9 @@ async function buildZohoSalesOrderPayload(orderId) {
     // after a failed sync is picked up by the retry.
     division: order.medrep_division || null,
     sub_division: order.medrep_sub_division || null,
+    // Sep 14, 2026: Headquarter, from the order row (absent before the
+    // migration adds the column, and then simply not sent).
+    headquarter: order.headquarter || null,
     // Sep 8, 2026: Delivery Method and Terms — matches the shape create()/
     // submit() now send on the first attempt (see orders.controller.js),
     // so a retry sends the same fields rather than a stale, narrower shape.

@@ -403,6 +403,13 @@ class LiveZohoAdapter extends ZohoAdapter {
     if (orderData.sub_division) {
       customFields.push({ customfield_id: '2254168002003349006', value: orderData.sub_division });
     }
+    // Sep 14, 2026: "Headquarter" — read from this org via Zoho_Books
+    // list_custom_fields (entity=salesorder) the day it was wired:
+    //   cf_head_quarter (text, active, optional) -> 2254168002004671156
+    // Omitted when blank, like every custom field here.
+    if (orderData.headquarter) {
+      customFields.push({ customfield_id: '2254168002004671156', value: orderData.headquarter });
+    }
     // Sep 8, 2026 (3): "GM Lead ID" — confirmed live via Zoho_Books
     // list_custom_fields (entity=salesorder) that this org already has
     // cf_gm_lead_id configured (field_id 2254168000497964391, plain text,

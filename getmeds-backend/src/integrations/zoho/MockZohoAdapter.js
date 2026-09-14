@@ -176,6 +176,8 @@ class MockZohoAdapter extends ZohoAdapter {
         // Omitted entirely when blank, exactly as there.
         ...(orderData.division ? [{ label: 'Division', value: orderData.division }] : []),
         ...(orderData.sub_division ? [{ label: 'Sub-division', value: orderData.sub_division }] : []),
+        // Sep 14, 2026: mirrors LiveZohoAdapter's cf_head_quarter.
+        ...(orderData.headquarter ? [{ label: 'Headquarter', value: orderData.headquarter }] : []),
         // Sep 8, 2026 (3): mirrors LiveZohoAdapter's cf_gm_lead_id so a test
         // can assert what would have been sent. Omitted when blank, same
         // convention as every other custom field here.

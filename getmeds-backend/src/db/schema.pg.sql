@@ -218,6 +218,9 @@ CREATE TABLE IF NOT EXISTS orders (
   -- before VAT, which is added on top), 1 = Tax Inclusive (the rate already
   -- contains VAT). See services/lineAmounts.js.
   is_inclusive_tax INTEGER NOT NULL DEFAULT 0,
+  -- Sep 14, 2026: Zoho's "Headquarter" (cf_head_quarter) on the Sales Order.
+  -- Free text, per order, optional.
+  headquarter TEXT,
   status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN (
     'draft', 'pending_management_approval', 'submitted', 'validating', 'so_pending', 'so_created',
     'ready_for_finance_verified', 'ready_for_draft_invoice',

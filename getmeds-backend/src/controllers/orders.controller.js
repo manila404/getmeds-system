@@ -1091,6 +1091,9 @@ exports.create = async (req, res, next) => {
       // has (see medrepProfile below), so an older client that never sends
       // this field behaves unchanged.
       sub_division,
+      // Sep 14, 2026: Headquarter — Zoho's cf_head_quarter, a plain text
+      // field on this org's Sales Order. Optional; blank is not sent.
+      headquarter,
       // Sep 5, 2026 (4): Division and Salesperson, manually typed — see
       // effectiveDivision/effectiveSalesperson below. Honored ONLY when
       // req.user is Management (checked there, not here) — for a MedRep,
@@ -1227,6 +1230,8 @@ exports.create = async (req, res, next) => {
     // Not sent — fall back to the ordering account's own value, exactly the
     // behavior this endpoint had before Sub-division became editable here.
     const effectiveSubDivision = cleanSubDivision !== null ? cleanSubDivision : medrepProfile.sub_division;
+    // Sep 14, 2026: Headquarter is per order, with no account default.
+    const cleanHeadquarter = (typeof headquarter === 'string' && headquarter.trim()) ? headquarter.trim() : null;
 
     const ALLOWED_INVOICING_FROM = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 
@@ -1531,6 +1536,7 @@ exports.create = async (req, res, next) => {
       // always comes straight from their account.
       division: effectiveDivision,
       sub_division: effectiveSubDivision,
+      headquarter: cleanHeadquarter,
       // Sep 8, 2026: Delivery Method and Terms — collected on the form and
       // stored locally (intake_delivery_method/intake_terms) since Aug 30,
       // but never forwarded to Zoho until now. Both are plain top-level
@@ -1696,6 +1702,12 @@ exports.create = async (req, res, next) => {
       // services/schemaColumns.js.
       if (isInclusiveTax && (await hasColumn('orders', 'is_inclusive_tax'))) {
         await db.prepare('UPDATE orders SET is_inclusive_tax = 1 WHERE id = ?').run(orderId);
+      }
+      // Sep 14, 2026: Headquarter — same guard, same reason. Before the
+      // migration it still reaches Zoho (the payload above carries it); it is
+      // only not kept here.
+      if (cleanHeadquarter && (await hasColumn('orders', 'headquarter'))) {
+        await db.prepare('UPDATE orders SET headquarter = ? WHERE id = ?').run(cleanHeadquarter, orderId);
       }
 
       // Insert line items
@@ -1997,6 +2009,9 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // column (`order.sub_division` is NULL on any row from before the
     // migration that added it).
     sub_division: order.sub_division || order.medrep_sub_division || null,
+    // Sep 14, 2026: the draft row's own Headquarter (undefined before the
+    // migration adds the column, and then simply not sent).
+    headquarter: order.headquarter || null,
     // Sep 8, 2026: same wiring as `create` above — pulled from the draft
     // row's own intake columns, since this acts on an already-stored draft.
     delivery_method: order.intake_delivery_method || null,
@@ -2692,6 +2707,17 @@ exports.updateDetails = async (req, res, next) => {
       if (cleanSub !== null) {
         updates.sub_division = cleanSub;
         changedSummary.push(`Sub-division: ${order.sub_division || '(none)'} → ${cleanSub}`);
+      }
+    }
+
+    // Sep 14, 2026: Headquarter. Can be cleared, unlike Sub-division (which
+    // falls back to the account's). Skipped before the migration adds the
+    // column — writing to a missing one would fail the whole edit.
+    if (Object.prototype.hasOwnProperty.call(body, 'headquarter') && (await hasColumn('orders', 'headquarter'))) {
+      const cleanHq = clean(body.headquarter);
+      if ((order.headquarter || null) !== cleanHq) {
+        updates.headquarter = cleanHq;
+        changedSummary.push(`Headquarter: ${order.headquarter || '(none)'} → ${cleanHq || '(none)'}`);
       }
     }
 

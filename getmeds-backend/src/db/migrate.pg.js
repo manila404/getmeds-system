@@ -814,6 +814,12 @@ async function reconcileOrderTaxPreference(client) {
   console.log('  ✔ orders.is_inclusive_tax present');
 }
 
+/** Sep 14, 2026: orders.headquarter — Zoho's cf_head_quarter. Existing rows stay NULL. */
+async function reconcileOrderHeadquarter(client) {
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS headquarter TEXT');
+  console.log('  ✔ orders.headquarter present');
+}
+
 
 /**
  * Sep 14, 2026: each product's Zoho sales tax (id, name, percentage).
@@ -868,6 +874,7 @@ async function main() {
     await reconcileOrderRaisedBy(client);
     await reconcileWorkflowV2Columns(client);
     await reconcileOrderTaxPreference(client);
+    await reconcileOrderHeadquarter(client);
     await reconcileProductTaxColumns(client);
 
     const { rows } = await client.query(
