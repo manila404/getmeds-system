@@ -786,10 +786,25 @@ exports.getById = async (req, res, next) => {
       }
     }
 
+    // Sep 15, 2026: the last time Management sent this order back — who and
+    // why — for the order page's "Sent back by Management · Veronica" and,
+    // once resubmitted, Management's "this is a resubmission" note.
+    const lastSentBack = [...events].reverse().find((e) => e.event_type === 'MANAGEMENT_SENT_BACK');
+    let sentBackInfo = null;
+    if (lastSentBack) {
+      let reason = null;
+      try {
+        reason = JSON.parse(lastSentBack.metadata || '{}').reason || null;
+      } catch {
+        reason = null;
+      }
+      sentBackInfo = { by: lastSentBack.actor_name, at: lastSentBack.created_at, reason: reason || order.exception_reason || null };
+    }
+
     res.json({
       success: true,
       data: {
-        order: { ...order, resubmittable, entered_tracking: enteredTracking },
+        order: { ...order, resubmittable, entered_tracking: enteredTracking, sent_back: sentBackInfo },
         items,
         payment,
         dispatch,
@@ -2254,6 +2269,27 @@ exports.submit = async (req, res, next) => {
         UPDATE orders SET getmeds_order_id = ?, status = ?, submitted_at = ?, updated_at = ? WHERE id = ?
       `).run(getmedsOrderId, 'pending_management_approval', now, now, order.id);
 
+      // Sep 15, 2026: a RESUBMISSION after Management sent the order back.
+      // Said so on the trail and to Management, with what they asked to fix,
+      // so whoever approves knows to check that it was — an ordinary "needs
+      // your approval" read like a brand-new order.
+      const sentBack = await db
+        .prepare(
+          `SELECT actor_name, metadata FROM order_events
+            WHERE order_id = ? AND event_type = 'MANAGEMENT_SENT_BACK'
+            ORDER BY id DESC LIMIT 1`
+        )
+        .get(order.id);
+      let sentBackReason = null;
+      if (sentBack) {
+        try {
+          sentBackReason = JSON.parse(sentBack.metadata || '{}').reason || null;
+        } catch {
+          sentBackReason = null;
+        }
+        sentBackReason = sentBackReason || order.exception_reason || null;
+      }
+
       await logEvent({
         orderId: order.id,
         eventType: 'STATUS_CHANGE',
@@ -2261,9 +2297,15 @@ exports.submit = async (req, res, next) => {
         newStatus: 'pending_management_approval',
         actorId: req.user.id,
         actorName: req.user.name,
-        notes: req.user.role === 'medrep'
-          ? 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
-          : `Submitted by ${req.user.name} — B2B order, waiting for Management approval before syncing to Zoho.`
+        notes: sentBack
+          ? `Resubmitted by ${req.user.name} after Management (${sentBack.actor_name}) sent it back` +
+            `${sentBackReason ? ` for: ${sentBackReason}` : ''} — waiting for Management to re-check before syncing to Zoho.`
+          : req.user.role === 'medrep'
+            ? 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
+            : `Submitted by ${req.user.name} — B2B order, waiting for Management approval before syncing to Zoho.`,
+        metadata: sentBack
+          ? { resubmission: true, sent_back_by: sentBack.actor_name, sent_back_reason: sentBackReason }
+          : undefined
       });
 
       const orderDataForNotif = { getmeds_order_id: getmedsOrderId, customer_name: order.customer_name, status: 'pending_management_approval', medrep_email: order.medrep_email };
@@ -2280,8 +2322,11 @@ exports.submit = async (req, res, next) => {
       await notify({
         orderId: order.id,
         recipientIds: managementIds,
-        message: `Order ${getmedsOrderId} from ${order.medrep_name} needs your approval before it syncs to Zoho.`,
-        eventType: 'MANAGEMENT_APPROVAL_REQUIRED',
+        message: sentBack
+          ? `Order ${getmedsOrderId} from ${order.medrep_name} was RESUBMITTED after being sent back` +
+            `${sentBackReason ? ` (${sentBackReason})` : ''} — ready for your re-check.`
+          : `Order ${getmedsOrderId} from ${order.medrep_name} needs your approval before it syncs to Zoho.`,
+        eventType: sentBack ? 'ORDER_RESUBMITTED' : 'MANAGEMENT_APPROVAL_REQUIRED',
         orderData: orderDataForNotif
       });
 

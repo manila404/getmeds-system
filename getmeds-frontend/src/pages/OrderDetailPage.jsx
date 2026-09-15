@@ -15,6 +15,7 @@ import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 import OrderItemsEditor from '../components/orders/OrderItemsEditor';
 import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
+import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
 import { TRACKING_EDITABLE_STATUSES } from '../components/dispatch/DeliveryActions';
@@ -224,6 +225,8 @@ const OrderDetailPage = () => {
 
   // Sep 15, 2026: re-submit an order Finance held, with the reason.
   const [resubmitOpen, setResubmitOpen] = useState(false);
+  // Sep 15, 2026: the whole order on one screen, like the submission review.
+  const [overviewOpen, setOverviewOpen] = useState(false);
   const resubmitMutation = useMutation({
     mutationFn: (reason) => client.post(`/api/orders/${id}/resubmit`, { reason }).then(r => r.data),
     onSuccess: (res) => {
@@ -596,8 +599,16 @@ const OrderDetailPage = () => {
               {order.status?.replace(/_/g, ' ')}
             </span>
             <p className="text-xl font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
+            <button
+              type="button"
+              onClick={() => setOverviewOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-getmeds-blue/40 bg-white text-xs font-semibold text-getmeds-blue hover:bg-getmeds-blue/5"
+            >
+              📋 Order overview
+            </button>
           </div>
         </div>
+        {overviewOpen && <OrderOverviewModal order={order} items={items} onClose={() => setOverviewOpen(false)} />}
 
         {/* Delivery Info */}
         <div className="mt-4 pt-4 border-t border-gray-100 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
@@ -884,6 +895,16 @@ const OrderDetailPage = () => {
         {order.status === 'pending_management_approval' && ['management', 'admin'].includes(user?.role) && (
           <div className="mt-4 pt-4 border-t border-gray-100">
             <p className="text-xs font-medium text-ink-secondary uppercase mb-2">Management Approval</p>
+            {/* Sep 15, 2026: a resubmission, said so — with what was asked
+                for last time, so the check is "was that fixed?". */}
+            {order.sent_back && (
+              <p className="mb-2 rounded-md border border-getmeds-blue/30 bg-getmeds-blue/5 px-3 py-2 text-xs text-getmeds-blue-dark">
+                <span className="font-semibold">↩ Resubmitted for re-approval.</span>{' '}
+                Sent back earlier by {order.sent_back.by}
+                {order.sent_back.reason ? <> for: <span className="font-semibold">{order.sent_back.reason}</span></> : ''}
+                {' '}— check it was fixed.
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
               <button
                 disabled={approveMutation.isPending}
@@ -914,7 +935,13 @@ const OrderDetailPage = () => {
             or bounced back by Management) needs a way back through the
             gate. Same ownership rule as editing: the order's own MedRep,
             or Management/admin. */}
-        {order.status === 'draft' && (user?.id === order.medrep_id || ['management', 'admin'].includes(user?.role)) && (
+        {/* Sep 15, 2026: whoever raised the order may submit it too — the
+            server always allowed it (canEditOrder); only this button hid it,
+            so a rep who raised an order for a colleague and had it sent back
+            could not resubmit it. A sent-back draft resubmits from the
+            banner below instead. */}
+        {order.status === 'draft' && !order.sent_back &&
+          (user?.id === order.medrep_id || user?.id === order.raised_by_id || ['management', 'admin'].includes(user?.role)) && (
           <div className="mt-4 pt-4 border-t border-gray-100">
             <button
               disabled={submitMutation.isPending}
@@ -946,9 +973,26 @@ const OrderDetailPage = () => {
           <div className="mt-3 bg-state-warning-light border border-state-warning/30 rounded p-3 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2">
             <p>
               <span className="font-semibold">
-                {order.status === 'draft' ? 'Sent Back — What To Fix:' : 'Exception/Hold Reason:'}
+                {order.status === 'draft'
+                  ? order.sent_back
+                    ? `Sent back by Management · ${order.sent_back.by} — What To Fix:`
+                    : 'Sent Back — What To Fix:'
+                  : 'Exception/Hold Reason:'}
               </span> {order.exception_reason}
             </p>
+            {/* Sep 15, 2026: fix it, then send it back to Management from here.
+                They are told it is a resubmission, with this reason. */}
+            {order.status === 'draft' &&
+              (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+              <button
+                type="button"
+                disabled={submitMutation.isPending}
+                onClick={() => submitMutation.mutate()}
+                className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
+              >
+                {submitMutation.isPending ? 'Resubmitting…' : '↩ Resubmit to Management'}
+              </button>
+            )}
             {order.status === 'on_hold' && order.resubmittable &&
               (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
               <button

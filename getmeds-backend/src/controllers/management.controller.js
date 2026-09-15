@@ -191,8 +191,12 @@ exports.getAllOrders = async (req, res, next) => {
 
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
-    const orders = await db.prepare(`
+    const rows = await db.prepare(`
       SELECT o.*, c.name as customer_name, u.name as medrep_name,
+             -- Sep 15, 2026: the last time Management sent this order back,
+             -- so the approval queue can say "Resubmitted — sent back by
+             -- Veronica: Change source". See the mapping below.
+             sb.sent_back_by, sb.sent_back_at, sb.sent_back_meta,
              -- Sep 10, 2026: the OWNER'S ROLE, so the table can tell "assigned
              -- to a rep" from "still sitting with the admin who ran the
              -- import". Both look like a name in medrep_name; only the role
@@ -216,10 +220,28 @@ exports.getAllOrders = async (req, res, next) => {
       LEFT JOIN users u ON o.medrep_id = u.id
       LEFT JOIN payments p ON o.id = p.order_id
       LEFT JOIN dispatch_records d ON o.id = d.order_id
+      LEFT JOIN LATERAL (
+        SELECT e.actor_name AS sent_back_by, e.created_at AS sent_back_at, e.metadata AS sent_back_meta
+          FROM order_events e
+         WHERE e.order_id = o.id AND e.event_type = 'MANAGEMENT_SENT_BACK'
+         ORDER BY e.id DESC LIMIT 1
+      ) sb ON TRUE
       ${whereClause}
       ORDER BY o.created_at DESC
       LIMIT ? OFFSET ?
     `).all(...params, limit, offset);
+
+    // A resubmission is an order waiting for approval AGAIN after a Send
+    // Back. A draft that was sent back is not one yet — it has not come back.
+    const orders = rows.map(({ sent_back_by: by, sent_back_at: at, sent_back_meta: meta, ...o }) => {
+      let reason = null;
+      try {
+        reason = JSON.parse(meta || '{}').reason || null;
+      } catch {
+        reason = null;
+      }
+      return { ...o, resubmission: o.status === 'pending_management_approval' && by ? { by, at, reason } : null };
+    });
 
     // The count has to join customers too now — the search clause filters on
     // c.name, and counting over `orders o` alone would raise "missing FROM

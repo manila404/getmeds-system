@@ -126,6 +126,15 @@ const ApprovalQueuePage = () => {
                         {order.medrep_name}
                         {order.customer_type && <> · <span className="capitalize">{order.customer_type}</span></>}
                       </p>
+                      {/* Sep 15, 2026: a resubmission after Send Back — with
+                          what was asked for, so the check is "was it fixed?". */}
+                      {order.resubmission && (
+                        <p className="mt-1 inline-flex flex-wrap items-center gap-1 rounded-md border border-getmeds-blue/30 bg-getmeds-blue/5 px-2 py-0.5 text-[11px] text-getmeds-blue-dark">
+                          <span className="font-bold uppercase tracking-wide">↩ Resubmitted</span>
+                          — sent back by {order.resubmission.by}
+                          {order.resubmission.reason ? <>: <span className="font-semibold">{order.resubmission.reason}</span></> : ''}
+                        </p>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
