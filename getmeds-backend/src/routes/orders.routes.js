@@ -82,6 +82,10 @@ router.post('/:id/reject', requireRole('management', 'admin'), c.reject);
 // required) instead of on hold, so the MedRep (or Management) can fix it
 // with updateDetails/updateItems below and resubmit through the gate again.
 router.post('/:id/send-back', requireRole('management', 'admin'), c.sendBack);
+// Sep 15, 2026: the MedRep sends a Finance-held order back to Finance, with a
+// reason ("Proof of payment uploaded", or typed). Who may, and which holds,
+// is checked in the controller — see resubmit().
+router.post('/:id/resubmit', blockMedrepWritesOnImported, c.resubmit);
 // Sep 7, 2026 (2): edit order-level fields (delivery/intake info, Division,
 // Sub-division, Salesperson) — the non-items counterpart to PATCH
 // /:id/items below. No requireRole here either — same as that route, the

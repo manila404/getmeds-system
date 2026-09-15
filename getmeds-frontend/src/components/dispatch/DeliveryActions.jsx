@@ -22,6 +22,9 @@ export const TRACKING_HOLDABLE_STATUSES = [...CONFIRMABLE_STATUSES, 'dispatched'
 // Where Dispatch can attach a proof photo: from Finance's confirmation until
 // the order is done (paymentProof.controller.js DISPATCH_PROOF_STATUSES).
 export const DISPATCH_PROOF_STATUSES = [...TRACKING_HOLDABLE_STATUSES, 'tracking_shared', 'completed'];
+// Where a tracking number can be added or updated (dispatch.controller.js
+// TRACKING_EDITABLE) — the same span as the proof photo.
+export const TRACKING_EDITABLE_STATUSES = DISPATCH_PROOF_STATUSES;
 
 // The file types the server accepts (services/paymentProofStorage.js), minus
 // the office documents — a proof here is a photo or a scan.
@@ -153,7 +156,8 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, busy }) => {
     !order.tracking_number && !entered && TRACKING_HOLDABLE_STATUSES.includes(order.status);
   const canHold = Boolean(onHold) && trackingFree && !hold &&
     ((confirmed && !stale) || order.status === 'dispatched');
-  const canAddTracking = Boolean(onAddTracking) && trackingFree;
+  // Add, or update one Dispatch typed in earlier — never over Zoho's own.
+  const canAddTracking = Boolean(onAddTracking) && !order.tracking_number && TRACKING_EDITABLE_STATUSES.includes(order.status);
 
   // Sep 15, 2026: the proof photo. Several can be picked at once; they go up
   // one after another, and the toast says what reached Zoho.
@@ -252,7 +256,7 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, busy }) => {
           }`}
         >
           <PlayCircle className="w-3.5 h-3.5" />
-          Add tracking number
+          {entered ? 'Update tracking' : 'Add tracking number'}
         </button>
       )}
       {canHold && (

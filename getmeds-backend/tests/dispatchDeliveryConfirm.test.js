@@ -234,7 +234,7 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
       expect(events).toHaveLength(0);
     });
 
-    test('adding the number later ends the hold; after that it cannot be held or added again', async () => {
+    test('adding the number later ends the hold; after that it can be updated, but not held', async () => {
       const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
       await confirmWith(order.id, { hold: { reason: 'Waiting for waybill' } });
       const add = await request(app)
@@ -245,10 +245,33 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
       expect(add.body.data.tracking_hold).toBeNull();
       expect(add.body.data.entered_tracking.tracking_number).toBe('JT0001');
 
+      // Update: the latest counts, and the one it replaced is named.
       const again = await request(app).post(`/api/dispatch/orders/${order.id}/tracking`).set(auth()).send({ courier: 'J&T', tracking_number: 'JT0002' });
-      expect(again.body.error.code).toBe('HAS_TRACKING');
+      expect(again.status).toBe(200);
+      expect(again.body.data.entered_tracking.tracking_number).toBe('JT0002');
+      expect(again.body.data.message).toMatch(/updated/);
+      const notes = (await db.prepare("SELECT notes FROM order_events WHERE order_id = ? AND event_type = 'DISPATCH_TRACKING_ADDED' ORDER BY id").all(order.id)).map((e) => e.notes);
+      expect(notes[1]).toMatch(/updated by Dispatch: J&T JT0002 \(was J&T JT0001\)/);
+
       const holdAfter = await request(app).post(`/api/dispatch/orders/${order.id}/tracking-hold`).set(auth()).send({ reason: 'Waiting for waybill' });
       expect(holdAfter.body.error.code).toBe('HAS_TRACKING');
+    });
+
+    test('an order at "tracking shared" without a number can have one added, and the order page shows it', async () => {
+      // GM-20260914-0020: Zoho said tracking shared, courier Lalamove, no number.
+      const order = await orderAt('tracking_shared', { zohoSoId: `ZSO-${Date.now()}` });
+      const res = await request(app).post(`/api/dispatch/orders/${order.id}/tracking`).set(auth()).send({ courier: 'Lalamove', tracking_number: 'LLM-4455' });
+      expect(res.status).toBe(200);
+      const page = await request(app).get(`/api/orders/${order.id}`).set(auth());
+      expect(page.body.data.order.entered_tracking).toEqual(expect.objectContaining({ courier: 'Lalamove', tracking_number: 'LLM-4455' }));
+    });
+
+    test("Zoho's own tracking number is not overwritten here", async () => {
+      const order = await orderAt('tracking_shared', { zohoSoId: `ZSO-${Date.now()}` });
+      await db.prepare("INSERT INTO dispatch_records (order_id, status, courier, tracking_number) VALUES (?, 'dispatched', 'LBC', 'LBC-ZOHO-1')").run(order.id);
+      const res = await request(app).post(`/api/dispatch/orders/${order.id}/tracking`).set(auth()).send({ courier: 'LBC', tracking_number: 'OTHER' });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('HAS_ZOHO_TRACKING');
     });
   });
 

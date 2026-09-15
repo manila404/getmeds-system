@@ -52,24 +52,43 @@ const HELD_FROM = 'ready_for_finance_verified';
  *
  * @returns {Promise<boolean>} whether the order was moved.
  */
-async function returnToFinanceIfHeld(order, actor, { reason } = {}) {
+/**
+ * Which status was this hold applied from? The most recent move INTO on_hold
+ * that came from somewhere else — repeated 'on_hold -> on_hold' events (an
+ * upload while held) are excluded so they cannot mask it.
+ */
+async function heldFromStatus(orderId) {
+  const held = await db
+    .prepare(
+      `SELECT old_status
+         FROM order_events
+        WHERE order_id = ? AND new_status = 'on_hold' AND old_status <> 'on_hold'
+        ORDER BY id DESC
+        LIMIT 1`
+    )
+    .get(orderId);
+  return held?.old_status || null;
+}
+
+/**
+ * Is this order on hold BECAUSE OF FINANCE — the one kind of hold a MedRep's
+ * change (or their "Re-submit for verification", Sep 15, 2026) sends back?
+ */
+async function isFinanceHold(order) {
+  if (!order || order.status !== 'on_hold') return false;
+  return (await heldFromStatus(order.id)) === HELD_FROM;
+}
+
+/**
+ * `notes` / `notifyMessage` (Sep 15, 2026): the MedRep's explicit re-submit
+ * says why in their own words, rather than the "Order updated while on hold"
+ * this writes when an edit or an upload triggers it.
+ */
+async function returnToFinanceIfHeld(order, actor, { reason, notes, notifyMessage } = {}) {
   try {
     if (!order || order.status !== 'on_hold') return false;
 
-    // Which status was this hold applied from? The most recent move INTO
-    // on_hold that came from somewhere else — repeated 'on_hold -> on_hold'
-    // events (an upload while held) are excluded so they cannot mask it.
-    const held = await db
-      .prepare(
-        `SELECT old_status
-           FROM order_events
-          WHERE order_id = ? AND new_status = 'on_hold' AND old_status <> 'on_hold'
-          ORDER BY id DESC
-          LIMIT 1`
-      )
-      .get(order.id);
-
-    if (held?.old_status !== HELD_FROM) return false;
+    if ((await heldFromStatus(order.id)) !== HELD_FROM) return false;
     if (!stateMachine.canTransition(order.status, HELD_FROM)) return false;
 
     const moved = await setOrderStatus(order.id, order.status, HELD_FROM);
@@ -84,14 +103,14 @@ async function returnToFinanceIfHeld(order, actor, { reason } = {}) {
       actorName: actor?.name ?? 'System',
       // The status moved without anyone pressing a button that says so, which
       // is exactly when the timeline has to explain itself.
-      notes: `${reason || 'Order updated'} while on hold — returned to Finance for re-verification.`,
+      notes: notes || `${reason || 'Order updated'} while on hold — returned to Finance for re-verification.`,
       metadata: { trigger: reason || 'order_updated' },
     });
 
     await notify({
       orderId: order.id,
       recipientIds: await getUserIdsByRole('finance'),
-      message: `Order ${order.getmeds_order_id} was on hold and has been updated — ready for your re-check.`,
+      message: notifyMessage || `Order ${order.getmeds_order_id} was on hold and has been updated — ready for your re-check.`,
       eventType: 'RETURNED_TO_FINANCE',
       orderData: { ...order, status: HELD_FROM },
     });
@@ -106,4 +125,4 @@ async function returnToFinanceIfHeld(order, actor, { reason } = {}) {
   }
 }
 
-module.exports = { returnToFinanceIfHeld, HELD_FROM };
+module.exports = { returnToFinanceIfHeld, isFinanceHold, HELD_FROM };

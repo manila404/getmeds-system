@@ -25,8 +25,10 @@ const DeliveryConfirmModal = ({ order, mode = 'confirm', onClose, onSubmit, savi
   const hasTracking = Boolean(order.tracking_number || order.entered_tracking || order.tracking_hold);
   const askTracking = mode === 'tracking' || !hasTracking;
   const [choice, setChoice] = useState('add'); // 'add' | 'hold'
-  const [courier, setCourier] = useState(order.intake_delivery_method || '');
-  const [trackingNumber, setTrackingNumber] = useState('');
+  // Updating (Sep 15, 2026): starts from the number Dispatch entered before.
+  const entered = mode === 'tracking' ? order.entered_tracking : null;
+  const [courier, setCourier] = useState(entered?.courier || order.courier || order.intake_delivery_method || '');
+  const [trackingNumber, setTrackingNumber] = useState(entered?.tracking_number || '');
   const [reason, setReason] = useState(TRACKING_HOLD_REASONS[0]);
   const [otherReason, setOtherReason] = useState('');
   const [note, setNote] = useState('');
@@ -47,7 +49,11 @@ const DeliveryConfirmModal = ({ order, mode = 'confirm', onClose, onSubmit, savi
     <Modal
       isOpen
       onClose={onClose}
-      title={mode === 'tracking' ? `Add tracking number — ${order.getmeds_order_id}` : `Confirm ${order.getmeds_order_id} for delivery?`}
+      title={
+        mode === 'tracking'
+          ? `${entered ? 'Update' : 'Add'} tracking number — ${order.getmeds_order_id}`
+          : `Confirm ${order.getmeds_order_id} for delivery?`
+      }
     >
       {mode === 'confirm' && (
         <div className="rounded-lg border border-slate-200 bg-surface px-3 py-2.5 text-sm">

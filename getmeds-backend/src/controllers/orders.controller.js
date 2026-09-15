@@ -40,7 +40,7 @@ const { setCustomerTin } = require('../services/customerTinService');
 // name>", from sign-up) and the read-only check that Zoho actually knows that
 // name. Zoho has Salesperson as a mandatory Sales Order field here.
 const salespersonService = require('../services/salespersonService');
-const { returnToFinanceIfHeld } = require('../services/financeHoldService');
+const { returnToFinanceIfHeld, isFinanceHold } = require('../services/financeHoldService');
 const { isTestModeEnabled } = require('../middleware/testMode');
 const { computeLine, parseInclusiveTax } = require('../services/lineAmounts');
 const { hasColumn } = require('../services/schemaColumns');
@@ -761,10 +761,28 @@ exports.getById = async (req, res, next) => {
     // keeps working — and `timeline` is the derived pipeline view beside it.
     // Derived on read rather than stored, so re-tiering an event type later is
     // one edit to SPINE and every existing order re-reads correctly.
+    // Sep 15, 2026: whether the order page offers "Re-submit for
+    // verification" — only on a hold Finance put on. The endpoint checks the
+    // same thing again; this only decides whether to show the button.
+    const resubmittable = order.status === 'on_hold' ? await isFinanceHold(order) : false;
+
+    // Sep 15, 2026: the tracking number Dispatch typed in (the latest one),
+    // for the Dispatch tab — Zoho's own number is on `dispatch` above.
+    const lastTracking = [...events].reverse().find((e) => e.event_type === 'DISPATCH_TRACKING_ADDED');
+    let enteredTracking = null;
+    if (lastTracking) {
+      try {
+        const m = JSON.parse(lastTracking.metadata || '{}');
+        enteredTracking = { courier: m.courier || null, tracking_number: m.tracking_number || null, by: lastTracking.actor_name, at: lastTracking.created_at };
+      } catch {
+        enteredTracking = null;
+      }
+    }
+
     res.json({
       success: true,
       data: {
-        order,
+        order: { ...order, resubmittable, entered_tracking: enteredTracking },
         items,
         payment,
         dispatch,
@@ -2518,6 +2536,81 @@ exports.sendBack = async (req, res, next) => {
 
     const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     res.json({ success: true, data: { order: updatedOrder, status: newStatus } });
+  } catch (err) { next(err); }
+};
+
+// ─── RE-SUBMIT A HELD ORDER TO FINANCE (Sep 15, 2026) ──────────────────────
+//
+// Finance holds an order ("overdue invoices", "no proof of payment"); the
+// MedRep sorts it out. An upload or an edit already sends a Finance hold back
+// (services/financeHoldService.js), but a fix that happened OUTSIDE the order —
+// the customer paid the overdue balance, Finance's remittance shows the money —
+// changes nothing on it, so nothing sent it back: GM-20260915-0001 was held
+// twice and returned only when Finance reopened it themselves.
+//
+// This is the MedRep saying so, with the reason: picked ("Proof of payment
+// uploaded") or typed. Only a hold Finance put on — a warehouse or Management
+// hold is not Finance's to re-check, and is refused with who to ask instead.
+exports.resubmit = async (req, res, next) => {
+  try {
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Say why it is ready again, e.g. "Proof of payment uploaded".' }
+      });
+    }
+    if (reason.length > 500) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'The reason is too long (500 characters at most).' } });
+    }
+
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+
+    // The order's MedRep (or the colleague who raised it), and Management —
+    // not Finance (they have Reopen) and not Dispatch.
+    const role = String(req.user?.role || '').toLowerCase();
+    const allowed = role === 'management' || role === 'admin' || (role === 'medrep' && canActOnOrder(req.user, order));
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Only the MedRep on this order, or Management, can re-submit it.' }
+      });
+    }
+    if (order.status !== 'on_hold') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_ON_HOLD', message: `This order is not on hold — it is at "${order.status}".` }
+      });
+    }
+    if (!(await isFinanceHold(order))) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'NOT_FINANCE_HOLD',
+          message: 'This hold was not put on by Finance, so it cannot be re-submitted to them. Ask Management to release it.'
+        }
+      });
+    }
+
+    const actor = await resolveActor(req.user, role === 'medrep' ? 'medrep' : 'management');
+    const moved = await returnToFinanceIfHeld(order, actor, {
+      reason,
+      notes: `Re-submitted for verification by ${actor.name}: ${reason}`,
+      notifyMessage: `Order ${order.getmeds_order_id} was re-submitted by ${actor.name}: ${reason} — ready for your re-check.`
+    });
+    if (!moved) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_MOVED', message: 'The order could not be sent back to Finance. Refresh the page and try again.' }
+      });
+    }
+
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({
+      success: true,
+      data: { order: updatedOrder, status: updatedOrder.status, message: 'Re-submitted — back with Finance for verification.' }
+    });
   } catch (err) { next(err); }
 };
 

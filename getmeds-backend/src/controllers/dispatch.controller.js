@@ -40,6 +40,11 @@ const CONFIRMATION_JOIN = `
 // Lifted by "Tracking ready", and treated as lifted the moment the order has
 // a tracking number, however it got one (this app's Ship, or Zoho's webhook).
 const TRACKING_HOLDABLE = [...FINANCE_CONFIRMED, 'dispatched'];
+// Sep 15, 2026: a tracking number can be added or corrected a little longer
+// than it can be held — an order Zoho already marked "tracking shared" or
+// complete can still be missing the number (GM-20260914-0020: Lalamove, no
+// number), and Dispatch is who has it.
+const TRACKING_EDITABLE = [...TRACKING_HOLDABLE, 'tracking_shared', 'completed'];
 
 // The latest hold-related entry decides whether the tracking is on hold: a
 // hold, its release, or Dispatch adding the number (which ends a hold). And,
@@ -459,7 +464,10 @@ function parseHold(input) {
  * Its own event type, not TRACKING_ENTERED: that one means Zoho's shipment
  * reported a number, and the timeline reads it as the order having shipped.
  */
-async function recordTracking(order, actor, { courier, trackingNumber }) {
+async function recordTracking(order, actor, { courier, trackingNumber }, previous = null) {
+  // An update is another entry, and the latest one counts; the one it
+  // replaces stays on the timeline, named in this one's note.
+  const updating = Boolean(previous?.tracking_number);
   await logEvent({
     orderId: order.id,
     eventType: 'DISPATCH_TRACKING_ADDED',
@@ -467,10 +475,22 @@ async function recordTracking(order, actor, { courier, trackingNumber }) {
     newStatus: order.status,
     actorId: actor.id,
     actorName: actor.name,
-    notes: `Tracking number added by Dispatch: ${courier} ${trackingNumber}.`,
-    metadata: { courier, tracking_number: trackingNumber }
+    notes: updating
+      ? `Tracking number updated by Dispatch: ${courier} ${trackingNumber} (was ${previous.courier || ''} ${previous.tracking_number}).`
+      : `Tracking number added by Dispatch: ${courier} ${trackingNumber}.`,
+    metadata: {
+      courier,
+      tracking_number: trackingNumber,
+      ...(updating ? { previous: { courier: previous.courier, tracking_number: previous.tracking_number } } : {})
+    }
   });
-  await tellMedrep(order, `Order ${order.getmeds_order_id}: tracking number ${trackingNumber} (${courier}).`, 'DISPATCH_TRACKING_ADDED');
+  await tellMedrep(
+    order,
+    updating
+      ? `Order ${order.getmeds_order_id}: tracking number updated to ${trackingNumber} (${courier}).`
+      : `Order ${order.getmeds_order_id}: tracking number ${trackingNumber} (${courier}).`,
+    'DISPATCH_TRACKING_ADDED'
+  );
 }
 
 async function recordHold(order, actor, { reason, note }) {
@@ -550,20 +570,30 @@ exports.addTracking = async (req, res, next) => {
     const loaded = await loadForTracking(req.params.id);
     if (!loaded) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     const order = loaded.raw;
-    if (!TRACKING_HOLDABLE.includes(order.status)) {
+    if (!TRACKING_EDITABLE.includes(order.status)) {
       return res.status(409).json({
         success: false,
         error: {
           code: 'NOT_HOLDABLE',
-          message: `A tracking number can be added once Finance has confirmed the order and until it ships. This one is at "${order.status}".`
+          message: `A tracking number can be added once Finance has confirmed the order. This one is at "${order.status}".`
         }
       });
     }
-    const already = trackingAlready(loaded);
-    if (already) return res.status(409).json({ success: false, error: { code: 'HAS_TRACKING', message: already } });
+    // Zoho's own number (its shipment) is corrected in Zoho, not overlaid
+    // here — two numbers for one parcel would leave the MedRep guessing.
+    // One Dispatch typed in earlier CAN be corrected: that is "update".
+    if (order.tracking_number) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'HAS_ZOHO_TRACKING',
+          message: `This order has tracking number ${order.tracking_number} from its Zoho shipment. Change it in Zoho.`
+        }
+      });
+    }
 
     const actor = await resolveActor(req.user, 'dispatch');
-    await recordTracking(order, actor, t);
+    await recordTracking(order, actor, t, loaded.entered);
     const now = await loadForTracking(order.id);
     res.json({
       success: true,
@@ -571,7 +601,7 @@ exports.addTracking = async (req, res, next) => {
         id: order.id,
         entered_tracking: now.entered,
         tracking_hold: now.hold,
-        message: `${order.getmeds_order_id}: tracking ${t.trackingNumber} (${t.courier}) saved — the MedRep was told.`
+        message: `${order.getmeds_order_id}: tracking ${t.trackingNumber} (${t.courier}) ${loaded.entered ? 'updated' : 'saved'} — the MedRep was told.`
       }
     });
   } catch (err) { next(err); }

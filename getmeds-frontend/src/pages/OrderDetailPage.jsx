@@ -14,6 +14,9 @@ import { useProducts } from '../hooks/useOrderData';
 import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 import OrderItemsEditor from '../components/orders/OrderItemsEditor';
+import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
+import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
+import { TRACKING_EDITABLE_STATUSES } from '../components/dispatch/DeliveryActions';
 import { TAX_OPTIONS } from '../utils/orderLines';
 
 // Sep 7, 2026 (2): mirrors orders.controller.js's / OrderForm.jsx's exact
@@ -214,6 +217,32 @@ const OrderDetailPage = () => {
     queryKey: ['order', id],
     queryFn: () => client.get(`/api/orders/${id}`).then(r => r.data),
     refetchInterval: 15000
+  });
+
+  // Sep 15, 2026: re-submit an order Finance held, with the reason.
+  const [resubmitOpen, setResubmitOpen] = useState(false);
+  const resubmitMutation = useMutation({
+    mutationFn: (reason) => client.post(`/api/orders/${id}/resubmit`, { reason }).then(r => r.data),
+    onSuccess: (res) => {
+      toast.success(res?.data?.message || 'Re-submitted to Finance.');
+      setResubmitOpen(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not re-submit this order', { duration: 8000 })
+  });
+
+  // Sep 15, 2026: Dispatch adds or updates the tracking number from the
+  // Dispatch tab — saved on the order and sent to the MedRep; Zoho's own
+  // shipment number is changed in Zoho.
+  const [trackingOpen, setTrackingOpen] = useState(false);
+  const trackingMutation = useMutation({
+    mutationFn: (tracking) => client.post(`/api/dispatch/orders/${id}/tracking`, tracking).then(r => r.data),
+    onSuccess: (res) => {
+      toast.success(res?.data?.message || 'Tracking number saved.');
+      setTrackingOpen(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not save the tracking number', { duration: 8000 })
   });
 
   const exceptionMutation = useMutation({
@@ -907,12 +936,35 @@ const OrderDetailPage = () => {
             >⚠️ Mark Exception</button>
           </div>
         )}
-        {order.exception_reason && (
-          <div className="mt-3 bg-state-warning-light border border-state-warning/30 rounded p-3 text-xs text-amber-950">
-            <span className="font-semibold">
-              {order.status === 'draft' ? 'Sent Back — What To Fix:' : 'Exception/Hold Reason:'}
-            </span> {order.exception_reason}
+        {/* Sep 15, 2026: only while it still applies. exception_reason stays
+            on the row after a hold is cleared, so without this a verified
+            order kept showing "Exception/Hold Reason: n/a". */}
+        {order.exception_reason && ['on_hold', 'exception', 'draft'].includes(order.status) && (
+          <div className="mt-3 bg-state-warning-light border border-state-warning/30 rounded p-3 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2">
+            <p>
+              <span className="font-semibold">
+                {order.status === 'draft' ? 'Sent Back — What To Fix:' : 'Exception/Hold Reason:'}
+              </span> {order.exception_reason}
+            </p>
+            {order.status === 'on_hold' && order.resubmittable &&
+              (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+              <button
+                type="button"
+                onClick={() => setResubmitOpen(true)}
+                className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
+              >
+                ↩ Re-submit for verification
+              </button>
+            )}
           </div>
+        )}
+        {resubmitOpen && (
+          <ResubmitHoldModal
+            order={order}
+            onClose={() => setResubmitOpen(false)}
+            onSubmit={(reason) => resubmitMutation.mutate(reason)}
+            saving={resubmitMutation.isPending}
+          />
         )}
       </div>
 
@@ -1050,8 +1102,11 @@ const OrderDetailPage = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {[
                     ['Dispatch Status', <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold capitalize ${dispatch.status === 'dispatched' ? 'bg-getmeds-blue/15 text-getmeds-blue-dark border border-getmeds-blue/40' : 'bg-indigo-100 text-indigo-700'}`}>{dispatch.status}</span>],
-                    ['Courier', dispatch.courier || '—'],
-                    ['Tracking Number', dispatch.tracking_number ? <span className="font-mono font-bold text-getmeds-blue">{dispatch.tracking_number}</span> : '—'],
+                    ['Courier', dispatch.courier || order.entered_tracking?.courier || '—'],
+                    // Zoho's number first; else the one Dispatch typed in.
+                    ['Tracking Number', (dispatch.tracking_number || order.entered_tracking?.tracking_number)
+                      ? <span className="font-mono font-bold text-getmeds-blue">{dispatch.tracking_number || order.entered_tracking.tracking_number}</span>
+                      : '—'],
                     ['Dispatched At', dispatch.dispatched_at ? formatPHT(dispatch.dispatched_at) : '—'],
                     ['Notes', dispatch.dispatch_notes || '—'],
                   ].map(([label, val]) => (
@@ -1061,6 +1116,51 @@ const OrderDetailPage = () => {
                     </div>
                   ))}
                 </div>
+              )}
+
+              {/* Sep 15, 2026: the tracking number Dispatch typed in, and adding
+                  or updating it. Not over a number Zoho's shipment carries —
+                  that one is changed in Zoho. */}
+              {(() => {
+                const canEditTracking =
+                  ['dispatch', 'management', 'admin'].includes(user?.role) &&
+                  TRACKING_EDITABLE_STATUSES.includes(order.status) &&
+                  !dispatch?.tracking_number;
+                const entered = order.entered_tracking;
+                if (!entered && !canEditTracking) return null;
+                return (
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-teal-200 bg-teal-50/60 px-3 py-2.5">
+                    <div className="text-sm text-ink-primary">
+                      {entered ? (
+                        <>
+                          Tracking added by Dispatch: <span className="font-semibold">{entered.courier}</span> ·{' '}
+                          <span className="font-mono font-bold text-getmeds-blue">{entered.tracking_number}</span>
+                          <span className="text-xs text-ink-secondary"> ({entered.by}, {formatPHT(entered.at)})</span>
+                        </>
+                      ) : (
+                        <span className="text-ink-secondary">No tracking number yet.</span>
+                      )}
+                    </div>
+                    {canEditTracking && (
+                      <button
+                        type="button"
+                        onClick={() => setTrackingOpen(true)}
+                        className="px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
+                      >
+                        {entered ? 'Update tracking number' : 'Add tracking number'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+              {trackingOpen && (
+                <DeliveryConfirmModal
+                  order={{ ...order, courier: dispatch?.courier }}
+                  mode="tracking"
+                  onClose={() => setTrackingOpen(false)}
+                  onSubmit={({ tracking }) => trackingMutation.mutate(tracking)}
+                  saving={trackingMutation.isPending}
+                />
               )}
 
               {!['completed', 'cancelled'].includes(order.status) && (
