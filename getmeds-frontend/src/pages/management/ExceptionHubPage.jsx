@@ -15,12 +15,11 @@ import { format } from 'date-fns';
 import toast from 'react-hot-toast';
 import client from '../../api/client';
 import OrderStatusBadge from '../../components/ui/OrderStatusBadge';
+import ResumeOrderModal from '../../components/orders/ResumeOrderModal';
 
 const ExceptionHubPage = () => {
   const qc = useQueryClient();
   const [selectedOrder, setSelectedOrder] = useState(null);
-  const [resolutionStatus, setResolutionStatus] = useState('validating');
-  const [resolutionNotes, setResolutionNotes] = useState('');
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['exception-orders'],
@@ -33,27 +32,19 @@ const ExceptionHubPage = () => {
   // Filter only orders with exception / on_hold / cancelled status
   const exceptionOrders = allOrders.filter(o => ['on_hold', 'exception', 'cancelled'].includes(o.status));
 
+  // Sep 15, 2026: this used to send the chosen status to /exception, which
+  // turns anything but on_hold into "exception" — so "Release" re-marked the
+  // order as an Exception. It now resumes the order properly.
   const resolveMutation = useMutation({
-    mutationFn: ({ id, status, reason }) => client.patch(`/api/orders/${id}/exception`, { status, reason }).then(r => r.data),
-    onSuccess: () => {
-      toast.success('Order status updated successfully ✅');
+    mutationFn: ({ id, ...body }) => client.post(`/api/orders/${id}/resume`, body).then(r => r.data),
+    onSuccess: (res) => {
+      toast.success(`Order resumed — now ${String(res.data?.status || '').replace(/_/g, ' ')} ✅`);
       qc.invalidateQueries({ queryKey: ['exception-orders'] });
       qc.invalidateQueries({ queryKey: ['management-summary'] });
       setSelectedOrder(null);
-      setResolutionNotes('');
     },
-    onError: (err) => toast.error(err.response?.data?.error?.message || 'Failed to update order status')
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not resume the order')
   });
-
-  const handleResolveSubmit = (e) => {
-    e.preventDefault();
-    if (!selectedOrder) return;
-    resolveMutation.mutate({
-      id: selectedOrder.id,
-      status: resolutionStatus,
-      reason: resolutionNotes || 'Resolved by management in Exception Hub'
-    });
-  };
 
   const onHoldCount = exceptionOrders.filter(o => o.status === 'on_hold').length;
   const criticalExceptionCount = exceptionOrders.filter(o => o.status === 'exception').length;
@@ -178,15 +169,14 @@ const ExceptionHubPage = () => {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      <button
-                        onClick={() => {
-                          setSelectedOrder(order);
-                          setResolutionStatus(order.customer_type === 'direct' ? 'waiting_for_payment' : 'ready_for_dispatch');
-                        }}
-                        className="px-2.5 py-1 bg-getmeds-blue text-white rounded text-xs font-semibold hover:bg-getmeds-blue-hover shadow-sm"
-                      >
-                        Resolve / Release
-                      </button>
+                      {order.status !== 'cancelled' && (
+                        <button
+                          onClick={() => setSelectedOrder(order)}
+                          className="px-2.5 py-1 bg-getmeds-blue text-white rounded text-xs font-semibold hover:bg-getmeds-blue-hover shadow-sm"
+                        >
+                          ▶ Resume order
+                        </button>
+                      )}
                       <Link
                         to={`/orders/${order.id}`}
                         className="p-1.5 text-ink-secondary hover:text-ink-primary"
@@ -205,69 +195,12 @@ const ExceptionHubPage = () => {
 
       {/* Resolution Modal */}
       {selectedOrder && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 animate-in fade-in duration-150">
-          <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-200">
-            <div className="flex items-start justify-between pb-3 border-b border-slate-100">
-              <div>
-                <h3 className="text-lg font-bold text-ink-primary">
-                  Resolve Order {selectedOrder.getmeds_order_id}
-                </h3>
-                <p className="text-xs text-ink-secondary">{selectedOrder.customer_name}</p>
-              </div>
-              <OrderStatusBadge status={selectedOrder.status} />
-            </div>
-
-            <form onSubmit={handleResolveSubmit} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-ink-primary uppercase mb-1">
-                  Target Next Status *
-                </label>
-                <select
-                  value={resolutionStatus}
-                  onChange={e => setResolutionStatus(e.target.value)}
-                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
-                  required
-                >
-                  <option value="validating">Validating / Resubmit</option>
-                  <option value="waiting_for_payment">Waiting for Payment (Direct Patient)</option>
-                  <option value="ready_for_dispatch">Ready for Dispatch (Credit Account)</option>
-                  <option value="cancelled">Cancel Order Permanently</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-ink-primary uppercase mb-1">
-                  Resolution Reason / Action Audit *
-                </label>
-                <textarea
-                  value={resolutionNotes}
-                  onChange={e => setResolutionNotes(e.target.value)}
-                  placeholder="Explain why this order is being released or re-routed..."
-                  rows={3}
-                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
-                  required
-                />
-              </div>
-
-              <div className="flex justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedOrder(null)}
-                  className="px-4 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={resolveMutation.isPending}
-                  className="px-5 py-2 bg-pharmacy-green text-white rounded-md text-sm font-semibold hover:bg-pharmacy-green-hover shadow-sm disabled:opacity-50"
-                >
-                  {resolveMutation.isPending ? 'Updating...' : 'Save & Update Status'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <ResumeOrderModal
+          order={selectedOrder}
+          onClose={() => setSelectedOrder(null)}
+          onSubmit={(body) => resolveMutation.mutate({ id: selectedOrder.id, ...body })}
+          saving={resolveMutation.isPending}
+        />
       )}
     </div>
   );

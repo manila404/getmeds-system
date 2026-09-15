@@ -15,6 +15,7 @@ import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 import OrderItemsEditor from '../components/orders/OrderItemsEditor';
 import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
+import ResumeOrderModal from '../components/orders/ResumeOrderModal';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
@@ -157,7 +158,8 @@ const EVENT_LABELS = {
   DISPATCH_RELEASED: 'RELEASED BY DISPATCH',
   DISPATCH_HOLD: 'ON HOLD BY DISPATCH',
   DISPATCH_HOLD_LIFTED: 'DISPATCH HOLD LIFTED',
-  CUSTOMER_LINKED_TO_ZOHO: 'CUSTOMER LINKED TO ZOHO'
+  CUSTOMER_LINKED_TO_ZOHO: 'CUSTOMER LINKED TO ZOHO',
+  ORDER_RESUMED: 'RESUMED BY MANAGEMENT'
 };
 
 // "[SO-66881] INVOICE SENT". The Sales Order number comes from the order
@@ -188,7 +190,7 @@ const EVENT_ICONS = {
   DISPATCH_TRACKING_ADDED: '🚚', DISPATCH_PROOF_UPLOADED: '📸',
   DISPATCH_CATERED: '👤', DISPATCH_RELEASED: '↩️',
   DISPATCH_HOLD: '⏸️', DISPATCH_HOLD_LIFTED: '▶️',
-  CUSTOMER_LINKED_TO_ZOHO: '🔗'
+  CUSTOMER_LINKED_TO_ZOHO: '🔗', ORDER_RESUMED: '▶️'
 };
 
 const OrderDetailPage = () => {
@@ -258,6 +260,18 @@ const OrderDetailPage = () => {
     mutationFn: ({ status, reason }) => client.patch(`/api/orders/${id}/exception`, { status, reason }).then(r => r.data),
     onSuccess: () => { toast.success('Order status updated'); qc.invalidateQueries({ queryKey: ['order', id] }); },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Failed')
+  });
+
+  // Sep 15, 2026: take the order off Exception / On Hold so it can continue.
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const resumeMutation = useMutation({
+    mutationFn: (body) => client.post(`/api/orders/${id}/resume`, body).then(r => r.data),
+    onSuccess: (res) => {
+      toast.success(`Order resumed — now ${String(res.data?.status || '').replace(/_/g, ' ')}`);
+      setResumeOpen(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not resume the order')
   });
 
   // Manual fallback for a missed webhook — pulls this order's current Sales
@@ -958,7 +972,13 @@ const OrderDetailPage = () => {
 
         {/* Management actions */}
         {['management', 'admin'].includes(user?.role) && !['completed', 'cancelled'].includes(order.status) && (
-          <div className="mt-4 pt-4 border-t border-gray-100 flex gap-2">
+          <div className="mt-4 pt-4 border-t border-gray-100 flex flex-wrap gap-2">
+            {['on_hold', 'exception'].includes(order.status) && (
+              <button
+                onClick={() => setResumeOpen(true)}
+                className="px-3 py-1.5 text-xs font-semibold bg-pharmacy-green text-white rounded hover:opacity-90"
+              >▶ Resume order</button>
+            )}
             <button
               onClick={() => { const r = prompt('Reason for hold?'); if (r) exceptionMutation.mutate({ status: 'on_hold', reason: r }); }}
               className="px-3 py-1.5 text-xs border border-state-warning text-amber-800 rounded hover:bg-state-warning-light"
@@ -1018,6 +1038,14 @@ const OrderDetailPage = () => {
               lift the hold.
             </span>
           </div>
+        )}
+        {resumeOpen && (
+          <ResumeOrderModal
+            order={order}
+            onClose={() => setResumeOpen(false)}
+            onSubmit={(body) => resumeMutation.mutate(body)}
+            saving={resumeMutation.isPending}
+          />
         )}
         {resubmitOpen && (
           <ResubmitHoldModal

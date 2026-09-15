@@ -772,6 +772,8 @@ exports.getById = async (req, res, next) => {
     // verification" — only on a hold Finance put on. The endpoint checks the
     // same thing again; this only decides whether to show the button.
     const resubmittable = order.status === 'on_hold' ? await isFinanceHold(order) : false;
+    // Sep 15, 2026: where "Resume order" would take a held order back to.
+    const resumeTo = ['on_hold', 'exception'].includes(order.status) ? await statusBeforeHold(order.id) : null;
 
     // Sep 15, 2026: the tracking number Dispatch typed in (the latest one),
     // for the Dispatch tab — Zoho's own number is on `dispatch` above.
@@ -818,7 +820,7 @@ exports.getById = async (req, res, next) => {
     res.json({
       success: true,
       data: {
-        order: { ...order, resubmittable, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold },
+        order: { ...order, resubmittable, resume_to: resumeTo, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold },
         items,
         payment,
         dispatch,
@@ -2966,7 +2968,93 @@ exports.setException = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ─── EDIT ORDER ITEMS (Aug 31, 2026) ──────────────────────────────────────────
+// ─── RESUME A HELD ORDER (Sep 15, 2026) ───────────────────────────────────────
+//
+// Management can take an order out of Exception / On Hold so it can still be
+// processed (GM-20260915-0031 sat at Exception "waiting for additional
+// payment" with no way back — exception only led to on_hold or cancelled).
+// By default it goes back to the stage it was at before the hold, read from
+// the order's own trail; Management may pick another stage instead.
+//
+// Written directly rather than through the state machine: the machine's
+// on_hold/exception edges are for the normal flow (Finance verifying a held
+// order, and so on), while this is Management deciding where the order goes.
+// The choices are limited to live processing stages. Nothing is sent to Zoho —
+// putting an order on hold never touched Zoho either.
+const HOLD_STATUSES = ['on_hold', 'exception'];
+const FINANCE_STAGES = ['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent'];
+const DISPATCH_STAGES = ['ready_for_dispatch', 'picking_packing', 'dispatched', 'tracking_shared'];
+const RESUMABLE_TO = ['pending_management_approval', ...FINANCE_STAGES, ...DISPATCH_STAGES];
+
+// The status the order had when it went into its current hold — the entry
+// into the hold, so on_hold → exception → … still finds the stage before it.
+async function statusBeforeHold(orderId) {
+  const row = await db
+    .prepare(
+      `SELECT old_status FROM order_events
+        WHERE order_id = ? AND new_status IN ('on_hold', 'exception')
+          AND old_status IS NOT NULL AND old_status NOT IN ('on_hold', 'exception')
+        ORDER BY created_at DESC, id DESC LIMIT 1`
+    )
+    .get(orderId);
+  return row && RESUMABLE_TO.includes(row.old_status) ? row.old_status : null;
+}
+
+exports.resume = async (req, res, next) => {
+  try {
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, error: { code: 'REASON_REQUIRED', message: 'Say why the order can continue.' } });
+    }
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    if (!HOLD_STATUSES.includes(order.status)) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_HELD', message: `Order is ${order.status}, not On Hold or Exception.` } });
+    }
+
+    const target = req.body?.status || (await statusBeforeHold(order.id));
+    if (!target) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'CHOOSE_STAGE', message: 'Could not tell which stage this order was at before the hold — choose the stage to continue from.' }
+      });
+    }
+    if (!RESUMABLE_TO.includes(target)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_STAGE', message: `Cannot resume an order to ${target}.` } });
+    }
+
+    const actor = await resolveActor(req.user, 'management');
+    const txn = db.transaction(async () => {
+      await db.prepare("UPDATE orders SET status = ?, exception_reason = NULL, updated_at = datetime('now') WHERE id = ?")
+        .run(target, order.id);
+      await logEvent({
+        orderId: order.id, eventType: 'ORDER_RESUMED', oldStatus: order.status, newStatus: target,
+        actorId: actor.id, actorName: actor.name,
+        notes: `${reason}${order.exception_reason ? ` (was held for: ${order.exception_reason})` : ''}`
+      });
+    });
+    await txn();
+
+    const stageRole = FINANCE_STAGES.includes(target) ? 'finance' : DISPATCH_STAGES.includes(target) ? 'dispatch' : null;
+    const recipients = new Set([order.medrep_id, order.raised_by_id, ...(await getUserIdsByRole('management'))]);
+    if (stageRole) (await getUserIdsByRole(stageRole)).forEach((uid) => recipients.add(uid));
+    recipients.delete(actor.id);
+    recipients.delete(null);
+    recipients.delete(undefined);
+    await notify({
+      orderId: order.id,
+      recipientIds: [...recipients],
+      message: `Order ${order.getmeds_order_id} was taken off ${order.status === 'exception' ? 'Exception' : 'On Hold'} by ${actor.name} and continues at ${target}. Reason: ${reason}`,
+      eventType: 'ORDER_RESUMED',
+      orderData: order
+    });
+
+    res.json({ success: true, data: { status: target } });
+  } catch (err) { next(err); }
+};
+exports.statusBeforeHold = statusBeforeHold;
+
+// ─── EDIT ORDER ITEMS (Aug 31, 2026)──────────────────────────────────────────
 //
 // Added after TestGM-20260831-0001 failed its Zoho sync with "Inactive
 // items cannot be added to the sales order" — the order had already been
