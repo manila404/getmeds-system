@@ -3,10 +3,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { CheckCircle, Clock, RefreshCw, PackageCheck, Truck, ExternalLink, Receipt, MapPin } from 'lucide-react';
 import client from '../../api/client';
-import ConfirmDialog from '../../components/ui/ConfirmDialog';
+import DeliveryConfirmModal from '../../components/dispatch/DeliveryConfirmModal';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
-import DeliveryActions, { CONFIRMABLE_STATUSES } from '../../components/dispatch/DeliveryActions';
+import DeliveryActions, { CONFIRMABLE_STATUSES, DISPATCH_PROOF_STATUSES } from '../../components/dispatch/DeliveryActions';
+import HoldTrackingModal from '../../components/dispatch/HoldTrackingModal';
 
 /**
  * Sep 12, 2026: two versions of this page, chosen by the server.
@@ -116,52 +117,109 @@ const DispatchQueuePage = () => {
   // Sep 15, 2026: the order whose receipt is open — clicking an order shows
   // everything needed to prepare it (items, delivery, attachments).
   const [viewing, setViewing] = useState(null);
+  // Sep 15, 2026: the order whose tracking number is being put on hold, and
+  // the one whose tracking number is being added (after an earlier confirm).
+  const [holdFor, setHoldFor] = useState(null);
+  const [trackingFor, setTrackingFor] = useState(null);
+
+  // Every Dispatch record here answers with the order's new confirmation /
+  // tracking state; the open receipt and both lists pick it up.
+  const afterRecord = (res) => {
+    toast.success(res.message, { duration: 7000 });
+    setConfirmFor(null);
+    setHoldFor(null);
+    setTrackingFor(null);
+    setViewing((v) => {
+      if (!v || v.id !== res.id) return v;
+      const next = { ...v };
+      for (const key of ['delivery_confirmed_by', 'delivery_confirmed_at', 'entered_tracking', 'tracking_hold']) {
+        if (key in res) next[key] = res[key];
+      }
+      if ('delivery_confirmed_at' in res) next.delivery_address_changed = false;
+      return next;
+    });
+    qc.invalidateQueries({ queryKey: ['dispatch-queue'] });
+    qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
+  };
+  const recordError = (err) =>
+    toast.error(err.response?.data?.error?.message || 'Could not save that. Refresh and check the order.', { duration: 8000 });
+
+  // Confirm for delivery, with the tracking number added now or put on hold.
   const confirmDelivery = useMutation({
-    mutationFn: (id) => client.post(`/api/dispatch/orders/${id}/confirm-delivery`).then((r) => r.data?.data),
-    onSuccess: (res) => {
-      toast.success(res.message);
-      // The open receipt shows the new confirmation straight away.
-      setViewing((v) => (v && v.id === res.id
-        ? { ...v, delivery_confirmed_by: res.delivery_confirmed_by, delivery_confirmed_at: res.delivery_confirmed_at, delivery_address_changed: false }
-        : v));
-      qc.invalidateQueries({ queryKey: ['dispatch-queue'] });
-      qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
-    },
-    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not confirm the delivery.', { duration: 8000 })
+    mutationFn: ({ id, ...body }) => client.post(`/api/dispatch/orders/${id}/confirm-delivery`, body).then((r) => r.data?.data),
+    onSuccess: afterRecord,
+    onError: recordError
   });
-  const confirmingId = confirmDelivery.isPending ? confirmDelivery.variables : null;
+  const holdTracking = useMutation({
+    mutationFn: ({ id, reason, note }) =>
+      client.post(`/api/dispatch/orders/${id}/tracking-hold`, { reason, note }).then((r) => r.data?.data),
+    onSuccess: afterRecord,
+    onError: recordError
+  });
+  const addTracking = useMutation({
+    mutationFn: ({ id, tracking }) => client.post(`/api/dispatch/orders/${id}/tracking`, tracking).then((r) => r.data?.data),
+    onSuccess: afterRecord,
+    onError: recordError
+  });
+
+  const pendingId = (m) => (m.isPending ? m.variables?.id : null);
+  const confirmingId = pendingId(confirmDelivery) ?? pendingId(holdTracking) ?? pendingId(addTracking);
+  const actionProps = (order) => ({
+    order,
+    onConfirm: setConfirmFor,
+    onHold: setHoldFor,
+    onAddTracking: setTrackingFor,
+    busy: confirmingId === order.id
+  });
   const deliveryActions = (order) =>
-    CONFIRMABLE_STATUSES.includes(order.status) || order.delivery_confirmed_at ? (
-      <DeliveryActions order={order} onConfirm={setConfirmFor} busy={confirmingId === order.id} />
+    CONFIRMABLE_STATUSES.includes(order.status) || DISPATCH_PROOF_STATUSES.includes(order.status) ||
+    order.delivery_confirmed_at || order.tracking_hold ? (
+      <DeliveryActions {...actionProps(order)} />
     ) : null;
 
   const recentAndDialog = (
     <>
-      <RecentDispatchPanel onConfirm={setConfirmFor} confirmingId={confirmingId} onOpen={setViewing} />
-      {/* Before the ConfirmDialog, so that dialog opens on top of it. */}
+      <RecentDispatchPanel
+        onConfirm={setConfirmFor}
+        onHold={setHoldFor}
+        onAddTracking={setTrackingFor}
+        confirmingId={confirmingId}
+        onOpen={setViewing}
+      />
+      {/* Before the dialogs below, so they open on top of it. */}
       {viewing && (
         <OrderDetailsModal
           orderId={viewing.id}
           onClose={() => setViewing(null)}
-          footer={<DeliveryActions order={viewing} onConfirm={setConfirmFor} busy={confirmingId === viewing.id} />}
+          footer={<DeliveryActions {...actionProps(viewing)} />}
         />
       )}
-      <ConfirmDialog
-        isOpen={!!confirmFor}
-        onClose={() => setConfirmFor(null)}
-        onConfirm={() => confirmFor && confirmDelivery.mutate(confirmFor.id)}
-        title={`Confirm ${confirmFor?.getmeds_order_id || ''} for delivery?`}
-        message={
-          confirmFor
-            ? `Deliver to ${confirmFor.customer_name}: ${confirmFor.delivery_address || '(no address)'}` +
-              (confirmFor.intake_receiver ? ` — receiver ${confirmFor.intake_receiver}` : '') +
-              (confirmFor.intake_contact_no || confirmFor.contact_number ? `, ${confirmFor.intake_contact_no || confirmFor.contact_number}` : '') +
-              '. Check this against the printed slip first. This records your confirmation; it does not change the order or Zoho.'
-            : ''
-        }
-        confirmText="Confirm for delivery"
-        variant="info"
-      />
+      {confirmFor && (
+        <DeliveryConfirmModal
+          order={confirmFor}
+          mode="confirm"
+          onClose={() => setConfirmFor(null)}
+          onSubmit={(body) => confirmDelivery.mutate({ id: confirmFor.id, ...body })}
+          saving={confirmDelivery.isPending}
+        />
+      )}
+      {trackingFor && (
+        <DeliveryConfirmModal
+          order={trackingFor}
+          mode="tracking"
+          onClose={() => setTrackingFor(null)}
+          onSubmit={({ tracking }) => addTracking.mutate({ id: trackingFor.id, tracking })}
+          saving={addTracking.isPending}
+        />
+      )}
+      {holdFor && (
+        <HoldTrackingModal
+          order={holdFor}
+          onClose={() => setHoldFor(null)}
+          onSave={({ reason, note }) => holdTracking.mutate({ id: holdFor.id, reason, note })}
+          saving={holdTracking.isPending}
+        />
+      )}
     </>
   );
 

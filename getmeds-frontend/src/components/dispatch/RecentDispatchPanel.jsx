@@ -63,7 +63,7 @@ const Opener = ({ order, onOpen, children }) => (
   </div>
 );
 
-const RecentDispatchPanel = ({ onConfirm, confirmingId, onOpen }) => {
+const RecentDispatchPanel = ({ onConfirm, onHold, onAddTracking, confirmingId, onOpen }) => {
   const { data, isLoading } = useQuery({
     queryKey: ['dispatch-recent'],
     queryFn: () => client.get('/api/dispatch/recent').then((r) => r.data?.data),
@@ -136,7 +136,7 @@ const RecentDispatchPanel = ({ onConfirm, confirmingId, onOpen }) => {
                     </p>
                   </div>
                 </div>
-                <DeliveryActions order={o} onConfirm={onConfirm} busy={confirmingId === o.id} />
+                <DeliveryActions order={o} onConfirm={onConfirm} onHold={onHold} onAddTracking={onAddTracking} busy={confirmingId === o.id} />
               </li>
             ))}
           </ul>

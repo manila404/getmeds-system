@@ -6,6 +6,7 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const zoho = require('../integrations/zoho');
+const { constraintAllows } = require('../services/schemaColumns');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -90,7 +91,7 @@ const zoho = require('../integrations/zoho');
 async function loadOrder(id) {
   return await db
     .prepare(
-      `SELECT o.id, o.getmeds_order_id, o.status, o.medrep_id, o.zoho_so_id,
+      `SELECT o.id, o.getmeds_order_id, o.status, o.medrep_id, o.zoho_so_id, o.zoho_so_number,
               o.raised_by_id,
               c.name AS customer_name,
               u.id   AS medrep_user_id
@@ -108,7 +109,19 @@ async function loadOrder(id) {
 // db/migrate.pg.js and the CHECK in schema.pg.sql — a value accepted here that
 // the constraint rejects fails at INSERT with a database error rather than a
 // useful message.
-const FILE_TYPES = ['payment_proof', 'other', 'purchase_order', 'gl', 'prescription', 'id'];
+const FILE_TYPES = ['payment_proof', 'other', 'purchase_order', 'gl', 'prescription', 'id', 'dispatch_proof'];
+
+// Sep 15, 2026: Dispatch's photo of the order going out — the packed parcel,
+// the waybill, a signed receipt — uploaded from the Dispatch page. Like every
+// attachment it is pushed onto the Zoho Sales Order; unlike the others it is
+// reserved to Dispatch (and management/admin), it is the ONLY type Dispatch
+// may attach, and the MedRep is told when one arrives.
+const DISPATCH_PROOF = 'dispatch_proof';
+// Finance has confirmed the order: from here on it is Dispatch's to prove.
+const DISPATCH_PROOF_STATUSES = [
+  'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch',
+  'picking_packing', 'dispatched', 'tracking_shared', 'completed'
+];
 
 /** Body may omit file_type entirely — every caller that predates this change
  * did, and they all meant a proof of payment. */
@@ -146,12 +159,51 @@ function normalizeFileType(value) {
  * make, so it has to name admin and management itself. The MedRep half is the
  * same rule and has to stay that way.
  */
-function canAttach(user, order) {
+function canAttach(user, order, fileType = 'payment_proof') {
   if (!user) return false;
   const role = (user.role || '').toLowerCase();
   if (role === 'admin' || role === 'management') return true;
+  // Sep 15, 2026: a dispatch proof is Dispatch's alone — not the MedRep's,
+  // even on their own order — and Dispatch attaches nothing else.
+  if (fileType === DISPATCH_PROOF) return role === 'dispatch';
   if (order.medrep_id === user.id) return true;
   return Boolean(order.raised_by_id) && order.raised_by_id === user.id;
+}
+
+function forbidden(res, user, fileType) {
+  const role = (user?.role || '').toLowerCase();
+  const message = fileType === DISPATCH_PROOF
+    ? 'Only Dispatch can attach a dispatch proof.'
+    : role === 'dispatch'
+      ? 'Dispatch can only attach a dispatch proof photo.'
+      : 'You can only attach a file to your own orders.';
+  return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message } });
+}
+
+/** The two further conditions on a dispatch proof. Returns the response sent, or null. */
+async function refuseDispatchProof(res, order, fileType) {
+  if (fileType !== DISPATCH_PROOF) return null;
+  if (!DISPATCH_PROOF_STATUSES.includes(order.status)) {
+    return res.status(409).json({
+      success: false,
+      error: {
+        code: 'NOT_AT_DISPATCH',
+        message: `A dispatch proof can be attached once Finance has confirmed the order. This one is at "${order.status}".`
+      }
+    });
+  }
+  // Before the migration widens the file_type CHECK, the INSERT would fail as
+  // a database error — say what to do instead. See services/schemaColumns.js.
+  if (!(await constraintAllows('payment_proofs', 'file_type', DISPATCH_PROOF))) {
+    return res.status(503).json({
+      success: false,
+      error: {
+        code: 'MIGRATION_PENDING',
+        message: 'Uploading a dispatch proof needs a database update first. Ask IT to run: node src/db/migrate.pg.js'
+      }
+    });
+  }
+  return null;
 }
 
 const notFound = (res, message) =>
@@ -175,12 +227,9 @@ exports.getUploadUrl = async (req, res, next) => {
     const order = await loadOrder(req.params.id);
     if (!order) return notFound(res, 'Order not found');
 
-    if (!canAttach(req.user, order)) {
-      return res.status(403).json({
-        success: false,
-        error: { code: 'FORBIDDEN', message: 'You can only attach a file to your own orders.' },
-      });
-    }
+    if (!canAttach(req.user, order, fileType)) return forbidden(res, req.user, fileType);
+    const refused = await refuseDispatchProof(res, order, fileType);
+    if (refused) return refused;
 
     const storagePath = proofStorage.buildPath(order.id, order.getmeds_order_id, contentType, fileName, fileType);
     const { signedUrl } = await proofStorage.createUploadUrl(storagePath);
@@ -204,12 +253,9 @@ exports.attach = async (req, res, next) => {
     const order = await loadOrder(req.params.id);
     if (!order) return notFound(res, 'Order not found');
 
-    if (!canAttach(req.user, order)) {
-      return res.status(403).json({
-        success: false,
-        error: { code: 'FORBIDDEN', message: 'You can only attach a file to your own orders.' },
-      });
-    }
+    if (!canAttach(req.user, order, fileType)) return forbidden(res, req.user, fileType);
+    const refused = await refuseDispatchProof(res, order, fileType);
+    if (refused) return refused;
 
     // The signed URL from step 1 is the only thing between these two calls, so
     // the path is re-checked here rather than trusted. Without this, a caller
@@ -219,7 +265,8 @@ exports.attach = async (req, res, next) => {
       return badRequest(res, 'storagePath does not belong to this order.');
     }
 
-    const actor = await resolveActor(req.user, 'medrep');
+    const isDispatchProof = fileType === DISPATCH_PROOF;
+    const actor = await resolveActor(req.user, isDispatchProof ? 'dispatch' : 'medrep');
     const now = new Date().toISOString();
 
     // Sep 5, 2026: always a new row. The old single-slot version upserted on
@@ -246,14 +293,18 @@ exports.attach = async (req, res, next) => {
 
     await logEvent({
       orderId: order.id,
-      eventType: fileType === 'payment_proof' ? 'PAYMENT_PROOF_UPLOADED' : 'ATTACHMENT_UPLOADED',
+      eventType: fileType === 'payment_proof'
+        ? 'PAYMENT_PROOF_UPLOADED'
+        : isDispatchProof ? 'DISPATCH_PROOF_UPLOADED' : 'ATTACHMENT_UPLOADED',
       oldStatus: order.status,
       newStatus: order.status,
       actorId: actor.id,
       actorName: actor.name,
       notes: fileType === 'payment_proof'
         ? `Proof of payment attached${fileName ? ` (${fileName})` : ''}.`
-        : `File attached${fileName ? ` (${fileName})` : ''}.`,
+        : isDispatchProof
+          ? `Dispatch proof attached${fileName ? ` (${fileName})` : ''}.`
+          : `File attached${fileName ? ` (${fileName})` : ''}.`,
       metadata: {
         storagePath,
         fileName: fileName || null,
@@ -275,7 +326,9 @@ exports.attach = async (req, res, next) => {
      * See services/financeHoldService.js for why this only fires on holds that
      * Finance itself applied.
      */
-    const returnedToFinance = await returnToFinanceIfHeld(order, actor, {
+    // A dispatch proof is not an answer to a Finance hold — and by the time
+    // one can be attached, Finance is done with the order anyway.
+    const returnedToFinance = isDispatchProof ? false : await returnToFinanceIfHeld(order, actor, {
       reason: fileType === 'payment_proof' ? 'Proof of payment attached' : 'File attached',
     });
 
@@ -322,6 +375,27 @@ exports.attach = async (req, res, next) => {
           `[PAYMENT_PROOF] addSalesOrderAttachment failed for SO ${order.zoho_so_id}:`,
           zohoErr.message
         );
+      }
+    }
+
+    // Sep 15, 2026: the MedRep who created the order (and whoever raised it)
+    // is told when Dispatch attaches a proof — after the Zoho push, so the
+    // message can say whether it reached the Sales Order. Best-effort: the
+    // upload has already succeeded and is never undone by this.
+    if (isDispatchProof) {
+      try {
+        const where = zohoPushed
+          ? `attached to ${order.zoho_so_number || 'the Sales Order'} in Zoho`
+          : 'saved in GetMeds (it could not be attached in Zoho yet)';
+        await notify({
+          orderId: order.id,
+          recipientIds: Array.from(new Set([order.medrep_id, order.raised_by_id].filter(Boolean))),
+          message: `Order ${order.getmeds_order_id}: Dispatch uploaded a proof photo${fileName ? ` (${fileName})` : ''} — ${where}.`,
+          eventType: 'DISPATCH_PROOF_UPLOADED',
+          orderData: order,
+        });
+      } catch (notifyErr) {
+        console.warn(`[DISPATCH_PROOF] could not notify for ${order.getmeds_order_id}:`, notifyErr.message);
       }
     }
 

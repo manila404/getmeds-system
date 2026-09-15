@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Printer, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Printer, CheckCircle2, AlertTriangle, PauseCircle, PlayCircle, Camera, Truck } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 
@@ -15,6 +16,32 @@ import { formatPHT } from '../../utils/dateUtils';
 // Finance has confirmed these and the parcel has not left — the same list the
 // server accepts a confirmation for (dispatch.controller.js FINANCE_CONFIRMED).
 export const CONFIRMABLE_STATUSES = ['ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'];
+// Where the tracking number can be put on hold: the same, plus shipped from
+// Zoho but no tracking number yet (dispatch.controller.js TRACKING_HOLDABLE).
+export const TRACKING_HOLDABLE_STATUSES = [...CONFIRMABLE_STATUSES, 'dispatched'];
+// Where Dispatch can attach a proof photo: from Finance's confirmation until
+// the order is done (paymentProof.controller.js DISPATCH_PROOF_STATUSES).
+export const DISPATCH_PROOF_STATUSES = [...TRACKING_HOLDABLE_STATUSES, 'tracking_shared', 'completed'];
+
+// The file types the server accepts (services/paymentProofStorage.js), minus
+// the office documents — a proof here is a photo or a scan.
+const PROOF_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf';
+
+/**
+ * Sep 15, 2026: one dispatch proof, through the same three steps as every
+ * attachment — ask for a signed URL, PUT the file straight to storage (plain
+ * fetch, so our session token never goes to another origin), confirm. The
+ * server then attaches it to the Zoho Sales Order and tells the MedRep.
+ */
+async function uploadDispatchProof(orderId, file) {
+  const meta = { contentType: file.type, fileName: file.name, fileSize: file.size, file_type: 'dispatch_proof' };
+  const { data: urlRes } = await client.post(`/api/orders/${orderId}/attachments/upload-url`, meta);
+  const { signedUrl, storagePath } = urlRes.data;
+  const put = await fetch(signedUrl, { method: 'PUT', headers: { 'content-type': file.type }, body: file });
+  if (!put.ok) throw new Error(`Upload to storage failed (${put.status}). Nothing was recorded — try again.`);
+  const { data: res } = await client.post(`/api/orders/${orderId}/attachments`, { ...meta, storagePath });
+  return res.data;
+}
 
 const escapeHtml = (v) =>
   String(v ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -107,11 +134,59 @@ export async function printDeliverySlip(orderId) {
   }
 }
 
-/** Print + Confirm for one order, or the confirmation already recorded. */
-const DeliveryActions = ({ order, onConfirm, busy }) => {
+/**
+ * Print + Confirm for one order, or the confirmation already recorded — and,
+ * once confirmed, putting the tracking number on hold (Sep 15, 2026).
+ */
+const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, busy }) => {
   const confirmed = Boolean(order.delivery_confirmed_at);
   const stale = confirmed && order.delivery_address_changed;
   const canConfirm = CONFIRMABLE_STATUSES.includes(order.status);
+  const hold = order.tracking_hold;
+  const entered = order.entered_tracking;
+  // Once the delivery is confirmed (or shipped from Zoho without a tracking
+  // number): add the number, or hold it — never when the order has one.
+  const trackingOpen =
+    !order.tracking_number && !entered &&
+    TRACKING_HOLDABLE_STATUSES.includes(order.status) &&
+    ((confirmed && !stale) || order.status === 'dispatched');
+  const canHold = Boolean(onHold) && trackingOpen && !hold;
+  const canAddTracking = Boolean(onAddTracking) && trackingOpen;
+
+  // Sep 15, 2026: the proof photo. Several can be picked at once; they go up
+  // one after another, and the toast says what reached Zoho.
+  const qc = useQueryClient();
+  const fileInput = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  const canUploadProof = DISPATCH_PROOF_STATUSES.includes(order.status);
+  const onProofPicked = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!files.length) return;
+    setUploading(true);
+    let saved = 0;
+    const notInZoho = [];
+    const failed = [];
+    for (const file of files) {
+      try {
+        const res = await uploadDispatchProof(order.id, file);
+        saved += 1;
+        if (!res?.zoho_pushed) notInZoho.push(file.name);
+      } catch (err) {
+        failed.push(`${file.name}: ${err.response?.data?.error?.message || err.message}`);
+      }
+    }
+    setUploading(false);
+    qc.invalidateQueries({ queryKey: ['finance-order-attachments', order.id] });
+    qc.invalidateQueries({ queryKey: ['order-attachments', order.id] });
+    if (saved) {
+      const where = notInZoho.length
+        ? ` Saved, but not attached in Zoho yet: ${notInZoho.join(', ')}.`
+        : ' Attached to the Sales Order in Zoho.';
+      toast.success(`${saved} proof photo${saved === 1 ? '' : 's'} uploaded.${where} The MedRep was notified.`, { duration: 7000 });
+    }
+    if (failed.length) toast.error(`Not uploaded — ${failed.join('; ')}`, { duration: 10000 });
+  };
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -146,6 +221,64 @@ const DeliveryActions = ({ order, onConfirm, busy }) => {
           <CheckCircle2 className="w-3.5 h-3.5" />
           {stale ? 'Confirm again' : 'Confirm for delivery'}
         </button>
+      )}
+
+      {hold && (
+        <span
+          className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-900"
+          title={hold.note || ''}
+        >
+          <PauseCircle className="w-3.5 h-3.5" />
+          Tracking on hold — {hold.reason}
+          <span className="font-normal text-amber-900/80">({hold.by}, {formatPHT(hold.at, 'short-datetime')})</span>
+        </span>
+      )}
+      {entered && (
+        <span className="inline-flex items-center gap-1 rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-800">
+          <Truck className="w-3.5 h-3.5" />
+          Tracking: {entered.courier} · <span className="font-mono">{entered.tracking_number}</span>
+          <span className="font-normal text-teal-800/80">({entered.by}, {formatPHT(entered.at, 'short-datetime')})</span>
+        </span>
+      )}
+      {canAddTracking && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onAddTracking(order)}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border bg-white text-xs font-semibold disabled:opacity-50 ${
+            hold ? 'border-amber-400 text-amber-900 hover:bg-amber-50' : 'border-slate-300 text-ink-primary hover:bg-surface'
+          }`}
+        >
+          <PlayCircle className="w-3.5 h-3.5" />
+          Add tracking number
+        </button>
+      )}
+      {canHold && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onHold(order)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-50"
+        >
+          <PauseCircle className="w-3.5 h-3.5" />
+          Hold tracking number
+        </button>
+      )}
+
+      {canUploadProof && (
+        <>
+          <input ref={fileInput} type="file" accept={PROOF_ACCEPT} multiple className="hidden" onChange={onProofPicked} />
+          <button
+            type="button"
+            disabled={uploading}
+            onClick={() => fileInput.current?.click()}
+            title="Photo of the packed parcel, the waybill or a signed receipt — attached to the Zoho Sales Order, and the MedRep is told"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-50"
+          >
+            <Camera className="w-3.5 h-3.5" />
+            {uploading ? 'Uploading…' : 'Upload proof photo'}
+          </button>
+        </>
       )}
     </div>
   );

@@ -51,8 +51,52 @@ async function hasColumn(table, column) {
   return present;
 }
 
-function _resetForTest() {
-  known.clear();
+/**
+ * Does a CHECK constraint on this column accept this value yet?
+ *
+ * Sep 15, 2026: the same gap as hasColumn, for a new allowed value — the
+ * 'dispatch_proof' attachment type is added to payment_proofs.file_type's
+ * CHECK by the migration, and an INSERT before then fails as a database
+ * error. Asked first so the caller can say "run the migration" instead.
+ *
+ * Reads the constraint's definition only to see whether the literal is in
+ * it; no constraint on the column at all means anything goes. Same caching
+ * as hasColumn: yes is kept, no is re-checked at most once a minute.
+ */
+const allowedValues = new Map(); // "table.column=value" -> { allowed, at }
+
+async function constraintAllows(table, column, value) {
+  const key = `${table}.${column}=${value}`;
+  const hit = allowedValues.get(key);
+  if (hit && (hit.allowed || Date.now() - hit.at < RECHECK_MS)) return hit.allowed;
+
+  let allowed = false;
+  try {
+    const rows = await db
+      .prepare(
+        `SELECT pg_get_constraintdef(c.oid) AS def
+           FROM pg_constraint c
+           JOIN pg_class t ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = current_schema() AND t.relname = ? AND c.contype = 'c'`
+      )
+      .all(table);
+    const onColumn = rows.map((r) => String(r.def || '')).filter((d) => d.includes(column));
+    allowed = onColumn.length === 0 || onColumn.every((d) => d.includes(`'${value}'`));
+  } catch {
+    allowed = false;
+  }
+
+  if (!allowed && !hit) {
+    console.warn(`[SCHEMA] ${table}.${column} does not accept '${value}' yet. Run \`node src/db/migrate.pg.js\`.`);
+  }
+  allowedValues.set(key, { allowed, at: Date.now() });
+  return allowed;
 }
 
-module.exports = { hasColumn, _resetForTest };
+function _resetForTest() {
+  known.clear();
+  allowedValues.clear();
+}
+
+module.exports = { hasColumn, constraintAllows, _resetForTest };

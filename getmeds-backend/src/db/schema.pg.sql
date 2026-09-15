@@ -489,7 +489,8 @@ CREATE TABLE IF NOT EXISTS payment_proofs (
   -- raised. Adding a value here means adding it to REQUIRED_FILE_TYPES in
   -- migrate.pg.js and FILE_TYPES in paymentProof.controller.js too — the
   -- three are checked against each other by the migration.
-  file_type TEXT NOT NULL DEFAULT 'payment_proof' CHECK(file_type IN ('payment_proof','other','purchase_order','gl','prescription','id')),
+  -- Sep 15, 2026: 'dispatch_proof' — Dispatch's photo of the order going out.
+  file_type TEXT NOT NULL DEFAULT 'payment_proof' CHECK(file_type IN ('payment_proof','other','purchase_order','gl','prescription','id','dispatch_proof')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified','rejected')),
   storage_path TEXT NOT NULL,
   file_name TEXT,

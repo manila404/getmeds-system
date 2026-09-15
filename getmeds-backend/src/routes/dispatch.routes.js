@@ -21,6 +21,13 @@ router.get('/queue', c.getQueue);
 router.get('/recent', c.getRecent);
 router.get('/orders/:id/slip', c.getSlip);
 router.post('/orders/:id/confirm-delivery', c.confirmDelivery);
+// Sep 15, 2026: tracking number on hold, with a reason ("Waiting for
+// waybill"), and lifting it. Record-only, like the confirmation above.
+router.post('/orders/:id/tracking-hold', c.holdTracking);
+// The tracking number, typed by Dispatch — saved and sent to the MedRep only;
+// Zoho's shipment is still made in Zoho. Ends a hold.
+router.post('/orders/:id/tracking', c.addTracking);
+router.post('/orders/:id/tracking-hold/release', c.releaseTrackingHold);
 
 // Sep 12, 2026: Dispatch works in Getmeds (GETMEDS_WORKFLOW_V2). Each button
 // makes the matching change in Zoho — see services/workflowV2Service.js. With

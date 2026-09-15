@@ -51,6 +51,8 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
   afterAll(async () => {
     for (const id of created) {
       await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM dispatch_records WHERE order_id = ?').run(id);
+      await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);
       await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
     }
   });
@@ -139,6 +141,115 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
     const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
     expect((await request(app).get('/api/dispatch/recent').set(auth(medrepToken))).status).toBe(403);
     expect((await confirm(order.id, medrepToken)).status).toBe(403);
+  });
+
+  describe('tracking number on hold', () => {
+    const hold = (id, body, token) =>
+      request(app).post(`/api/dispatch/orders/${id}/tracking-hold`).set(auth(token)).send(body);
+    const release = (id) => request(app).post(`/api/dispatch/orders/${id}/tracking-hold/release`).set(auth());
+
+    test('records the reason, tells the MedRep, and changes nothing else', async () => {
+      const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      await confirm(order.id);
+      const notificationService = require('../src/services/notificationService');
+      const spy = jest.spyOn(notificationService, 'notify');
+      try {
+        const res = await hold(order.id, { reason: 'Waiting for waybill', note: 'LBC says tomorrow' });
+        expect(res.status).toBe(200);
+        expect(res.body.data.tracking_hold.reason).toBe('Waiting for waybill');
+        expect(spy).toHaveBeenCalledWith(expect.objectContaining({ recipientIds: expect.arrayContaining([medrepId]) }));
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(order.id)).status).toBe('ready_for_dispatch');
+      const row = (await recent()).finance_confirmed.find((o) => o.id === order.id);
+      expect(row.tracking_hold).toEqual(expect.objectContaining({ reason: 'Waiting for waybill', note: 'LBC says tomorrow' }));
+      const queued = (await request(app).get('/api/dispatch/queue').set(auth())).body.data.orders.find((o) => o.id === order.id);
+      expect(queued.tracking_hold.reason).toBe('Waiting for waybill');
+    });
+
+    test('"Tracking ready" lifts it; lifting one not on hold is refused', async () => {
+      const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      await hold(order.id, { reason: 'Waiting for courier pickup' });
+      expect((await release(order.id)).status).toBe(200);
+      const row = (await recent()).finance_confirmed.find((o) => o.id === order.id);
+      expect(row.tracking_hold).toBeNull();
+      expect((await release(order.id)).status).toBe(409);
+    });
+
+    test('a hold counts as lifted once the order has a tracking number', async () => {
+      const order = await orderAt('dispatched', { zohoSoId: `ZSO-${Date.now()}` });
+      expect((await hold(order.id, { reason: 'Waiting for waybill' })).status).toBe(200);
+      await db.prepare("INSERT INTO dispatch_records (order_id, status, tracking_number) VALUES (?, 'dispatched', 'LBC-123')").run(order.id);
+      const queued = (await request(app).get('/api/dispatch/queue').set(auth())).body.data.orders.find((o) => o.id === order.id);
+      expect(queued.tracking_hold).toBeNull();
+      expect((await hold(order.id, { reason: 'Waiting for waybill' })).body.error.code).toBe('HAS_TRACKING');
+    });
+
+    test('needs a reason, and only for an order on its way through Dispatch', async () => {
+      const ready = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      expect((await hold(ready.id, { reason: '  ' })).status).toBe(400);
+      const early = await orderAt('ready_for_finance_verified', { zohoSoId: `ZSO-${Date.now()}` });
+      expect((await hold(early.id, { reason: 'Waiting for waybill' })).body.error.code).toBe('NOT_HOLDABLE');
+      expect((await hold(ready.id, { reason: 'Waiting for waybill' }, medrepToken)).status).toBe(403);
+    });
+  });
+
+  describe('confirming, with the tracking number added or on hold in the same step', () => {
+    const confirmWith = (id, body) =>
+      request(app).post(`/api/dispatch/orders/${id}/confirm-delivery`).set(auth()).send(body);
+
+    test('with the tracking number: saved, the MedRep told, nothing else changed', async () => {
+      const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      const res = await confirmWith(order.id, { tracking: { courier: 'LBC Express', tracking_number: '1234 5678 9012' } });
+      expect(res.status).toBe(200);
+      expect(res.body.data.entered_tracking).toEqual(expect.objectContaining({ courier: 'LBC Express', tracking_number: '1234 5678 9012' }));
+
+      const types = (await db.prepare('SELECT event_type FROM order_events WHERE order_id = ? ORDER BY id').all(order.id)).map((e) => e.event_type);
+      expect(types).toEqual(['DELIVERY_CONFIRMED', 'DISPATCH_TRACKING_ADDED']);
+      const note = await db.prepare('SELECT message FROM notifications WHERE order_id = ? AND recipient_id = ?').get(order.id, medrepId);
+      expect(note.message).toMatch(/1234 5678 9012/);
+      expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(order.id)).status).toBe('ready_for_dispatch');
+      // Record-only: Dispatch's number does not pose as Zoho's shipment.
+      expect(await db.prepare('SELECT 1 FROM dispatch_records WHERE order_id = ?').get(order.id)).toBeUndefined();
+
+      const row = (await recent()).finance_confirmed.find((o) => o.id === order.id);
+      expect(row.entered_tracking.tracking_number).toBe('1234 5678 9012');
+    });
+
+    test('waiting for the waybill: confirmed, and the tracking on hold', async () => {
+      const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      const res = await confirmWith(order.id, { hold: { reason: 'Waiting for waybill' } });
+      expect(res.status).toBe(200);
+      expect(res.body.data.tracking_hold.reason).toBe('Waiting for waybill');
+      expect(res.body.data.delivery_confirmed_at).toBeTruthy();
+    });
+
+    test('both at once, or a tracking number without one, is refused before anything is saved', async () => {
+      const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      expect((await confirmWith(order.id, { tracking: { courier: 'LBC', tracking_number: '1' }, hold: { reason: 'x' } })).status).toBe(400);
+      expect((await confirmWith(order.id, { tracking: { courier: 'LBC', tracking_number: ' ' } })).status).toBe(400);
+      const events = await db.prepare('SELECT 1 FROM order_events WHERE order_id = ?').all(order.id);
+      expect(events).toHaveLength(0);
+    });
+
+    test('adding the number later ends the hold; after that it cannot be held or added again', async () => {
+      const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      await confirmWith(order.id, { hold: { reason: 'Waiting for waybill' } });
+      const add = await request(app)
+        .post(`/api/dispatch/orders/${order.id}/tracking`)
+        .set(auth())
+        .send({ courier: 'J&T', tracking_number: 'JT0001' });
+      expect(add.status).toBe(200);
+      expect(add.body.data.tracking_hold).toBeNull();
+      expect(add.body.data.entered_tracking.tracking_number).toBe('JT0001');
+
+      const again = await request(app).post(`/api/dispatch/orders/${order.id}/tracking`).set(auth()).send({ courier: 'J&T', tracking_number: 'JT0002' });
+      expect(again.body.error.code).toBe('HAS_TRACKING');
+      const holdAfter = await request(app).post(`/api/dispatch/orders/${order.id}/tracking-hold`).set(auth()).send({ reason: 'Waiting for waybill' });
+      expect(holdAfter.body.error.code).toBe('HAS_TRACKING');
+    });
   });
 
   test("Dispatch can open an order's receipt: the order, its items and its attachments", async () => {

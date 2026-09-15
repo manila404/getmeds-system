@@ -20,9 +20,16 @@ export const ATTACHMENT_TYPES = [
   { value: 'other',          label: 'Other' },
 ];
 
+// Sep 15, 2026: types that exist but are NOT offered in the MedRep's pickers
+// above. 'dispatch_proof' is uploaded by Dispatch only (the server refuses it
+// from anyone else), so it is labelled here and never listed there.
+const OTHER_LABELS = {
+  dispatch_proof: 'Dispatch Proof',
+};
+
 /** Falls back rather than throwing: an unknown type is still a real file. */
 export const attachmentLabel = (fileType) =>
-  (ATTACHMENT_TYPES.find((t) => t.value === fileType) || {}).label || 'Other attachment';
+  (ATTACHMENT_TYPES.find((t) => t.value === fileType) || {}).label || OTHER_LABELS[fileType] || 'Other attachment';
 
 /**
  * The four a hospital (PAP/DSWD) order cannot be submitted without. Kept here

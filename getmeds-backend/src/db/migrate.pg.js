@@ -55,7 +55,8 @@ const REQUIRED_STATUSES = [
 // Payment and a photo ID. reconcilePaymentProofs below widens the existing
 // CHECK constraint to match, so an already-deployed database picks these up
 // without anyone editing SQL by hand.
-const REQUIRED_FILE_TYPES = ['payment_proof', 'other', 'purchase_order', 'gl', 'prescription', 'id'];
+// Sep 15, 2026: 'dispatch_proof' — Dispatch's photo of the order going out.
+const REQUIRED_FILE_TYPES = ['payment_proof', 'other', 'purchase_order', 'gl', 'prescription', 'id', 'dispatch_proof'];
 
 function connectionString() {
   const url = process.env.DATABASE_URL;
