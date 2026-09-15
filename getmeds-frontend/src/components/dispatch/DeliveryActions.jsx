@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import { Printer, CheckCircle2, AlertTriangle, PauseCircle, PlayCircle, Camera, Truck } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
+import { useAuth } from '../../hooks/useAuth';
 
 /**
  * Print the delivery slip, and confirm the order for delivery.
@@ -141,7 +142,16 @@ export async function printDeliverySlip(orderId) {
  * Print + Confirm for one order, or the confirmation already recorded — and,
  * once confirmed, putting the tracking number on hold (Sep 15, 2026).
  */
-const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, busy }) => {
+const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onReleaseCater, busy }) => {
+  // Sep 15, 2026: who caters the order — a label, not a lock.
+  const { user } = useAuth();
+  const role = String(user?.role || '').toLowerCase();
+  const catered = order.catered;
+  const cateredByMe = Boolean(catered) && String(catered.by_id) === String(user?.id);
+  const canCater = Boolean(onCater) && ['dispatch', 'admin'].includes(role) &&
+    TRACKING_EDITABLE_STATUSES.includes(order.status) && !cateredByMe;
+  const canRelease = Boolean(onReleaseCater) && Boolean(catered) && (cateredByMe || ['management', 'admin'].includes(role));
+
   const confirmed = Boolean(order.delivery_confirmed_at);
   const stale = confirmed && order.delivery_address_changed;
   const canConfirm = CONFIRMABLE_STATUSES.includes(order.status);
@@ -196,6 +206,37 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, busy }) => {
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {catered && (
+        <span
+          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${
+            cateredByMe ? 'border-getmeds-blue/40 bg-getmeds-blue/10 text-getmeds-blue-dark' : 'border-amber-300 bg-amber-50 text-amber-900'
+          }`}
+          title={`Since ${formatPHT(catered.at)}`}
+        >
+          👤 {cateredByMe ? 'You are catering this' : `Catered by ${catered.by}`}
+        </span>
+      )}
+      {canCater && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onCater(order)}
+          title={catered ? `${catered.by} caters this — catering it takes it over` : 'Handle this order yourself; the rest of Dispatch sees it is yours'}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-getmeds-blue bg-white text-xs font-semibold text-getmeds-blue hover:bg-getmeds-blue/5 disabled:opacity-50"
+        >
+          {catered ? 'Take over' : 'Cater this order'}
+        </button>
+      )}
+      {canRelease && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onReleaseCater(order)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-secondary hover:bg-surface disabled:opacity-50"
+        >
+          Release
+        </button>
+      )}
       <button
         type="button"
         onClick={() => printDeliverySlip(order.id)}

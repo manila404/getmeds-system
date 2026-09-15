@@ -44,6 +44,7 @@ const { returnToFinanceIfHeld, isFinanceHold } = require('../services/financeHol
 const { isTestModeEnabled } = require('../middleware/testMode');
 const { computeLine, parseInclusiveTax } = require('../services/lineAmounts');
 const { hasColumn } = require('../services/schemaColumns');
+const { CATERED_SUBQUERY } = require('../services/dispatchCater');
 
 // Sep 5, 2026 (3): mirrors auth.controller.js's SUB_DIVISIONS_BY_DIVISION
 // exactly — see that file's comment for why only these four Divisions have
@@ -604,6 +605,12 @@ exports.getAll = async (req, res, next) => {
     }
     if (status) { where.push('o.status = ?'); params.push(status); }
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
+    // Sep 15, 2026: Dispatch's "My orders" — the ones they cater. See
+    // services/dispatchCater.js.
+    if (req.query.catered === 'mine') {
+      where.push(`o.id IN (${CATERED_SUBQUERY} AND last.actor_id = ?)`);
+      params.push(req.user.id);
+    }
 
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
 

@@ -155,11 +155,11 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   } else if (role === 'dispatch') {
     mainLinks.push(
       { to: '/dispatch', icon: <Truck size={19} />, label: 'Zoho Dispatch Status' },
+      // Sep 15, 2026: the orders this person caters (the page's other tab is
+      // the full log that "All Orders Log" used to be).
+      { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Catered Orders' },
       { to: '/dispatch/history', icon: <MapPin size={19} />, label: 'Dispatched / Tracking Log' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' }
-    );
-    secondaryLinks.push(
-      { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
     );
   } else if (role === 'management') {
     mainLinks.push(

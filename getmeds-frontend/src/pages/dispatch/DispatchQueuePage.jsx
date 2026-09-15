@@ -114,17 +114,21 @@ const DispatchQueuePage = () => {
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [origin, setOrigin] = useState('all');
+  // Sep 15, 2026: everyone's, the ones I cater, or the ones nobody has yet.
+  const [caterFilter, setCaterFilter] = useState('');
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(t);
   }, [searchInput]);
-  useEffect(() => { setPage(1); }, [search, origin, stepKey]);
+  useEffect(() => { setPage(1); }, [search, origin, stepKey, caterFilter]);
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['dispatch-queue', { page, search, origin, step: stepKey }],
+    queryKey: ['dispatch-queue', { page, search, origin, step: stepKey, cater: caterFilter }],
     queryFn: () =>
       client
-        .get('/api/dispatch/queue', { params: { page, limit: PAGE_SIZE, search: search || undefined, origin, step: stepKey } })
+        .get('/api/dispatch/queue', {
+          params: { page, limit: PAGE_SIZE, search: search || undefined, origin, step: stepKey, cater: caterFilter || undefined }
+        })
         .then(r => r.data),
     placeholderData: keepPreviousData,
     refetchInterval: 30000
@@ -160,6 +164,16 @@ const DispatchQueuePage = () => {
           <option value="zoho">Imported from Zoho</option>
         </select>
       )}
+      <select
+        value={caterFilter}
+        onChange={(e) => setCaterFilter(e.target.value)}
+        className="py-1.5 px-2 text-sm rounded-md border border-slate-300 focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+        title="Who caters the order"
+      >
+        <option value="">Everyone's orders</option>
+        <option value="mine">Catered by me</option>
+        <option value="open">Not catered yet</option>
+      </select>
     </div>
   );
   const pager = <Pager pagination={pagination} onPage={setPage} fetching={isFetching} />;
@@ -209,7 +223,7 @@ const DispatchQueuePage = () => {
     setViewing((v) => {
       if (!v || v.id !== res.id) return v;
       const next = { ...v };
-      for (const key of ['delivery_confirmed_by', 'delivery_confirmed_at', 'entered_tracking', 'tracking_hold']) {
+      for (const key of ['delivery_confirmed_by', 'delivery_confirmed_at', 'entered_tracking', 'tracking_hold', 'catered']) {
         if (key in res) next[key] = res[key];
       }
       if ('delivery_confirmed_at' in res) next.delivery_address_changed = false;
@@ -217,6 +231,7 @@ const DispatchQueuePage = () => {
     });
     qc.invalidateQueries({ queryKey: ['dispatch-queue'] });
     qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
+    qc.invalidateQueries({ queryKey: ['my-orders'] });
   };
   const recordError = (err) =>
     toast.error(err.response?.data?.error?.message || 'Could not save that. Refresh and check the order.', { duration: 8000 });
@@ -239,13 +254,31 @@ const DispatchQueuePage = () => {
     onError: recordError
   });
 
+  // Sep 15, 2026: cater an order (take it on), or release it for anyone.
+  const caterOrder = useMutation({
+    mutationFn: ({ id }) => client.post(`/api/dispatch/orders/${id}/cater`).then((r) => r.data?.data),
+    onSuccess: afterRecord,
+    onError: recordError
+  });
+  const releaseCater = useMutation({
+    mutationFn: ({ id }) => client.post(`/api/dispatch/orders/${id}/cater/release`).then((r) => r.data?.data),
+    onSuccess: afterRecord,
+    onError: recordError
+  });
+
   const pendingId = (m) => (m.isPending ? m.variables?.id : null);
-  const confirmingId = pendingId(confirmDelivery) ?? pendingId(holdTracking) ?? pendingId(addTracking);
+  const confirmingId =
+    pendingId(confirmDelivery) ?? pendingId(holdTracking) ?? pendingId(addTracking) ??
+    pendingId(caterOrder) ?? pendingId(releaseCater);
+  const onCater = (o) => caterOrder.mutate({ id: o.id });
+  const onReleaseCater = (o) => releaseCater.mutate({ id: o.id });
   const actionProps = (order) => ({
     order,
     onConfirm: setConfirmFor,
     onHold: setHoldFor,
     onAddTracking: setTrackingFor,
+    onCater,
+    onReleaseCater,
     busy: confirmingId === order.id
   });
   const deliveryActions = (order) =>
@@ -260,6 +293,8 @@ const DispatchQueuePage = () => {
         onConfirm={setConfirmFor}
         onHold={setHoldFor}
         onAddTracking={setTrackingFor}
+        onCater={onCater}
+        onReleaseCater={onReleaseCater}
         confirmingId={confirmingId}
         onOpen={setViewing}
       />

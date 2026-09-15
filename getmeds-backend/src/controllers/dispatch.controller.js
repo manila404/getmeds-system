@@ -6,6 +6,7 @@ const workflow = require('../services/workflowV2Service');
 const { workflowAction } = require('./workflowAction');
 const { logEvent, resolveActor } = require('../services/auditService');
 const notificationService = require('../services/notificationService');
+const { CATERED_SUBQUERY } = require('../services/dispatchCater');
 
 // ─── Confirmed for delivery (Sep 15, 2026) ─────────────────────────────────
 // Dispatch prints the delivery slip, checks the address, and confirms the
@@ -64,10 +65,19 @@ const TRACKING_HOLD_JOIN = `
           FROM order_events et
          WHERE et.order_id = o.id AND et.event_type = 'DISPATCH_TRACKING_ADDED'
          ORDER BY et.id DESC LIMIT 1
-      ) et ON TRUE`;
+      ) et ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT ce.event_type AS cater_event, ce.actor_id AS cater_by_id,
+               ce.actor_name AS cater_by, ce.created_at AS cater_at
+          FROM order_events ce
+         WHERE ce.order_id = o.id AND ce.event_type IN ('DISPATCH_CATERED', 'DISPATCH_RELEASED')
+         ORDER BY ce.id DESC LIMIT 1
+      ) ce ON TRUE`;
+// Also carries who caters the order (Sep 15, 2026) — see services/dispatchCater.js.
 const TRACKING_HOLD_COLUMNS =
   'th.tracking_hold_event, th.tracking_hold_by, th.tracking_hold_at, th.tracking_hold_meta, ' +
-  'et.entered_tracking_by, et.entered_tracking_at, et.entered_tracking_meta';
+  'et.entered_tracking_by, et.entered_tracking_at, et.entered_tracking_meta, ' +
+  'ce.cater_event, ce.cater_by_id, ce.cater_by, ce.cater_at';
 
 const parseJson = (text) => {
   try {
@@ -91,12 +101,18 @@ function withConfirmation(row) {
     entered_tracking_by: enteredBy,
     entered_tracking_at: enteredAt,
     entered_tracking_meta: enteredMeta,
+    cater_event: caterEvent,
+    cater_by_id: caterById,
+    cater_by: caterBy,
+    cater_at: caterAt,
     ...rest
   } = row;
   const confirmedAddress = parseJson(meta)?.delivery_address ?? null;
   const hold = parseJson(holdMeta) || {};
   const entered = parseJson(enteredMeta);
   return {
+    // Sep 15, 2026: which Dispatch person caters it (services/dispatchCater.js).
+    catered: caterEvent === 'DISPATCH_CATERED' ? { by: caterBy, by_id: caterById, at: caterAt } : null,
     // Sep 15, 2026: the tracking number Dispatch typed in (record-only — Zoho
     // still gets its shipment the way it does today).
     entered_tracking: entered
@@ -216,6 +232,14 @@ exports.getQueue = async (req, res, next) => {
                    OR o.id IN (SELECT te.order_id FROM order_events te
                                 WHERE te.event_type = 'DISPATCH_TRACKING_ADDED' AND te.metadata ILIKE ?))`);
       params.push(like, like, like, like, like, like);
+    }
+    // Sep 15, 2026: whose orders — ?cater=mine (the ones I cater) or
+    // ?cater=open (nobody caters them yet). Absent: everyone's.
+    if (req.query.cater === 'mine') {
+      where.push(`o.id IN (${CATERED_SUBQUERY} AND last.actor_id = ?)`);
+      params.push(req.user.id);
+    } else if (req.query.cater === 'open') {
+      where.push(`o.id NOT IN (${CATERED_SUBQUERY})`);
     }
     const whereSql = where.join(' AND ');
 
@@ -631,6 +655,112 @@ exports.releaseTrackingHold = async (req, res, next) => {
     await tellMedrep(order, `Order ${order.getmeds_order_id}: the tracking number is on its way — the hold is lifted.`, 'TRACKING_HOLD_RELEASED');
 
     res.json({ success: true, data: { id: order.id, tracking_hold: null, message: `${order.getmeds_order_id}: tracking hold lifted.` } });
+  } catch (err) { next(err); }
+};
+
+// ─── Catering an order (Sep 15, 2026) ──────────────────────────────────────
+// See services/dispatchCater.js. A label, not a lock.
+
+async function loadCater(id) {
+  const row = await db.prepare(`
+    SELECT o.*, ${TRACKING_HOLD_COLUMNS}
+      FROM orders o${TRACKING_HOLD_JOIN}
+     WHERE o.id = ?
+  `).get(id);
+  return row ? { raw: row, catered: withConfirmation(row).catered } : null;
+}
+
+const actorOf = (user) => ({ id: user.id, name: user.name || user.email });
+
+/**
+ * POST /api/dispatch/orders/:id/cater — "I'm handling this one." Taking over
+ * an order someone else caters is allowed (label only), and the trail says
+ * from whom. Any order in Dispatch, imported history included.
+ */
+exports.cater = async (req, res, next) => {
+  try {
+    const role = String(req.user?.role || '').toLowerCase();
+    if (!['dispatch', 'admin'].includes(role)) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only Dispatch staff cater orders.' } });
+    }
+    const loaded = await loadCater(req.params.id);
+    if (!loaded) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    const order = loaded.raw;
+    if (!TRACKING_EDITABLE.includes(order.status)) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'NOT_CATERABLE',
+          message: `Only an order Finance has confirmed can be catered. This one is at "${order.status}".`
+        }
+      });
+    }
+
+    const me = actorOf(req.user);
+    const current = loaded.catered;
+    if (current && Number(current.by_id) === Number(me.id)) {
+      return res.json({ success: true, data: { id: order.id, catered: current, message: `You are already catering ${order.getmeds_order_id}.` } });
+    }
+
+    await logEvent({
+      orderId: order.id,
+      eventType: 'DISPATCH_CATERED',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: me.id,
+      actorName: me.name,
+      notes: current ? `Catered by ${me.name} — taken over from ${current.by}.` : `Catered by ${me.name}.`,
+      metadata: current ? { taken_over_from: { by: current.by, by_id: current.by_id } } : null
+    });
+
+    const now = await loadCater(order.id);
+    res.json({
+      success: true,
+      data: {
+        id: order.id,
+        catered: now.catered,
+        message: current
+          ? `You are now catering ${order.getmeds_order_id} (taken over from ${current.by}).`
+          : `You are now catering ${order.getmeds_order_id}.`
+      }
+    });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/dispatch/orders/:id/cater/release — put it back for anyone. The
+ * person catering it, or Management/admin (someone is off, say).
+ */
+exports.releaseCater = async (req, res, next) => {
+  try {
+    const loaded = await loadCater(req.params.id);
+    if (!loaded) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    const order = loaded.raw;
+    const current = loaded.catered;
+    if (!current) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_CATERED', message: 'Nobody is catering this order.' } });
+    }
+    const me = actorOf(req.user);
+    const role = String(req.user?.role || '').toLowerCase();
+    if (Number(current.by_id) !== Number(me.id) && !['management', 'admin'].includes(role)) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: `Only ${current.by}, or Management, can release it. You can cater it yourself instead.` }
+      });
+    }
+
+    await logEvent({
+      orderId: order.id,
+      eventType: 'DISPATCH_RELEASED',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: me.id,
+      actorName: me.name,
+      notes: Number(current.by_id) === Number(me.id)
+        ? `Released by ${me.name} — open for anyone in Dispatch.`
+        : `Released by ${me.name} (was catered by ${current.by}) — open for anyone in Dispatch.`
+    });
+    res.json({ success: true, data: { id: order.id, catered: null, message: `${order.getmeds_order_id} released — anyone in Dispatch can cater it.` } });
   } catch (err) { next(err); }
 };
 

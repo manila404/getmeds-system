@@ -29,6 +29,12 @@ const MyOrdersPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [statusFilter, setStatusFilter] = useState('');
+  // Sep 15, 2026: for Dispatch, "My Orders" is the orders they cater (take
+  // on from the Dispatch page), so each person can focus on theirs; "All
+  // orders" is the old log. Everyone else sees this page as before.
+  const isDispatch = String(user?.role || '').toLowerCase() === 'dispatch';
+  const [dispatchView, setDispatchView] = useState('mine');
+  const cateredOnly = isDispatch && dispatchView === 'mine';
 
   /**
    * Sep 12, 2026. This list now holds two kinds of order: the rep's own, and
@@ -51,8 +57,11 @@ const MyOrdersPage = () => {
   };
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['my-orders', statusFilter],
-    queryFn: () => client.get(`/api/orders${statusFilter ? `?status=${statusFilter}` : ''}`).then(r => r.data),
+    queryKey: ['my-orders', statusFilter, cateredOnly],
+    queryFn: () =>
+      client
+        .get('/api/orders', { params: { status: statusFilter || undefined, catered: cateredOnly ? 'mine' : undefined } })
+        .then(r => r.data),
     refetchInterval: 30000
   });
 
@@ -68,18 +77,41 @@ const MyOrdersPage = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-ink-primary">My Orders</h1>
-          <p className="text-sm text-ink-secondary mt-1">Track status of orders you have submitted.</p>
+          <h1 className="text-2xl font-semibold text-ink-primary">{isDispatch ? 'My Catered Orders' : 'My Orders'}</h1>
+          <p className="text-sm text-ink-secondary mt-1">
+            {isDispatch
+              ? 'The orders you cater. Take one on with "Cater this order" on the Dispatch page; open one to update its tracking.'
+              : 'Track status of orders you have submitted.'}
+          </p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary">
             <RefreshCw className="w-4 h-4" /> Refresh
           </button>
-          <button onClick={() => navigate('/orders/new')} className="flex items-center gap-1.5 px-3.5 py-2 bg-getmeds-blue text-white rounded-md text-sm font-semibold hover:bg-getmeds-blue-hover transition-colors shadow-sm">
-            <Plus className="w-4 h-4" /> New Order
-          </button>
+          {!isDispatch && (
+            <button onClick={() => navigate('/orders/new')} className="flex items-center gap-1.5 px-3.5 py-2 bg-getmeds-blue text-white rounded-md text-sm font-semibold hover:bg-getmeds-blue-hover transition-colors shadow-sm">
+              <Plus className="w-4 h-4" /> New Order
+            </button>
+          )}
         </div>
       </div>
+
+      {isDispatch && (
+        <div className="inline-flex rounded-md border border-slate-200 bg-white p-0.5" role="tablist">
+          {[['mine', 'Catered by me'], ['all', 'All orders']].map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={dispatchView === key}
+              onClick={() => setDispatchView(key)}
+              className={`px-3 py-1.5 rounded text-sm font-semibold ${dispatchView === key ? 'bg-getmeds-blue text-white' : 'text-ink-secondary hover:bg-surface'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Filter */}
       <div className="flex gap-2 flex-wrap">
@@ -100,10 +132,23 @@ const MyOrdersPage = () => {
         <div className="bg-red-50 border border-red-200 rounded-md p-4 text-red-700 text-sm">Failed to load orders.</div>
       ) : orders.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-lg border border-slate-200 shadow-sm">
-          <p className="text-ink-secondary mb-4">No orders found.</p>
-          <button onClick={() => navigate('/orders/new')} className="px-4 py-2 bg-getmeds-blue text-white rounded-md text-sm font-semibold hover:bg-getmeds-blue-hover">
-            Create Your First Order
-          </button>
+          {cateredOnly ? (
+            <>
+              <p className="text-ink-secondary mb-4">You are not catering any orders{statusFilter ? ' at this status' : ''} yet.</p>
+              <button onClick={() => navigate('/dispatch')} className="px-4 py-2 bg-getmeds-blue text-white rounded-md text-sm font-semibold hover:bg-getmeds-blue-hover">
+                Pick orders on the Dispatch page
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-ink-secondary mb-4">No orders found.</p>
+              {!isDispatch && (
+                <button onClick={() => navigate('/orders/new')} className="px-4 py-2 bg-getmeds-blue text-white rounded-md text-sm font-semibold hover:bg-getmeds-blue-hover">
+                  Create Your First Order
+                </button>
+              )}
+            </>
+          )}
         </div>
       ) : (
         <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
