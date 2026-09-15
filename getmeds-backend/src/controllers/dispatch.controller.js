@@ -80,6 +80,18 @@ const TRACKING_HOLD_COLUMNS =
   'et.entered_tracking_by, et.entered_tracking_at, et.entered_tracking_meta, ' +
   'ce.cater_event, ce.cater_by_id, ce.cater_by, ce.cater_at';
 
+/**
+ * Midnight today in the Philippines, as the UTC ISO string the timestamps are
+ * stored in (text, ISO, UTC — so a string comparison is a time comparison).
+ * Manila is UTC+8 all year; no daylight saving to account for.
+ */
+function manilaTodayStartIso(now = new Date()) {
+  const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+  const manila = new Date(now.getTime() + MANILA_OFFSET_MS);
+  const midnightManilaAsUtc = Date.UTC(manila.getUTCFullYear(), manila.getUTCMonth(), manila.getUTCDate());
+  return new Date(midnightManilaAsUtc - MANILA_OFFSET_MS).toISOString();
+}
+
 const parseJson = (text) => {
   try {
     return JSON.parse(text || 'null');
@@ -320,6 +332,11 @@ exports.getRecent = async (req, res, next) => {
     const wh = warehouseSql(req.query.warehouse, 'o');
     const whAnd = wh ? ` AND ${wh.sql}` : '';
     const whParams = wh ? wh.params : [];
+    // Sep 15, 2026: ?period=today — every draft SO created today and every
+    // order Finance confirmed today (Philippine time), so Dispatch sees all of
+    // today's work in these two lists. Not capped at 20 like "any time".
+    const today = req.query.period === 'today' ? manilaTodayStartIso() : null;
+    const listLimit = today ? 500 : 20;
     const columns = `
         o.id, o.getmeds_order_id, o.status, o.division, o.total_amount, o.delivery_address, o.delivery_notes,
         o.intake_receiver, o.intake_contact_no, o.intake_delivery_method,
@@ -337,10 +354,10 @@ exports.getRecent = async (req, res, next) => {
     const drafts = await db.prepare(`
       SELECT ${columns} ${from}
        WHERE o.status = 'ready_for_finance_verified' AND o.zoho_so_id IS NOT NULL
-         AND NOT (${importedSql('o')})${scopeAnd}${whAnd}
+         AND NOT (${importedSql('o')})${scopeAnd}${whAnd}${today ? ' AND o.created_at >= ?' : ''}
        ORDER BY o.created_at DESC
-       LIMIT 20
-    `).all([...scopeParams, ...whParams]);
+       LIMIT ${listLimit}
+    `).all([...scopeParams, ...whParams, ...(today ? [today] : [])]);
 
     const confirmed = await db.prepare(`
       SELECT ${columns}, fv.finance_confirmed_at, fv.finance_confirmed_by ${from}
@@ -351,10 +368,10 @@ exports.getRecent = async (req, res, next) => {
          ORDER BY fe.id DESC LIMIT 1
       ) fv ON TRUE
        WHERE o.status = ANY(?)
-         AND NOT (${importedSql('o')})${scopeAnd}${whAnd}
+         AND NOT (${importedSql('o')})${scopeAnd}${whAnd}${today ? ' AND fv.finance_confirmed_at >= ?' : ''}
        ORDER BY COALESCE(fv.finance_confirmed_at, o.updated_at) DESC
-       LIMIT 20
-    `).all([FINANCE_CONFIRMED, ...scopeParams, ...whParams]);
+       LIMIT ${listLimit}
+    `).all([FINANCE_CONFIRMED, ...scopeParams, ...whParams, ...(today ? [today] : [])]);
 
     res.json({
       success: true,

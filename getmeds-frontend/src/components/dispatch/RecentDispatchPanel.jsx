@@ -71,11 +71,19 @@ const WarehouseTag = ({ order }) =>
     </span>
   ) : null;
 
-const RecentDispatchPanel = ({ onConfirm, onHold, onAddTracking, onCater, onReleaseCater, confirmingId, onOpen, warehouse = '' }) => {
-  // Sep 15, 2026: filtered by the warehouse picked at the top of the page.
+const RecentDispatchPanel = ({
+  onConfirm, onHold, onAddTracking, onCater, onReleaseCater, confirmingId, onOpen, warehouse = '', period = ''
+}) => {
+  // Sep 15, 2026: filtered by the warehouse picked at the top of the page, and
+  // by "Today" — every draft SO created today and every order Finance
+  // confirmed today, not just the latest 20.
+  const today = period === 'today';
   const { data, isLoading } = useQuery({
-    queryKey: ['dispatch-recent', warehouse],
-    queryFn: () => client.get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined } }).then((r) => r.data?.data),
+    queryKey: ['dispatch-recent', warehouse, period],
+    queryFn: () =>
+      client
+        .get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined, period: period || undefined } })
+        .then((r) => r.data?.data),
     refetchInterval: 30000
   });
   const drafts = data?.new_draft_sos || [];
@@ -87,10 +95,14 @@ const RecentDispatchPanel = ({ onConfirm, onHold, onAddTracking, onCater, onRele
       <Card
         icon={FilePlus2}
         title="New draft SOs"
-        hint="Just created in Zoho and waiting on Finance. Nothing to do yet — a heads-up of what is coming."
+        hint={
+          today
+            ? 'Every draft SO created today, waiting on Finance. Nothing to do yet — a heads-up of what is coming.'
+            : 'Just created in Zoho and waiting on Finance. Nothing to do yet — a heads-up of what is coming.'
+        }
         count={drafts.length}
       >
-        {isLoading ? loading : drafts.length === 0 ? <Empty text="No new draft Sales Orders." /> : (
+        {isLoading ? loading : drafts.length === 0 ? <Empty text={today ? 'No draft Sales Orders created today.' : 'No new draft Sales Orders.'} /> : (
           <ul className="divide-y divide-slate-100">
             {drafts.map((o) => (
               <li key={o.id} className="px-4 py-3 flex justify-between gap-3">
@@ -119,10 +131,14 @@ const RecentDispatchPanel = ({ onConfirm, onHold, onAddTracking, onCater, onRele
       <Card
         icon={ShieldCheck}
         title="Confirmed by Finance"
-        hint="Verified and not shipped yet. Print the address, check it, then confirm the delivery."
+        hint={
+          today
+            ? 'Every order Finance confirmed today that has not shipped yet — today\'s orders to fulfill.'
+            : 'Verified and not shipped yet. Print the address, check it, then confirm the delivery.'
+        }
         count={confirmed.length}
       >
-        {isLoading ? loading : confirmed.length === 0 ? <Empty text="Nothing confirmed by Finance is waiting." /> : (
+        {isLoading ? loading : confirmed.length === 0 ? <Empty text={today ? 'Finance has not confirmed any order today yet.' : 'Nothing confirmed by Finance is waiting.'} /> : (
           <ul className="divide-y divide-slate-100">
             {confirmed.map((o) => (
               <li key={o.id} className="px-4 py-3 space-y-2">

@@ -120,6 +120,9 @@ const DispatchQueuePage = () => {
   // Sep 15, 2026: one of Dispatch's three warehouses, for the whole page —
   // the Recent lists and the queue alike. '' is all of them.
   const [warehouse, setWarehouse] = useState('');
+  // Sep 15, 2026: "Today" — the two Recent lists show every draft SO created
+  // today and every order Finance confirmed today. The queue below is unaffected.
+  const [period, setPeriod] = useState('');
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(t);
@@ -319,9 +322,27 @@ const DispatchQueuePage = () => {
             </button>
           );
         })}
+        <span className="mx-1 w-px self-stretch bg-slate-200" aria-hidden="true" />
+        {[['', 'Any time'], ['today', 'Today']].map(([key, label]) => (
+          <button
+            key={key || 'any'}
+            type="button"
+            aria-pressed={period === key}
+            title={key === 'today' ? "Every draft SO created today and every order Finance confirmed today" : 'The latest 20 in each list'}
+            onClick={() => setPeriod(key)}
+            className={`px-3 py-1.5 rounded-full border text-sm font-semibold ${
+              period === key
+                ? 'border-pharmacy-green bg-pharmacy-green text-white'
+                : 'border-slate-200 bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
       <RecentDispatchPanel
         warehouse={warehouse}
+        period={period}
         onConfirm={setConfirmFor}
         onHold={setHoldFor}
         onAddTracking={setTrackingFor}
