@@ -9,6 +9,7 @@ import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
 import DeliveryActions, { CONFIRMABLE_STATUSES, DISPATCH_PROOF_STATUSES } from '../../components/dispatch/DeliveryActions';
 import HoldTrackingModal from '../../components/dispatch/HoldTrackingModal';
 import { DISPATCH_WAREHOUSES } from '../../constants/dispatchWarehouses';
+import StockAnnouncementsManager from '../../components/stock/StockAnnouncementsManager';
 
 /**
  * Sep 12, 2026: two versions of this page, chosen by the server.
@@ -276,6 +277,19 @@ const DispatchQueuePage = () => {
     onError: recordError
   });
 
+  // Sep 15, 2026: the receipt's footer acts on the order as it is NOW. `viewing`
+  // is the row it was opened from, which can be minutes old — GM-20260915-0028
+  // had moved to "tracking shared" and the footer still offered what its old
+  // status allowed. The receipt already fetches the order; this reads the same
+  // cached request (same key as components/finance/OrderDetailsModal.jsx).
+  const viewingDetail = useQuery({
+    queryKey: ['finance-order-detail', viewing?.id],
+    queryFn: () => client.get(`/api/orders/${viewing.id}`).then((r) => r.data),
+    enabled: Boolean(viewing?.id)
+  });
+  const freshStatus = viewingDetail.data?.data?.order?.status;
+  const viewingNow = viewing && freshStatus ? { ...viewing, status: freshStatus } : viewing;
+
   const pendingId = (m) => (m.isPending ? m.variables?.id : null);
   const confirmingId =
     pendingId(confirmDelivery) ?? pendingId(holdTracking) ?? pendingId(addTracking) ??
@@ -299,6 +313,8 @@ const DispatchQueuePage = () => {
 
   const recentAndDialog = (
     <>
+      {/* Sep 15, 2026: Dispatch announces stock to MedReps and Management. */}
+      <StockAnnouncementsManager />
       {/* Sep 15, 2026: the warehouse filter — sorted by the order's Division
           on the server (services/dispatchWarehouses.js). */}
       <div className="flex flex-wrap gap-2" role="tablist" aria-label="Warehouse">
@@ -356,7 +372,7 @@ const DispatchQueuePage = () => {
         <OrderDetailsModal
           orderId={viewing.id}
           onClose={() => setViewing(null)}
-          footer={<DeliveryActions {...actionProps(viewing)} />}
+          footer={<DeliveryActions {...actionProps(viewingNow)} />}
         />
       )}
       {confirmFor && (

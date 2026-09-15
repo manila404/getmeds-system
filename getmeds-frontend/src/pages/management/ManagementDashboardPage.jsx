@@ -11,6 +11,7 @@ import { formatPHT } from '../../utils/dateUtils';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
 import { useSyncJobs } from '../../context/SyncJobsContext';
 import { fetchZohoImportStatus } from '../../api/queries';
+import StockAnnouncementsBanner from '../../components/stock/StockAnnouncements';
 
 const STATUS_COLORS = {
   draft: 'bg-slate-100 text-slate-700 border border-slate-300',
@@ -237,6 +238,8 @@ const ManagementDashboardPage = () => {
 
   return (
     <div className="space-y-6">
+      {/* Sep 15, 2026: what Dispatch has said about stock — nothing when quiet. */}
+      <StockAnnouncementsBanner />
       <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-ink-primary">Management Dashboard</h1>

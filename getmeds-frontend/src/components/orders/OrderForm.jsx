@@ -35,6 +35,7 @@ import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ORDER_SOURCES } from '../../constants/orderSources';
+import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
 import { TAX_OPTIONS, getTaxOption, lineTaxLabel, computeLineAmounts } from '../../utils/orderLines';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
@@ -405,6 +406,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
 
   // Cart State: [{ productId, name, sku, quantity, rate, discount, taxOption }]
   const [items, setItems] = useState([]);
+  // Sep 15, 2026: Dispatch's open stock announcements, for the warning under
+  // the product search when an item in this order is flagged.
+  const { data: stockAnnouncements = [] } = useStockAnnouncements();
   // Sep 14, 2026: Zoho's "Item Tax Preference" for the whole order. Inclusive
   // by default: read back from the live org, Zoho has priced every order this
   // app sent with VAT inside the rate, so this is how customers are billed.
@@ -2071,6 +2075,21 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                 Click any product in the floating dropdown to add it to the requisition table below.
               </p>
             </div>
+
+            {/* Sep 15, 2026: what Dispatch has said about the stock of an item
+                in this order — out of stock, low, back — so the rep knows
+                before submitting, not after. A warning, never a block. */}
+            {(() => {
+              const inOrder = new Set(items.map((i) => String(i.productId)));
+              const notices = (stockAnnouncements || []).filter((a) => inOrder.has(String(a.product_id)));
+              if (!notices.length) return null;
+              return (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-ink-secondary">📢 Dispatch says about items in this order</p>
+                  {notices.map((a) => <StockAnnouncementLine key={a.id} a={a} />)}
+                </div>
+              );
+            })()}
 
             {/* Sep 14, 2026: Item Tax Preference, as on Zoho's own Sales Order.
                 One setting for the whole order, like Zoho's, rather than per

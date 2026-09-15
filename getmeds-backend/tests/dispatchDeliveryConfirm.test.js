@@ -218,6 +218,23 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
       expect(row.entered_tracking.tracking_number).toBe('1234 5678 9012');
     });
 
+    test('an order Zoho already shipped can still be confirmed, with a long tracking link', async () => {
+      // GM-20260915-0028: "tracking shared" (a Lalamove shipment, no number),
+      // confirmed with the Lalamove share link — refused as "shipped" before.
+      const order = await orderAt('tracking_shared', { zohoSoId: `ZSO-${Date.now()}` });
+      const link = `https://share.lalamove.com/?PH100250915114525123456789&lang=en_PH&sign=${'a'.repeat(120)}`;
+      const res = await confirmWith(order.id, { tracking: { courier: 'Lalamove', tracking_number: link } });
+      expect(res.status).toBe(200);
+      expect(res.body.data.entered_tracking.tracking_number).toBe(link);
+    });
+
+    test('a completed order cannot be confirmed for delivery', async () => {
+      const order = await orderAt('completed', { zohoSoId: `ZSO-${Date.now()}` });
+      const res = await confirmWith(order.id, {});
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('NOT_CONFIRMABLE');
+    });
+
     test('waiting for the waybill: confirmed, and the tracking on hold', async () => {
       const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
       const res = await confirmWith(order.id, { hold: { reason: 'Waiting for waybill' } });

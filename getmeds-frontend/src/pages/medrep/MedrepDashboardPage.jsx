@@ -16,6 +16,7 @@ import {
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import OrderStatusBadge from '../../components/ui/OrderStatusBadge';
+import StockAnnouncementsBanner from '../../components/stock/StockAnnouncements';
 
 const MedrepDashboardPage = () => {
   const { user } = useAuth();
@@ -75,6 +76,8 @@ const MedrepDashboardPage = () => {
 
   return (
     <div className="space-y-6">
+      {/* Sep 15, 2026: what Dispatch has said about stock — nothing when quiet. */}
+      <StockAnnouncementsBanner />
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>

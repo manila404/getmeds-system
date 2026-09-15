@@ -90,6 +90,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/finance', financeRoutes);
 app.use('/api/dispatch', dispatchRoutes);
+// Sep 15, 2026: Dispatch's stock announcements (out of stock, back in stock…).
+app.use('/api/stock-announcements', require('./routes/stockAnnouncements.routes'));
 app.use('/api/management', managementRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/admin', adminRoutes);

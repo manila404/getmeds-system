@@ -94,7 +94,8 @@ const DeliveryConfirmModal = ({ order, mode = 'confirm', onClose, onSubmit, savi
                   autoFocus
                   value={trackingNumber}
                   onChange={(e) => setTrackingNumber(e.target.value)}
-                  maxLength={100}
+                  maxLength={500}
+                  placeholder="Number, or the courier's tracking link"
                   className={`mt-0.5 font-mono ${inputClass}`}
                 />
               </label>

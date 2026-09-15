@@ -94,9 +94,36 @@ async function constraintAllows(table, column, value) {
   return allowed;
 }
 
+/**
+ * Does this table exist yet? Sep 15, 2026: stock_announcements, added by the
+ * migration — before it runs, the feature answers "not yet" instead of a
+ * database error. Same caching as hasColumn.
+ */
+const knownTables = new Map(); // table -> { present, at }
+
+async function tableExists(table) {
+  const hit = knownTables.get(table);
+  if (hit && (hit.present || Date.now() - hit.at < RECHECK_MS)) return hit.present;
+  let present = false;
+  try {
+    const row = await db
+      .prepare('SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?')
+      .get(table);
+    present = Boolean(row);
+  } catch {
+    present = false;
+  }
+  if (!present && !hit) {
+    console.warn(`[SCHEMA] table ${table} does not exist yet. Run \`node src/db/migrate.pg.js\`.`);
+  }
+  knownTables.set(table, { present, at: Date.now() });
+  return present;
+}
+
 function _resetForTest() {
   known.clear();
   allowedValues.clear();
+  knownTables.clear();
 }
 
-module.exports = { hasColumn, constraintAllows, _resetForTest };
+module.exports = { hasColumn, constraintAllows, tableExists, _resetForTest };

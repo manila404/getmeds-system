@@ -23,6 +23,13 @@ const { warehouseOf, warehouseSql } = require('../services/dispatchWarehouses');
 // Finance has confirmed these and the parcel has not left: the orders
 // Dispatch can confirm for delivery, and the "Confirmed by Finance" list.
 const FINANCE_CONFIRMED = ['ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'];
+// Where "Confirm for delivery" is accepted: Finance's confirmation until the
+// order is done — including once Zoho has shipped it (dispatched, tracking
+// shared). Sep 15, 2026: GM-20260915-0028 was at "tracking shared" with a
+// Lalamove shipment and no number, and confirming it with the number was
+// refused because it had "shipped". Confirming is record-only (it changes no
+// status and writes nothing to Zoho), so that is exactly when it is useful.
+const DELIVERY_CONFIRMABLE = [...FINANCE_CONFIRMED, 'dispatched', 'tracking_shared'];
 
 // The latest confirmation for each order row.
 const CONFIRMATION_JOIN = `
@@ -125,7 +132,7 @@ function withConfirmation(row) {
   const entered = parseJson(enteredMeta);
   return {
     // Sep 15, 2026: which of the three warehouses it belongs to, by division.
-    warehouse: warehouseOf(row.division),
+    warehouse: warehouseOf(row.division, row.intake_source),
     // Sep 15, 2026: which Dispatch person caters it (services/dispatchCater.js).
     catered: caterEvent === 'DISPATCH_CATERED' ? { by: caterBy, by_id: caterById, at: caterAt } : null,
     // Sep 15, 2026: the tracking number Dispatch typed in (record-only — Zoho
@@ -338,7 +345,7 @@ exports.getRecent = async (req, res, next) => {
     const today = req.query.period === 'today' ? manilaTodayStartIso() : null;
     const listLimit = today ? 500 : 20;
     const columns = `
-        o.id, o.getmeds_order_id, o.status, o.division, o.total_amount, o.delivery_address, o.delivery_notes,
+        o.id, o.getmeds_order_id, o.status, o.division, o.intake_source, o.total_amount, o.delivery_address, o.delivery_notes,
         o.intake_receiver, o.intake_contact_no, o.intake_delivery_method,
         o.zoho_so_number, o.zoho_so_status, o.created_at, o.updated_at,
         c.name AS customer_name, c.contact_number, u.name AS medrep_name,
@@ -410,13 +417,13 @@ exports.confirmDelivery = async (req, res, next) => {
     if (!order) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     }
-    if (!FINANCE_CONFIRMED.includes(order.status)) {
+    if (!DELIVERY_CONFIRMABLE.includes(order.status)) {
       return res.status(409).json({
         success: false,
         error: {
           code: 'NOT_CONFIRMABLE',
           message:
-            'Only an order Finance has confirmed, and that has not shipped yet, can be confirmed for delivery. ' +
+            'Only an order Finance has confirmed, and that is not completed, can be confirmed for delivery. ' +
             `This one is at "${order.status}".`
         }
       });
@@ -500,7 +507,9 @@ function parseTracking(input) {
   const courier = String(input?.courier || '').trim();
   const trackingNumber = String(input?.tracking_number || '').trim();
   if (!courier || !trackingNumber) return { error: 'Enter the courier and the tracking number.' };
-  if (courier.length > 100 || trackingNumber.length > 100) return { error: 'The courier or tracking number is too long.' };
+  // Up to 500: Lalamove's "tracking number" is a share link
+  // (https://share.lalamove.com/?PH…&sign=…), well over the 100 once allowed.
+  if (courier.length > 100 || trackingNumber.length > 500) return { error: 'The courier or tracking number is too long.' };
   return { courier, trackingNumber };
 }
 

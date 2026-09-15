@@ -18,7 +18,7 @@ import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
-import { TRACKING_EDITABLE_STATUSES } from '../components/dispatch/DeliveryActions';
+import { TRACKING_EDITABLE_STATUSES, TrackingValue } from '../components/dispatch/DeliveryActions';
 import { TAX_OPTIONS } from '../utils/orderLines';
 
 // Sep 7, 2026 (2): mirrors orders.controller.js's / OrderForm.jsx's exact
@@ -1181,7 +1181,7 @@ const OrderDetailPage = () => {
                       {entered ? (
                         <>
                           Tracking added by Dispatch: <span className="font-semibold">{entered.courier}</span> ·{' '}
-                          <span className="font-mono font-bold text-getmeds-blue">{entered.tracking_number}</span>
+                          <span className="font-bold text-getmeds-blue"><TrackingValue value={entered.tracking_number} /></span>
                           <span className="text-xs text-ink-secondary"> ({entered.by}, {formatPHT(entered.at)})</span>
                         </>
                       ) : (

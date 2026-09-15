@@ -16,10 +16,24 @@ import { useAuth } from '../../hooks/useAuth';
 
 // Finance has confirmed these and the parcel has not left — the same list the
 // server accepts a confirmation for (dispatch.controller.js FINANCE_CONFIRMED).
-export const CONFIRMABLE_STATUSES = ['ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'];
-// Where the tracking number can be put on hold: the same, plus shipped from
-// Zoho but no tracking number yet (dispatch.controller.js TRACKING_HOLDABLE).
-export const TRACKING_HOLDABLE_STATUSES = [...CONFIRMABLE_STATUSES, 'dispatched'];
+const FINANCE_CONFIRMED_STATUSES = ['ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'];
+// Where "Confirm for delivery" is offered — the same as the server accepts
+// (dispatch.controller.js DELIVERY_CONFIRMABLE): Finance's confirmation until
+// completed, including once Zoho has shipped it.
+export const CONFIRMABLE_STATUSES = [...FINANCE_CONFIRMED_STATUSES, 'dispatched', 'tracking_shared'];
+// Where the tracking number can be put on hold: before Zoho has a number —
+// Finance-confirmed, or shipped without one (dispatch.controller.js TRACKING_HOLDABLE).
+export const TRACKING_HOLDABLE_STATUSES = [...FINANCE_CONFIRMED_STATUSES, 'dispatched'];
+
+/** A tracking "number" that is a link (Lalamove's share URL) opens; anything else is text. */
+export const TrackingValue = ({ value }) =>
+  /^https?:\/\//i.test(String(value || '')) ? (
+    <a href={value} target="_blank" rel="noopener noreferrer" className="font-mono underline break-all" title={value}>
+      {String(value).length > 40 ? `${String(value).slice(0, 40)}…` : value}
+    </a>
+  ) : (
+    <span className="font-mono">{value}</span>
+  );
 // Where Dispatch can attach a proof photo: from Finance's confirmation until
 // the order is done (paymentProof.controller.js DISPATCH_PROOF_STATUSES).
 export const DISPATCH_PROOF_STATUSES = [...TRACKING_HOLDABLE_STATUSES, 'tracking_shared', 'completed'];
@@ -283,7 +297,7 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
       {entered && (
         <span className="inline-flex items-center gap-1 rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-800">
           <Truck className="w-3.5 h-3.5" />
-          Tracking: {entered.courier} · <span className="font-mono">{entered.tracking_number}</span>
+          Tracking: {entered.courier} · <TrackingValue value={entered.tracking_number} />
           <span className="font-normal text-teal-800/80">({entered.by}, {formatPHT(entered.at, 'short-datetime')})</span>
         </span>
       )}
