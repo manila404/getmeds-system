@@ -786,6 +786,20 @@ exports.getById = async (req, res, next) => {
       }
     }
 
+    // Sep 15, 2026: Dispatch's hold on the order (a flag — see
+    // dispatch.controller.js holdOrder), so the MedRep sees why and what to fix.
+    const lastDispatchHold = [...events].reverse().find((e) => ['DISPATCH_HOLD', 'DISPATCH_HOLD_LIFTED'].includes(e.event_type));
+    let dispatchHold = null;
+    if (lastDispatchHold && lastDispatchHold.event_type === 'DISPATCH_HOLD') {
+      let reason = null;
+      try {
+        reason = JSON.parse(lastDispatchHold.metadata || '{}').reason || null;
+      } catch {
+        reason = null;
+      }
+      dispatchHold = { reason, by: lastDispatchHold.actor_name, at: lastDispatchHold.created_at };
+    }
+
     // Sep 15, 2026: the last time Management sent this order back — who and
     // why — for the order page's "Sent back by Management · Veronica" and,
     // once resubmitted, Management's "this is a resubmission" note.
@@ -804,7 +818,7 @@ exports.getById = async (req, res, next) => {
     res.json({
       success: true,
       data: {
-        order: { ...order, resubmittable, entered_tracking: enteredTracking, sent_back: sentBackInfo },
+        order: { ...order, resubmittable, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold },
         items,
         payment,
         dispatch,

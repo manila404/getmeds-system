@@ -8,6 +8,7 @@ import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
 import DeliveryActions, { CONFIRMABLE_STATUSES, DISPATCH_PROOF_STATUSES } from '../../components/dispatch/DeliveryActions';
 import HoldTrackingModal from '../../components/dispatch/HoldTrackingModal';
+import HoldOrderModal from '../../components/dispatch/HoldOrderModal';
 import { DISPATCH_WAREHOUSES } from '../../constants/dispatchWarehouses';
 import StockAnnouncementsManager from '../../components/stock/StockAnnouncementsManager';
 
@@ -234,7 +235,7 @@ const DispatchQueuePage = () => {
     setViewing((v) => {
       if (!v || v.id !== res.id) return v;
       const next = { ...v };
-      for (const key of ['delivery_confirmed_by', 'delivery_confirmed_at', 'entered_tracking', 'tracking_hold', 'catered']) {
+      for (const key of ['delivery_confirmed_by', 'delivery_confirmed_at', 'entered_tracking', 'tracking_hold', 'catered', 'dispatch_hold']) {
         if (key in res) next[key] = res[key];
       }
       if ('delivery_confirmed_at' in res) next.delivery_address_changed = false;
@@ -243,6 +244,7 @@ const DispatchQueuePage = () => {
     qc.invalidateQueries({ queryKey: ['dispatch-queue'] });
     qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
     qc.invalidateQueries({ queryKey: ['my-orders'] });
+    qc.invalidateQueries({ queryKey: ['dispatch-on-hold'] });
   };
   const recordError = (err) =>
     toast.error(err.response?.data?.error?.message || 'Could not save that. Refresh and check the order.', { duration: 8000 });
@@ -261,6 +263,22 @@ const DispatchQueuePage = () => {
   });
   const addTracking = useMutation({
     mutationFn: ({ id, tracking }) => client.post(`/api/dispatch/orders/${id}/tracking`, tracking).then((r) => r.data?.data),
+    onSuccess: afterRecord,
+    onError: recordError
+  });
+
+  // Sep 15, 2026: Dispatch's hold on an order — a flag; it keeps its place.
+  const [holdOrderFor, setHoldOrderFor] = useState(null);
+  const holdOrder = useMutation({
+    mutationFn: ({ id, reason }) => client.post(`/api/dispatch/orders/${id}/hold`, { reason }).then((r) => r.data?.data),
+    onSuccess: (res) => {
+      setHoldOrderFor(null);
+      afterRecord(res);
+    },
+    onError: recordError
+  });
+  const liftHold = useMutation({
+    mutationFn: ({ id }) => client.post(`/api/dispatch/orders/${id}/hold/lift`).then((r) => r.data?.data),
     onSuccess: afterRecord,
     onError: recordError
   });
@@ -293,7 +311,7 @@ const DispatchQueuePage = () => {
   const pendingId = (m) => (m.isPending ? m.variables?.id : null);
   const confirmingId =
     pendingId(confirmDelivery) ?? pendingId(holdTracking) ?? pendingId(addTracking) ??
-    pendingId(caterOrder) ?? pendingId(releaseCater);
+    pendingId(caterOrder) ?? pendingId(releaseCater) ?? pendingId(holdOrder) ?? pendingId(liftHold);
   const onCater = (o) => caterOrder.mutate({ id: o.id });
   const onReleaseCater = (o) => releaseCater.mutate({ id: o.id });
   const actionProps = (order) => ({
@@ -303,6 +321,8 @@ const DispatchQueuePage = () => {
     onAddTracking: setTrackingFor,
     onCater,
     onReleaseCater,
+    onHoldOrder: setHoldOrderFor,
+    onLiftHold: (o) => liftHold.mutate({ id: o.id }),
     busy: confirmingId === order.id
   });
   const deliveryActions = (order) =>
@@ -339,7 +359,7 @@ const DispatchQueuePage = () => {
           );
         })}
         <span className="mx-1 w-px self-stretch bg-slate-200" aria-hidden="true" />
-        {[['', 'Any time'], ['today', 'Today']].map(([key, label]) => (
+        {[['', 'Any time'], ['today', 'Today'], ['on_hold', '⏸ On hold']].map(([key, label]) => (
           <button
             key={key || 'any'}
             type="button"
@@ -364,6 +384,8 @@ const DispatchQueuePage = () => {
         onAddTracking={setTrackingFor}
         onCater={onCater}
         onReleaseCater={onReleaseCater}
+        onHoldOrder={setHoldOrderFor}
+        onLiftHold={(o) => liftHold.mutate({ id: o.id })}
         confirmingId={confirmingId}
         onOpen={setViewing}
       />
@@ -399,6 +421,14 @@ const DispatchQueuePage = () => {
           onClose={() => setHoldFor(null)}
           onSave={({ reason, note }) => holdTracking.mutate({ id: holdFor.id, reason, note })}
           saving={holdTracking.isPending}
+        />
+      )}
+      {holdOrderFor && (
+        <HoldOrderModal
+          order={holdOrderFor}
+          onClose={() => setHoldOrderFor(null)}
+          onSave={(reason) => holdOrder.mutate({ id: holdOrderFor.id, reason })}
+          saving={holdOrder.isPending}
         />
       )}
     </>

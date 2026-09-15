@@ -155,6 +155,8 @@ const EVENT_LABELS = {
   DISPATCH_PROOF_UPLOADED: 'DISPATCH PROOF UPLOADED',
   DISPATCH_CATERED: 'CATERED BY DISPATCH',
   DISPATCH_RELEASED: 'RELEASED BY DISPATCH',
+  DISPATCH_HOLD: 'ON HOLD BY DISPATCH',
+  DISPATCH_HOLD_LIFTED: 'DISPATCH HOLD LIFTED',
   CUSTOMER_LINKED_TO_ZOHO: 'CUSTOMER LINKED TO ZOHO'
 };
 
@@ -185,6 +187,7 @@ const EVENT_ICONS = {
   DELIVERY_CONFIRMED: '📍', TRACKING_ON_HOLD: '⏸️', TRACKING_HOLD_RELEASED: '▶️',
   DISPATCH_TRACKING_ADDED: '🚚', DISPATCH_PROOF_UPLOADED: '📸',
   DISPATCH_CATERED: '👤', DISPATCH_RELEASED: '↩️',
+  DISPATCH_HOLD: '⏸️', DISPATCH_HOLD_LIFTED: '▶️',
   CUSTOMER_LINKED_TO_ZOHO: '🔗'
 };
 
@@ -1005,6 +1008,17 @@ const OrderDetailPage = () => {
             )}
           </div>
         )}
+        {/* Sep 15, 2026: Dispatch's hold — the order is still being prepared,
+            but something needs fixing (usually the items, out of stock). */}
+        {order.dispatch_hold && (
+          <div className="mt-3 bg-amber-50 border border-amber-300 rounded p-3 text-xs text-amber-950">
+            <span className="font-semibold">⏸ On hold by Dispatch · {order.dispatch_hold.by}:</span> {order.dispatch_hold.reason}
+            <span className="block mt-0.5 text-amber-900/80">
+              Dispatch is still preparing it. Fix what they asked (items are changed in Zoho once the order is synced), and they
+              lift the hold.
+            </span>
+          </div>
+        )}
         {resubmitOpen && (
           <ResubmitHoldModal
             order={order}
@@ -1151,8 +1165,10 @@ const OrderDetailPage = () => {
                     ['Dispatch Status', <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold capitalize ${dispatch.status === 'dispatched' ? 'bg-getmeds-blue/15 text-getmeds-blue-dark border border-getmeds-blue/40' : 'bg-indigo-100 text-indigo-700'}`}>{dispatch.status}</span>],
                     ['Courier', dispatch.courier || order.entered_tracking?.courier || '—'],
                     // Zoho's number first; else the one Dispatch typed in.
+                    // Sep 15, 2026: a link opens, and wraps rather than running
+                    // past the edge of the box (it read as cut off).
                     ['Tracking Number', (dispatch.tracking_number || order.entered_tracking?.tracking_number)
-                      ? <span className="font-mono font-bold text-getmeds-blue">{dispatch.tracking_number || order.entered_tracking.tracking_number}</span>
+                      ? <span className="font-bold text-getmeds-blue break-all"><TrackingValue value={dispatch.tracking_number || order.entered_tracking.tracking_number} /></span>
                       : '—'],
                     ['Dispatched At', dispatch.dispatched_at ? formatPHT(dispatch.dispatched_at) : '—'],
                     ['Notes', dispatch.dispatch_notes || '—'],

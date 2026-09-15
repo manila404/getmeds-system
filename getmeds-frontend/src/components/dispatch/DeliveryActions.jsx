@@ -25,15 +25,23 @@ export const CONFIRMABLE_STATUSES = [...FINANCE_CONFIRMED_STATUSES, 'dispatched'
 // Finance-confirmed, or shipped without one (dispatch.controller.js TRACKING_HOLDABLE).
 export const TRACKING_HOLDABLE_STATUSES = [...FINANCE_CONFIRMED_STATUSES, 'dispatched'];
 
-/** A tracking "number" that is a link (Lalamove's share URL) opens; anything else is text. */
-export const TrackingValue = ({ value }) =>
-  /^https?:\/\//i.test(String(value || '')) ? (
-    <a href={value} target="_blank" rel="noopener noreferrer" className="font-mono underline break-all" title={value}>
-      {String(value).length > 40 ? `${String(value).slice(0, 40)}…` : value}
+/**
+ * A tracking "number" that is a link (Lalamove's share URL) opens; anything
+ * else is text.
+ *
+ * Sep 15, 2026: shown WHOLE and wrapped — a long link used to run past the
+ * edge of its box and read as cut off. `compact` (the Dispatch badge) shows
+ * "Open tracking link" instead of the address; the full link is on hover.
+ */
+export const TrackingValue = ({ value, compact = false }) => {
+  const v = String(value || '');
+  if (!/^https?:\/\//i.test(v)) return <span className="font-mono break-all">{v}</span>;
+  return (
+    <a href={v} target="_blank" rel="noopener noreferrer" title={v} className="underline break-all">
+      {compact ? 'Open tracking link ↗' : v}
     </a>
-  ) : (
-    <span className="font-mono">{value}</span>
   );
+};
 // Where Dispatch can attach a proof photo: from Finance's confirmation until
 // the order is done (paymentProof.controller.js DISPATCH_PROOF_STATUSES).
 export const DISPATCH_PROOF_STATUSES = [...TRACKING_HOLDABLE_STATUSES, 'tracking_shared', 'completed'];
@@ -156,7 +164,7 @@ export async function printDeliverySlip(orderId) {
  * Print + Confirm for one order, or the confirmation already recorded — and,
  * once confirmed, putting the tracking number on hold (Sep 15, 2026).
  */
-const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onReleaseCater, busy }) => {
+const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, busy }) => {
   // Sep 15, 2026: who caters the order — a label, not a lock.
   const { user } = useAuth();
   const role = String(user?.role || '').toLowerCase();
@@ -165,6 +173,10 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
   const canCater = Boolean(onCater) && ['dispatch', 'admin'].includes(role) &&
     TRACKING_EDITABLE_STATUSES.includes(order.status) && !cateredByMe;
   const canRelease = Boolean(onReleaseCater) && Boolean(catered) && (cateredByMe || ['management', 'admin'].includes(role));
+  // Sep 15, 2026: Dispatch's hold — a flag; the order keeps its place.
+  const dispatchHold = order.dispatch_hold;
+  const canHoldOrder = Boolean(onHoldOrder) && !dispatchHold && CONFIRMABLE_STATUSES.includes(order.status);
+  const canLiftHold = Boolean(onLiftHold) && Boolean(dispatchHold);
 
   const confirmed = Boolean(order.delivery_confirmed_at);
   const stale = confirmed && order.delivery_address_changed;
@@ -220,6 +232,27 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {dispatchHold && (
+        <span
+          className="inline-flex items-center gap-1 rounded-md border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-950"
+          title={`Since ${formatPHT(dispatchHold.at)}`}
+        >
+          <PauseCircle className="w-3.5 h-3.5" />
+          On hold by Dispatch — {dispatchHold.reason}
+          <span className="font-normal opacity-80">({dispatchHold.by})</span>
+        </span>
+      )}
+      {canLiftHold && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onLiftHold(order)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-amber-400 bg-white text-xs font-semibold text-amber-900 hover:bg-amber-50 disabled:opacity-50"
+        >
+          <PlayCircle className="w-3.5 h-3.5" />
+          Lift hold
+        </button>
+      )}
       {catered && (
         <span
           className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${
@@ -297,7 +330,7 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
       {entered && (
         <span className="inline-flex items-center gap-1 rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-800">
           <Truck className="w-3.5 h-3.5" />
-          Tracking: {entered.courier} · <TrackingValue value={entered.tracking_number} />
+          Tracking: {entered.courier} · <TrackingValue value={entered.tracking_number} compact />
           <span className="font-normal text-teal-800/80">({entered.by}, {formatPHT(entered.at, 'short-datetime')})</span>
         </span>
       )}
@@ -326,6 +359,18 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
         </button>
       )}
 
+      {canHoldOrder && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onHoldOrder(order)}
+          title="Flag it on hold (e.g. an item is out of stock) — it stays here, and the MedRep and Management are told"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-amber-300 bg-white text-xs font-semibold text-amber-900 hover:bg-amber-50 disabled:opacity-50"
+        >
+          <PauseCircle className="w-3.5 h-3.5" />
+          Hold order
+        </button>
+      )}
       {canUploadProof && (
         <>
           <input ref={fileInput} type="file" accept={PROOF_ACCEPT} multiple className="hidden" onChange={onProofPicked} />

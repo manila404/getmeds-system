@@ -19,6 +19,11 @@ router.get('/queue', c.getQueue);
 // checked the address and when; it changes no status and writes nothing to
 // Zoho, so it works with the workflow switch on or off.
 router.get('/recent', c.getRecent);
+// Sep 15, 2026: every held order (Dispatch's flag, or On Hold by Finance /
+// Management), and Dispatch's own hold — a flag, the order keeps its place.
+router.get('/on-hold', c.getOnHold);
+router.post('/orders/:id/hold', c.holdOrder);
+router.post('/orders/:id/hold/lift', c.liftHold);
 router.get('/orders/:id/slip', c.getSlip);
 router.post('/orders/:id/confirm-delivery', c.confirmDelivery);
 // Sep 15, 2026: tracking number on hold, with a reason ("Waiting for

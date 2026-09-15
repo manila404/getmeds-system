@@ -30,7 +30,10 @@ const STAGE_LABEL = {
   ready_for_draft_invoice: 'Needs invoice',
   ready_for_invoice_sent: 'Invoice not sent yet',
   ready_for_dispatch: 'Ready for dispatch',
-  picking_packing: 'Packed'
+  picking_packing: 'Packed',
+  dispatched: 'Dispatched',
+  tracking_shared: 'Tracking shared',
+  on_hold: 'On Hold'
 };
 
 const Card = ({ icon: Icon, title, hint, count, children }) => (
@@ -72,14 +75,24 @@ const WarehouseTag = ({ order }) =>
   ) : null;
 
 const RecentDispatchPanel = ({
-  onConfirm, onHold, onAddTracking, onCater, onReleaseCater, confirmingId, onOpen, warehouse = '', period = ''
+  onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, confirmingId, onOpen,
+  warehouse = '', period = ''
 }) => {
   // Sep 15, 2026: filtered by the warehouse picked at the top of the page, and
   // by "Today" — every draft SO created today and every order Finance
-  // confirmed today, not just the latest 20.
+  // confirmed today, not just the latest 20. "On hold" swaps both lists for
+  // every held order (Dispatch's flag, or On Hold by Finance / Management).
   const today = period === 'today';
+  const heldView = period === 'on_hold';
+  const held = useQuery({
+    queryKey: ['dispatch-on-hold', warehouse],
+    queryFn: () => client.get('/api/dispatch/on-hold', { params: { warehouse: warehouse || undefined } }).then((r) => r.data?.data?.orders || []),
+    enabled: heldView,
+    refetchInterval: 30000
+  });
   const { data, isLoading } = useQuery({
     queryKey: ['dispatch-recent', warehouse, period],
+    enabled: !heldView,
     queryFn: () =>
       client
         .get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined, period: period || undefined } })
@@ -89,6 +102,60 @@ const RecentDispatchPanel = ({
   const drafts = data?.new_draft_sos || [];
   const confirmed = data?.finance_confirmed || [];
   const loading = <p className="text-sm text-ink-secondary text-center py-8">Loading…</p>;
+
+  if (heldView) {
+    const rows = held.data || [];
+    return (
+      <Card
+        icon={ShieldCheck}
+        title="On hold"
+        hint="Orders Dispatch flagged, and orders Finance or Management put On Hold — who held each one and why. Dispatch can still prepare them."
+        count={rows.length}
+      >
+        {held.isLoading ? loading : rows.length === 0 ? <Empty text="No order is on hold." /> : (
+          <ul className="divide-y divide-slate-100">
+            {rows.map((o) => (
+              <li key={o.id} className="px-4 py-3 space-y-2">
+                <div className="flex justify-between gap-3">
+                  <Opener order={o} onOpen={onOpen}>
+                    <p className="text-sm font-mono font-semibold text-getmeds-blue">
+                      {o.getmeds_order_id}
+                      <span className="ml-2 font-sans text-[11px] text-getmeds-blue/80 group-hover:underline">View receipt</span>
+                    </p>
+                    <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}<WarehouseTag order={o} /></p>
+                    <p className="text-xs text-ink-secondary">{o.medrep_name}</p>
+                  </Opener>
+                  <div className="text-right shrink-0">
+                    <p className="text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</p>
+                    <p className="text-[11px] font-semibold text-ink-secondary">{STAGE_LABEL[o.status] || String(o.status).replace(/_/g, ' ')}</p>
+                  </div>
+                </div>
+                {o.status_hold && (
+                  <p className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs text-red-900">
+                    <span className="font-bold uppercase tracking-wide">On Hold</span>
+                    {o.status_hold.by ? ` by ${o.status_hold.by}` : ''}
+                    {o.status_hold.at ? ` · ${timeAgo(o.status_hold.at)}` : ''}
+                    {o.status_hold.reason ? <> — <span className="font-semibold">{o.status_hold.reason}</span></> : ''}
+                  </p>
+                )}
+                <DeliveryActions
+                  order={o}
+                  onConfirm={onConfirm}
+                  onHold={onHold}
+                  onAddTracking={onAddTracking}
+                  onCater={onCater}
+                  onReleaseCater={onReleaseCater}
+                  onHoldOrder={onHoldOrder}
+                  onLiftHold={onLiftHold}
+                  busy={confirmingId === o.id}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    );
+  }
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -161,7 +228,7 @@ const RecentDispatchPanel = ({
                     </p>
                   </div>
                 </div>
-                <DeliveryActions order={o} onConfirm={onConfirm} onHold={onHold} onAddTracking={onAddTracking} onCater={onCater} onReleaseCater={onReleaseCater} busy={confirmingId === o.id} />
+                <DeliveryActions order={o} onConfirm={onConfirm} onHold={onHold} onAddTracking={onAddTracking} onCater={onCater} onReleaseCater={onReleaseCater} onHoldOrder={onHoldOrder} onLiftHold={onLiftHold} busy={confirmingId === o.id} />
               </li>
             ))}
           </ul>

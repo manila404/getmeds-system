@@ -80,12 +80,21 @@ const TRACKING_HOLD_JOIN = `
           FROM order_events ce
          WHERE ce.order_id = o.id AND ce.event_type IN ('DISPATCH_CATERED', 'DISPATCH_RELEASED')
          ORDER BY ce.id DESC LIMIT 1
-      ) ce ON TRUE`;
-// Also carries who caters the order (Sep 15, 2026) — see services/dispatchCater.js.
+      ) ce ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT dh.event_type AS dispatch_hold_event, dh.actor_name AS dispatch_hold_by,
+               dh.created_at AS dispatch_hold_at, dh.metadata AS dispatch_hold_meta
+          FROM order_events dh
+         WHERE dh.order_id = o.id AND dh.event_type IN ('DISPATCH_HOLD', 'DISPATCH_HOLD_LIFTED')
+         ORDER BY dh.id DESC LIMIT 1
+      ) dh ON TRUE`;
+// Also carries who caters the order (services/dispatchCater.js) and
+// Dispatch's own hold on it (see holdOrder below) — Sep 15, 2026.
 const TRACKING_HOLD_COLUMNS =
   'th.tracking_hold_event, th.tracking_hold_by, th.tracking_hold_at, th.tracking_hold_meta, ' +
   'et.entered_tracking_by, et.entered_tracking_at, et.entered_tracking_meta, ' +
-  'ce.cater_event, ce.cater_by_id, ce.cater_by, ce.cater_at';
+  'ce.cater_event, ce.cater_by_id, ce.cater_by, ce.cater_at, ' +
+  'dh.dispatch_hold_event, dh.dispatch_hold_by, dh.dispatch_hold_at, dh.dispatch_hold_meta';
 
 /**
  * Midnight today in the Philippines, as the UTC ISO string the timestamps are
@@ -125,6 +134,10 @@ function withConfirmation(row) {
     cater_by_id: caterById,
     cater_by: caterBy,
     cater_at: caterAt,
+    dispatch_hold_event: dispatchHoldEvent,
+    dispatch_hold_by: dispatchHoldBy,
+    dispatch_hold_at: dispatchHoldAt,
+    dispatch_hold_meta: dispatchHoldMeta,
     ...rest
   } = row;
   const confirmedAddress = parseJson(meta)?.delivery_address ?? null;
@@ -133,6 +146,11 @@ function withConfirmation(row) {
   return {
     // Sep 15, 2026: which of the three warehouses it belongs to, by division.
     warehouse: warehouseOf(row.division, row.intake_source),
+    // Sep 15, 2026: Dispatch's hold — a flag, the order keeps its place.
+    dispatch_hold:
+      dispatchHoldEvent === 'DISPATCH_HOLD'
+        ? { reason: parseJson(dispatchHoldMeta)?.reason || null, by: dispatchHoldBy, at: dispatchHoldAt }
+        : null,
     // Sep 15, 2026: which Dispatch person caters it (services/dispatchCater.js).
     catered: caterEvent === 'DISPATCH_CATERED' ? { by: caterBy, by_id: caterById, at: caterAt } : null,
     // Sep 15, 2026: the tracking number Dispatch typed in (record-only — Zoho
@@ -695,6 +713,151 @@ exports.releaseTrackingHold = async (req, res, next) => {
     await tellMedrep(order, `Order ${order.getmeds_order_id}: the tracking number is on its way — the hold is lifted.`, 'TRACKING_HOLD_RELEASED');
 
     res.json({ success: true, data: { id: order.id, tracking_hold: null, message: `${order.getmeds_order_id}: tracking hold lifted.` } });
+  } catch (err) { next(err); }
+};
+
+// ─── Dispatch puts an order on hold (Sep 15, 2026) ─────────────────────────
+// "Sometimes it needs to update the items because of out of stock and such."
+// Confirmed with the business: a FLAG, not the On Hold status — the order
+// keeps its place in Dispatch (they can still prepare it), shows "On hold by
+// Dispatch — <reason>", and the MedRep, whoever raised it and Management are
+// told so someone fixes it. Lifted by Dispatch when it is sorted. Record-only:
+// no status change, nothing to Zoho. DISPATCH_HOLD / DISPATCH_HOLD_LIFTED
+// events, the latest one counting.
+
+async function loadForHold(id) {
+  const row = await db.prepare(`
+    SELECT o.*, ${TRACKING_HOLD_COLUMNS}
+      FROM orders o${TRACKING_HOLD_JOIN}
+     WHERE o.id = ?
+  `).get(id);
+  return row ? { raw: row, hold: withConfirmation(row).dispatch_hold } : null;
+}
+
+async function tellOrderPeople(order, message, eventType) {
+  try {
+    const managementIds = await notificationService.getUserIdsByRole('management');
+    const recipients = Array.from(new Set([order.medrep_id, order.raised_by_id, ...managementIds].filter(Boolean)));
+    await notificationService.notify({ orderId: order.id, recipientIds: recipients, message, eventType, orderData: order });
+  } catch (err) {
+    console.warn(`[DISPATCH] could not notify for ${order.getmeds_order_id}:`, err.message);
+  }
+}
+
+/** POST /api/dispatch/orders/:id/hold { reason } — flag the order on hold. */
+exports.holdOrder = async (req, res, next) => {
+  try {
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Say why, e.g. "PacliGet 260 out of stock — please update items".' } });
+    }
+    if (reason.length > 500) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'The reason is too long (500 characters at most).' } });
+    }
+    const loaded = await loadForHold(req.params.id);
+    if (!loaded) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    const order = loaded.raw;
+    if (!DELIVERY_CONFIRMABLE.includes(order.status)) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_HOLDABLE', message: `Only an order in Dispatch can be put on hold by Dispatch. This one is at "${order.status}".` }
+      });
+    }
+    if (loaded.hold) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'ALREADY_HELD', message: `Already on hold by ${loaded.hold.by}: ${loaded.hold.reason}` }
+      });
+    }
+
+    const actor = await resolveActor(req.user, 'dispatch');
+    await logEvent({
+      orderId: order.id,
+      eventType: 'DISPATCH_HOLD',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: actor.id,
+      actorName: actor.name,
+      notes: `On hold by Dispatch: ${reason}`,
+      metadata: { reason }
+    });
+    await tellOrderPeople(order, `Order ${order.getmeds_order_id} is on hold by Dispatch: ${reason}`, 'DISPATCH_HOLD');
+    const now = await loadForHold(order.id);
+    res.json({ success: true, data: { id: order.id, dispatch_hold: now.hold, message: `${order.getmeds_order_id} is on hold — the MedRep and Management were told.` } });
+  } catch (err) { next(err); }
+};
+
+/** POST /api/dispatch/orders/:id/hold/lift — sorted; the hold comes off. */
+exports.liftHold = async (req, res, next) => {
+  try {
+    const loaded = await loadForHold(req.params.id);
+    if (!loaded) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    const order = loaded.raw;
+    if (!loaded.hold) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_HELD', message: 'This order is not on hold by Dispatch.' } });
+    }
+    const actor = await resolveActor(req.user, 'dispatch');
+    await logEvent({
+      orderId: order.id,
+      eventType: 'DISPATCH_HOLD_LIFTED',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: actor.id,
+      actorName: actor.name,
+      notes: `Dispatch hold lifted (was: ${loaded.hold.reason}).`,
+      metadata: { previous_reason: loaded.hold.reason }
+    });
+    await tellOrderPeople(order, `Order ${order.getmeds_order_id}: Dispatch lifted its hold — back in preparation.`, 'DISPATCH_HOLD_LIFTED');
+    res.json({ success: true, data: { id: order.id, dispatch_hold: null, message: `${order.getmeds_order_id}: hold lifted.` } });
+  } catch (err) { next(err); }
+};
+
+/**
+ * GET /api/dispatch/on-hold — every held order Dispatch should know about:
+ * the ones Dispatch flagged, and the ones Finance or Management put On Hold
+ * (with their reason and who held it). Confirmed with the business: all
+ * held orders, so Dispatch can see what is happening with each. Imported Zoho
+ * history left out. ?warehouse= as elsewhere on the page.
+ */
+exports.getOnHold = async (req, res, next) => {
+  try {
+    const scope = await loadScope(req.user);
+    const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
+    const wh = warehouseSql(req.query.warehouse, 'o');
+    const extra = [scopeClause, wh && wh.sql].filter(Boolean).map((s) => ` AND ${s}`).join('');
+    const rows = await db.prepare(`
+      SELECT o.id, o.getmeds_order_id, o.status, o.division, o.intake_source, o.total_amount,
+             o.delivery_address, o.delivery_notes, o.intake_receiver, o.intake_contact_no, o.intake_delivery_method,
+             o.zoho_so_number, o.exception_reason, o.medrep_id, o.raised_by_id, o.created_at, o.updated_at,
+             c.name AS customer_name, c.contact_number, u.name AS medrep_name,
+             dc.delivery_confirmed_by, dc.delivery_confirmed_at, dc.delivery_confirmed_meta,
+             (SELECT dr.tracking_number FROM dispatch_records dr WHERE dr.order_id = o.id) AS tracking_number,
+             ${TRACKING_HOLD_COLUMNS},
+             hs.held_by, hs.held_at
+        FROM orders o
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN users u ON u.id = o.medrep_id${CONFIRMATION_JOIN}${TRACKING_HOLD_JOIN}
+        LEFT JOIN LATERAL (
+          SELECT e.actor_name AS held_by, e.created_at AS held_at
+            FROM order_events e
+           WHERE e.order_id = o.id AND e.new_status = 'on_hold' AND e.old_status <> 'on_hold'
+           ORDER BY e.id DESC LIMIT 1
+        ) hs ON TRUE
+       WHERE (o.status = 'on_hold' OR dh.dispatch_hold_event = 'DISPATCH_HOLD')
+         AND NOT (${importedSql('o')})${extra}
+       ORDER BY COALESCE(dh.dispatch_hold_at, hs.held_at, o.updated_at) DESC
+       LIMIT 200
+    `).all([...scopeParams, ...(wh ? wh.params : [])]);
+
+    const orders = rows.map(({ held_by: heldBy, held_at: heldAt, ...row }) => {
+      const shaped = withConfirmation(row);
+      return {
+        ...shaped,
+        // On Hold the STATUS — Finance's or Management's hold, not Dispatch's.
+        status_hold: row.status === 'on_hold' ? { reason: row.exception_reason || null, by: heldBy || null, at: heldAt || null } : null
+      };
+    });
+    res.json({ success: true, data: { orders } });
   } catch (err) { next(err); }
 };
 
