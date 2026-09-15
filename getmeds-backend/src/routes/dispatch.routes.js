@@ -14,6 +14,14 @@ router.param('id', (req, res, next) => requireOrderScope(req, res, next));
 
 router.get('/queue', c.getQueue);
 
+// Sep 15, 2026: new draft Sales Orders and Finance-confirmed orders, the
+// printed delivery slip, and "confirmed for delivery" — which only records who
+// checked the address and when; it changes no status and writes nothing to
+// Zoho, so it works with the workflow switch on or off.
+router.get('/recent', c.getRecent);
+router.get('/orders/:id/slip', c.getSlip);
+router.post('/orders/:id/confirm-delivery', c.confirmDelivery);
+
 // Sep 12, 2026: Dispatch works in Getmeds (GETMEDS_WORKFLOW_V2). Each button
 // makes the matching change in Zoho — see services/workflowV2Service.js. With
 // the switch off these answer 404 FEATURE_OFF and the queue above stays
