@@ -34,6 +34,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
+import { ORDER_SOURCES } from '../../constants/orderSources';
 import { TAX_OPTIONS, getTaxOption, lineTaxLabel, computeLineAmounts } from '../../utils/orderLines';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
@@ -51,22 +52,15 @@ import { TAX_OPTIONS, getTaxOption, lineTaxLabel, computeLineAmounts } from '../
 // delivery_address being present to actually ship an order — dropping it
 // would strand every credit order with nowhere to deliver to.
 
-// Source options — exactly the dropdown Zoho already shows on its own
-// Sales Order "Source" field (matched 1:1 so the value picked here is
-// already valid the day this gets wired into a real Zoho payload).
-const SOURCE_OPTIONS = [
-  'Doctor order',
-  'Patient order referred by doctor',
-  'Patient order referred by patient',
-  'Emergency purchase',
-  'Hospital PO',
-  'Distributor order',
-  // Sep 9, 2026: the assistance-programme sources the hospital flow uses.
-  // Kept in this same list rather than a separate hospital-only one — the
-  // Source field is one field with one set of answers, and splitting it would
-  // mean a MedRep who picked the wrong customer category sees the wrong menu.
-  'PAP-DSWD'
-];
+// Source options — exactly the dropdown Zoho shows on its own Sales Order
+// "Source" field, which is mandatory and accepts only its own options.
+//
+// Sep 15, 2026: now Zoho's full list of 12, shared with the order page (see
+// constants/orderSources.js). The assistance-programme sources are Zoho's own
+// PCSO / IAPF / DSWD / Office of the President — this list used to offer
+// "PAP-DSWD", which is not a Zoho option. One field, one set of answers, for
+// every customer category.
+const SOURCE_OPTIONS = ORDER_SOURCES;
 
 /**
  * Sep 9, 2026: which customer categories put the form into its hospital

@@ -15,6 +15,7 @@ import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 import OrderItemsEditor from '../components/orders/OrderItemsEditor';
 import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
+import { ORDER_SOURCES } from '../constants/orderSources';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
 import { TRACKING_EDITABLE_STATUSES } from '../components/dispatch/DeliveryActions';
 import { TAX_OPTIONS } from '../utils/orderLines';
@@ -43,10 +44,9 @@ const SUB_DIVISIONS_BY_DIVISION = {
   STC: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
   URO: ['CEBU', 'COMMONWEALTH', 'DAVAO', 'KALAW', 'NCL', 'SOUTH LUZON', 'TMC ORTIGAS'],
 };
-const SOURCE_OPTIONS = [
-  'Doctor order', 'Patient order referred by doctor', 'Patient order referred by patient',
-  'Emergency purchase', 'Hospital PO', 'Distributor order'
-];
+// Sep 15, 2026: Zoho's own Source options, shared with the order form — see
+// constants/orderSources.js.
+const SOURCE_OPTIONS = ORDER_SOURCES;
 const INVOICING_FROM_OPTIONS = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 const DELIVERY_METHOD_SUGGESTIONS = [
   'Own Rider / Company Vehicle', 'LBC Express', 'Grab Express', 'J&T Express',
