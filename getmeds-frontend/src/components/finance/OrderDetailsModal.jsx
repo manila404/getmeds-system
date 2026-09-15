@@ -49,7 +49,10 @@ const Section = ({ title, children }) => (
   </div>
 );
 
-const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2 = false }) => {
+// Sep 15, 2026: `footer` — Dispatch opens this same panel as the order's
+// receipt (what to prepare), and puts its own actions there instead of
+// Finance's Confirm. Without `onConfirm` no Confirm button can appear anyway.
+const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2 = false, footer = null }) => {
   const detail = useQuery({
     queryKey: ['finance-order-detail', orderId],
     queryFn: () => client.get(`/api/orders/${orderId}`).then((r) => r.data),
@@ -347,7 +350,9 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
         <div className="px-5 py-3 border-t border-slate-200 bg-white rounded-b-xl flex items-center justify-between gap-3">
           {/* Says why there is no Confirm button, rather than leaving its
               absence to be read as the panel being broken. */}
-          {confirmsSalesOrder ? (
+          {footer ? (
+            <div className="min-w-0">{footer}</div>
+          ) : confirmsSalesOrder ? (
             <fieldset className="min-w-0 space-y-1">
               <legend className="text-[11px] text-ink-secondary mb-1">
                 Confirming confirms this Sales Order in Zoho. Dispatch invoices it next.

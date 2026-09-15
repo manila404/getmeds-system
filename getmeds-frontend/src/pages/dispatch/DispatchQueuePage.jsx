@@ -3,6 +3,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { CheckCircle, Clock, RefreshCw, PackageCheck, Truck, ExternalLink, Receipt, MapPin } from 'lucide-react';
 import client from '../../api/client';
+import ConfirmDialog from '../../components/ui/ConfirmDialog';
+import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
+import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
+import DeliveryActions, { CONFIRMABLE_STATUSES } from '../../components/dispatch/DeliveryActions';
 
 /**
  * Sep 12, 2026: two versions of this page, chosen by the server.
@@ -106,6 +110,61 @@ const DispatchQueuePage = () => {
   });
   const busyOn = (id) => act.isPending && act.variables?.id === id;
 
+  // Sep 15, 2026: "Confirmed for delivery" — records who checked the address
+  // and when. Changes no status and writes nothing to Zoho.
+  const [confirmFor, setConfirmFor] = useState(null);
+  // Sep 15, 2026: the order whose receipt is open — clicking an order shows
+  // everything needed to prepare it (items, delivery, attachments).
+  const [viewing, setViewing] = useState(null);
+  const confirmDelivery = useMutation({
+    mutationFn: (id) => client.post(`/api/dispatch/orders/${id}/confirm-delivery`).then((r) => r.data?.data),
+    onSuccess: (res) => {
+      toast.success(res.message);
+      // The open receipt shows the new confirmation straight away.
+      setViewing((v) => (v && v.id === res.id
+        ? { ...v, delivery_confirmed_by: res.delivery_confirmed_by, delivery_confirmed_at: res.delivery_confirmed_at, delivery_address_changed: false }
+        : v));
+      qc.invalidateQueries({ queryKey: ['dispatch-queue'] });
+      qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not confirm the delivery.', { duration: 8000 })
+  });
+  const confirmingId = confirmDelivery.isPending ? confirmDelivery.variables : null;
+  const deliveryActions = (order) =>
+    CONFIRMABLE_STATUSES.includes(order.status) || order.delivery_confirmed_at ? (
+      <DeliveryActions order={order} onConfirm={setConfirmFor} busy={confirmingId === order.id} />
+    ) : null;
+
+  const recentAndDialog = (
+    <>
+      <RecentDispatchPanel onConfirm={setConfirmFor} confirmingId={confirmingId} onOpen={setViewing} />
+      {/* Before the ConfirmDialog, so that dialog opens on top of it. */}
+      {viewing && (
+        <OrderDetailsModal
+          orderId={viewing.id}
+          onClose={() => setViewing(null)}
+          footer={<DeliveryActions order={viewing} onConfirm={setConfirmFor} busy={confirmingId === viewing.id} />}
+        />
+      )}
+      <ConfirmDialog
+        isOpen={!!confirmFor}
+        onClose={() => setConfirmFor(null)}
+        onConfirm={() => confirmFor && confirmDelivery.mutate(confirmFor.id)}
+        title={`Confirm ${confirmFor?.getmeds_order_id || ''} for delivery?`}
+        message={
+          confirmFor
+            ? `Deliver to ${confirmFor.customer_name}: ${confirmFor.delivery_address || '(no address)'}` +
+              (confirmFor.intake_receiver ? ` — receiver ${confirmFor.intake_receiver}` : '') +
+              (confirmFor.intake_contact_no || confirmFor.contact_number ? `, ${confirmFor.intake_contact_no || confirmFor.contact_number}` : '') +
+              '. Check this against the printed slip first. This records your confirmation; it does not change the order or Zoho.'
+            : ''
+        }
+        confirmText="Confirm for delivery"
+        variant="info"
+      />
+    </>
+  );
+
   const header = (
     <div className="flex items-center justify-between gap-3">
       <div>
@@ -126,8 +185,18 @@ const DispatchQueuePage = () => {
 
   const orderSummary = (order) => (
     <div className="flex justify-between items-start gap-4">
-      <div className="min-w-0">
-        <p className="text-sm font-mono font-semibold text-getmeds-blue">{order.getmeds_order_id}</p>
+      <div
+        role="button"
+        tabIndex={0}
+        title="View the receipt"
+        onClick={() => setViewing(order)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setViewing(order); } }}
+        className="min-w-0 cursor-pointer group"
+      >
+        <p className="text-sm font-mono font-semibold text-getmeds-blue">
+          {order.getmeds_order_id}
+          <span className="ml-2 font-sans text-[11px] font-semibold text-getmeds-blue/80 group-hover:underline">View receipt</span>
+        </p>
         <p className="text-sm text-ink-primary mt-0.5 font-medium truncate">{order.customer_name}</p>
         <p className="text-xs text-ink-secondary">{order.medrep_name}</p>
         {(order.zoho_so_number || order.zoho_invoice_number || order.zoho_package_number) && (
@@ -225,6 +294,7 @@ const DispatchQueuePage = () => {
     return (
       <div className="space-y-6">
         {header}
+        {recentAndDialog}
 
         <div className="flex flex-wrap gap-2" role="tablist" aria-label="Dispatch steps">
           {STEPS.map((s) => {
@@ -266,6 +336,7 @@ const DispatchQueuePage = () => {
                   {order.status === 'completed' && (
                     <p className="text-xs text-ink-secondary">Shipped and paid — the order is complete; only the delivery is left to record.</p>
                   )}
+                  {deliveryActions(order)}
                   <div>{actionFor(order)}</div>
                 </li>
               ))}
@@ -320,6 +391,7 @@ const DispatchQueuePage = () => {
   return (
     <div className="space-y-6">
       {header}
+      {recentAndDialog}
 
       <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
         <div className="px-4 py-3 border-b border-slate-200 bg-surface flex items-center gap-2">
@@ -340,6 +412,7 @@ const DispatchQueuePage = () => {
               return (
                 <li key={order.id} className="p-4">
                   {orderSummary(order)}
+                  <div className="mt-2">{deliveryActions(order)}</div>
                   <div className={`mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${stage.className}`}>
                     <Icon className="w-3.5 h-3.5 mt-0.5 shrink-0" />
                     <div>
