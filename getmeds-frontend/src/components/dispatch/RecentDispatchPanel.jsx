@@ -63,10 +63,19 @@ const Opener = ({ order, onOpen, children }) => (
   </div>
 );
 
-const RecentDispatchPanel = ({ onConfirm, onHold, onAddTracking, onCater, onReleaseCater, confirmingId, onOpen }) => {
+// Which of the three warehouses the order belongs to (by its division).
+const WarehouseTag = ({ order }) =>
+  order.warehouse ? (
+    <span className="ml-1.5 align-middle text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-100 text-ink-secondary">
+      {order.warehouse.label}
+    </span>
+  ) : null;
+
+const RecentDispatchPanel = ({ onConfirm, onHold, onAddTracking, onCater, onReleaseCater, confirmingId, onOpen, warehouse = '' }) => {
+  // Sep 15, 2026: filtered by the warehouse picked at the top of the page.
   const { data, isLoading } = useQuery({
-    queryKey: ['dispatch-recent'],
-    queryFn: () => client.get('/api/dispatch/recent').then((r) => r.data?.data),
+    queryKey: ['dispatch-recent', warehouse],
+    queryFn: () => client.get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined } }).then((r) => r.data?.data),
     refetchInterval: 30000
   });
   const drafts = data?.new_draft_sos || [];
@@ -90,7 +99,7 @@ const RecentDispatchPanel = ({ onConfirm, onHold, onAddTracking, onCater, onRele
                     {o.getmeds_order_id}
                     <span className="ml-2 font-sans text-[11px] text-getmeds-blue/80 group-hover:underline">View receipt</span>
                   </p>
-                  <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
+                  <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}<WarehouseTag order={o} /></p>
                   <p className="text-xs text-ink-secondary">
                     {o.zoho_so_number && <>SO <span className="font-mono">{o.zoho_so_number}</span> · </>}
                     {o.medrep_name}
@@ -123,7 +132,7 @@ const RecentDispatchPanel = ({ onConfirm, onHold, onAddTracking, onCater, onRele
                       {o.getmeds_order_id}
                       <span className="ml-2 font-sans text-[11px] text-getmeds-blue/80 group-hover:underline">View receipt</span>
                     </p>
-                    <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
+                    <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}<WarehouseTag order={o} /></p>
                     <p className="text-xs text-ink-secondary truncate" title={o.delivery_address || ''}>
                       {o.delivery_address || <span className="text-red-700 font-semibold">No delivery address</span>}
                     </p>

@@ -456,12 +456,10 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
     String(selectedCustomer?.category || '').toLowerCase()
   );
 
+  // What is staged, for the hospital checklist's ticks. Sep 15, 2026: the
+  // checklist no longer gates submission (see isFormValid), so nothing else
+  // reads it.
   const stagedTypes = new Set(stagedAttachments.map(a => a.fileType));
-  // Computed from HOSPITAL_REQUIRED_ATTACHMENTS rather than listed again, so
-  // the checklist on screen and the submit gate can never disagree.
-  const missingHospitalAttachments = isHospitalOrder
-    ? HOSPITAL_REQUIRED_ATTACHMENTS.filter(t => !stagedTypes.has(t.value))
-    : [];
 
   // Doctor Name is only typed when the customer is NOT the doctor. When they
   // are, the field is the customer's own name — asking someone to retype what
@@ -1051,17 +1049,14 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
     // making every rep answer a question that does not apply produces a filled
     // box rather than a fact.
     //
-    // They stay REQUIRED on a hospital order, which is what the Master Form
-    // always specified. That clause is written out here on purpose: the old
-    // code relied on the global requirement above and said so in a comment
-    // ("a hospital order can never be Yes in practice, which is why the
-    // hospital rule needs no separate clause for it"), so simply deleting the
-    // global one would have quietly dropped the hospital requirement too.
-    (!isHospitalOrder ||
-      (effectiveDoctorName.trim() &&
-        glNumber.trim() &&
-        receiverType &&
-        missingHospitalAttachments.length === 0)) &&
+    // Sep 15, 2026: and on a hospital order too. Doctor Name, GL Number, the
+    // receiver type and the four attachments (GL, Prescription, Proof of
+    // Payment, Valid ID) used to be required there, and a MedRep without all
+    // of them in hand could not place the order at all. Confirmed with the
+    // business: still asked for — the checklist and the fields stay on screen
+    // for a hospital customer — but none of them blocks submission. What is
+    // missing can be attached later from the order's Attachments tab, and
+    // Finance's panel still points out any hospital document not attached.
     items.length > 0 &&
     items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0) &&
     // Sep 4, 2026: a proof of payment, or a reason there is none. Never neither,
@@ -1076,12 +1071,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
     // proof, say why" field is not shown to them at all (see isBackOffice
     // below and the Field it gates), so there is nothing here for them to
     // fill in and this requirement must not block their submission.
-    // Sep 9, 2026: a hospital order requires a Proof of Payment outright (it is
-    // in HOSPITAL_REQUIRED_ATTACHMENTS), so the "or say why there isn't one"
-    // escape does not apply to it — including for management, who are
-    // otherwise exempt from this rule entirely.
-    (isHospitalOrder ||
-      isBackOffice || hasStagedProof ||
+    // Sep 15, 2026: a hospital order used to be exempt here because it required
+    // a Proof of Payment outright among its four attachments. Now that those
+    // are optional, it follows the same rule as every other order: a proof,
+    // or the reason there is none.
+    (isBackOffice || hasStagedProof ||
       (Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim()))))
     // Sep 5, 2026 (4): management picking a MedRep here used to be
     // required (see the Sep 5 removal note on resolveOrderMedrep on the
@@ -1814,7 +1808,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
 
               {isHospitalOrder && (
                 <p className="mt-2 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200 text-[11px] font-semibold">
-                  🏥 Hospital order — Doctor Name, GL Number, receiver type and four attachments are required below.
+                  🏥 Hospital order — Doctor Name, GL Number, receiver type and four attachments are requested below (optional).
                 </p>
               )}
 
@@ -1900,23 +1894,22 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   order actually reads them. */}
               {isHospitalOrder && (
                 <>
-                  <Field label="GL Number" required help="Guarantee Letter reference — e.g. the GL number issued by DSWD.">
+                  {/* Sep 15, 2026: optional — see isFormValid. */}
+                  <Field label="GL Number" help="Guarantee Letter reference — e.g. the GL number issued by DSWD. Optional.">
                     <input
                       type="text"
                       value={glNumber}
                       onChange={(e) => setGlNumber(e.target.value)}
                       placeholder="e.g. GL-2026-00123"
                       className={inputClass}
-                      required
                     />
                   </Field>
 
-                  <Field label="Receiver" required help="Who physically receives the delivery.">
+                  <Field label="Receiver" help="Who physically receives the delivery. Optional.">
                     <select
                       value={receiverType}
                       onChange={(e) => setReceiverType(e.target.value)}
                       className={inputClass}
-                      required
                     >
                       <option value="">-- Select receiver --</option>
                       {RECEIVER_TYPES.map((r) => (
@@ -1971,13 +1964,10 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   already known and shown rather than retyped — retyping what
                   is on screen produces typos, not answers.
 
-                  Sep 11, 2026: optional on an ordinary order, required on a
-                  hospital one. The hospital rule now has its own clause in
-                  isFormValid rather than leaning on a global requirement that
-                  no longer exists. */}
+                  Sep 11, 2026: optional on an ordinary order. Sep 15, 2026:
+                  and on a hospital one too — see isFormValid. */}
               <Field
                 label="Doctor Name"
-                required={isHospitalOrder}
                 help={
                   isDoctor === 'yes'
                     ? 'The selected customer is the doctor.'
@@ -2287,7 +2277,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
               {isHospitalOrder && (
                 <div className="mb-3 rounded-xl border border-indigo-200 bg-indigo-50/60 p-3">
                   <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-900 mb-2">
-                    Required for a hospital order
+                    Requested for a hospital order — optional
                   </p>
                   <ul className="space-y-1">
                     {HOSPITAL_REQUIRED_ATTACHMENTS.map((t) => {
@@ -2306,6 +2296,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   </ul>
                   <p className="mt-2 text-[11px] text-indigo-800">
                     Attach each file below and tag it with the matching type in the dropdown next to it.
+                    The order can be submitted without them — anything missing can be attached later
+                    from the order's Attachments tab.
                   </p>
                 </div>
               )}
@@ -2392,7 +2384,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                 </label>
               </div>
 
-              {!hasStagedProof && !isBackOffice && !isHospitalOrder && (
+              {!hasStagedProof && !isBackOffice && (
                 <div className="mt-4">
                   <label className="block text-xs font-semibold text-ink-primary mb-1.5">
                     No proof of payment? Say why <span className="text-state-error">*</span>

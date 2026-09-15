@@ -8,6 +8,7 @@ import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
 import DeliveryActions, { CONFIRMABLE_STATUSES, DISPATCH_PROOF_STATUSES } from '../../components/dispatch/DeliveryActions';
 import HoldTrackingModal from '../../components/dispatch/HoldTrackingModal';
+import { DISPATCH_WAREHOUSES } from '../../constants/dispatchWarehouses';
 
 /**
  * Sep 12, 2026: two versions of this page, chosen by the server.
@@ -116,18 +117,24 @@ const DispatchQueuePage = () => {
   const [origin, setOrigin] = useState('all');
   // Sep 15, 2026: everyone's, the ones I cater, or the ones nobody has yet.
   const [caterFilter, setCaterFilter] = useState('');
+  // Sep 15, 2026: one of Dispatch's three warehouses, for the whole page —
+  // the Recent lists and the queue alike. '' is all of them.
+  const [warehouse, setWarehouse] = useState('');
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(t);
   }, [searchInput]);
-  useEffect(() => { setPage(1); }, [search, origin, stepKey, caterFilter]);
+  useEffect(() => { setPage(1); }, [search, origin, stepKey, caterFilter, warehouse]);
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['dispatch-queue', { page, search, origin, step: stepKey, cater: caterFilter }],
+    queryKey: ['dispatch-queue', { page, search, origin, step: stepKey, cater: caterFilter, warehouse }],
     queryFn: () =>
       client
         .get('/api/dispatch/queue', {
-          params: { page, limit: PAGE_SIZE, search: search || undefined, origin, step: stepKey, cater: caterFilter || undefined }
+          params: {
+            page, limit: PAGE_SIZE, search: search || undefined, origin, step: stepKey,
+            cater: caterFilter || undefined, warehouse: warehouse || undefined
+          }
         })
         .then(r => r.data),
     placeholderData: keepPreviousData,
@@ -289,7 +296,32 @@ const DispatchQueuePage = () => {
 
   const recentAndDialog = (
     <>
+      {/* Sep 15, 2026: the warehouse filter — sorted by the order's Division
+          on the server (services/dispatchWarehouses.js). */}
+      <div className="flex flex-wrap gap-2" role="tablist" aria-label="Warehouse">
+        {DISPATCH_WAREHOUSES.map((w) => {
+          const selected = w.key === warehouse;
+          return (
+            <button
+              key={w.key || 'all'}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              title={w.hint || ''}
+              onClick={() => setWarehouse(w.key)}
+              className={`px-3 py-1.5 rounded-full border text-sm font-semibold ${
+                selected
+                  ? 'border-getmeds-blue bg-getmeds-blue text-white'
+                  : 'border-slate-200 bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'
+              }`}
+            >
+              {w.label}
+            </button>
+          );
+        })}
+      </div>
       <RecentDispatchPanel
+        warehouse={warehouse}
         onConfirm={setConfirmFor}
         onHold={setHoldFor}
         onAddTracking={setTrackingFor}
@@ -367,7 +399,14 @@ const DispatchQueuePage = () => {
           {order.getmeds_order_id}
           <span className="ml-2 font-sans text-[11px] font-semibold text-getmeds-blue/80 group-hover:underline">View receipt</span>
         </p>
-        <p className="text-sm text-ink-primary mt-0.5 font-medium truncate">{order.customer_name}</p>
+        <p className="text-sm text-ink-primary mt-0.5 font-medium truncate">
+          {order.customer_name}
+          {order.warehouse && (
+            <span className="ml-1.5 align-middle text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-100 text-ink-secondary">
+              {order.warehouse.label}
+            </span>
+          )}
+        </p>
         <p className="text-xs text-ink-secondary">{order.medrep_name}</p>
         {(order.zoho_so_number || order.zoho_invoice_number || order.zoho_package_number) && (
           <p className="text-xs text-ink-secondary mt-1">

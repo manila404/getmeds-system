@@ -45,7 +45,7 @@ const REQUIRED = ['display_name', 'contact_number', 'phone'];
  * disappear with nothing on screen to say so.
  */
 const CATEGORIES = [
-  { value: 'hospital', label: 'Hospital', hint: 'Orders will require a GL Number, receiver type and four attachments.' },
+  { value: 'hospital', label: 'Hospital', hint: 'Orders will ask for a GL Number, receiver type and four attachments (optional).' },
   { value: 'doctor', label: 'Doctor' },
   { value: 'distributor', label: 'Distributor' },
   { value: 'pwd', label: 'PWD' },

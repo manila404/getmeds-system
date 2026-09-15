@@ -154,7 +154,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
                 <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-900" />
                 <p className="text-[12px] text-amber-950">
                   <span className="font-semibold">
-                    Hospital order missing {missing.length} required document
+                    Hospital order missing {missing.length} requested document
                     {missing.length > 1 ? 's' : ''}:
                   </span>{' '}
                   {missing.map(attachmentLabel).join(', ')}. Worth chasing before verifying — these are

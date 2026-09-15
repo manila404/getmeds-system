@@ -7,6 +7,7 @@ const { workflowAction } = require('./workflowAction');
 const { logEvent, resolveActor } = require('../services/auditService');
 const notificationService = require('../services/notificationService');
 const { CATERED_SUBQUERY } = require('../services/dispatchCater');
+const { warehouseOf, warehouseSql } = require('../services/dispatchWarehouses');
 
 // ─── Confirmed for delivery (Sep 15, 2026) ─────────────────────────────────
 // Dispatch prints the delivery slip, checks the address, and confirms the
@@ -111,6 +112,8 @@ function withConfirmation(row) {
   const hold = parseJson(holdMeta) || {};
   const entered = parseJson(enteredMeta);
   return {
+    // Sep 15, 2026: which of the three warehouses it belongs to, by division.
+    warehouse: warehouseOf(row.division),
     // Sep 15, 2026: which Dispatch person caters it (services/dispatchCater.js).
     catered: caterEvent === 'DISPATCH_CATERED' ? { by: caterBy, by_id: caterById, at: caterAt } : null,
     // Sep 15, 2026: the tracking number Dispatch typed in (record-only — Zoho
@@ -233,6 +236,12 @@ exports.getQueue = async (req, res, next) => {
                                 WHERE te.event_type = 'DISPATCH_TRACKING_ADDED' AND te.metadata ILIKE ?))`);
       params.push(like, like, like, like, like, like);
     }
+    // Sep 15, 2026: one of Dispatch's three warehouses (by division).
+    const wh = warehouseSql(req.query.warehouse, 'o');
+    if (wh) {
+      where.push(wh.sql);
+      params.push(...wh.params);
+    }
     // Sep 15, 2026: whose orders — ?cater=mine (the ones I cater) or
     // ?cater=open (nobody caters them yet). Absent: everyone's.
     if (req.query.cater === 'mine') {
@@ -306,8 +315,13 @@ exports.getRecent = async (req, res, next) => {
     const scope = await loadScope(req.user);
     const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
     const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
+    // Sep 15, 2026: one of Dispatch's three warehouses (by division) — see
+    // services/dispatchWarehouses.js. Absent: all of them.
+    const wh = warehouseSql(req.query.warehouse, 'o');
+    const whAnd = wh ? ` AND ${wh.sql}` : '';
+    const whParams = wh ? wh.params : [];
     const columns = `
-        o.id, o.getmeds_order_id, o.status, o.total_amount, o.delivery_address, o.delivery_notes,
+        o.id, o.getmeds_order_id, o.status, o.division, o.total_amount, o.delivery_address, o.delivery_notes,
         o.intake_receiver, o.intake_contact_no, o.intake_delivery_method,
         o.zoho_so_number, o.zoho_so_status, o.created_at, o.updated_at,
         c.name AS customer_name, c.contact_number, u.name AS medrep_name,
@@ -323,10 +337,10 @@ exports.getRecent = async (req, res, next) => {
     const drafts = await db.prepare(`
       SELECT ${columns} ${from}
        WHERE o.status = 'ready_for_finance_verified' AND o.zoho_so_id IS NOT NULL
-         AND NOT (${importedSql('o')})${scopeAnd}
+         AND NOT (${importedSql('o')})${scopeAnd}${whAnd}
        ORDER BY o.created_at DESC
        LIMIT 20
-    `).all([...scopeParams]);
+    `).all([...scopeParams, ...whParams]);
 
     const confirmed = await db.prepare(`
       SELECT ${columns}, fv.finance_confirmed_at, fv.finance_confirmed_by ${from}
@@ -337,10 +351,10 @@ exports.getRecent = async (req, res, next) => {
          ORDER BY fe.id DESC LIMIT 1
       ) fv ON TRUE
        WHERE o.status = ANY(?)
-         AND NOT (${importedSql('o')})${scopeAnd}
+         AND NOT (${importedSql('o')})${scopeAnd}${whAnd}
        ORDER BY COALESCE(fv.finance_confirmed_at, o.updated_at) DESC
        LIMIT 20
-    `).all([FINANCE_CONFIRMED, ...scopeParams]);
+    `).all([FINANCE_CONFIRMED, ...scopeParams, ...whParams]);
 
     res.json({
       success: true,
