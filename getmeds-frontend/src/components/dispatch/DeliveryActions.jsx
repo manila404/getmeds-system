@@ -144,14 +144,16 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, busy }) => {
   const canConfirm = CONFIRMABLE_STATUSES.includes(order.status);
   const hold = order.tracking_hold;
   const entered = order.entered_tracking;
-  // Once the delivery is confirmed (or shipped from Zoho without a tracking
-  // number): add the number, or hold it — never when the order has one.
-  const trackingOpen =
-    !order.tracking_number && !entered &&
-    TRACKING_HOLDABLE_STATUSES.includes(order.status) &&
+  // The tracking number can be added on any order Dispatch has that does not
+  // have one yet — confirmed or not (Sep 15, 2026: Dispatch asked to add it
+  // straight from the list). Putting it on hold follows the confirmation (or
+  // a shipment from Zoho without a number), since "not ready yet" answers the
+  // confirm step.
+  const trackingFree =
+    !order.tracking_number && !entered && TRACKING_HOLDABLE_STATUSES.includes(order.status);
+  const canHold = Boolean(onHold) && trackingFree && !hold &&
     ((confirmed && !stale) || order.status === 'dispatched');
-  const canHold = Boolean(onHold) && trackingOpen && !hold;
-  const canAddTracking = Boolean(onAddTracking) && trackingOpen;
+  const canAddTracking = Boolean(onAddTracking) && trackingFree;
 
   // Sep 15, 2026: the proof photo. Several can be picked at once; they go up
   // one after another, and the toast says what reached Zoho.

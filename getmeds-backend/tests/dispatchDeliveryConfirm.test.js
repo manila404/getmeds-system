@@ -252,6 +252,55 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
     });
   });
 
+  describe('the queue: 25 a page, searchable', () => {
+    // A tag only these rows carry, so the search isolates them from every
+    // other suite's orders in the shared test database.
+    const tag = `PAGE${Date.now()}`;
+    const queue = (params) => request(app).get('/api/dispatch/queue').query(params).set(auth());
+
+    beforeAll(async () => {
+      for (let i = 0; i < 3; i++) await orderAt('ready_for_dispatch', { prefix: `GM-${tag}` });
+      await orderAt('picking_packing', { prefix: `ZOHO-SO-${tag}` });
+    });
+
+    test('pages through the matches', async () => {
+      const first = (await queue({ search: tag, limit: 2, page: 1 })).body.data;
+      expect(first.orders).toHaveLength(2);
+      expect(first.pagination).toEqual(expect.objectContaining({ page: 1, limit: 2, total: 4, pages: 2 }));
+      const second = (await queue({ search: tag, limit: 2, page: 2 })).body.data;
+      expect(second.orders).toHaveLength(2);
+      const ids = [...first.orders, ...second.orders].map((o) => o.id);
+      expect(new Set(ids).size).toBe(4);
+    });
+
+    test('25 a page when no size is asked for', async () => {
+      const data = (await queue({})).body.data;
+      expect(data.pagination.limit).toBe(25);
+      expect(data.orders.length).toBeLessThanOrEqual(25);
+    });
+
+    test('searches the order number, and splits raised-here from imported', async () => {
+      expect((await queue({ search: tag, origin: 'getmeds' })).body.data.pagination.total).toBe(3);
+      const imported = (await queue({ search: tag, origin: 'zoho' })).body.data;
+      expect(imported.orders.map((o) => o.getmeds_order_id)).toEqual([expect.stringMatching(/^ZOHO-SO-/)]);
+      expect(imported.status_counts).toEqual({ picking_packing: 1 });
+    });
+
+    test('a search with % or _ matches them literally', async () => {
+      expect((await queue({ search: `${tag}%` })).body.data.pagination.total).toBe(0);
+    });
+
+    test('a tracking number can be added straight from the list, without confirming first', async () => {
+      const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      const res = await request(app).post(`/api/dispatch/orders/${order.id}/tracking`).set(auth()).send({ courier: 'LBC', tracking_number: 'LBC-777' });
+      expect(res.status).toBe(200);
+      // Found by the number Dispatch typed, as well as by Zoho's.
+      const found = (await queue({ search: 'LBC-777' })).body.data.orders;
+      expect(found.map((o) => o.id)).toEqual([order.id]);
+      expect(found[0].entered_tracking.tracking_number).toBe('LBC-777');
+    });
+  });
+
   test("Dispatch can open an order's receipt: the order, its items and its attachments", async () => {
     // Clicking an order on the Dispatch page opens the same panel Finance
     // uses, which reads these two endpoints.

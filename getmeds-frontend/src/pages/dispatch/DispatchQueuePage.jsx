@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import React, { useEffect, useState } from 'react';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, PackageCheck, Truck, ExternalLink, Receipt, MapPin } from 'lucide-react';
+import { CheckCircle, Clock, RefreshCw, PackageCheck, Truck, ExternalLink, Receipt, MapPin, Search, ChevronLeft, ChevronRight } from 'lucide-react';
 import client from '../../api/client';
 import DeliveryConfirmModal from '../../components/dispatch/DeliveryConfirmModal';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
@@ -74,18 +74,95 @@ const doneMessage = (action, d = {}) => {
   return `Marked delivered.${tail}`;
 };
 
+const PAGE_SIZE = 25;
+
+// Sep 15, 2026: "Showing 1–25 of 10,108", and Previous / Next.
+const Pager = ({ pagination, onPage, fetching }) => {
+  if (!pagination || pagination.total <= pagination.limit) return null;
+  const { page, pages, total, limit } = pagination;
+  const from = (page - 1) * limit + 1;
+  const to = Math.min(page * limit, total);
+  const btn = 'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed';
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-slate-200 bg-surface">
+      <p className="text-xs text-ink-secondary">
+        Showing <span className="font-semibold text-ink-primary">{from.toLocaleString()}–{to.toLocaleString()}</span> of{' '}
+        <span className="font-semibold text-ink-primary">{total.toLocaleString()}</span>
+        {fetching && <span className="ml-2">Loading…</span>}
+      </p>
+      <div className="flex items-center gap-2">
+        <button type="button" className={btn} disabled={page <= 1} onClick={() => onPage(page - 1)}>
+          <ChevronLeft className="w-3.5 h-3.5" /> Previous
+        </button>
+        <span className="text-xs text-ink-secondary tabular-nums">Page {page} of {pages.toLocaleString()}</span>
+        <button type="button" className={btn} disabled={page >= pages} onClick={() => onPage(page + 1)}>
+          Next <ChevronRight className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+};
+
 const DispatchQueuePage = () => {
   const qc = useQueryClient();
+
+  // Sep 15, 2026: the queue is paged and searchable on the server. Before,
+  // it came back whole — 10,108 orders, nearly all imported from Zoho, drawn
+  // in one list. Search waits for a pause in typing so each key is not a query.
+  const [stepKey, setStepKey] = useState('needs_invoice');
+  const [page, setPage] = useState(1);
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  const [origin, setOrigin] = useState('all');
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+  useEffect(() => { setPage(1); }, [search, origin, stepKey]);
+
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['dispatch-queue'],
-    queryFn: () => client.get('/api/dispatch/queue').then(r => r.data),
+    queryKey: ['dispatch-queue', { page, search, origin, step: stepKey }],
+    queryFn: () =>
+      client
+        .get('/api/dispatch/queue', { params: { page, limit: PAGE_SIZE, search: search || undefined, origin, step: stepKey } })
+        .then(r => r.data),
+    placeholderData: keepPreviousData,
     refetchInterval: 30000
   });
   const orders = data?.data?.orders || [];
   const workflowV2 = Boolean(data?.data?.workflow_v2);
   const stepStatuses = data?.data?.steps || {};
+  const pagination = data?.data?.pagination || null;
+  const statusCounts = data?.data?.status_counts || {};
+  const total = pagination?.total ?? orders.length;
 
-  const [stepKey, setStepKey] = useState('needs_invoice');
+  const toolbar = (
+    <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-slate-200 bg-white">
+      <div className="relative flex-1 min-w-[14rem]">
+        <Search className="w-4 h-4 text-ink-secondary absolute left-2.5 top-1/2 -translate-y-1/2" />
+        <input
+          type="search"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder="Search order no., customer, SO no., MedRep or tracking no."
+          className="w-full pl-8 pr-2 py-1.5 text-sm rounded-md border border-slate-300 focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+        />
+      </div>
+      {!workflowV2 && (
+        <select
+          value={origin}
+          onChange={(e) => setOrigin(e.target.value)}
+          className="py-1.5 px-2 text-sm rounded-md border border-slate-300 focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+          title="Where the order was raised"
+        >
+          <option value="all">All orders</option>
+          <option value="getmeds">Raised in GetMeds</option>
+          <option value="zoho">Imported from Zoho</option>
+        </select>
+      )}
+    </div>
+  );
+  const pager = <Pager pagination={pagination} onPage={setPage} fetching={isFetching} />;
   // Ship needs two fields per row; kept by order id so typing in one row
   // never fills another.
   const [shipForm, setShipForm] = useState({});
@@ -280,9 +357,11 @@ const DispatchQueuePage = () => {
 
   // ─── Switch on: Dispatch works here ─────────────────────────────────────
   if (workflowV2) {
-    const inStep = (key) => orders.filter((o) => (stepStatuses[key] || []).includes(o.status));
+    // The server returns only the chosen step's page; the tab counts come
+    // from its per-status totals.
+    const stepCount = (key) => (stepStatuses[key] || []).reduce((n, s) => n + (Number(statusCounts[s]) || 0), 0);
     const current = STEPS.find((s) => s.key === stepKey) || STEPS[0];
-    const rows = inStep(current.key);
+    const rows = orders;
     const primary = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed';
 
     const actionFor = (order) => {
@@ -357,7 +436,7 @@ const DispatchQueuePage = () => {
         <div className="flex flex-wrap gap-2" role="tablist" aria-label="Dispatch steps">
           {STEPS.map((s) => {
             const Icon = s.icon;
-            const count = inStep(s.key).length;
+            const count = stepCount(s.key);
             const selected = s.key === current.key;
             return (
               <button
@@ -378,13 +457,14 @@ const DispatchQueuePage = () => {
 
         <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
           <div className="px-4 py-3 border-b border-slate-200 bg-surface">
-            <h2 className="text-sm font-semibold text-ink-primary">{current.label} ({rows.length})</h2>
+            <h2 className="text-sm font-semibold text-ink-primary">{current.label} ({total.toLocaleString()})</h2>
             <p className="text-xs text-ink-secondary mt-0.5">{current.hint}</p>
           </div>
+          {toolbar}
           {isLoading ? spinner : rows.length === 0 ? (
             <div className="text-center py-12 text-ink-secondary">
               <CheckCircle className="w-10 h-10 mx-auto mb-2 text-pharmacy-green" />
-              <p className="text-sm">Nothing at this step</p>
+              <p className="text-sm">{search ? `Nothing at this step matches "${search}"` : 'Nothing at this step'}</p>
             </div>
           ) : (
             <ul className="divide-y divide-slate-100">
@@ -400,6 +480,7 @@ const DispatchQueuePage = () => {
               ))}
             </ul>
           )}
+          {pager}
         </div>
 
         <div className="flex items-start gap-2 text-xs text-ink-secondary bg-surface border border-slate-200 rounded-lg p-3">
@@ -454,13 +535,14 @@ const DispatchQueuePage = () => {
       <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
         <div className="px-4 py-3 border-b border-slate-200 bg-surface flex items-center gap-2">
           <Clock className="w-4 h-4 text-state-warning" />
-          <h2 className="text-sm font-semibold text-ink-primary">Awaiting Dispatch Action in Zoho ({orders.length})</h2>
+          <h2 className="text-sm font-semibold text-ink-primary">Awaiting Dispatch Action in Zoho ({total.toLocaleString()})</h2>
         </div>
+        {toolbar}
 
         {isLoading ? spinner : orders.length === 0 ? (
           <div className="text-center py-12 text-ink-secondary">
             <CheckCircle className="w-10 h-10 mx-auto mb-2 text-pharmacy-green" />
-            <p className="text-sm">No orders currently waiting on dispatch</p>
+            <p className="text-sm">{search ? `No order matches "${search}"` : 'No orders currently waiting on dispatch'}</p>
           </div>
         ) : (
           <ul className="divide-y divide-slate-100">
@@ -483,6 +565,7 @@ const DispatchQueuePage = () => {
             })}
           </ul>
         )}
+        {pager}
       </div>
 
       <div className="flex items-start gap-2 text-xs text-ink-secondary bg-surface border border-slate-200 rounded-lg p-3">

@@ -1,6 +1,6 @@
 const db = require('../db/database');
 const { loadScope, scopeSql } = require('../services/orderScopeService');
-const { importedSql } = require('../services/orderOrigin');
+const { importedSql, originSql } = require('../services/orderOrigin');
 const { isWorkflowV2Enabled } = require('../services/workflowFlags');
 const workflow = require('../services/workflowV2Service');
 const { workflowAction } = require('./workflowAction');
@@ -145,7 +145,6 @@ exports.getQueue = async (req, res, next) => {
     // unchanged.
     const scope = await loadScope(req.user);
     const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
-    const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
     const v2 = isWorkflowV2Enabled();
 
     const select = `
@@ -160,32 +159,105 @@ exports.getQueue = async (req, res, next) => {
       LEFT JOIN users u ON o.medrep_id = u.id
       LEFT JOIN dispatch_records d ON o.id = d.order_id${CONFIRMATION_JOIN}${TRACKING_HOLD_JOIN}`;
 
-    let orders;
+    // Sep 15, 2026: paged (25 by default) and searchable. Unpaged, the
+    // read-only list answered with every order at these statuses — 10,108 in
+    // production, nearly all history imported from Zoho — in one response.
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
+    const requestedPage = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const search = String(req.query.search || '').trim().slice(0, 100);
+    // 'all' by default here, so the list shows what it always has; the page
+    // offers "raised in GetMeds" / "imported from Zoho" to narrow it.
+    const origin = ['getmeds', 'zoho', 'all'].includes(req.query.origin) ? req.query.origin : 'all';
+    const step = v2 && Object.prototype.hasOwnProperty.call(V2_STEPS, req.query.step) ? req.query.step : null;
+
+    const where = [];
+    const params = [];
     if (v2) {
       // Dispatch's work now starts at "needs invoice" and ends when the parcel
       // arrives, so a shipped order stays here until someone marks it
       // delivered. Imported Zoho orders are left out: they are history, and
       // pressing a button on one would write to a Sales Order someone finished
       // in Zoho long ago.
-      orders = await db.prepare(`${select}
-        WHERE (o.status = ANY(?) OR (o.status = 'completed' AND d.zoho_shipment_id IS NOT NULL))
-          AND d.delivered_at IS NULL
-          AND NOT (${importedSql('o')})${scopeAnd}
-        ORDER BY o.updated_at ASC
-      `).all([V2_STATUSES, ...scopeParams]);
+      where.push(
+        "(o.status = ANY(?) OR (o.status = 'completed' AND d.zoho_shipment_id IS NOT NULL))",
+        'd.delivered_at IS NULL',
+        `NOT (${importedSql('o')})`
+      );
+      params.push(V2_STATUSES);
     } else {
-      orders = await db.prepare(`${select}
-        -- Sep 1, 2026 (5): 'ready_for_dispatch' now MEANS "the invoice has been
-        -- issued, this is yours to pack" — it used to mean "the Sales Order is
-        -- confirmed". That rename is exactly what this queue wanted: the
-        -- warehouse sees an order at the point Finance is done with it, and the
-        -- two finance stages ahead of it (ready_for_draft_invoice,
-        -- ready_for_invoice_sent) correctly stay out of this list.
-        WHERE o.status IN ('ready_for_dispatch', 'picking_packing', 'dispatched')${scopeAnd}
-        ORDER BY o.updated_at ASC
-      `).all(...scopeParams);
+      // Sep 1, 2026 (5): 'ready_for_dispatch' now MEANS "the invoice has been
+      // issued, this is yours to pack" — it used to mean "the Sales Order is
+      // confirmed". That rename is exactly what this queue wanted: the
+      // warehouse sees an order at the point Finance is done with it, and the
+      // two finance stages ahead of it (ready_for_draft_invoice,
+      // ready_for_invoice_sent) correctly stay out of this list.
+      where.push("o.status IN ('ready_for_dispatch', 'picking_packing', 'dispatched')");
+      const originClause = originSql(origin, 'o');
+      if (originClause) where.push(originClause);
     }
-    res.json({ success: true, data: { orders: orders.map(withConfirmation), workflow_v2: v2, steps: v2 ? V2_STEPS : null } });
+    if (scopeClause) {
+      where.push(scopeClause);
+      params.push(...scopeParams);
+    }
+    if (search) {
+      // % and _ are matched as themselves, not as wildcards.
+      const like = `%${search.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+      // The tracking number is either Zoho's (dispatch_records) or one
+      // Dispatch typed in (a DISPATCH_TRACKING_ADDED event). The events are
+      // matched once, as a set, rather than probed for every one of the
+      // ~10,000 rows — per-row, a search took 4.4 s against production.
+      where.push(`(o.getmeds_order_id ILIKE ? OR o.zoho_so_number ILIKE ? OR c.name ILIKE ? OR u.name ILIKE ?
+                   OR d.tracking_number ILIKE ?
+                   OR o.id IN (SELECT te.order_id FROM order_events te
+                                WHERE te.event_type = 'DISPATCH_TRACKING_ADDED' AND te.metadata ILIKE ?))`);
+      params.push(like, like, like, like, like, like);
+    }
+    const whereSql = where.join(' AND ');
+
+    // Per-status totals over everything that matches — the page's count, and
+    // the v2 step tabs' counts — without fetching the rows themselves.
+    const counted = await db.prepare(`
+      SELECT o.status, COUNT(*) AS n
+        FROM orders o
+        LEFT JOIN customers c ON o.customer_id = c.id
+        LEFT JOIN users u ON o.medrep_id = u.id
+        LEFT JOIN dispatch_records d ON o.id = d.order_id
+       WHERE ${whereSql}
+       GROUP BY o.status
+    `).all([...params]);
+    const statusCounts = Object.fromEntries(counted.map((r) => [r.status, Number(r.n)]));
+
+    const pageWhere = [whereSql];
+    const pageParams = [...params];
+    if (step) {
+      pageWhere.push('o.status = ANY(?)');
+      pageParams.push(V2_STEPS[step]);
+    }
+    const total = Object.entries(statusCounts)
+      .filter(([status]) => !step || V2_STEPS[step].includes(status))
+      .reduce((n, [, c]) => n + c, 0);
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const page = Math.min(requestedPage, pages);
+
+    // v2 is a work queue, oldest first. The read-only mirror is mostly history,
+    // so the newest come first there.
+    const orders = await db.prepare(`${select}
+       WHERE ${pageWhere.join(' AND ')}
+       ORDER BY o.updated_at ${v2 ? 'ASC' : 'DESC'}, o.id DESC
+       LIMIT ? OFFSET ?
+    `).all([...pageParams, limit, (page - 1) * limit]);
+
+    res.json({
+      success: true,
+      data: {
+        orders: orders.map(withConfirmation),
+        workflow_v2: v2,
+        steps: v2 ? V2_STEPS : null,
+        pagination: { page, limit, total, pages },
+        status_counts: statusCounts,
+        origin: v2 ? null : origin
+      }
+    });
   } catch (err) { next(err); }
 };
 
