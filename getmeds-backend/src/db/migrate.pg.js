@@ -837,6 +837,37 @@ async function reconcileProductTaxColumns(client) {
   console.log('  ✔ products tax columns present');
 }
 
+/**
+ * Sep 18, 2026: order_events.actor_role — the actor's role AT THE TIME of
+ * the event, so the trail can say "by Management" / "by MedRep" without a
+ * live join to users.role, which would rewrite history for every past event
+ * the moment someone's role changes (see admin role-change). Same guarded-
+ * CHECK pattern as reconcileStatusCheck: Postgres cannot add a value to an
+ * existing CHECK, only drop and re-add it, but this is the column's first
+ * version so there is nothing to widen yet — just add it if missing.
+ * Existing rows stay NULL: nobody recorded a role before this column
+ * existed, and there is no reliable way to reconstruct one after the fact
+ * (a live join would give a WRONG, not merely missing, answer for anyone
+ * whose role has since changed) — same "don't invent history" reasoning as
+ * raised_by_id not being backfilled onto every historical row.
+ */
+async function reconcileOrderEventsActorRole(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'order_events' AND column_name = 'actor_role'`
+  );
+  if (rows.length) {
+    console.log('  ✔ order_events.actor_role already present');
+    return;
+  }
+  console.log('  ↻ order_events.actor_role is missing — adding (existing rows stay NULL — no reliable way to know a past role now)');
+  await client.query(
+    `ALTER TABLE order_events ADD COLUMN actor_role TEXT
+       CHECK (actor_role IS NULL OR actor_role IN ('medrep','finance','dispatch','management','admin'))`
+  );
+  console.log('  ✔ order_events.actor_role added');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -877,6 +908,7 @@ async function main() {
     await reconcileOrderTaxPreference(client);
     await reconcileOrderHeadquarter(client);
     await reconcileProductTaxColumns(client);
+    await reconcileOrderEventsActorRole(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

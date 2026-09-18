@@ -531,6 +531,14 @@ CREATE TABLE IF NOT EXISTS order_events (
   new_status TEXT,
   actor_id INTEGER REFERENCES users(id),
   actor_name TEXT,
+  -- Sep 18, 2026: the actor's role AT THE TIME, so the trail can say "by
+  -- Management" or "by MedRep" without joining to users.role live — a live
+  -- join would silently rewrite history the moment someone's role changes
+  -- (an admin can now do that, see the role-change feature), same reasoning
+  -- actor_name is a snapshot copy rather than a join to users.name.
+  -- auditService.js's logEvent fills this in automatically from actor_id
+  -- when a caller doesn't pass one explicitly, so no call site has to.
+  actor_role TEXT CHECK(actor_role IS NULL OR actor_role IN ('medrep','finance','dispatch','management','admin')),
   notes TEXT,
   metadata TEXT,
   created_at TEXT DEFAULT iso_now()

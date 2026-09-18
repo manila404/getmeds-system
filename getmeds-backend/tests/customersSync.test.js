@@ -80,6 +80,36 @@ describe('Customers — Zoho sync (read-only) and single-TEST-customer gate', ()
     expect(after).toBe(before);
   });
 
+  // Sep 18, 2026: a TIN set directly in Zoho (not through this app's own
+  // TIN field) never reached the local `customers` row no matter how many
+  // times this sync ran — reconcileContacts never read cf_tin at all.
+  test('sync pulls a TIN set directly in Zoho (cf_tin) into the local row', async () => {
+    await zoho.updateContactTin('CONTACT-FIX-1001', '123-456-789-000');
+
+    const res = await request(app)
+      .post('/api/customers/sync-from-zoho')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+
+    const row = await db.prepare(`SELECT tin FROM customers WHERE zoho_contact_id = 'CONTACT-FIX-1001'`).get();
+    expect(row.tin).toBe('123-456-789-000');
+  });
+
+  // A blank cf_tin on the Zoho side must never blank a value already saved
+  // locally (e.g. pushed to Zoho but the push itself hasn't round-tripped,
+  // or a local correction — see customerTinService.js).
+  test("sync never blanks a locally-saved TIN just because Zoho's own is empty", async () => {
+    await db.prepare(`UPDATE customers SET tin = 'LOCAL-ONLY-999' WHERE zoho_contact_id = 'CONTACT-FIX-1002'`).run();
+
+    const res = await request(app)
+      .post('/api/customers/sync-from-zoho')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+
+    const row = await db.prepare(`SELECT tin FROM customers WHERE zoho_contact_id = 'CONTACT-FIX-1002'`).get();
+    expect(row.tin).toBe('LOCAL-ONLY-999');
+  });
+
   test('RBAC: MedRep cannot trigger the Zoho customer pull', async () => {
     const res = await request(app)
       .post('/api/customers/sync-from-zoho')

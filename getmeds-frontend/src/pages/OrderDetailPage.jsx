@@ -18,6 +18,7 @@ import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
 import ResumeOrderModal from '../components/orders/ResumeOrderModal';
 import AttachFileField from '../components/orders/AttachFileField';
 import { uploadOrderAttachment } from '../utils/attachmentUpload';
+import { roleLabel } from '../constants/roles';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
@@ -1356,7 +1357,10 @@ const OrderDetailPage = () => {
                                 )}
                               </p>
                               {event.notes && <p className="text-xs text-ink-secondary mt-0.5">{event.notes}</p>}
-                              <p className="text-xs text-ink-secondary mt-0.5">By: {event.actor_name || 'System'}</p>
+                              <p className="text-xs text-ink-secondary mt-0.5">
+                                By: {event.actor_name || 'System'}
+                                {event.actor_role && <span className="font-semibold"> · {roleLabel(event.actor_role)}</span>}
+                              </p>
                             </div>
                             <p className="text-xs text-ink-secondary flex-shrink-0 ml-4">
                               {event.created_at ? formatPHT(event.created_at, 'timeline') : ''}

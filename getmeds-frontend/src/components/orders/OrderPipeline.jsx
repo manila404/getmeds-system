@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Check, Minus, ChevronRight, Clock, XCircle, Info } from 'lucide-react';
 import { formatPHT } from '../../utils/dateUtils';
+import { roleLabel } from '../../constants/roles';
 
 /**
  * The order's life as a ten-stage pipeline.
@@ -54,6 +55,28 @@ const STATE_STYLE = {
   }
 };
 
+// Sep 18, 2026: which role did this, next to whose name it was — "By:
+// Veronica" alone reads as just a name; the badge says at a glance whether
+// this was Management overriding something, the MedRep themselves, Finance,
+// or Dispatch, so nobody has to already know who Veronica is.
+const ROLE_BADGE_STYLE = {
+  management: 'bg-purple-50 text-purple-800 border-purple-200',
+  admin: 'bg-purple-50 text-purple-800 border-purple-200',
+  medrep: 'bg-getmeds-blue/10 text-getmeds-blue-dark border-getmeds-blue/25',
+  finance: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+  dispatch: 'bg-teal-50 text-teal-800 border-teal-200'
+};
+
+const RoleBadge = ({ role }) => {
+  if (!role) return null;
+  const cls = ROLE_BADGE_STYLE[role] || 'bg-slate-100 text-slate-600 border-slate-200';
+  return (
+    <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border ${cls}`}>
+      {roleLabel(role)}
+    </span>
+  );
+};
+
 const SourceBadge = ({ source }) => {
   if (!source) return null;
   // Which system this actually happened in. Worth showing: an order can be
@@ -101,7 +124,11 @@ const Updates = ({ updates }) => {
                 </span>
               </div>
               {u.note && <p className="text-ink-secondary mt-0.5">{u.note}</p>}
-              {u.by && <p className="text-ink-secondary/80 mt-0.5">By: {u.by}</p>}
+              {u.by && (
+                <p className="text-ink-secondary/80 mt-0.5 flex items-center flex-wrap">
+                  By: {u.by}<RoleBadge role={u.by_role} />
+                </p>
+              )}
             </div>
           ))}
         </div>
@@ -181,7 +208,11 @@ const OrderPipeline = ({ timeline }) => {
                   </p>
                 </div>
 
-                {s.by && <p className="text-xs text-ink-secondary mt-0.5">By: {s.by}</p>}
+                {s.by && (
+                  <p className="text-xs text-ink-secondary mt-0.5 flex items-center flex-wrap">
+                    By: {s.by}<RoleBadge role={s.by_role} />
+                  </p>
+                )}
 
                 {/* A stage known only from Zoho's status. Said plainly rather
                     than left as a tick with a blank date, which reads like

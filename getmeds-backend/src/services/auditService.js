@@ -1,5 +1,6 @@
 const db = require('../db/database');
 const { mirrorAuditEvent } = require('./discordAuditService');
+const { hasColumn } = require('./schemaColumns');
 
 // 1. Prepare the statement once at module load for better performance
 // Sep 10, 2026: `created_at` is now a parameter rather than 'now'.
@@ -12,13 +13,14 @@ const { mirrorAuditEvent } = require('./discordAuditService');
 //
 // Callers that do not pass one still get 'now', which is correct for anything
 // a person does IN this app — see logEvent's `occurredAt`.
-const insertEventStmt = db.prepare(`
-  INSERT INTO order_events (
-    order_id, event_type, old_status, new_status, 
-    actor_id, actor_name, notes, metadata, created_at
-  )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
+//
+// Sep 18, 2026: NOT a single fixed statement any more — actor_role is a new,
+// not-yet-guaranteed-migrated column (see schemaColumns.js), so the column
+// list is built per call depending on whether it exists yet. The SQL text is
+// still cheap to build (this runs once per user action, never in a bulk
+// loop like the 500-row customer sync), and until the migration runs this
+// simply falls back to the nine columns it always wrote.
+const BASE_EVENT_COLUMNS = ['order_id', 'event_type', 'old_status', 'new_status', 'actor_id', 'actor_name', 'notes', 'metadata', 'created_at'];
 
 /**
  * Log an order event to the order_events audit table.
@@ -30,6 +32,15 @@ const insertEventStmt = db.prepare(`
  * @param {string} [params.newStatus] - The new status.
  * @param {number|string} [params.actorId] - ID of the user performing the action.
  * @param {string} [params.actorName] - Name of the user.
+ * @param {string} [params.actorRole] - The actor's role AT THE TIME (Sep 18,
+ *   2026) — 'medrep'/'finance'/'dispatch'/'management'/'admin'. Almost never
+ *   needs to be passed explicitly: when omitted, this looks it up from
+ *   actorId's CURRENT role, which is correct for the overwhelming case (the
+ *   role they're acting in right now, at the moment the action happens).
+ *   Pass it only when a caller already resolved a different actor than the
+ *   request's own req.user (e.g. TEST_MODE's resolveActor swap) and wants to
+ *   skip the extra lookup — resolveActor's return value already carries
+ *   `.role`.
  * @param {string} [params.notes] - Additional context.
  * @param {Object} [params.metadata] - Extra data to be stored as JSON.
  * @param {string} [params.occurredAt] - ISO timestamp of when the event
@@ -37,7 +48,7 @@ const insertEventStmt = db.prepare(`
  *   Zoho's own date when backfilling something that happened there.
  */
 async function logEvent(
-  { orderId, eventType, oldStatus, newStatus, actorId, actorName, notes, metadata, occurredAt }
+  { orderId, eventType, oldStatus, newStatus, actorId, actorName, actorRole, notes, metadata, occurredAt }
 ) {
   // 2. Validate required fields
   if (!orderId || !eventType) {
@@ -45,9 +56,22 @@ async function logEvent(
   }
 
   try {
-    // 3. Execute the cached statement
+    let role = actorRole || null;
+    if (!role && actorId) {
+      try {
+        const actorRow = await db.prepare('SELECT role FROM users WHERE id = ?').get(actorId);
+        role = actorRow?.role || null;
+      } catch (_) {
+        role = null; // a lookup hiccup must not block the event itself
+      }
+    }
+    const canWriteRole = role && (await hasColumn('order_events', 'actor_role'));
+
+    // 3. Build the column list (see BASE_EVENT_COLUMNS' note on why this is
+    //    per-call rather than one fixed prepared statement).
     // 4. Use '??' instead of '||' to preserve falsy values like 0 or ""
-    await insertEventStmt.run(
+    const columns = canWriteRole ? [...BASE_EVENT_COLUMNS, 'actor_role'] : BASE_EVENT_COLUMNS;
+    const values = [
       orderId,
       eventType,
       oldStatus ?? null,
@@ -58,9 +82,14 @@ async function logEvent(
       metadata ? JSON.stringify(metadata) : null,
       // When it HAPPENED, not when we heard about it. Defaults to now, which
       // is right for an action taken in this app and wrong for one backfilled
-      // from Zoho — see the note on insertEventStmt above.
+      // from Zoho — see the note on BASE_EVENT_COLUMNS above.
       occurredAt || new Date().toISOString()
-    );
+    ];
+    if (canWriteRole) values.push(role);
+
+    await db
+      .prepare(`INSERT INTO order_events (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`)
+      .run(...values);
 
     // Sep 13, 2026: mirror to the order's Discord thread once the event is
     // committed (services/discordAuditService.js). Only who, what and when are

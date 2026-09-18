@@ -344,7 +344,16 @@ async function reconcileContacts(contacts, opts = {}) {
       address: contact.billing_address
         ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ')
         : null,
-      isActive: String(contact.status || '').toLowerCase() === 'inactive' ? 0 : 1
+      isActive: String(contact.status || '').toLowerCase() === 'inactive' ? 0 : 1,
+      // Sep 18, 2026: Zoho's own TIN (cf_tin), a flat property on the
+      // contact object same as every other custom field Zoho returns —
+      // MockZohoAdapter.updateContactTin sets it the same way. Never synced
+      // here before, so a TIN entered directly in Zoho (rather than through
+      // this app's own TIN field, see customerTinService.js) never showed up
+      // locally no matter how many times Sync from Zoho ran. Blank/missing
+      // stays null rather than '' so the DO UPDATE below can tell "Zoho has
+      // nothing" from "Zoho says empty" and leave a local value alone.
+      tin: contact.cf_tin ? String(contact.cf_tin).trim() || null : null
     });
   }
 
@@ -390,8 +399,8 @@ async function reconcileContacts(contacts, opts = {}) {
 
       const params = [];
       const tuples = batch.map((r) => {
-        params.push(r.name, r.type, r.zohoId, r.contactPerson, r.phone, r.address, r.isActive);
-        return "(?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?)";
+        params.push(r.name, r.type, r.zohoId, r.contactPerson, r.phone, r.address, r.isActive, r.tin);
+        return "(?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?, ?)";
       });
 
       // ON CONFLICT names the index predicate as well as the column because
@@ -403,9 +412,18 @@ async function reconcileContacts(contacts, opts = {}) {
       // is only ever a guess on first insert that an admin then corrects
       // locally — re-deriving it on every sync would silently undo that
       // correction. This matches the old UPDATE statement, which set neither.
+      //
+      // `tin` DOES get re-derived on every sync, unlike those two — Zoho is
+      // the compliance record for it (this app's own TIN field pushes TO
+      // Zoho, see customerTinService.js's header comment). COALESCE(EXCLUDED,
+      // existing) rather than a flat overwrite: when Zoho's cf_tin is blank
+      // this leaves whatever is already stored alone, so a value saved here
+      // but not yet reflected in Zoho (a failed push, or a local correction
+      // — see setCustomerTin's "clearing locally is not pushed to Zoho" note)
+      // is never wiped out by its own absence on the Zoho side.
       await db
         .prepare(
-          `INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active)
+          `INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active, tin)
            VALUES ${tuples.join(', ')}
            ON CONFLICT (zoho_contact_id) WHERE zoho_contact_id IS NOT NULL
            DO UPDATE SET
@@ -414,7 +432,8 @@ async function reconcileContacts(contacts, opts = {}) {
              contact_number = EXCLUDED.contact_number,
              address = EXCLUDED.address,
              is_active = EXCLUDED.is_active,
-             last_synced_at = EXCLUDED.last_synced_at`
+             last_synced_at = EXCLUDED.last_synced_at,
+             tin = COALESCE(EXCLUDED.tin, customers.tin)`
         )
         .run(...params);
 
@@ -629,13 +648,20 @@ async function getZohoAddress(req, res, next) {
       ? `${contact.first_name} ${contact.last_name || ''}`.trim()
       : (customer.contact_person || null);
     const contactNumber = contact.phone || contact.mobile || customer.contact_number || null;
+    // Sep 18, 2026: same reasoning as reconcileContacts' tin column — take
+    // Zoho's cf_tin when it has one, otherwise keep whatever's stored
+    // locally rather than blanking it. Picking a customer on the order form
+    // is the moment their TIN actually matters (see OrderForm.jsx), so this
+    // is also the moment this app is most likely to notice one was only ever
+    // set directly in Zoho and never reached here via a bulk sync.
+    const tin = contact.cf_tin ? String(contact.cf_tin).trim() || null : null;
 
     await db.prepare(`
-      UPDATE customers SET address = ?, contact_person = ?, contact_number = ?, last_synced_at = datetime('now')
+      UPDATE customers SET address = ?, contact_person = ?, contact_number = ?, tin = COALESCE(?, tin), last_synced_at = datetime('now')
       WHERE id = ?
-    `).run(address || null, contactPerson, contactNumber, customer.id);
+    `).run(address || null, contactPerson, contactNumber, tin, customer.id);
 
-    res.json({ success: true, data: { address, contact_person: contactPerson, contact_number: contactNumber, synced_from_zoho: true } });
+    res.json({ success: true, data: { address, contact_person: contactPerson, contact_number: contactNumber, tin: tin || customer.tin || null, synced_from_zoho: true } });
   } catch (err) { next(err); }
 }
 

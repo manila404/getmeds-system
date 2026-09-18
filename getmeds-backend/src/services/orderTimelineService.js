@@ -293,6 +293,12 @@ function buildTimeline(order, events = []) {
       evidence: event ? 'event' : byState ? 'state' : null,
       at: event ? event.created_at : null,
       by: event ? event.actor_name : null,
+      // Sep 18, 2026: the actor's role at the time (order_events.actor_role)
+      // — "by Veronica" alone reads as a name nobody outside her own team
+      // necessarily recognises; "by Veronica · Management" says WHO can be
+      // trusted to have made that call. Null on an order pre-dating the
+      // column, or a state-only stage with no event at all.
+      by_role: event ? event.actor_role || null : null,
       source: event ? sourceOf(event) : byState ? 'zoho' : null,
       note: event
         ? event.notes
@@ -322,6 +328,7 @@ function buildTimeline(order, events = []) {
       event_type: u.event_type,
       at: u.created_at,
       by: u.actor_name,
+      by_role: u.actor_role || null,
       note: u.notes,
       source: sourceOf(u)
     });
@@ -336,6 +343,7 @@ function buildTimeline(order, events = []) {
       state: 'terminal',
       at: t.created_at,
       by: t.actor_name,
+      by_role: t.actor_role || null,
       source: sourceOf(t),
       note: t.notes,
       event_type: t.event_type,
