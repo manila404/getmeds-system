@@ -36,6 +36,7 @@ import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ORDER_SOURCES } from '../../constants/orderSources';
 import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
+import StockWarningModal from './StockWarningModal';
 import { TAX_OPTIONS, getTaxOption, lineTaxLabel, computeLineAmounts } from '../../utils/orderLines';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
@@ -409,6 +410,24 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // Sep 15, 2026: Dispatch's open stock announcements, for the warning under
   // the product search when an item in this order is flagged.
   const { data: stockAnnouncements = [] } = useStockAnnouncements();
+  // Sep 18, 2026: out_of_stock/low_stock items currently in the cart — the
+  // two kinds worth stopping to ask about. back_in_stock/stock_update are
+  // informational, not a problem to justify proceeding past.
+  const flaggedStockItems = React.useMemo(() => {
+    const inOrder = new Set(items.map((i) => String(i.productId)));
+    return (stockAnnouncements || []).filter(
+      (a) => inOrder.has(String(a.product_id)) && ['out_of_stock', 'low_stock'].includes(a.kind)
+    );
+  }, [items, stockAnnouncements]);
+  const [stockWarningOpen, setStockWarningOpen] = useState(false);
+  const [stockWarningNote, setStockWarningNote] = useState('');
+  // Which exact set of product ids the rep already said "proceed anyway"
+  // for — a plain proceeded:true flag would still let a NEWLY added flagged
+  // item slip through unasked, or leave a stale note attached to an order
+  // whose flagged item was since removed and swapped for a different one.
+  const [acknowledgedFor, setAcknowledgedFor] = useState(null);
+  const flaggedIdsKey = [...new Set(flaggedStockItems.map((a) => a.product_id))].sort().join(',');
+  const stockWarningPending = flaggedStockItems.length > 0 && acknowledgedFor !== flaggedIdsKey;
   // Sep 14, 2026: Zoho's "Item Tax Preference" for the whole order. Inclusive
   // by default: read back from the live org, Zoho has priced every order this
   // app sent with VAT inside the rate, so this is how customers are billed.
@@ -793,6 +812,19 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           if (d.address) setDeliveryAddress(d.address);
           if (d.contact_person) setReceiverName(d.contact_person);
           if (d.contact_number) setReceiverContactNo(d.contact_number);
+          // Sep 18, 2026: a TIN, name, or email corrected straight in Zoho —
+          // this is the moment it actually matters, right as the order is
+          // being raised for this customer, rather than waiting on the next
+          // admin-triggered Sync from Zoho. `selectedCustomer` is what the
+          // review screen and the created order's customer read, so the
+          // name/email fix has to land there, not only in the database row
+          // the server just updated.
+          if (d.tin) setCustomerTin(d.tin);
+          if (d.name || d.email) {
+            setSelectedCustomer((prev) =>
+              prev && String(prev.id) === String(c.id) ? { ...prev, name: d.name || prev.name, email: d.email || prev.email } : prev
+            );
+          }
         }
       })
       .catch((err) => {
@@ -1244,6 +1276,10 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         // clears these (see handleFilesSelected).
         no_payment_proof_reason: hasStagedProof ? null : (noProofReason || null),
         no_payment_proof_note: hasStagedProof ? null : (noProofNote.trim() || null),
+        // Sep 18, 2026: only meaningful when an item was actually flagged —
+        // the server recomputes that itself and ignores this otherwise, so
+        // it's harmless to always send whatever is in state.
+        stock_warning_note: stockWarningNote.trim() || null,
         // Sep 2, 2026: only ever sent when the server said the picker is
         // allowed AND one was chosen. The server ignores it otherwise, so
         // this is belt-and-braces rather than the control itself.
@@ -1332,6 +1368,20 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
       toast.error('Please fill in all mandatory fields (marked *)');
       return;
     }
+    // Sep 18, 2026: an item Dispatch flagged is stopped here, before the
+    // review modal — not a second check inside it, so "Back to Edit" from
+    // the review modal can never re-open Confirm & Submit and skip past this.
+    if (stockWarningPending) {
+      setStockWarningOpen(true);
+      return;
+    }
+    setIsReviewOpen(true);
+  };
+
+  const handleStockWarningProceed = (note) => {
+    setStockWarningNote(note);
+    setAcknowledgedFor(flaggedIdsKey);
+    setStockWarningOpen(false);
     setIsReviewOpen(true);
   };
 
@@ -2504,6 +2554,17 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         </form>
       </div>
 
+      {/* Sep 18, 2026: Dispatch flagged an item in this cart — proceed, or go
+          back and edit. Rendered ahead of the review modal so it is always
+          the first thing seen when it applies. */}
+      {stockWarningOpen && (
+        <StockWarningModal
+          flagged={flaggedStockItems}
+          onClose={() => setStockWarningOpen(false)}
+          onProceed={handleStockWarningProceed}
+        />
+      )}
+
       {/* Review Modal */}
       <Modal
         isOpen={isReviewOpen}
@@ -2579,6 +2640,14 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
               </div>
             )}
           </div>
+
+          {/* Sep 18, 2026: shown only once acknowledged, so it's plain what
+              is about to be submitted alongside the flagged item(s). */}
+          {stockWarningNote.trim() && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+              <span className="font-semibold">📦⚠️ Stock warning note:</span> {stockWarningNote.trim()}
+            </div>
+          )}
 
           {filledIntakeDetails.length > 0 && (
             <div>

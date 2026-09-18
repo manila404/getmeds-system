@@ -12,6 +12,7 @@
 const request = require('supertest');
 const app = require('../src/app');
 const db = require('../src/db/database');
+const zoho = require('../src/integrations/zoho');
 
 describe('GET /api/customers/:id/address-from-zoho', () => {
   let medrepToken;
@@ -64,6 +65,39 @@ describe('GET /api/customers/:id/address-from-zoho', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.synced_from_zoho).toBe(false);
     expect(res.body.data.address).toBe('123 Local St');
+  });
+
+  // Sep 18, 2026: a name (or email) corrected straight in Zoho — not through
+  // this app's own edit paths — has to reach the local row the moment a
+  // MedRep picks that customer, not only on the next admin-triggered Sync
+  // from Zoho. orders.controller.js never stores its own copy of a
+  // customer's name (always a live JOIN), so fixing it here is enough for
+  // every order this customer has, past and future, to show the correction.
+  test("a name corrected in Zoho is picked up here, on selection — not just on the next bulk sync", async () => {
+    // CONTACT-FIX-1002, not 1001 — the earlier test in this file already
+    // has a row on 1001 that only cleans up in afterAll, and zoho_contact_id
+    // is unique locally.
+    const insert = await db.prepare(`
+      INSERT INTO customers (name, type, zoho_contact_id, source, is_active)
+      VALUES ('Juana Dela Cruz TYPO', 'direct', 'CONTACT-FIX-1002', 'zoho', 1)
+    `).run();
+    const customerId = insert.lastInsertRowid;
+    cleanupCustomerIds.push(customerId);
+
+    // The edit made "straight in Zoho".
+    await zoho.updateContact('CONTACT-FIX-1002', { contact_name: 'Juana Dela Cruz (Corrected)', email: 'juana.corrected@example.com' });
+
+    const res = await request(app)
+      .get(`/api/customers/${customerId}/address-from-zoho`)
+      .set('Authorization', `Bearer ${medrepToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.name).toBe('Juana Dela Cruz (Corrected)');
+    expect(res.body.data.email).toBe('juana.corrected@example.com');
+
+    const stored = await db.prepare('SELECT name, email FROM customers WHERE id = ?').get(customerId);
+    expect(stored.name).toBe('Juana Dela Cruz (Corrected)');
+    expect(stored.email).toBe('juana.corrected@example.com');
   });
 
   test('an unknown customer id returns 404', async () => {

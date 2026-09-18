@@ -43,7 +43,7 @@ const salespersonService = require('../services/salespersonService');
 const { returnToFinanceIfHeld, isFinanceHold } = require('../services/financeHoldService');
 const { isTestModeEnabled } = require('../middleware/testMode');
 const { computeLine, parseInclusiveTax } = require('../services/lineAmounts');
-const { hasColumn } = require('../services/schemaColumns');
+const { hasColumn, tableExists } = require('../services/schemaColumns');
 const { CATERED_SUBQUERY } = require('../services/dispatchCater');
 
 // Sep 5, 2026 (3): mirrors auth.controller.js's SUB_DIVISIONS_BY_DIVISION
@@ -1176,7 +1176,15 @@ exports.create = async (req, res, next) => {
       // MedRep instead of the seeded stand-in. See resolveOrderMedrep above
       // for the four conditions and why it is ignored rather than refused
       // everywhere else.
-      medrep_id
+      medrep_id,
+      // Sep 18, 2026: the MedRep's note when they proceeded past the order
+      // form's warning that an item in this order has an open Dispatch stock
+      // announcement (out of stock / low stock) — see the block right before
+      // this order is returned below. Optional and never validated here: an
+      // order with no flagged item simply has nothing to log it against, so
+      // a stray note from an older client or a since-resolved announcement
+      // is silently ignored rather than rejected.
+      stock_warning_note
     } = req.body;
     const clean = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
 
@@ -1976,6 +1984,72 @@ exports.create = async (req, res, next) => {
         const dispatchIds = await getUserIdsByRole('dispatch');
         await notify({ orderId, recipientIds: dispatchIds, message: `New credit order ${getmedsOrderId} is ready for dispatch.`, eventType: 'ORDER_READY_FOR_DISPATCH', orderData: orderDataForNotif });
       }
+    }
+
+    // ─── STOCK WARNING ACKNOWLEDGED (Sep 18, 2026) ───────────────────────────
+    //
+    // The order form warns a MedRep when an item they're ordering has an open
+    // Dispatch stock announcement (out of stock / low stock) and asks them to
+    // say why they're proceeding anyway — see components/orders/OrderForm.jsx
+    // and components/orders/StockWarningModal.jsx. "A warning, never a block"
+    // (stockAnnouncements.controller.js): nothing here refuses the order for
+    // being flagged, or for arriving with no note. This only records what
+    // happened, for Dispatch and Management's benefit — so an order that
+    // shows up against an item Dispatch already said was out isn't a mystery.
+    //
+    // Recomputed from the CURRENT open announcements rather than trusting
+    // whatever the client saw when the form was filled — stock can change in
+    // the time it takes to submit, and a note attached to an item that is no
+    // longer flagged (or was never flagged, from a stale/other client) would
+    // misdescribe the order. A note with nothing currently open to attach it
+    // to is simply not logged; the item(s) it WAS about, not the free text
+    // alone, are what makes it worth a trail entry at all.
+    try {
+      if (await tableExists('stock_announcements')) {
+        const productIds = (items || []).map((i) => parseInt(i.product_id, 10)).filter(Boolean);
+        const flagged = productIds.length
+          ? await db
+              .prepare(
+                `SELECT a.kind, p.name AS product_name
+                   FROM stock_announcements a
+                   JOIN products p ON p.id = a.product_id
+                  WHERE a.resolved_at IS NULL AND a.kind IN ('out_of_stock','low_stock')
+                    AND a.product_id IN (${productIds.map(() => '?').join(',')})`
+              )
+              .all(...productIds)
+          : [];
+
+        if (flagged.length) {
+          const describe = (f) => `${f.product_name} (${f.kind === 'out_of_stock' ? 'out of stock' : 'low stock'})`;
+          const note = String(stock_warning_note || '').trim();
+          await logEvent({
+            orderId,
+            eventType: 'STOCK_WARNING_ACKNOWLEDGED',
+            oldStatus: finalStatus,
+            newStatus: finalStatus,
+            actorId: req.user.id,
+            actorName: req.user.name,
+            notes: `Raised despite Dispatch's stock warning on ${flagged.map(describe).join(', ')}.` +
+              (note ? ` MedRep's note: ${note}` : ' No note given.'),
+            metadata: { flagged: flagged.map((f) => ({ product_name: f.product_name, kind: f.kind })), note: note || null }
+          });
+
+          const recipients = new Set([...(await getUserIdsByRole('dispatch')), ...(await getUserIdsByRole('management'))]);
+          await notify({
+            orderId,
+            recipientIds: [...recipients],
+            message: `Order ${getmedsOrderId} was raised despite a stock warning on ${flagged.map(describe).join(', ')}.` +
+              (note ? ` Note: ${note}` : ''),
+            eventType: 'STOCK_WARNING_ACKNOWLEDGED',
+            orderData: { getmeds_order_id: getmedsOrderId, customer_name: customer.name, status: finalStatus }
+          });
+        }
+      }
+    } catch (warnErr) {
+      // The order itself already exists and is synced (or queued) by this
+      // point — a failure recording the acknowledgement must never read back
+      // as the order having failed.
+      console.error(`[STOCK_WARNING] could not log acknowledgement for order ${orderId}:`, warnErr.message);
     }
 
     const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);

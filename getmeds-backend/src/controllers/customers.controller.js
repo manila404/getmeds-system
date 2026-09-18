@@ -655,13 +655,35 @@ async function getZohoAddress(req, res, next) {
     // is also the moment this app is most likely to notice one was only ever
     // set directly in Zoho and never reached here via a bulk sync.
     const tin = contact.cf_tin ? String(contact.cf_tin).trim() || null : null;
+    // Sep 18, 2026: same again for the customer's NAME and email — a
+    // correction made straight in Zoho ("Mercury Drug Taft" spelled out
+    // properly, a typo fixed) used to only reach here on the next bulk Sync
+    // from Zoho / Quick or Full Resync (an admin/management action), which
+    // could be a long wait. Every order for this customer — past AND future
+    // — reads `customers.name` live via a JOIN (orders never store their own
+    // copy of it), so fixing it here, the moment a MedRep actually picks the
+    // customer to raise an order, is what makes the fix show up on THIS
+    // order without anyone having to remember to sync first.
+    const name = (contact.contact_name || contact.company_name || '').trim() || null;
+    const email = (contact.email || '').trim() || null;
 
     await db.prepare(`
-      UPDATE customers SET address = ?, contact_person = ?, contact_number = ?, tin = COALESCE(?, tin), last_synced_at = datetime('now')
-      WHERE id = ?
-    `).run(address || null, contactPerson, contactNumber, tin, customer.id);
+      UPDATE customers
+         SET address = ?, contact_person = ?, contact_number = ?, tin = COALESCE(?, tin),
+             name = COALESCE(?, name), email = COALESCE(?, email), last_synced_at = datetime('now')
+       WHERE id = ?
+    `).run(address || null, contactPerson, contactNumber, tin, name, email, customer.id);
 
-    res.json({ success: true, data: { address, contact_person: contactPerson, contact_number: contactNumber, tin: tin || customer.tin || null, synced_from_zoho: true } });
+    res.json({
+      success: true,
+      data: {
+        address, contact_person: contactPerson, contact_number: contactNumber,
+        tin: tin || customer.tin || null,
+        name: name || customer.name,
+        email: email || customer.email || null,
+        synced_from_zoho: true
+      }
+    });
   } catch (err) { next(err); }
 }
 
