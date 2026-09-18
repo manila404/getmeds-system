@@ -29,13 +29,6 @@ const peso = (n) =>
 const inputClass =
   'text-center border border-slate-300 rounded py-1 text-xs font-bold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue';
 
-// The tax a line carries: the item's own Zoho tax once known, e.g. "Vat (12%)".
-const rowTaxLabel = (row) => {
-  const pct = Number(row.tax_percent) || 0;
-  if (row.tax_label) return `${row.tax_label} (${pct}%)`;
-  return pct > 0 ? `VAT ${pct}%` : 'No Tax';
-};
-
 const OrderItemsEditor = ({
   rows,
   products,
@@ -63,6 +56,11 @@ const OrderItemsEditor = ({
     { subtotal: 0, discount: 0, tax: 0, grand: 0 }
   );
   const hasInactive = rows.some((r) => !activeProductIds.has(String(r.product_id)));
+  // Sep 18, 2026: the Tax select's tooltip needs the product's REAL current
+  // Zoho tax — row.tax_percent/tax_label now hold whatever preset was picked
+  // (they get overwritten the moment Tax is changed, same as the order
+  // form), so they're no longer reliable evidence of what Zoho actually has.
+  const productById = new Map(products.map((p) => [String(p.id), p]));
 
   return (
     <div className="space-y-4">
@@ -109,9 +107,14 @@ const OrderItemsEditor = ({
               <tr>
                 <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Item Details</th>
                 <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Qty</th>
-                <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Rate</th>
+                <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Price</th>
                 <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Discount</th>
-                <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Tax</th>
+                <th
+                  className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider"
+                  title="Changes the price here only — Zoho still bills at the item's own configured tax once this order syncs, so the two can differ."
+                >
+                  Tax <span className="text-[9px] normal-case font-medium text-ink-secondary/70">(this order only)</span>
+                </th>
                 <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Amount</th>
                 <th className="px-3 py-3 w-12"></th>
               </tr>
@@ -188,22 +191,30 @@ const OrderItemsEditor = ({
                       )}
                     </td>
                     <td className="px-3 py-3 text-center">
-                      {/* The item's own Zoho tax. Only a product nobody has
-                          pulled from Zoho yet offers a choice — same rule as
-                          the order form. */}
-                      {row.taxUnknown ? (
-                        <select
-                          value={row.taxOption || 'none'}
-                          onChange={(e) => onChange(idx, 'taxOption', e.target.value)}
-                          className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
-                        >
-                          {TAX_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                        </select>
-                      ) : (
-                        <span className="inline-block rounded bg-surface border border-slate-200 px-1.5 py-1 text-[11px] font-semibold text-ink-primary whitespace-nowrap">
-                          {rowTaxLabel(row)}
-                        </span>
-                      )}
+                      {/* Sep 14, 2026: used to be a read-only badge unless
+                          nobody had pulled the product's tax from Zoho yet.
+                          Sep 18, 2026: editable for every item on request —
+                          picking a preset changes THIS order's price/total;
+                          Zoho still bills at the item's own tax on sync (see
+                          the column header). */}
+                      {(() => {
+                        const product = productById.get(String(row.product_id));
+                        const zohoPct = product?.tax_percentage;
+                        return (
+                          <select
+                            value={row.taxOption || 'none'}
+                            onChange={(e) => onChange(idx, 'taxOption', e.target.value)}
+                            title={
+                              zohoPct != null
+                                ? `Zoho has this item at ${product.tax_name || 'VAT'} (${zohoPct}%) — this only changes the price in this order`
+                                : 'Not yet pulled from Zoho — this only changes the price in this order'
+                            }
+                            className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                          >
+                            {TAX_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                          </select>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">
                       {peso(lines[idx].amount)}

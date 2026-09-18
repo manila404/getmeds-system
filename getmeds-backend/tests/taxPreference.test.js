@@ -4,11 +4,19 @@
  * Sep 14, 2026. Two decisions, both made from what the live Zoho org actually
  * does rather than from what the app used to assume:
  *
- *   WHOSE TAX  the item's own, as Zoho has it. Zoho applies each item's tax to
- *              a Sales Order line whatever the app sends, so a per-line pick
- *              could only ever disagree with what the customer is billed. The
- *              app mirrors the item's tax, and uses the client's value only for
- *              a product not yet pulled from Zoho.
+ *   WHOSE TAX  used to be the item's own, unconditionally — Zoho applies each
+ *              item's configured tax to a Sales Order line whatever the app
+ *              sends, so a per-line pick could only ever disagree with what
+ *              the customer is billed there.
+ *
+ *              Sep 18, 2026: reversed on request — tax is now editable per
+ *              line for every item, and the client's pick wins whenever it
+ *              sends one (falling back to the item's own Zoho tax only when
+ *              it sends none at all). A known, accepted trade: this order's
+ *              stored total can now diverge from what Zoho actually invoices
+ *              once it syncs, for a product with its own configured tax —
+ *              the order form and item editor both say so next to the
+ *              control.
  *
  *   INSIDE OR ON TOP  inclusive by default. Read back from the live org, every
  *              Sales Order this app created was priced with VAT inside the rate.
@@ -161,20 +169,39 @@ describe('tax through the order API', () => {
     expect(Number(row.is_inclusive_tax)).toBe(0);
   });
 
-  test('the item Zoho tax wins over what the client sent', async () => {
-    // The client says No Tax; Zoho taxes this item at 12%, and that is what
-    // the customer will be billed — so that is what is priced and stored.
+  test('Sep 18, 2026: what the client sends now wins over the item\'s Zoho tax', async () => {
+    // The client says No Tax on an item Zoho taxes at 12% — the client's
+    // pick is what is priced and stored here now (Zoho will still apply its
+    // own 12% once this order syncs; the two are allowed to diverge).
     const id = await create({ productId: vatProductId, taxPercent: 0, extra: { is_inclusive_tax: false } });
-    expect(Number((await orderRow(id)).total_amount)).toBeCloseTo(201.6, 6);
+    expect(Number((await orderRow(id)).total_amount)).toBeCloseTo(180, 6);
     const item = await itemRow(id);
-    expect(Number(item.tax_percent)).toBe(12);
-    expect(item.tax_label).toBe('Vat');
+    expect(Number(item.tax_percent)).toBe(0);
   });
 
-  test('an item Zoho marks No Tax is untaxed even if the client picked VAT', async () => {
+  test('an item Zoho marks No Tax can still be taxed here if the client picks VAT', async () => {
     const id = await create({ productId: noTaxProductId, taxPercent: 12, extra: { is_inclusive_tax: false } });
-    expect(Number((await orderRow(id)).total_amount)).toBeCloseTo(180, 6);
-    expect((await itemRow(id)).tax_label).toBe('No Tax');
+    expect(Number((await orderRow(id)).total_amount)).toBeCloseTo(201.6, 6);
+    expect(Number((await itemRow(id)).tax_percent)).toBe(12);
+    expect((await itemRow(id)).tax_label).toBe('client label');
+  });
+
+  test('sending no tax_percent at all still falls back to the item\'s own Zoho tax', async () => {
+    const res = await request(app)
+      .post('/api/orders')
+      .set(auth(managerToken))
+      .send({
+        customer_id: customerId,
+        medrep_id: medrepId,
+        delivery_address: '1 Tax St',
+        is_inclusive_tax: false,
+        items: [{ product_id: vatProductId, quantity: 2, rate: 100, discount: 20 }]
+      });
+    expect([200, 201]).toContain(res.status);
+    createdOrderIds.push(res.body.data.order.id);
+    const item = await itemRow(res.body.data.order.id);
+    expect(Number(item.tax_percent)).toBe(12);
+    expect(item.tax_label).toBe('Vat');
   });
 
   test('a product not yet pulled from Zoho uses what the client sent', async () => {

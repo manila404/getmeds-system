@@ -159,7 +159,7 @@ const OrderOverviewModal = ({ order, items = [], onClose }) => {
                 <tr>
                   <th className="px-3 py-2 text-left font-bold text-ink-secondary">Item</th>
                   <th className="px-2 py-2 text-center font-bold text-ink-secondary">Qty</th>
-                  <th className="px-3 py-2 text-right font-bold text-ink-secondary">Rate</th>
+                  <th className="px-3 py-2 text-right font-bold text-ink-secondary">Price</th>
                   <th className="px-3 py-2 text-right font-bold text-ink-secondary">Discount</th>
                   <th className="px-3 py-2 text-center font-bold text-ink-secondary">Tax</th>
                   <th className="px-3 py-2 text-right font-bold text-ink-secondary">Amount</th>

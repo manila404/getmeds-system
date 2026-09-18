@@ -22,6 +22,22 @@ export const TAX_OPTIONS = [
 
 export const getTaxOption = (value) => TAX_OPTIONS.find((t) => t.value === value) || TAX_OPTIONS[0];
 
+/**
+ * Sep 18, 2026: which TAX_OPTIONS preset a product's own Zoho tax (percent +
+ * name) most likely means, so the tax select on a freshly-added item starts
+ * on a sensible choice instead of always defaulting to "No Tax". A guess,
+ * not a fact — Zoho's real name for a 0% item ("Zero-Rated" vs "VAT-Exempt"
+ * vs "No Tax") decides between the three 0% presets; anything else at 0%
+ * falls back to "No Tax".
+ */
+export const inferTaxOption = (percent, label) => {
+  if (Number(percent) === 12) return 'vat12';
+  const name = String(label || '').toLowerCase();
+  if (name.includes('zero')) return 'zero_rated';
+  if (name.includes('exempt')) return 'vat_exempt';
+  return 'none';
+};
+
 // A line's tax as Zoho has it for that item — "Vat (12%)", "No Tax (0%)" — or,
 // for a product not yet pulled from Zoho, the old preset.
 export const lineTaxLabel = (item) =>

@@ -1408,14 +1408,26 @@ exports.create = async (req, res, next) => {
       // from before this field existed.
       // Sep 14, 2026: one helper for both create and updateItems, so the
       // Tax Inclusive / Exclusive rule cannot drift between them.
-      // Sep 14, 2026 (2): the tax is the ITEM's own, as Zoho has it. Zoho
-      // applies the item's tax to a Sales Order line whatever the app sends,
-      // so the app mirrors it rather than trusting a per-line pick. Falls back
-      // to what the client sent only for a product not yet pulled from Zoho.
+      // Sep 14, 2026 (2): the tax used to be the ITEM'S OWN unconditionally —
+      // Zoho applies the item's configured tax to a Sales Order line whatever
+      // the app sends, so a per-line pick could only disagree with what the
+      // customer is actually billed.
+      // Sep 18, 2026: reversed on request — tax is now editable per line for
+      // EVERY item, not just one not yet pulled from Zoho, and what the
+      // client sends now wins whenever it sends one. This is a deliberate,
+      // known trade: it prices and stores what the client picked, and Zoho
+      // will still apply the item's own tax on sync regardless — so this
+      // order's total here can diverge from the eventual Zoho invoice for a
+      // product with a configured tax. The order form and item editor both
+      // say so next to the control. Falls back to the item's own Zoho tax
+      // only when the client sends none at all (older/other callers).
+      const clientTaxPercent = item.tax_percent !== undefined && item.tax_percent !== null && item.tax_percent !== ''
+        ? Number(item.tax_percent)
+        : null;
       const { discountAmount, taxPercent, lineTotal } = computeLine({
         subtotal,
         discount: item.discount,
-        taxPercent: product.tax_percentage != null ? product.tax_percentage : item.tax_percent,
+        taxPercent: clientTaxPercent != null ? clientTaxPercent : product.tax_percentage,
         inclusive: isInclusiveTax
       });
 
@@ -1432,7 +1444,9 @@ exports.create = async (req, res, next) => {
         subtotal,
         discount_amount: discountAmount,
         tax_percent: taxPercent,
-        tax_label: product.tax_name ? clean(product.tax_name) : clean(item.tax_label),
+        // Same reversal as taxPercent just above — the client's label wins
+        // when it sends one.
+        tax_label: clean(item.tax_label) || (product.tax_name ? clean(product.tax_name) : null),
         line_total: lineTotal,
         sku: product.sku,
         name: product.name,
@@ -3235,14 +3249,17 @@ exports.updateItems = async (req, res, next) => {
 
       // Sep 14, 2026: one helper for both create and updateItems, so the
       // Tax Inclusive / Exclusive rule cannot drift between them.
-      // Sep 14, 2026 (2): the tax is the ITEM's own, as Zoho has it. Zoho
-      // applies the item's tax to a Sales Order line whatever the app sends,
-      // so the app mirrors it rather than trusting a per-line pick. Falls back
-      // to what the client sent only for a product not yet pulled from Zoho.
+      // Sep 18, 2026: kept in lockstep with create() — see that function's
+      // comment for the Sep 18 reversal. The client's tax now wins whenever
+      // it sends one; the item's own Zoho tax is only the fallback for a
+      // caller that sends none.
+      const clientTaxPercent = item.tax_percent !== undefined && item.tax_percent !== null && item.tax_percent !== ''
+        ? Number(item.tax_percent)
+        : null;
       const { discountAmount, taxPercent, lineTotal } = computeLine({
         subtotal,
         discount: item.discount,
-        taxPercent: product.tax_percentage != null ? product.tax_percentage : item.tax_percent,
+        taxPercent: clientTaxPercent != null ? clientTaxPercent : product.tax_percentage,
         inclusive: isInclusiveTax
       });
 
@@ -3260,7 +3277,7 @@ exports.updateItems = async (req, res, next) => {
         subtotal,
         discount_amount: discountAmount,
         tax_percent: taxPercent,
-        tax_label: product.tax_name || ((typeof item.tax_label === 'string' && item.tax_label.trim()) ? item.tax_label.trim() : null),
+        tax_label: ((typeof item.tax_label === 'string' && item.tax_label.trim()) ? item.tax_label.trim() : null) || product.tax_name || null,
         line_total: lineTotal,
         name: product.name,
         price_remark: priceRemark

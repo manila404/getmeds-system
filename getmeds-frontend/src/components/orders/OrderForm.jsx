@@ -38,7 +38,7 @@ import { ORDER_SOURCES } from '../../constants/orderSources';
 import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
 import StockWarningModal from './StockWarningModal';
 import { onPasteImage } from '../../hooks/usePasteImage';
-import { TAX_OPTIONS, getTaxOption, lineTaxLabel, computeLineAmounts } from '../../utils/orderLines';
+import { TAX_OPTIONS, getTaxOption, inferTaxOption, lineTaxLabel, computeLineAmounts } from '../../utils/orderLines';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
 // paper/spreadsheet-styled "Order Intake Details" block (label-left rows,
@@ -872,11 +872,18 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           unit: product.unit || 'unit',
           quantity: 1,
           discount: 0,
-          taxOption: 'none',
-          // Sep 14, 2026: the item's own Zoho tax. Zoho applies THIS to the line
-          // whatever the app sends, so the form shows it instead of asking.
+          // Sep 14, 2026: starts mirroring the item's own Zoho tax.
+          // Sep 18, 2026: no longer locked to it — see the Tax column's
+          // header note. `taxOption` just picks the closest preset so the
+          // select opens on a sensible default; changing it overrides both
+          // taxPercent/taxLabel below (see handleTaxOptionChange). The real
+          // Zoho tax is kept separately, unedited, so the select's tooltip
+          // can still say what it actually is.
+          taxOption: inferTaxOption(product.tax_percentage, product.tax_name),
           taxPercent: product.tax_percentage ?? null,
           taxLabel: product.tax_name ?? null,
+          zohoTaxPercent: product.tax_percentage ?? null,
+          zohoTaxLabel: product.tax_name ?? null,
           // Sep 18, 2026: why this line is priced the way it is — a discount
           // agreed with the customer, a rate override — so Management and
           // Finance see the reason next to the number, not just the number.
@@ -923,6 +930,18 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
       const n = Number(row[field]);
       return { ...row, [field]: Number.isFinite(n) && n >= 0 ? n : 0 };
     }));
+  };
+
+  // Sep 18, 2026: tax is now editable for every item, not just one Zoho has
+  // never priced — picking a preset here overrides taxPercent/taxLabel
+  // directly (rather than leaving them at whatever the product mirrored),
+  // which is what actually changes the line's amount and what gets sent —
+  // see the payload mapping below.
+  const handleTaxOptionChange = (index, value) => {
+    const opt = getTaxOption(value);
+    setItems((rows) => rows.map((row, i) => (i === index
+      ? { ...row, taxOption: value, taxPercent: opt.percent, taxLabel: opt.label }
+      : row)));
   };
 
   const handleRemoveItem = (index) => {
@@ -2192,9 +2211,14 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                     <tr>
                       <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Item Details</th>
                       <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Qty</th>
-                      <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Rate</th>
+                      <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Price</th>
                       <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Discount</th>
-                      <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Tax</th>
+                      <th
+                        className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider"
+                        title="Changes the price here only — Zoho still bills at the item's own configured tax once this order syncs, so the two can differ."
+                      >
+                        Tax <span className="text-[9px] normal-case font-medium text-ink-secondary/70">(this order only)</span>
+                      </th>
                       <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Amount</th>
                       <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider w-12"></th>
                     </tr>
@@ -2255,27 +2279,26 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                             />
                           </td>
                           <td className="px-3 py-3 text-center">
-                            {/* Sep 14, 2026: the item's own Zoho tax, shown rather than
-                                picked. Zoho applies the item's tax to the line whatever
-                                the app sends, so a per-line choice here could only
-                                disagree with what the customer is billed. The old preset
-                                remains only for a product not yet pulled from Zoho. */}
-                            {item.taxLabel != null ? (
-                              <span
-                                title="Set on this item in Zoho"
-                                className="inline-block rounded bg-surface border border-slate-200 px-1.5 py-1 text-[11px] font-semibold text-ink-primary whitespace-nowrap"
-                              >
-                                {lineTaxLabel(item)}
-                              </span>
-                            ) : (
-                              <select
-                                value={item.taxOption}
-                                onChange={e => handleUpdateItemField(idx, 'taxOption', e.target.value)}
-                                className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
-                              >
-                                {TAX_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                              </select>
-                            )}
+                            {/* Sep 14, 2026: used to show the item's own Zoho tax as a
+                                read-only badge — Zoho applies that tax to the line
+                                whatever the app sends, so a per-line choice here could
+                                only disagree with what the customer is billed there.
+                                Sep 18, 2026: made editable for every item on request —
+                                picking a preset here changes THIS order's price/total;
+                                Zoho still bills at the item's own tax on sync (see the
+                                column header). */}
+                            <select
+                              value={item.taxOption}
+                              onChange={e => handleTaxOptionChange(idx, e.target.value)}
+                              title={
+                                item.zohoTaxPercent != null
+                                  ? `Zoho has this item at ${item.zohoTaxLabel || 'VAT'} (${item.zohoTaxPercent}%) — this only changes the price in this order`
+                                  : 'Not yet pulled from Zoho — this only changes the price in this order'
+                              }
+                              className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                            >
+                              {TAX_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                            </select>
                           </td>
                           <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">
                             {peso(line.amount)}
@@ -2724,7 +2747,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   <tr>
                     <th className="px-3 py-2 text-left font-bold text-ink-secondary">Item</th>
                     <th className="px-2 py-2 text-center font-bold text-ink-secondary">Qty</th>
-                    <th className="px-3 py-2 text-right font-bold text-ink-secondary">Rate</th>
+                    <th className="px-3 py-2 text-right font-bold text-ink-secondary">Price</th>
                     <th className="px-3 py-2 text-right font-bold text-ink-secondary">Discount</th>
                     <th className="px-3 py-2 text-center font-bold text-ink-secondary">Tax</th>
                     <th className="px-3 py-2 text-right font-bold text-ink-secondary">Amount</th>

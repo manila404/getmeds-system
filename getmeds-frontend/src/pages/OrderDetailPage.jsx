@@ -23,7 +23,7 @@ import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
 import { TRACKING_EDITABLE_STATUSES, TrackingValue } from '../components/dispatch/DeliveryActions';
-import { TAX_OPTIONS } from '../utils/orderLines';
+import { TAX_OPTIONS, inferTaxOption } from '../utils/orderLines';
 
 // Sep 7, 2026 (2): mirrors orders.controller.js's / OrderForm.jsx's exact
 // lists for the new "Edit Details" panel below — kept as a duplicate
@@ -447,6 +447,10 @@ const OrderDetailPage = () => {
       discount: it.discount_amount || 0,
       tax_percent: it.tax_percent || 0,
       tax_label: it.tax_label || null,
+      // Sep 18, 2026: opens the Tax select on the closest matching preset —
+      // see OrderItemsEditor.jsx's Sep 18 note for why tax is now editable
+      // here regardless of whether Zoho has this item's tax on file.
+      taxOption: inferTaxOption(it.tax_percent, it.tax_label),
       price_remark: it.price_remark || ''
     })));
     setIsEditingItems(true);
@@ -528,10 +532,12 @@ const OrderDetailPage = () => {
     setDraftItems((rows) => [...rows, {
       product_id: product.id, name: product.name, sku: product.sku, unit: product.unit,
       quantity: 1, rate: product.unit_price, discount: 0,
-      // Sep 14, 2026: the item's own Zoho tax, as the order form uses. A product
-      // nobody has pulled from Zoho yet offers the old preset instead.
+      // Sep 14, 2026: the item's own Zoho tax, as the order form uses.
+      // Sep 18, 2026: taxOption now opens on the closest matching preset
+      // (rather than always 'none') — tax is editable for every item now,
+      // known or not, so a product Zoho does tax should not default to none.
       tax_percent: product.tax_percentage ?? 0, tax_label: product.tax_name ?? null,
-      taxUnknown: product.tax_percentage == null, taxOption: 'none',
+      taxUnknown: product.tax_percentage == null, taxOption: inferTaxOption(product.tax_percentage, product.tax_name),
       price_remark: ''
     }]);
   };
