@@ -370,6 +370,24 @@ class LiveZohoAdapter extends ZohoAdapter {
     if (orderData.invoicing_from) {
       customFields.push({ customfield_id: '2254168001900812580', value: orderData.invoicing_from });
     }
+    // Sep 18, 2026: the Sales Order's own PDF Template — until now never sent,
+    // so Zoho fell back to whatever this org's own default template is
+    // configured as, regardless of Invoicing From. Confirmed live via
+    // GET /salesorders/templates on this exact org — six templates exist;
+    // these are the only two that matter for the two Invoicing From values
+    // this app ever sends (see ALLOWED_INVOICING_FROM, orders.controller.js):
+    //   "2MG Template"      -> 2254168001903121678
+    //   "Standard Template" -> 2254168000000019003
+    // Omitted (Zoho's own default applies) for an order with no Invoicing
+    // From, or a value neither of these two — same "don't guess" rule every
+    // other optional field here follows.
+    const TEMPLATE_ID_BY_INVOICING_FROM = {
+      '2mg Incorporated': '2254168001903121678',
+      'Getmeds Philippines Inc.': '2254168000000019003'
+    };
+    if (TEMPLATE_ID_BY_INVOICING_FROM[orderData.invoicing_from]) {
+      body.template_id = TEMPLATE_ID_BY_INVOICING_FROM[orderData.invoicing_from];
+    }
     // Sep 2, 2026: "Division" and "Sub-division" — the two custom fields
     // sitting directly under Salesperson on this org's Sales Order screen.
     //

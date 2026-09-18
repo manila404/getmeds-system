@@ -2,6 +2,15 @@ const ZohoAdapter = require('./ZohoAdapter');
 const { findSalesperson, SalespersonNotFoundError } = require('./salespersonName');
 const { items, contacts } = require('./fixtures');
 
+// Sep 18, 2026: mirrors LiveZohoAdapter's TEMPLATE_ID_BY_INVOICING_FROM
+// exactly — see that file for where the ids came from (GET
+// /salesorders/templates on the live org). Duplicated rather than shared,
+// same as every other "mirrors LiveZohoAdapter" constant in this file.
+const TEMPLATE_ID_BY_INVOICING_FROM = {
+  '2mg Incorporated': '2254168001903121678',
+  'Getmeds Philippines Inc.': '2254168000000019003'
+};
+
 /**
  * MockZohoAdapter — pure in-memory, zero network calls, zero external
  * dependency. This is the default and the safest possible mode: it is
@@ -183,6 +192,12 @@ class MockZohoAdapter extends ZohoAdapter {
         // convention as every other custom field here.
         ...(orderData.gm_lead_id ? [{ label: 'GM Lead ID', value: orderData.gm_lead_id }] : [])
       ],
+      // Sep 18, 2026: mirrors LiveZohoAdapter's template_id mapping exactly
+      // (see that file's TEMPLATE_ID_BY_INVOICING_FROM), so a test can assert
+      // what would have been sent without needing a live Zoho call.
+      ...(TEMPLATE_ID_BY_INVOICING_FROM[orderData.invoicing_from]
+        ? { template_id: TEMPLATE_ID_BY_INVOICING_FROM[orderData.invoicing_from], template_name: orderData.invoicing_from === '2mg Incorporated' ? '2MG Template' : 'Standard Template' }
+        : {}),
       created_time: new Date().toISOString(),
       _mock: true
     };
