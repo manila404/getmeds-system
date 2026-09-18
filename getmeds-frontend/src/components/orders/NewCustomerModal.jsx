@@ -1,8 +1,20 @@
 import React, { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { X, Building2, MapPin, FileText, Loader2, AlertTriangle, UserCheck, CheckCircle2, CloudOff } from 'lucide-react';
+import { X, Building2, MapPin, FileText, Loader2, AlertTriangle, UserCheck, CheckCircle2, CloudOff, Copy } from 'lucide-react';
 import client from '../../api/client';
+
+// Sep 18, 2026: how a fuzzy match earned its place on screen — mirrors
+// PendingCustomersPage.jsx's MATCH_LABEL for the same reasons, so a rep who
+// has seen one has seen the other.
+const MATCH_LABEL = {
+  lto: 'Same LTO licence',
+  tin: 'Same TIN',
+  same_name: 'Same name',
+  similar_name: 'Similar name',
+  email: 'Same email',
+  phone: 'Same phone'
+};
 
 /**
  * Create a customer that Zoho has never seen, without leaving the order.
@@ -25,6 +37,21 @@ import client from '../../api/client';
  * buttons to select and carry on with, which is what the rep actually wanted.
  * Reporting "failed" and leaving them on a full form would be technically
  * accurate and useless.
+ *
+ * ── A SOFTER CHECK RUNS FIRST (Sep 18, 2026) ────────────────────────────────
+ *
+ * The 409 above only ever catches an EXACT name or LTO licence — right for
+ * those two (Zoho enforces the licence as unique anyway; an identical name is
+ * as close to certain as this gets), but silent about "Mercury Drug Taft" vs
+ * "Mercury Drug Taft Branch", a typo, a shared phone, a matching TIN. Before
+ * ever asking the server to actually create anything, "Create customer" now
+ * asks POST /api/customers/check-duplicates — the same fuzzy matcher already
+ * trusted for the held-customer-to-Zoho push review (PendingCustomersPage.jsx)
+ * — and shows what it found. Each match says `overridable`: false for the
+ * same two exact reasons the 409 above would refuse regardless (so there is
+ * no "create anyway" button for those — it would just hit that wall a moment
+ * later); true for a softer resemblance, where "create anyway" genuinely
+ * proceeds and succeeds.
  */
 
 const REQUIRED = ['display_name', 'contact_number', 'phone'];
@@ -98,6 +125,12 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   });
   const [sameAsBilling, setSameAsBilling] = useState(true);
   const [duplicates, setDuplicates] = useState(null);
+  // Sep 18, 2026: what the fuzzy pre-check found — null until checked, []
+  // once checked clean. Kept separate from `duplicates` (the EXACT-match
+  // 409) since these two panels mean different things: this one can be
+  // dismissed, that one cannot.
+  const [matches, setMatches] = useState(null);
+  const hasHardMatch = (matches || []).some((m) => !m.overridable);
   // A blocking problem that no amount of retyping will fix — kept on screen
   // rather than shown as a toast that disappears while the rep is still
   // looking at a full form wondering what they got wrong.
@@ -145,20 +178,58 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
     }
   });
 
+  // Sep 18, 2026: the fuzzy pre-check. Read-only — nothing is created here,
+  // win or lose. A failure here (network hiccup, whatever) must not itself
+  // block creating a real customer, so its catch just proceeds to `create`
+  // rather than showing an error — see submit() below.
+  const checkMutation = useMutation({
+    mutationFn: (body) => client.post('/api/customers/check-duplicates', body).then((r) => r.data)
+  });
+
   const missing = REQUIRED.filter((k) => !String(form[k] || '').trim());
   const billingOk = form.billing_address.address.trim() && form.billing_address.phone.trim();
   const shippingOk =
     sameAsBilling || (form.shipping_address.address.trim() && form.shipping_address.phone.trim());
-  const canSubmit = missing.length === 0 && billingOk && shippingOk && !create.isPending;
+  const checking = checkMutation.isPending;
+  const canSubmit = missing.length === 0 && billingOk && shippingOk && !create.isPending && !checking;
 
-  const submit = (e) => {
+  const doCreate = () => create.mutate({ ...form, shipping_same_as_billing: sameAsBilling });
+
+  const submit = async (e) => {
     // Called from a click now rather than a form submission, but guarded so it
     // still behaves if it is ever wired to one again.
     if (e && typeof e.preventDefault === 'function') e.preventDefault();
     if (!canSubmit) return;
     setDuplicates(null);
     setBlocked(null);
-    create.mutate({ ...form, shipping_same_as_billing: sameAsBilling });
+    setMatches(null);
+
+    try {
+      const res = await checkMutation.mutateAsync({ ...form, shipping_same_as_billing: sameAsBilling });
+      const found = res.data?.matches || [];
+      if (found.length) {
+        // Shown as a panel below, with its own actions — nothing is created
+        // yet. See createAnyway() for the override, and the "already
+        // exists" case above for why a hard match never gets one.
+        setMatches(found);
+        return;
+      }
+    } catch (_) {
+      // The pre-check itself failing (not "it found nothing" — an actual
+      // request failure) is not a reason to stop the rep from creating a
+      // real customer. createCustomer's own exact-match check still runs
+      // regardless, so nothing unsafe slips through either way.
+    }
+    doCreate();
+  };
+
+  // "None of these match — create it anyway." Only reachable when every
+  // match shown is `overridable` (see hasHardMatch), so this always
+  // succeeds against createCustomer's own exact-match check rather than
+  // walking the rep into the same wall a moment later.
+  const createAnyway = () => {
+    setMatches(null);
+    doCreate();
   };
 
   return (
@@ -215,6 +286,68 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                   </span>
                 </button>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* Sep 18, 2026: the fuzzy pre-check's answer. Shown instead of the
+            409 panel above when nothing matched EXACTLY but something looks
+            close — a typo, a shared phone, a matching TIN. Each match can be
+            picked directly; "create anyway" only appears when nothing shown
+            would hit createCustomer's own exact-match wall regardless. */}
+        {matches && matches.length > 0 && (
+          <div className="mx-5 mt-4 rounded-lg border border-orange-300 bg-orange-50/60 px-4 py-3">
+            <p className="flex items-center gap-2 text-[13px] font-semibold text-orange-900">
+              <Copy className="w-4 h-4 shrink-0" />
+              This looks like a customer we may already have.
+            </p>
+            <p className="mt-0.5 text-[12px] text-orange-900/80">
+              {hasHardMatch
+                ? 'One of these is close enough that it needs picking — creating a new one with these exact details would be refused.'
+                : 'Pick one below if it is the same business, or confirm this is different and create it anyway.'}
+            </p>
+            <div className="mt-2 space-y-1.5">
+              {matches.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => onCreated(m)}
+                  className="w-full text-left px-3 py-2 rounded-md bg-white border border-orange-200 hover:border-orange-400 text-[13px]"
+                >
+                  <span className="font-semibold text-ink-primary">{m.name}</span>
+                  {m.contact_number && <span className="text-ink-secondary"> · {m.contact_number}</span>}
+                  {m.order_count > 0 && (
+                    <span className="text-ink-secondary"> · {m.order_count} order{m.order_count === 1 ? '' : 's'}</span>
+                  )}
+                  {m.is_active === 0 && <span className="ml-2 text-[10px] font-bold uppercase text-slate-500">inactive</span>}
+                  <span className="block mt-1 flex flex-wrap gap-1">
+                    {m.matched.map((reason) => (
+                      <span
+                        key={reason}
+                        className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-orange-100 text-orange-800 border border-orange-200"
+                      >
+                        {MATCH_LABEL[reason] || reason}
+                      </span>
+                    ))}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 flex justify-end">
+              {hasHardMatch ? (
+                <p className="text-[11px] text-orange-900/70">
+                  Not the right one? Ask an admin — this needs a real difference in name or licence to create separately.
+                </p>
+              ) : (
+                <button
+                  type="button"
+                  onClick={createAnyway}
+                  disabled={create.isPending}
+                  className="px-3 py-1.5 rounded-md border border-orange-300 bg-white text-[12px] font-semibold text-orange-900 hover:border-orange-400 disabled:opacity-60"
+                >
+                  None of these — different customer, create anyway
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -467,6 +600,11 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
                     Creating in Zoho…
+                  </>
+                ) : checking ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Checking for duplicates…
                   </>
                 ) : (
                   <>

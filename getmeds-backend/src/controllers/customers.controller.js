@@ -957,6 +957,35 @@ const linkPendingCustomer = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/customers/check-duplicates — "does a customer that looks like
+ * this already exist in Zoho?", asked BEFORE createCustomer would otherwise
+ * create one.
+ *
+ * Sep 18, 2026. createCustomer's own duplicate check (findDuplicates, above)
+ * only ever catches an EXACT name or LTO licence, and refuses outright with
+ * no way past it — right for those two (Zoho enforces the licence as unique
+ * anyway; an identical name is as close to certain as this gets), wrong for
+ * everything softer. This runs findZohoMatches' full fuzzy matcher — already
+ * trusted for the held-customer-to-Zoho push review — one step earlier, so
+ * "New Customer" can show what it found and let a MedRep decide, rather than
+ * the rep only finding out after clicking Create and hitting a wall.
+ *
+ * Read-only: no customer is created, nothing is sent to Zoho. Each match
+ * carries `overridable` — false for the same two reasons findDuplicates
+ * itself would refuse (same_name, lto), so the UI knows not to offer
+ * "create anyway" for those; true for a softer resemblance (similar_name,
+ * phone, tin, email) that createCustomer will not, in fact, block.
+ */
+const checkDuplicates = async (req, res, next) => {
+  try {
+    const matches = await customerCreate.checkDuplicates(req.body);
+    res.json({ success: true, data: { matches } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 /** GET /api/customers/:id/zoho-compare?target_id= — the waiting customer next to the live Zoho one. */
 const getZohoComparison = async (req, res, next) => {
   try {
@@ -979,6 +1008,7 @@ const discardPendingCustomer = async (req, res, next) => {
 
 module.exports = {
   createCustomer,
+  checkDuplicates,
   retryPendingCustomer,
   pushPendingCustomer,
   linkPendingCustomer,

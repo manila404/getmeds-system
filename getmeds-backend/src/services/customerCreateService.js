@@ -217,21 +217,47 @@ const MATCH_WEIGHT = { lto: 5, tin: 5, same_name: 4, email: 3, similar_name: 3, 
 // Production has 09123456789 on five unrelated customers.
 const MAX_SHARED_PHONE = 3;
 
+// Sep 18, 2026: which match reasons are the SAME check findDuplicates() runs
+// (an exact name, or the LTO licence Zoho itself enforces as unique) — the
+// two reasons createCustomer()'s hard block will refuse regardless of what
+// anyone chooses here. checkDuplicates (customers.controller.js) uses this
+// to decide whether "different customer, create anyway" can be offered at
+// all: offering it for a HARD match would just walk the rep into the same
+// wall a moment later. Every other reason (similar_name, phone, tin, email)
+// is a real, but not certain, resemblance — findDuplicates does not check
+// any of them, so "create anyway" genuinely succeeds for those.
+const HARD_MATCH_REASONS = ['same_name', 'lto'];
+
 /**
- * Customers Zoho already has that look like this waiting one. Never the
- * waiting customer itself, never another local-only one — only rows with a
- * zoho_contact_id, because "use the existing customer" has to mean one Zoho
- * actually holds.
+ * Customers Zoho already has that look like this one. Never the customer
+ * itself (when it has an id — see below), never another local-only one —
+ * only rows with a zoho_contact_id, because "use the existing customer" has
+ * to mean one Zoho actually holds.
+ *
+ * Sep 18, 2026: `held.id` is now OPTIONAL. This used to only ever run
+ * against a customer already saved here and waiting to be pushed to Zoho
+ * (syncHeldCustomer below), which always has a real id to exclude itself
+ * with. It is now also called BEFORE anything is created at all — from the
+ * order form's "New Customer" modal, checking a plain candidate object that
+ * has no id yet (see customers.controller.js's checkDuplicates) — so the
+ * self-exclusion has to become optional rather than assuming an id exists.
+ * Passing `undefined` as a bind param would silently exclude every row
+ * (Postgres: `id <> NULL` is never true), which is why this can't just leave
+ * the old `AND id <> ?` in place unconditionally.
  */
 async function findZohoMatches(held) {
   const found = new Map();
+  const hasId = held.id !== undefined && held.id !== null;
   const add = (row, reason) => {
-    if (!row || row.id === held.id) return;
+    if (!row || (hasId && row.id === held.id)) return;
     const entry = found.get(row.id) || { row, matched: new Set() };
     entry.matched.add(reason);
     found.set(row.id, entry);
   };
-  const base = 'SELECT * FROM customers WHERE zoho_contact_id IS NOT NULL AND id <> ?';
+  const base = `SELECT * FROM customers WHERE zoho_contact_id IS NOT NULL${hasId ? ' AND id <> ?' : ''}`;
+  // Spread onto the front of every query's params below — empty when there
+  // is no id to exclude, so the placeholder count still matches the SQL.
+  const selfParam = hasId ? [held.id] : [];
 
   // Name. The LIKE narrows 95,000 rows to the few sharing every meaningful
   // word's first letters; compareNames decides.
@@ -239,8 +265,8 @@ async function findZohoMatches(held) {
   const nameRows = words.length
     ? await db
         .prepare(`${base} AND ${words.map(() => 'lower(name) LIKE ?').join(' AND ')} LIMIT 500`)
-        .all(held.id, ...words.map((w) => `%${w.slice(0, 4)}%`))
-    : await db.prepare(`${base} AND lower(trim(name)) = ? LIMIT 20`).all(held.id, String(held.name || '').trim().toLowerCase());
+        .all(...selfParam, ...words.map((w) => `%${w.slice(0, 4)}%`))
+    : await db.prepare(`${base} AND lower(trim(name)) = ? LIMIT 20`).all(...selfParam, String(held.name || '').trim().toLowerCase());
   for (const r of nameRows) {
     const how = compareNames(held.name, r.name);
     if (how) add(r, how);
@@ -252,7 +278,7 @@ async function findZohoMatches(held) {
   if (phone.length === 10) {
     const rows = await db
       .prepare(`${base} AND contact_number LIKE ? LIMIT 500`)
-      .all(held.id, `%${phone.slice(-4)}`);
+      .all(...selfParam, `%${phone.slice(-4)}`);
     const same = rows.filter((r) => digitsOf(r.contact_number).slice(-10) === phone);
     // A number several Zoho customers share is a placeholder (09123456789) or
     // a switchboard, and says nothing about which business this is.
@@ -262,19 +288,19 @@ async function findZohoMatches(held) {
   // TIN, by its first nine digits — the branch code after them varies.
   const tin = digitsOf(held.tin);
   if (tin.length >= 9) {
-    const rows = await db.prepare(`${base} AND tin LIKE ? LIMIT 500`).all(held.id, `${tin.slice(0, 3)}%`);
+    const rows = await db.prepare(`${base} AND tin LIKE ? LIMIT 500`).all(...selfParam, `${tin.slice(0, 3)}%`);
     for (const r of rows) if (digitsOf(r.tin).slice(0, 9) === tin.slice(0, 9)) add(r, 'tin');
   }
 
   const lto = String(held.lto_license_number || '').trim().toLowerCase();
   if (lto) {
-    const rows = await db.prepare(`${base} AND lower(trim(lto_license_number)) = ? LIMIT 20`).all(held.id, lto);
+    const rows = await db.prepare(`${base} AND lower(trim(lto_license_number)) = ? LIMIT 20`).all(...selfParam, lto);
     for (const r of rows) add(r, 'lto');
   }
 
   const email = String(held.email || '').trim().toLowerCase();
   if (email) {
-    const rows = await db.prepare(`${base} AND lower(trim(email)) = ? LIMIT 20`).all(held.id, email);
+    const rows = await db.prepare(`${base} AND lower(trim(email)) = ? LIMIT 20`).all(...selfParam, email);
     for (const r of rows) add(r, 'email');
   }
 
@@ -295,6 +321,8 @@ async function findZohoMatches(held) {
     contact_number: row.contact_number,
     email: row.email,
     tin: row.tin,
+    // Sep 18, 2026: see HARD_MATCH_REASONS above.
+    overridable: ![...matched].some((m) => HARD_MATCH_REASONS.includes(m)),
     lto_license_number: row.lto_license_number,
     category: row.category,
     type: row.type,
@@ -304,6 +332,34 @@ async function findZohoMatches(held) {
     order_count: orderCount.get(row.id) || 0,
     matched: [...matched].sort((a, b) => (MATCH_WEIGHT[b] || 0) - (MATCH_WEIGHT[a] || 0))
   }));
+}
+
+/**
+ * Customers Zoho already has that look like a NOT-YET-CREATED one — the
+ * order form's "New Customer" modal, asked right before it would otherwise
+ * go create a real Zoho contact.
+ *
+ * Sep 18, 2026. findDuplicates() above (called from inside createCustomer)
+ * only ever caught an EXACT name or LTO licence, and blocked outright with
+ * nothing to say if it was wrong. This is findZohoMatches' full fuzzy
+ * matcher — the one already trusted for the held-customer-to-Zoho push
+ * review — run one step earlier, so a typo'd name, a shared phone, or a
+ * matching TIN gets flagged before Zoho ever sees the request, not just an
+ * identical name.
+ *
+ * Maps the order form's field names onto the shape findZohoMatches expects
+ * (a `held` row's — `name` rather than `display_name`) and passes no `id`,
+ * since nothing has been created yet for it to exclude itself by.
+ */
+async function checkDuplicates(input) {
+  const c = input || {};
+  return findZohoMatches({
+    name: c.display_name,
+    contact_number: c.contact_number,
+    tin: c.tin,
+    lto_license_number: c.lto_license_number,
+    email: c.email
+  });
 }
 
 /** A customer still waiting for Zoho, or null. */
@@ -802,6 +858,8 @@ module.exports = {
   listHeldCustomers,
   isZohoUnreachable,
   findZohoMatches,
+  checkDuplicates,
+  HARD_MATCH_REASONS,
   compareNames,
   getHeldCustomer,
   linkHeldToExisting,

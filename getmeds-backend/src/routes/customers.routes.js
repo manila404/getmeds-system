@@ -19,6 +19,14 @@ router.get('/', requireAuth, requireRole('admin', 'management'), c.getCustomersO
 // accounts.
 router.post('/', requireAuth, requireRole('medrep', 'admin', 'management'), c.createCustomer);
 
+// Sep 18, 2026: "does a customer that looks like this already exist in
+// Zoho?" — asked from the New Customer modal BEFORE the POST / above would
+// otherwise create one. Read-only; same roles as creating, since this is
+// only ever a step ahead of it. Declared here (a literal segment, not
+// `/:id`) so it is unambiguous regardless of where the `/:id/...` routes
+// below sit.
+router.post('/check-duplicates', requireAuth, requireRole('medrep', 'admin', 'management'), c.checkDuplicates);
+
 // Sep 11, 2026: customers saved here that Zoho has not accepted yet.
 //
 // Declared ABOVE any '/:id' route — Express matches in declaration order, so
