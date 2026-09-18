@@ -2,6 +2,7 @@ import React, { useRef } from 'react';
 import { Paperclip, X } from 'lucide-react';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_ACCEPT } from '../../utils/attachmentUpload';
+import { onPasteImage } from '../../hooks/usePasteImage';
 
 /**
  * Sep 18, 2026: pick a file (and what it is — Proof of Payment, GL,
@@ -13,16 +14,24 @@ import { ATTACHMENT_MAX_BYTES, ATTACHMENT_ACCEPT } from '../../utils/attachmentU
 const AttachFileField = ({ file, fileType, onFileChange, onTypeChange, disabled, label = 'Attach a file (optional)' }) => {
   const inputRef = useRef(null);
 
-  const pick = (e) => {
-    const f = e.target.files?.[0];
-    e.target.value = '';
-    if (!f) return;
+  const acceptFile = (f) => {
+    if (!f || disabled) return;
     if (f.size > ATTACHMENT_MAX_BYTES) {
       onFileChange(null, `That file is too large — the limit is ${ATTACHMENT_MAX_BYTES / 1024 / 1024} MB.`);
       return;
     }
     onFileChange(f);
   };
+  const pick = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    acceptFile(f);
+  };
+  // Sep 18, 2026: click the button, then paste (Ctrl+V) a copied image —
+  // scoped to this button's own focus (usePasteImage.js's header note), not
+  // the whole window, since a resubmit dialog can be open on top of the
+  // Payment tab's own upload panel at the same time.
+  const handlePaste = onPasteImage(acceptFile);
 
   return (
     <div>
@@ -57,7 +66,9 @@ const AttachFileField = ({ file, fileType, onFileChange, onTypeChange, disabled,
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
+            onPaste={handlePaste}
             disabled={disabled}
+            title="Choose a file, or click here then paste a copied image with Ctrl+V"
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-slate-300 bg-white text-ink-secondary text-xs font-semibold hover:bg-surface disabled:opacity-50"
           >
             <Paperclip className="w-3.5 h-3.5" /> Choose file

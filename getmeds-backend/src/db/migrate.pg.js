@@ -868,6 +868,18 @@ async function reconcileOrderEventsActorRole(client) {
   console.log('  ✔ order_events.actor_role added');
 }
 
+/**
+ * Sep 18, 2026: order_items.price_remark — the MedRep's own note on a
+ * line's pricing (why a discount was given, why the rate differs from the
+ * product's own), so Management and Finance see the reason next to the
+ * number wherever they review the order's items. Existing rows stay NULL:
+ * nobody recorded a reason before this column existed.
+ */
+async function reconcileOrderItemsPriceRemark(client) {
+  await client.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS price_remark TEXT');
+  console.log('  ✔ order_items.price_remark present');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -909,6 +921,7 @@ async function main() {
     await reconcileOrderHeadquarter(client);
     await reconcileProductTaxColumns(client);
     await reconcileOrderEventsActorRole(client);
+    await reconcileOrderItemsPriceRemark(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

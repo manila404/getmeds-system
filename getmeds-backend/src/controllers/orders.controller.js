@@ -1419,6 +1419,11 @@ exports.create = async (req, res, next) => {
         inclusive: isInclusiveTax
       });
 
+      // Sep 18, 2026: the MedRep's own note on this line's pricing — why a
+      // discount was given, why the rate differs from the product's own.
+      // Capped, same 300-char convention as stock_announcements' message.
+      const priceRemark = clean(item.price_remark)?.slice(0, 300) || null;
+
       total_amount += lineTotal;
       resolvedItems.push({
         product_id: item.product_id,
@@ -1432,7 +1437,8 @@ exports.create = async (req, res, next) => {
         sku: product.sku,
         name: product.name,
         zoho_item_id: product.zoho_item_id,
-        unit: product.unit
+        unit: product.unit,
+        price_remark: priceRemark
       });
     }
 
@@ -1775,17 +1781,23 @@ exports.create = async (req, res, next) => {
       }
 
       // Insert line items
-      const insItem = db.prepare(`
-        INSERT INTO order_items (
-          order_id, product_id, quantity, unit_price, subtotal,
-          discount_amount, tax_percent, tax_label, line_total
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
+      // Sep 18, 2026: price_remark — same guard as headquarter/is_inclusive_tax
+      // just above, checked once rather than per item. Before the migration,
+      // a remark a MedRep typed is simply not kept, same as headquarter above.
+      const canWriteRemark = await hasColumn('order_items', 'price_remark');
+      const itemColumns = canWriteRemark
+        ? 'order_id, product_id, quantity, unit_price, subtotal, discount_amount, tax_percent, tax_label, line_total, price_remark'
+        : 'order_id, product_id, quantity, unit_price, subtotal, discount_amount, tax_percent, tax_label, line_total';
+      const insItem = db.prepare(
+        `INSERT INTO order_items (${itemColumns}) VALUES (${itemColumns.split(', ').map(() => '?').join(', ')})`
+      );
       for (const ri of resolvedItems) {
-        await insItem.run(
+        const values = [
           orderId, ri.product_id, ri.quantity, ri.unit_price, ri.subtotal,
           ri.discount_amount, ri.tax_percent, ri.tax_label, ri.line_total
-        );
+        ];
+        if (canWriteRemark) values.push(ri.price_remark);
+        await insItem.run(...values);
       }
 
       // 2. Evaluate Workflow Gate & Create Child Records
@@ -3234,6 +3246,12 @@ exports.updateItems = async (req, res, next) => {
         inclusive: isInclusiveTax
       });
 
+      // Sep 18, 2026: same as create()'s price_remark — the MedRep's note on
+      // this line's pricing, kept in lockstep with that function.
+      const priceRemark = (typeof item.price_remark === 'string' && item.price_remark.trim())
+        ? item.price_remark.trim().slice(0, 300)
+        : null;
+
       total_amount += lineTotal;
       resolvedItems.push({
         product_id: item.product_id,
@@ -3244,7 +3262,8 @@ exports.updateItems = async (req, res, next) => {
         tax_percent: taxPercent,
         tax_label: product.tax_name || ((typeof item.tax_label === 'string' && item.tax_label.trim()) ? item.tax_label.trim() : null),
         line_total: lineTotal,
-        name: product.name
+        name: product.name,
+        price_remark: priceRemark
       });
     }
 
@@ -3256,12 +3275,18 @@ exports.updateItems = async (req, res, next) => {
     const now = new Date().toISOString();
     const txn = db.transaction(async () => {
       await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(order.id);
-      const insertItem = db.prepare(`
-        INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal, discount_amount, tax_percent, tax_label, line_total)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
+      // Sep 18, 2026: price_remark — same guard as create()'s item insert.
+      const canWriteRemark = await hasColumn('order_items', 'price_remark');
+      const itemColumns = canWriteRemark
+        ? 'order_id, product_id, quantity, unit_price, subtotal, discount_amount, tax_percent, tax_label, line_total, price_remark'
+        : 'order_id, product_id, quantity, unit_price, subtotal, discount_amount, tax_percent, tax_label, line_total';
+      const insertItem = db.prepare(
+        `INSERT INTO order_items (${itemColumns}) VALUES (${itemColumns.split(', ').map(() => '?').join(', ')})`
+      );
       for (const it of resolvedItems) {
-        await insertItem.run(order.id, it.product_id, it.quantity, it.unit_price, it.subtotal, it.discount_amount, it.tax_percent, it.tax_label, it.line_total);
+        const values = [order.id, it.product_id, it.quantity, it.unit_price, it.subtotal, it.discount_amount, it.tax_percent, it.tax_label, it.line_total];
+        if (canWriteRemark) values.push(it.price_remark);
+        await insertItem.run(...values);
       }
       await db.prepare('UPDATE orders SET total_amount = ?, updated_at = ? WHERE id = ?').run(total_amount, now, order.id);
 

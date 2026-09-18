@@ -231,6 +231,9 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
                         <td className="px-3 py-2 text-ink-primary">
                           {it.product_name}
                           {it.sku && <span className="block text-[11px] text-ink-secondary">{it.sku}</span>}
+                          {it.price_remark && (
+                            <span className="block text-[11px] text-ink-secondary italic mt-0.5">💬 {it.price_remark}</span>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-right text-ink-primary">{it.quantity}</td>
                         <td className="px-3 py-2 text-right text-ink-primary">{peso(it.unit_price)}</td>

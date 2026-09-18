@@ -446,7 +446,8 @@ const OrderDetailPage = () => {
       rate: it.unit_price,
       discount: it.discount_amount || 0,
       tax_percent: it.tax_percent || 0,
-      tax_label: it.tax_label || null
+      tax_label: it.tax_label || null,
+      price_remark: it.price_remark || ''
     })));
     setIsEditingItems(true);
   };
@@ -501,6 +502,13 @@ const OrderDetailPage = () => {
   const changeDraftField = (index, field, value) => {
     if (field === 'quantity') return updateDraftQuantity(index, value);
     if (field === 'rate' || field === 'discount') return updateDraftMoney(index, field, value);
+    // Sep 18, 2026: why this line is priced this way — free text, no
+    // numeric rule to route through, matching the backend's own 300-char cap.
+    if (field === 'price_remark') {
+      if (value.length > 300) return undefined;
+      setDraftItems((rows) => rows.map((row, i) => (i === index ? { ...row, price_remark: value } : row)));
+      return undefined;
+    }
     if (field === 'taxOption') {
       const opt = TAX_OPTIONS.find((t) => t.value === value) || TAX_OPTIONS[0];
       setDraftItems((rows) => rows.map((row, i) => (i === index
@@ -523,7 +531,8 @@ const OrderDetailPage = () => {
       // Sep 14, 2026: the item's own Zoho tax, as the order form uses. A product
       // nobody has pulled from Zoho yet offers the old preset instead.
       tax_percent: product.tax_percentage ?? 0, tax_label: product.tax_name ?? null,
-      taxUnknown: product.tax_percentage == null, taxOption: 'none'
+      taxUnknown: product.tax_percentage == null, taxOption: 'none',
+      price_remark: ''
     }]);
   };
 
@@ -539,7 +548,8 @@ const OrderDetailPage = () => {
       rate: Number(row.rate) || 0,
       discount: Number(row.discount) || 0,
       tax_percent: row.tax_percent,
-      tax_label: row.tax_label
+      tax_label: row.tax_label,
+      price_remark: (row.price_remark || '').trim() || null
     })));
   };
 
@@ -1169,6 +1179,9 @@ const OrderDetailPage = () => {
                         <td className="py-3">
                           <p className="text-sm font-semibold text-ink-primary">{item.product_name}</p>
                           <p className="text-xs text-ink-secondary">SKU: {item.sku} · Unit: {item.unit}</p>
+                          {item.price_remark && (
+                            <p className="text-xs text-ink-secondary italic mt-0.5">💬 {item.price_remark}</p>
+                          )}
                         </td>
                         <td className="py-3 text-center text-sm text-ink-primary">{item.quantity}</td>
                         <td className="py-3 text-right text-sm text-ink-secondary">₱{(item.unit_price || 0).toFixed(2)}</td>

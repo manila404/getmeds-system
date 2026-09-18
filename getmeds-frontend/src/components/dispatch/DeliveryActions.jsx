@@ -5,6 +5,8 @@ import { Printer, CheckCircle2, AlertTriangle, PauseCircle, PlayCircle, Camera, 
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import { useAuth } from '../../hooks/useAuth';
+import { onPasteImage } from '../../hooks/usePasteImage';
+import UploadConfirmModal from '../orders/UploadConfirmModal';
 
 /**
  * Print the delivery slip, and confirm the order for delivery.
@@ -197,13 +199,38 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
 
   // Sep 15, 2026: the proof photo. Several can be picked at once; they go up
   // one after another, and the toast says what reached Zoho.
+  //
+  // Sep 18, 2026: picking (or pasting) no longer uploads straight away — it
+  // stages the file(s) for one confirmation first. This attaches to the
+  // Zoho Sales Order and notifies the MedRep the moment it lands, and
+  // clipboard paste makes grabbing the wrong screenshot a one-keystroke
+  // mistake rather than a browse-and-click one.
   const qc = useQueryClient();
   const fileInput = useRef(null);
   const [uploading, setUploading] = useState(false);
+  const [pendingProof, setPendingProof] = useState(null); // File[] | null
   const canUploadProof = DISPATCH_PROOF_STATUSES.includes(order.status);
-  const onProofPicked = async (e) => {
+
+  const stageProofFiles = (files) => {
+    // Refused mid-upload — same race as PaymentProofPanel.jsx's processFile:
+    // confirmProofUpload clears `pendingProof` once its batch finishes, which
+    // would silently wipe out anything staged in the meantime.
+    if (!files.length || uploading) return;
+    setPendingProof((prev) => [...(prev || []), ...files]);
+  };
+  const onProofPicked = (e) => {
     const files = Array.from(e.target.files || []);
     e.target.value = '';
+    stageProofFiles(files);
+  };
+  // Sep 18, 2026: this button renders once per order — a whole list of them
+  // is on screen together on the Dispatch queue — so paste is scoped to
+  // whichever one is actually focused (tabIndex + onPaste below), not a
+  // window-wide listener every row would answer to at once.
+  const handleProofPaste = onPasteImage((file) => stageProofFiles([file]));
+
+  const confirmProofUpload = async () => {
+    const files = pendingProof || [];
     if (!files.length) return;
     setUploading(true);
     let saved = 0;
@@ -219,6 +246,7 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
       }
     }
     setUploading(false);
+    setPendingProof(null);
     qc.invalidateQueries({ queryKey: ['finance-order-attachments', order.id] });
     qc.invalidateQueries({ queryKey: ['order-attachments', order.id] });
     if (saved) {
@@ -378,13 +406,25 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
             type="button"
             disabled={uploading}
             onClick={() => fileInput.current?.click()}
-            title="Photo of the packed parcel, the waybill or a signed receipt — attached to the Zoho Sales Order, and the MedRep is told"
+            onPaste={handleProofPaste}
+            title="Photo of the packed parcel, the waybill or a signed receipt — attached to the Zoho Sales Order, and the MedRep is told. Click, then paste a copied image with Ctrl+V."
             className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-50"
           >
             <Camera className="w-3.5 h-3.5" />
             {uploading ? 'Uploading…' : 'Upload proof photo'}
           </button>
         </>
+      )}
+
+      {pendingProof?.length > 0 && (
+        <UploadConfirmModal
+          files={pendingProof}
+          title={`Upload proof for ${order.getmeds_order_id}?`}
+          note="Attached to the Zoho Sales Order, and the MedRep is notified."
+          onCancel={() => setPendingProof(null)}
+          onConfirm={confirmProofUpload}
+          confirming={uploading}
+        />
       )}
     </div>
   );

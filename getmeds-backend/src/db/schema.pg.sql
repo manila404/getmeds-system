@@ -393,7 +393,14 @@ CREATE TABLE IF NOT EXISTS order_items (
   discount_amount DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK(discount_amount >= 0),
   tax_percent DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK(tax_percent >= 0),
   tax_label TEXT,
-  line_total DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK(line_total >= 0)
+  line_total DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK(line_total >= 0),
+  -- Sep 18, 2026: the MedRep's own note on THIS line's pricing — why a
+  -- discount was given, why the rate differs from the product's own —
+  -- visible to Management and Finance wherever they review the order's
+  -- items, so a price they didn't expect has an answer next to it rather
+  -- than a question. Free text, nullable, no CHECK: same reasoning as every
+  -- other optional descriptive field in this app (delivery_notes and so on).
+  price_remark TEXT
 );
 
 CREATE TABLE IF NOT EXISTS payments (

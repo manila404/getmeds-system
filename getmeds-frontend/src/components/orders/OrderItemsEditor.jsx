@@ -121,7 +121,7 @@ const OrderItemsEditor = ({
                 const inactive = !activeProductIds.has(String(row.product_id));
                 return (
                   <tr key={idx} className={inactive ? 'bg-state-error-light/40' : 'hover:bg-surface/50 transition-colors'}>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 min-w-[11rem]">
                       <p className="font-semibold text-ink-primary whitespace-nowrap">{row.name}</p>
                       <span className="text-[11px] font-mono text-ink-secondary">{row.sku}</span>
                       {inactive && (
@@ -129,6 +129,19 @@ const OrderItemsEditor = ({
                           <AlertCircle className="w-3.5 h-3.5" /> No longer active in Zoho
                         </p>
                       )}
+                      {/* Sep 18, 2026: why this line is priced this way — kept
+                          editable here even for a MedRep who cannot touch
+                          Rate/Discount (canEditPrice, Management-only below):
+                          explaining a price is not the same as setting one. */}
+                      <input
+                        type="text"
+                        value={row.price_remark || ''}
+                        onChange={(e) => onChange(idx, 'price_remark', e.target.value)}
+                        maxLength={300}
+                        placeholder="Price remark (optional) — why this rate/discount"
+                        title="Visible to Management and Finance"
+                        className="mt-1 block w-full text-[11px] text-ink-secondary placeholder:text-ink-secondary/50 border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
+                      />
                     </td>
                     <td className="px-3 py-3 text-center">
                       <input

@@ -6,8 +6,10 @@ import {
 } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
+import { onPasteImage } from '../../hooks/usePasteImage';
 import { formatPHT } from '../../utils/dateUtils';
 import { ATTACHMENT_TYPES, attachmentLabel } from '../../constants/attachmentTypes';
+import UploadConfirmModal from './UploadConfirmModal';
 
 /**
  * Attachments for one order: proof of payment, and everything else.
@@ -223,6 +225,13 @@ const PaymentProofPanel = ({ orderId, order }) => {
   // 'other' files never lock; they can be added any time.
   const proofLocked = latestProof?.status === 'verified';
 
+  // Sep 18, 2026: a file no longer uploads the instant it's picked — this
+  // holds it until confirmed. A proof-of-payment upload reopens a Finance
+  // hold the moment it lands (financeHoldService.js's "any attachment
+  // reopens a Finance hold"), and pasting a screenshot makes picking the
+  // wrong one a one-keystroke mistake rather than a browse-and-click one.
+  const [pending, setPending] = useState(null); // { file, fileType } | null
+
   const uploadMutation = useMutation({
     mutationFn: async ({ file, fileType }) => {
       // 1. ask our API where this file may go
@@ -270,23 +279,31 @@ const PaymentProofPanel = ({ orderId, order }) => {
       qc.invalidateQueries({ queryKey: ['order-attachments', orderId] });
       qc.invalidateQueries({ queryKey: ['order-payment-proof', orderId] });
       qc.invalidateQueries({ queryKey: ['order', String(orderId)] });
+      setPending(null);
     },
     onError: (err) => {
       toast.error(err.response?.data?.error?.message || err.message || 'Upload failed');
+      setPending(null);
     },
     onSettled: () => setUploading(false),
   });
 
   // Sep 5, 2026 (2): pulled out of onPick so a drop event (desktop
   // drag-and-drop) can share the same size check / mutate call.
+  // Sep 18, 2026: stages the file for confirmation instead of uploading it
+  // straight away — see `pending` above. Refused while an earlier confirmed
+  // upload is still in flight: click/drop are already disabled during that
+  // window (dropDisabled/disabled props below), but paste has no such
+  // built-in gate, and without this a paste landing mid-upload would stage a
+  // new `pending` that the in-flight mutation's onSuccess/onError then wipes
+  // out from under the rep before they ever got to confirm it.
   const processFile = (file) => {
-    if (!file) return;
+    if (!file || uploading) return;
     if (file.size > MAX_BYTES) {
       toast.error(`That file is ${prettySize(file.size)}. The limit is ${MAX_BYTES / 1024 / 1024} MB.`);
       return;
     }
-    setUploading(true);
-    uploadMutation.mutate({ file, fileType: uploadType });
+    setPending({ file, fileType: uploadType });
   };
 
   const onPick = (e) => {
@@ -312,6 +329,19 @@ const PaymentProofPanel = ({ orderId, order }) => {
     setIsDragActive(false);
     if (dropDisabled) return;
     processFile(e.dataTransfer.files?.[0]);
+  };
+
+  // Sep 18, 2026: paste a copied image straight in — same processFile()
+  // every other path uses, so it gets the same size check and confirmation.
+  // Scoped to the drag-and-drop zone's own focus (see usePasteImage.js's
+  // header note) — the Attachments tab and a resubmit dialog's own file
+  // field can both be mounted on one order's page at once.
+  const handlePaste = onPasteImage((file) => processFile(file));
+
+  const confirmUpload = () => {
+    if (!pending) return;
+    setUploading(true);
+    uploadMutation.mutate(pending);
   };
 
   if (isLoading) {
@@ -432,10 +462,12 @@ const PaymentProofPanel = ({ orderId, order }) => {
                   pair kept for mobile below — same split as OrderForm.jsx's
                   attach control. */}
               <label
+                tabIndex={0}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
-                className={`hidden sm:flex flex-col items-center justify-center gap-1 border-2 border-dashed rounded-lg py-5 px-3 text-center cursor-pointer transition-colors ${
+                onPaste={handlePaste}
+                className={`hidden sm:flex flex-col items-center justify-center gap-1 border-2 border-dashed rounded-lg py-5 px-3 text-center cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-getmeds-blue ${
                   isDragActive
                     ? 'border-getmeds-blue bg-getmeds-blue/10'
                     : 'border-slate-300 hover:border-getmeds-blue hover:bg-getmeds-blue/5'
@@ -443,7 +475,8 @@ const PaymentProofPanel = ({ orderId, order }) => {
               >
                 <Upload className="w-4 h-4 text-ink-secondary" />
                 <p className="text-xs text-ink-secondary">
-                  <span className="font-semibold text-getmeds-blue">Drag & drop a file here</span>, or click to browse
+                  <span className="font-semibold text-getmeds-blue">Drag & drop a file here</span>, click to browse, or paste a
+                  copied image (Ctrl+V)
                 </p>
                 <input type="file" accept={ACCEPT} onChange={onPick} className="hidden" disabled={uploading} />
               </label>
@@ -477,6 +510,24 @@ const PaymentProofPanel = ({ orderId, order }) => {
             </>
           )}
         </div>
+      )}
+
+      {pending && (
+        <UploadConfirmModal
+          files={[pending.file]}
+          title="Attach this file?"
+          asLabel={attachmentLabel(pending.fileType)}
+          note={
+            pending.fileType === 'payment_proof'
+              ? order?.status === 'on_hold'
+                ? 'This order is on hold. Uploading a proof of payment sends it back to Finance for re-check.'
+                : 'Finance will check this against the order when they verify it for invoicing.'
+              : null
+          }
+          onCancel={() => setPending(null)}
+          onConfirm={confirmUpload}
+          confirming={uploading}
+        />
       )}
     </div>
   );

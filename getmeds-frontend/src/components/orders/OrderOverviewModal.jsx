@@ -170,6 +170,9 @@ const OrderOverviewModal = ({ order, items = [], onClose }) => {
                   <tr key={it.id}>
                     <td className="px-3 py-2 font-medium text-ink-primary">
                       {it.product_name} {it.sku && <span className="text-ink-secondary">({it.sku})</span>}
+                      {it.price_remark && (
+                        <span className="block text-[11px] font-normal text-ink-secondary italic mt-0.5">💬 {it.price_remark}</span>
+                      )}
                     </td>
                     <td className="px-2 py-2 text-center text-ink-primary font-bold">{it.quantity}</td>
                     <td className="px-3 py-2 text-right text-ink-secondary">{peso(it.unit_price)}</td>

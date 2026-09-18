@@ -37,6 +37,7 @@ import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ORDER_SOURCES } from '../../constants/orderSources';
 import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
 import StockWarningModal from './StockWarningModal';
+import { onPasteImage } from '../../hooks/usePasteImage';
 import { TAX_OPTIONS, getTaxOption, lineTaxLabel, computeLineAmounts } from '../../utils/orderLines';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
@@ -875,7 +876,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           // Sep 14, 2026: the item's own Zoho tax. Zoho applies THIS to the line
           // whatever the app sends, so the form shows it instead of asking.
           taxPercent: product.tax_percentage ?? null,
-          taxLabel: product.tax_name ?? null
+          taxLabel: product.tax_name ?? null,
+          // Sep 18, 2026: why this line is priced the way it is — a discount
+          // agreed with the customer, a rate override — so Management and
+          // Finance see the reason next to the number, not just the number.
+          priceRemark: ''
         }
       ]);
       toast.success(`Added ${product.name} to order`);
@@ -901,6 +906,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   const handleUpdateItemField = (index, field, value) => {
     if (field === 'quantity' && !/^\d*$/.test(value)) return;
     if ((field === 'rate' || field === 'discount') && !/^\d*\.?\d{0,2}$/.test(value)) return;
+    // Sep 18, 2026: matches the backend's own cap (orders.controller.js).
+    if (field === 'priceRemark' && value.length > 300) return;
     setItems((rows) => rows.map((row, i) => (i === index ? { ...row, [field]: value } : row)));
   };
 
@@ -992,6 +999,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
     setIsDragActive(false);
     processFiles(e.dataTransfer.files);
   };
+  // Sep 18, 2026: click the drop zone, then paste (Ctrl+V) a copied image —
+  // same processFiles() every other path here uses.
+  const handleAttachmentPaste = onPasteImage((file) => processFiles([file]));
 
   const handleRemoveAttachment = (localId) => {
     setStagedAttachments(prev => prev.filter(a => a.localId !== localId));
@@ -1230,7 +1240,10 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           rate: Number(i.rate),
           discount: Number(i.discount || 0),
           tax_percent: i.taxPercent != null ? Number(i.taxPercent) : getTaxOption(i.taxOption).percent,
-          tax_label: i.taxLabel != null ? i.taxLabel : getTaxOption(i.taxOption).label
+          tax_label: i.taxLabel != null ? i.taxLabel : getTaxOption(i.taxOption).label,
+          // Sep 18, 2026: why this line is priced this way — Management and
+          // Finance see it wherever they review the order's items.
+          price_remark: (i.priceRemark || '').trim() || null
         })),
         // Sep 14, 2026: the order's tax preference. The server recomputes every
         // line under it, so this is what decides the stored total.
@@ -2191,9 +2204,22 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                       const line = lineAmounts[idx];
                       return (
                         <tr key={idx} className="hover:bg-surface/50 transition-colors">
-                          <td className="px-4 py-3">
+                          <td className="px-4 py-3 min-w-[11rem]">
                             <p className="font-semibold text-ink-primary whitespace-nowrap">{item.name}</p>
                             <span className="text-[11px] font-mono text-ink-secondary">{item.sku}</span>
+                            {/* Sep 18, 2026: why THIS line is priced the way it is — a
+                                discount agreed with the customer, a rate override —
+                                so Management and Finance see the reason, not just the
+                                number, wherever they review the order's items. */}
+                            <input
+                              type="text"
+                              value={item.priceRemark || ''}
+                              onChange={(e) => handleUpdateItemField(idx, 'priceRemark', e.target.value)}
+                              maxLength={300}
+                              placeholder="Price remark (optional) — why this rate/discount"
+                              title="Visible to Management and Finance"
+                              className="mt-1 block w-full text-[11px] text-ink-secondary placeholder:text-ink-secondary/50 border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
+                            />
                           </td>
                           <td className="px-3 py-3 text-center">
                             <input
@@ -2417,10 +2443,12 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   the other — shown/hidden with Tailwind's `sm:` breakpoint
                   rather than any device sniffing. */}
               <label
+                tabIndex={0}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
-                className={`hidden sm:flex flex-col items-center justify-center gap-1.5 border-2 border-dashed rounded-xl py-8 px-4 text-center cursor-pointer transition-colors ${
+                onPaste={handleAttachmentPaste}
+                className={`hidden sm:flex flex-col items-center justify-center gap-1.5 border-2 border-dashed rounded-xl py-8 px-4 text-center cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-getmeds-blue ${
                   isDragActive
                     ? 'border-getmeds-blue bg-getmeds-blue/10'
                     : 'border-slate-300 hover:border-getmeds-blue hover:bg-getmeds-blue/5'
@@ -2428,7 +2456,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
               >
                 <Paperclip size={18} className="text-ink-secondary" />
                 <p className="text-sm text-ink-secondary">
-                  <span className="font-semibold text-getmeds-blue">Drag & drop files here</span>, or click to browse
+                  <span className="font-semibold text-getmeds-blue">Drag & drop files here</span>, click to browse, or paste a
+                  copied image (Ctrl+V)
                 </p>
                 <p className="text-[11px] text-ink-secondary/70">Photos, PDFs, Word or Excel files — up to 15 MB each</p>
                 <input type="file" accept={PROOF_ACCEPT} multiple onChange={handleFilesSelected} className="hidden" />
@@ -2706,6 +2735,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                     <tr key={idx}>
                       <td className="px-3 py-2 font-medium text-ink-primary">
                         {item.name} <span className="text-ink-secondary">({item.sku})</span>
+                        {item.priceRemark?.trim() && (
+                          <span className="block text-[11px] font-normal text-ink-secondary italic mt-0.5">
+                            💬 {item.priceRemark.trim()}
+                          </span>
+                        )}
                       </td>
                       <td className="px-2 py-2 text-center text-ink-primary font-bold">{item.quantity}</td>
                       <td className="px-3 py-2 text-right text-ink-secondary">{peso(item.rate)}</td>
