@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Printer, CheckCircle2, AlertTriangle, PauseCircle, PlayCircle, Camera, Truck } from 'lucide-react';
+import { Printer, CheckCircle2, AlertTriangle, PauseCircle, PlayCircle, Camera, Truck, Clipboard } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import { useAuth } from '../../hooks/useAuth';
@@ -225,8 +225,12 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
   };
   // Sep 18, 2026: this button renders once per order — a whole list of them
   // is on screen together on the Dispatch queue — so paste is scoped to
-  // whichever one is actually focused (tabIndex + onPaste below), not a
-  // window-wide listener every row would answer to at once.
+  // whichever one is actually focused, not a window-wide listener every row
+  // would answer to at once. It is NOT bound to "Upload proof photo" itself
+  // (below): that button's onClick opens the native file dialog, which
+  // steals focus to a window outside the page — a paste right after would
+  // never reach it. Bound instead to the small paste-only button next to
+  // it, which focuses on click and opens nothing.
   const handleProofPaste = onPasteImage((file) => stageProofFiles([file]));
 
   const confirmProofUpload = async () => {
@@ -406,12 +410,24 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
             type="button"
             disabled={uploading}
             onClick={() => fileInput.current?.click()}
-            onPaste={handleProofPaste}
-            title="Photo of the packed parcel, the waybill or a signed receipt — attached to the Zoho Sales Order, and the MedRep is told. Click, then paste a copied image with Ctrl+V."
+            title="Photo of the packed parcel, the waybill or a signed receipt — attached to the Zoho Sales Order, and the MedRep is told"
             className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-50"
           >
             <Camera className="w-3.5 h-3.5" />
             {uploading ? 'Uploading…' : 'Upload proof photo'}
+          </button>
+          {/* Sep 18, 2026: a separate paste target — see handleProofPaste's
+              note above for why it can't be the button itself. Click here
+              (just focuses it, opens nothing), then Ctrl+V a copied image. */}
+          <button
+            type="button"
+            tabIndex={0}
+            disabled={uploading}
+            onPaste={handleProofPaste}
+            title="Click here, then paste a copied image (Ctrl+V)"
+            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-dashed border-slate-300 bg-white text-ink-secondary hover:border-getmeds-blue hover:text-getmeds-blue disabled:opacity-50"
+          >
+            <Clipboard className="w-3.5 h-3.5" />
           </button>
         </>
       )}

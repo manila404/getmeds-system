@@ -2,7 +2,7 @@ import React, { useRef } from 'react';
 import { Paperclip, X } from 'lucide-react';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_ACCEPT } from '../../utils/attachmentUpload';
-import { onPasteImage } from '../../hooks/usePasteImage';
+import { usePasteImage } from '../../hooks/usePasteImage';
 
 /**
  * Sep 18, 2026: pick a file (and what it is — Proof of Payment, GL,
@@ -27,11 +27,14 @@ const AttachFileField = ({ file, fileType, onFileChange, onTypeChange, disabled,
     e.target.value = '';
     acceptFile(f);
   };
-  // Sep 18, 2026: click the button, then paste (Ctrl+V) a copied image —
-  // scoped to this button's own focus (usePasteImage.js's header note), not
-  // the whole window, since a resubmit dialog can be open on top of the
-  // Payment tab's own upload panel at the same time.
-  const handlePaste = onPasteImage(acceptFile);
+  // Sep 18, 2026: paste (Ctrl+V) a copied image straight in, no click first
+  // — window-level (see usePasteImage.js's header note): "Choose file"
+  // opens a native file dialog on click, which stole the paste target every
+  // time an onPaste was bound to that same button instead. This field is
+  // never more than one-at-a-time on a page (a resubmit dialog's own field
+  // and the sent-back banner's are mutually exclusive order states), so
+  // nothing else on THIS field's own screen competes for the same paste.
+  usePasteImage(acceptFile, { disabled });
 
   return (
     <div>
@@ -66,9 +69,8 @@ const AttachFileField = ({ file, fileType, onFileChange, onTypeChange, disabled,
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            onPaste={handlePaste}
             disabled={disabled}
-            title="Choose a file, or click here then paste a copied image with Ctrl+V"
+            title="Choose a file, or paste a copied image with Ctrl+V"
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-slate-300 bg-white text-ink-secondary text-xs font-semibold hover:bg-surface disabled:opacity-50"
           >
             <Paperclip className="w-3.5 h-3.5" /> Choose file

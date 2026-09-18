@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
-import { onPasteImage } from '../../hooks/usePasteImage';
+import { usePasteImage } from '../../hooks/usePasteImage';
 import { formatPHT } from '../../utils/dateUtils';
 import { ATTACHMENT_TYPES, attachmentLabel } from '../../constants/attachmentTypes';
 import UploadConfirmModal from './UploadConfirmModal';
@@ -331,12 +331,12 @@ const PaymentProofPanel = ({ orderId, order }) => {
     processFile(e.dataTransfer.files?.[0]);
   };
 
-  // Sep 18, 2026: paste a copied image straight in — same processFile()
-  // every other path uses, so it gets the same size check and confirmation.
-  // Scoped to the drag-and-drop zone's own focus (see usePasteImage.js's
-  // header note) — the Attachments tab and a resubmit dialog's own file
-  // field can both be mounted on one order's page at once.
-  const handlePaste = onPasteImage((file) => processFile(file));
+  // Sep 18, 2026: paste a copied image straight in, no click first — same
+  // processFile() every other path uses, so it gets the same size check and
+  // confirmation. Window-level (see usePasteImage.js's header note): the
+  // drop zone's own click opens a file dialog, which stole the paste target
+  // every time an onPaste was bound there instead.
+  usePasteImage(processFile, { disabled: dropDisabled || !canUpload });
 
   const confirmUpload = () => {
     if (!pending) return;
@@ -462,12 +462,10 @@ const PaymentProofPanel = ({ orderId, order }) => {
                   pair kept for mobile below — same split as OrderForm.jsx's
                   attach control. */}
               <label
-                tabIndex={0}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
-                onPaste={handlePaste}
-                className={`hidden sm:flex flex-col items-center justify-center gap-1 border-2 border-dashed rounded-lg py-5 px-3 text-center cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-getmeds-blue ${
+                className={`hidden sm:flex flex-col items-center justify-center gap-1 border-2 border-dashed rounded-lg py-5 px-3 text-center cursor-pointer transition-colors ${
                   isDragActive
                     ? 'border-getmeds-blue bg-getmeds-blue/10'
                     : 'border-slate-300 hover:border-getmeds-blue hover:bg-getmeds-blue/5'

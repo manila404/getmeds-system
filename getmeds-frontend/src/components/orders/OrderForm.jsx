@@ -37,7 +37,7 @@ import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ORDER_SOURCES } from '../../constants/orderSources';
 import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
 import StockWarningModal from './StockWarningModal';
-import { onPasteImage } from '../../hooks/usePasteImage';
+import { usePasteImage } from '../../hooks/usePasteImage';
 import { TAX_OPTIONS, getTaxOption, inferTaxOption, lineTaxLabel, computeLineAmounts } from '../../utils/orderLines';
 
 // Aug 30, 2026: "Create New Order" form redesign. Replaces the old
@@ -1018,9 +1018,13 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
     setIsDragActive(false);
     processFiles(e.dataTransfer.files);
   };
-  // Sep 18, 2026: click the drop zone, then paste (Ctrl+V) a copied image —
-  // same processFiles() every other path here uses.
-  const handleAttachmentPaste = onPasteImage((file) => processFiles([file]));
+  // Sep 18, 2026: paste (Ctrl+V) a copied image straight in, no click first
+  // — see usePasteImage.js's header note for why this is window-level
+  // rather than bound to the drop zone itself (which opens a file dialog on
+  // click, and that stole the paste target every time). Only one of these
+  // is ever on screen (this whole page IS the order form), so nothing else
+  // is competing for the same paste.
+  usePasteImage((file) => processFiles([file]));
 
   const handleRemoveAttachment = (localId) => {
     setStagedAttachments(prev => prev.filter(a => a.localId !== localId));
@@ -2466,12 +2470,10 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   the other — shown/hidden with Tailwind's `sm:` breakpoint
                   rather than any device sniffing. */}
               <label
-                tabIndex={0}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
-                onPaste={handleAttachmentPaste}
-                className={`hidden sm:flex flex-col items-center justify-center gap-1.5 border-2 border-dashed rounded-xl py-8 px-4 text-center cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-getmeds-blue ${
+                className={`hidden sm:flex flex-col items-center justify-center gap-1.5 border-2 border-dashed rounded-xl py-8 px-4 text-center cursor-pointer transition-colors ${
                   isDragActive
                     ? 'border-getmeds-blue bg-getmeds-blue/10'
                     : 'border-slate-300 hover:border-getmeds-blue hover:bg-getmeds-blue/5'
