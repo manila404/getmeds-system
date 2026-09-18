@@ -16,6 +16,8 @@ import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 import OrderItemsEditor from '../components/orders/OrderItemsEditor';
 import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
 import ResumeOrderModal from '../components/orders/ResumeOrderModal';
+import AttachFileField from '../components/orders/AttachFileField';
+import { uploadOrderAttachment } from '../utils/attachmentUpload';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
@@ -232,12 +234,28 @@ const OrderDetailPage = () => {
   const [resubmitOpen, setResubmitOpen] = useState(false);
   // Sep 15, 2026: the whole order on one screen, like the submission review.
   const [overviewOpen, setOverviewOpen] = useState(false);
+  // Sep 18, 2026: reason first (moves the order off Finance's hold with the
+  // MedRep's own words on the trail), then the file — attaching afterwards
+  // is harmless even though attaching to a held order already returns it to
+  // Finance on its own (financeHoldService), because by then the order has
+  // already left on_hold and that auto-return is a no-op.
   const resubmitMutation = useMutation({
-    mutationFn: (reason) => client.post(`/api/orders/${id}/resubmit`, { reason }).then(r => r.data),
+    mutationFn: async ({ reason, file, fileType }) => {
+      const res = await client.post(`/api/orders/${id}/resubmit`, { reason }).then(r => r.data);
+      if (file) {
+        try {
+          await uploadOrderAttachment(client, id, file, fileType);
+        } catch (err) {
+          toast.error(err.response?.data?.error?.message || err.message || 'Re-submitted, but the file did not upload — attach it from the Payment tab.');
+        }
+      }
+      return res;
+    },
     onSuccess: (res) => {
       toast.success(res?.data?.message || 'Re-submitted to Finance.');
       setResubmitOpen(false);
       qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries({ queryKey: ['order-attachments', id] });
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not re-submit this order', { duration: 8000 })
   });
@@ -349,13 +367,33 @@ const OrderDetailPage = () => {
   // sent through the gate afterward. Needed so "Send Back" actually round
   // -trips: an order sent back lands at 'draft' and needs a way back to
   // 'pending_management_approval'.
+  // Sep 18, 2026: a resubmission after Management sent it back can carry a
+  // file too — the corrected document, so Management does not have to take
+  // the MedRep's word that it's fixed. Attached after submit (harmless
+  // either order here, since attach() is never status-gated for these
+  // types); the submit itself is what matters, so a failed upload only
+  // shows a toast rather than blocking it.
+  const [sentBackFile, setSentBackFile] = useState(null);
+  const [sentBackFileType, setSentBackFileType] = useState('payment_proof');
   const submitMutation = useMutation({
-    mutationFn: () => client.post(`/api/orders/${id}/submit`).then(r => r.data),
+    mutationFn: async () => {
+      const res = await client.post(`/api/orders/${id}/submit`).then(r => r.data);
+      if (sentBackFile) {
+        try {
+          await uploadOrderAttachment(client, id, sentBackFile, sentBackFileType);
+        } catch (err) {
+          toast.error(err.response?.data?.error?.message || err.message || 'Resubmitted, but the file did not upload — attach it from the Payment tab.');
+        }
+      }
+      return res;
+    },
     onSuccess: (res) => {
       toast.success(res?.data?.pending_management_approval
         ? 'Submitted — waiting for Management approval.'
         : 'Submitted and synced to Zoho.');
+      setSentBackFile(null);
       qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries({ queryKey: ['order-attachments', id] });
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not submit this order')
   });
@@ -993,28 +1031,42 @@ const OrderDetailPage = () => {
             on the row after a hold is cleared, so without this a verified
             order kept showing "Exception/Hold Reason: n/a". */}
         {order.exception_reason && ['on_hold', 'exception', 'draft'].includes(order.status) && (
-          <div className="mt-3 bg-state-warning-light border border-state-warning/30 rounded p-3 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2">
-            <p>
-              <span className="font-semibold">
-                {order.status === 'draft'
-                  ? order.sent_back
-                    ? `Sent back by Management · ${order.sent_back.by} — What To Fix:`
-                    : 'Sent Back — What To Fix:'
-                  : 'Exception/Hold Reason:'}
-              </span> {order.exception_reason}
-            </p>
-            {/* Sep 15, 2026: fix it, then send it back to Management from here.
-                They are told it is a resubmission, with this reason. */}
+          <div className="mt-3 bg-state-warning-light border border-state-warning/30 rounded p-3 text-xs text-amber-950 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p>
+                <span className="font-semibold">
+                  {order.status === 'draft'
+                    ? order.sent_back
+                      ? `Sent back by Management · ${order.sent_back.by} — What To Fix:`
+                      : 'Sent Back — What To Fix:'
+                    : 'Exception/Hold Reason:'}
+                </span> {order.exception_reason}
+              </p>
+              {/* Sep 15, 2026: fix it, then send it back to Management from
+                  here. They are told it is a resubmission, with this reason.
+                  Sep 18, 2026: a supporting file can go along with it. */}
+              {order.status === 'draft' &&
+                (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+                <button
+                  type="button"
+                  disabled={submitMutation.isPending}
+                  onClick={() => submitMutation.mutate()}
+                  className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
+                >
+                  {submitMutation.isPending ? 'Resubmitting…' : '↩ Resubmit to Management'}
+                </button>
+              )}
+            </div>
             {order.status === 'draft' &&
               (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
-              <button
-                type="button"
+              <AttachFileField
+                file={sentBackFile}
+                fileType={sentBackFileType}
+                onFileChange={(f, err) => { if (err) toast.error(err); else setSentBackFile(f); }}
+                onTypeChange={setSentBackFileType}
                 disabled={submitMutation.isPending}
-                onClick={() => submitMutation.mutate()}
-                className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
-              >
-                {submitMutation.isPending ? 'Resubmitting…' : '↩ Resubmit to Management'}
-              </button>
+                label="Attach the corrected document (optional)"
+              />
             )}
             {order.status === 'on_hold' && order.resubmittable &&
               (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
@@ -1051,7 +1103,7 @@ const OrderDetailPage = () => {
           <ResubmitHoldModal
             order={order}
             onClose={() => setResubmitOpen(false)}
-            onSubmit={(reason) => resubmitMutation.mutate(reason)}
+            onSubmit={(body) => resubmitMutation.mutate(body)}
             saving={resubmitMutation.isPending}
           />
         )}

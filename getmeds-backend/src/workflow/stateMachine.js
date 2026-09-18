@@ -112,7 +112,15 @@ const TRANSITIONS = {
   // out. The branch guards in the controllers stop these being downgrades.
   picking_packing: ['dispatched', 'ready_for_invoice_sent', 'ready_for_dispatch', 'completed', 'on_hold', 'cancelled', 'deleted'],
   dispatched: ['tracking_shared', 'completed', 'ready_for_invoice_sent', 'ready_for_dispatch', 'exception', 'deleted'],
-  tracking_shared: ['completed', 'ready_for_invoice_sent', 'ready_for_dispatch', 'deleted'],
+  // Sep 18, 2026: 'exception' added — Management's "Mark Exception" refused
+  // an order that already had its tracking shared (e.g. the courier lost the
+  // parcel, or the receiver disputes delivery after the fact) with "Cannot
+  // move from tracking_shared to exception", even though the same button
+  // already worked one stage earlier, at 'dispatched'. "Resume order" (see
+  // orders.controller.js's RESUMABLE_TO/statusBeforeHold) already treats
+  // tracking_shared as a stage it can resume back to, so this only closes a
+  // gap the resume side had already accounted for.
+  tracking_shared: ['completed', 'ready_for_invoice_sent', 'ready_for_dispatch', 'exception', 'deleted'],
 
   on_hold: [
     'ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch',

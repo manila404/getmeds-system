@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
+import toast from 'react-hot-toast';
 import Modal from '../ui/Modal';
+import AttachFileField from './AttachFileField';
 
 /**
  * Sep 15, 2026: send an order Finance put on hold back to Finance, saying why.
@@ -21,8 +23,15 @@ const ResubmitHoldModal = ({ order, onClose, onSubmit, saving }) => {
   const [choice, setChoice] = useState(RESUBMIT_REASONS[0]);
   const [other, setOther] = useState('');
   const [note, setNote] = useState('');
+  const [file, setFile] = useState(null);
+  const [fileType, setFileType] = useState('payment_proof');
   const base = choice === OTHER ? other.trim() : choice;
   const reason = [base, note.trim()].filter(Boolean).join(' — ');
+
+  const onFileChange = (f, error) => {
+    if (error) { toast.error(error); return; }
+    setFile(f);
+  };
 
   return (
     <Modal isOpen onClose={onClose} title={`Re-submit ${order.getmeds_order_id} for verification`}>
@@ -68,6 +77,13 @@ const ResubmitHoldModal = ({ order, onClose, onSubmit, saving }) => {
         />
       </label>
 
+      <div className="mt-3">
+        <AttachFileField file={file} fileType={fileType} onFileChange={onFileChange} onTypeChange={setFileType} disabled={saving} />
+        <p className="mt-1 text-[11px] text-ink-secondary">
+          Whatever backs this up — the deposit slip, a corrected Guarantee Letter or Prescription, an ID. Finance sees it with the order.
+        </p>
+      </div>
+
       <div className="mt-4 flex justify-end gap-2">
         <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm border border-slate-300 text-ink-secondary rounded hover:bg-surface">
           Cancel
@@ -75,7 +91,7 @@ const ResubmitHoldModal = ({ order, onClose, onSubmit, saving }) => {
         <button
           type="button"
           disabled={saving || !base}
-          onClick={() => onSubmit(reason)}
+          onClick={() => onSubmit({ reason, file, fileType })}
           className="px-3 py-1.5 text-sm font-semibold bg-getmeds-blue text-white rounded hover:bg-getmeds-blue-dark disabled:opacity-50"
         >
           {saving ? 'Sending…' : 'Re-submit to Finance'}
