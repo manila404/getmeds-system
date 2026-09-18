@@ -258,8 +258,8 @@ class LiveZohoAdapter extends ZohoAdapter {
     // number, so nobody confirms/packs/ships it thinking it's real.
     const isTestOrder = /^TestGM-/i.test(orderData.getmeds_order_id || '');
     const notes = isTestOrder
-      ? `TEST — DO NOT FULFILL. Getmeds Order: ${orderData.getmeds_order_id}`
-      : `Getmeds Order: ${orderData.getmeds_order_id}`;
+      ? `TEST — DO NOT FULFILL. Order No.: ${orderData.getmeds_order_id}`
+      : `Order No.: ${orderData.getmeds_order_id}`;
 
     const body = {
       customer_id: contactId,

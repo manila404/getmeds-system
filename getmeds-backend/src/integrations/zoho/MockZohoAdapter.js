@@ -117,8 +117,8 @@ class MockZohoAdapter extends ZohoAdapter {
     // why this exists.
     const isTestOrder = /^TestGM-/i.test(orderData.getmeds_order_id || '');
     const notes = isTestOrder
-      ? `TEST — DO NOT FULFILL. Getmeds Order: ${orderData.getmeds_order_id}`
-      : `Getmeds Order: ${orderData.getmeds_order_id}`;
+      ? `TEST — DO NOT FULFILL. Order No.: ${orderData.getmeds_order_id}`
+      : `Order No.: ${orderData.getmeds_order_id}`;
 
     // Mirrors the real request body shape (organization_id + auth would be
     // added by LiveZohoAdapter; here we just log what *would* be sent).

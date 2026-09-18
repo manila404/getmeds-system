@@ -276,7 +276,7 @@ function buildDryRunSalesOrder(payload) {
       customer_name: payload.customer_name,
       total: payload.total_amount,
       reference_number: payload.getmeds_order_id,
-      notes: `[DRY RUN — nothing was sent to Zoho] Getmeds Order: ${payload.getmeds_order_id}`,
+      notes: `[DRY RUN — nothing was sent to Zoho] Order No.: ${payload.getmeds_order_id}`,
       date: new Date().toISOString().slice(0, 10),
       line_items: (payload.items || []).map((item) => ({
         item_id: item.zoho_item_id || null,
