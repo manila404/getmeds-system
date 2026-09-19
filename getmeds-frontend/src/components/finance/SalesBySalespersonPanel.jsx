@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { X, BarChart3, Calendar, Loader2, AlertCircle } from 'lucide-react';
 import client from '../../api/client';
+import PaginationFooter from './PaginationFooter';
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
@@ -30,17 +31,21 @@ const SalesBySalespersonPanel = ({ onClose }) => {
   const [dateFrom, setDateFrom] = useState(todayStr());
   const [dateTo, setDateTo] = useState(todayStr());
   const [origin, setOrigin] = useState('all');
+  const [page, setPage] = useState(1);
+
+  useEffect(() => { setPage(1); }, [dateFrom, dateTo, origin]);
 
   const { data, isLoading, isFetching } = useQuery({
-    queryKey: ['finance-sales-by-salesperson', dateFrom, dateTo, origin],
+    queryKey: ['finance-sales-by-salesperson', dateFrom, dateTo, origin, page],
     queryFn: () =>
       client
-        .get('/api/finance/reports/sales-by-salesperson', { params: { date_from: dateFrom, date_to: dateTo, origin } })
+        .get('/api/finance/reports/sales-by-salesperson', { params: { date_from: dateFrom, date_to: dateTo, origin, page } })
         .then(r => r.data),
   });
 
   const rows = data?.data?.rows || [];
   const total = data?.data?.total || { order_count: 0, order_total: 0 };
+  const pagination = data?.data?.pagination || null;
   const isToday = dateFrom === todayStr() && dateTo === todayStr();
   const goToToday = () => { setDateFrom(todayStr()); setDateTo(todayStr()); };
 
@@ -142,6 +147,7 @@ const SalesBySalespersonPanel = ({ onClose }) => {
           </table>
         </div>
       )}
+      <PaginationFooter pagination={pagination} onPageChange={setPage} isFetching={isFetching} itemLabel="salespersons" />
     </div>
   );
 };

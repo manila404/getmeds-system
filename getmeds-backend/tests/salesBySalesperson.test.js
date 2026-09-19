@@ -105,4 +105,24 @@ describe('GET /api/finance/reports/sales-by-salesperson', () => {
     expect(dataInRange.rows.some((r) => r.name === 'OLD | PERSON')).toBe(true);
     void old;
   });
+
+  test('paginates 25 salespersons per page — the Total row sums every group, not just the page shown', async () => {
+    const before = await report();
+    const stamp = Date.now();
+    for (let i = 0; i < 26; i += 1) {
+      await makeOrder({ salesperson: `PAGE-TEST-${stamp}-${i}`, amount: 100 });
+    }
+    const expectedGroups = before.pagination.total + 26;
+
+    const page1 = await report('?page=1');
+    expect(page1.rows.length).toBe(25);
+    expect(page1.pagination).toEqual({ page: 1, limit: 25, total: expectedGroups, pages: Math.ceil(expectedGroups / 25) });
+    // The grand total reflects EVERY order in range, not just the 25 groups on this page.
+    expect(page1.total.order_count).toBe(before.total.order_count + 26);
+
+    const page2 = await report('?page=2');
+    expect(page2.rows.length).toBe(expectedGroups - 25);
+    const names1 = new Set(page1.rows.map((r) => r.name));
+    expect(page2.rows.every((r) => !names1.has(r.name))).toBe(true);
+  });
 });

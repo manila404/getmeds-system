@@ -22,6 +22,9 @@ const salespersonMappingRoutes = require('./routes/salespersonMapping.routes');
 // Sep 11, 2026: which divisions each manager covers — see
 // services/orderScopeService.js for what the scope actually gates.
 const managerScopeRoutes = require('./routes/managerScope.routes');
+// Sep 19, 2026: the top-nav search bar (Topbar.jsx) — wired up for the
+// first time, see routes/search.routes.js and controllers/search.controller.js.
+const searchRoutes = require('./routes/search.routes');
 
 const app = express();
 
@@ -108,6 +111,7 @@ app.use('/api/sync-jobs', syncJobsRoutes);
 app.use('/api/cron', cronRoutes);
 app.use('/api/salesperson-mappings', salespersonMappingRoutes);
 app.use('/api/manager-scopes', managerScopeRoutes);
+app.use('/api/search', searchRoutes);
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } }));

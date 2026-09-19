@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { X, ShieldCheck, Calendar, Loader2 } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
+import PaginationFooter from './PaginationFooter';
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
@@ -21,17 +22,23 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 const MyConfirmationsPanel = ({ onClose }) => {
   const [dateFrom, setDateFrom] = useState(todayStr());
   const [dateTo, setDateTo] = useState(todayStr());
+  const [page, setPage] = useState(1);
+
+  // A new date range starting on page 3 of the OLD range would look like
+  // "no results" the moment the range no longer has three pages.
+  useEffect(() => { setPage(1); }, [dateFrom, dateTo]);
 
   const { data, isLoading, isFetching } = useQuery({
-    queryKey: ['finance-my-confirmations', dateFrom, dateTo],
+    queryKey: ['finance-my-confirmations', dateFrom, dateTo, page],
     queryFn: () =>
       client
-        .get('/api/finance/my-confirmations', { params: { date_from: dateFrom, date_to: dateTo } })
+        .get('/api/finance/my-confirmations', { params: { date_from: dateFrom, date_to: dateTo, page } })
         .then(r => r.data),
   });
 
   const orders = data?.data?.orders || [];
   const summary = data?.data?.summary || { count: 0, totalAmount: 0 };
+  const pagination = data?.data?.pagination || null;
   const isToday = dateFrom === todayStr() && dateTo === todayStr();
   const goToToday = () => { setDateFrom(todayStr()); setDateTo(todayStr()); };
 
@@ -129,6 +136,7 @@ const MyConfirmationsPanel = ({ onClose }) => {
           ))}
         </ul>
       )}
+      <PaginationFooter pagination={pagination} onPageChange={setPage} isFetching={isFetching} itemLabel="confirmed" />
     </div>
   );
 };

@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../hooks/useAuth';
 import { useNotifications } from '../../hooks/useNotifications';
 import NotificationBell from '../ui/NotificationBell';
 import ConfirmDialog from '../ui/ConfirmDialog';
+import client from '../../api/client';
 import {
   LogOut,
   User,
@@ -13,7 +15,10 @@ import {
   Menu,
   Search,
   Settings,
-  ChevronDown
+  ChevronDown,
+  Users,
+  Pill,
+  Loader2
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { formatPHT } from '../../utils/dateUtils';
@@ -38,6 +43,43 @@ const Topbar = ({ onToggleSidebar }) => {
   const dropdownRef = useRef(null);
   const userMenuRef = useRef(null);
   const navigate = useNavigate();
+
+  // Sep 19, 2026: the search box itself has existed since before this —
+  // this is the first time it's ever had a value, a handler, or an endpoint
+  // behind it. Debounced so typing "amoxicillin" doesn't fire six requests.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const searchRef = useRef(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  const { data: searchData, isFetching: isSearching } = useQuery({
+    queryKey: ['global-search', debouncedQuery],
+    queryFn: () => client.get('/api/search', { params: { q: debouncedQuery } }).then((r) => r.data),
+    enabled: debouncedQuery.length >= 2,
+    staleTime: 15000,
+  });
+  const searchResults = searchData?.data || { orders: [], customers: [], products: [] };
+  const hasSearchResults =
+    (searchResults.orders?.length || 0) + (searchResults.customers?.length || 0) + (searchResults.products?.length || 0) > 0;
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (searchRef.current && !searchRef.current.contains(e.target)) setIsSearchOpen(false);
+    };
+    if (isSearchOpen) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isSearchOpen]);
+
+  const goToOrder = (order) => {
+    setIsSearchOpen(false);
+    setSearchQuery('');
+    navigate(`/orders/${order.getmeds_order_id}`);
+  };
 
   // Close notification popover on outside click
   useEffect(() => {
@@ -104,7 +146,7 @@ const Topbar = ({ onToggleSidebar }) => {
       {/* Right Area: Notification Bell & User Identity */}
       <div className="flex items-center space-x-2 sm:space-x-4">
         {/* Global Search */}
-        <div className="relative hidden md:block">
+        <div className="relative hidden md:block" ref={searchRef}>
           <Search
             size={16}
             className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
@@ -113,8 +155,83 @@ const Topbar = ({ onToggleSidebar }) => {
             type="search"
             placeholder="Search orders, clients, products..."
             aria-label="Search"
+            value={searchQuery}
+            onChange={(e) => { setSearchQuery(e.target.value); setIsSearchOpen(true); }}
+            onFocus={() => setIsSearchOpen(true)}
+            onKeyDown={(e) => { if (e.key === 'Escape') setIsSearchOpen(false); }}
             className="w-48 lg:w-72 pl-9 pr-4 py-2 rounded-full border border-slate-100 bg-slate-50 text-xs text-ink-primary placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-getmeds-blue/40 focus:border-getmeds-blue/40 focus:bg-white transition-colors"
           />
+          {isSearchOpen && searchQuery.trim().length >= 2 && (
+            <div className="absolute top-full left-0 mt-1.5 w-80 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50 max-h-96 overflow-y-auto animate-in fade-in slide-in-from-top-2 duration-150">
+              {isSearching && !hasSearchResults ? (
+                <div className="py-8 flex items-center justify-center gap-2 text-xs text-ink-secondary">
+                  <Loader2 size={14} className="animate-spin" /> Searching…
+                </div>
+              ) : !hasSearchResults ? (
+                <div className="py-8 text-center text-xs text-ink-secondary">
+                  No matches for &ldquo;{searchQuery.trim()}&rdquo;
+                </div>
+              ) : (
+                <>
+                  {searchResults.orders?.length > 0 && (
+                    <div className="pb-1.5">
+                      <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Orders</p>
+                      {searchResults.orders.map((o) => (
+                        <button
+                          key={o.id}
+                          type="button"
+                          onClick={() => goToOrder(o)}
+                          className="w-full flex items-center justify-between gap-2 px-3.5 py-2 text-left hover:bg-surface transition-colors"
+                        >
+                          <span className="min-w-0">
+                            <span className="block text-xs font-semibold text-getmeds-blue truncate">{o.getmeds_order_id}</span>
+                            <span className="block text-[11px] text-ink-secondary truncate">{o.customer_name || '—'}</span>
+                          </span>
+                          <span className="shrink-0 text-[11px] font-medium text-ink-secondary">
+                            ₱{(Number(o.total_amount) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {searchResults.customers?.length > 0 && (
+                    <div className="pb-1.5 border-t border-slate-100">
+                      <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Clients</p>
+                      {searchResults.customers.map((c) => (
+                        <div key={c.id} className="flex items-center gap-2 px-3.5 py-2">
+                          <Users size={13} className="text-ink-secondary shrink-0" />
+                          <span className="min-w-0">
+                            <span className="block text-xs font-medium text-ink-primary truncate">{c.name}</span>
+                            {c.contact_number && <span className="block text-[11px] text-ink-secondary truncate">{c.contact_number}</span>}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {searchResults.products?.length > 0 && (
+                    <div className="border-t border-slate-100">
+                      <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Products</p>
+                      {searchResults.products.map((p) => (
+                        <div key={p.id} className="flex items-center gap-2 px-3.5 py-2">
+                          <Pill size={13} className="text-ink-secondary shrink-0" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-xs font-medium text-ink-primary truncate">{p.name}</span>
+                            {p.sku && <span className="block text-[11px] text-ink-secondary truncate">SKU: {p.sku}</span>}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {/* Orders link to their own page; clients and products have
+                      no dedicated page anywhere in this app (confirmed before
+                      building this), so they're shown for reference only. */}
+                  <p className="px-3.5 pt-1.5 text-[10px] text-ink-secondary/70 border-t border-slate-100">
+                    Clients and products aren&rsquo;t clickable yet — open Order or Products from the menu to work with them.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Notification Bell & Dropdown */}

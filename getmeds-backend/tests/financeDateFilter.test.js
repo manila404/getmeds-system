@@ -209,4 +209,30 @@ describe('GET /api/finance/my-confirmations', () => {
     const data = await myConfirmations(financeToken, `?date_from=${yesterday}&date_to=${yesterday}`);
     expect(data.orders.map((o) => o.id)).not.toContain(id);
   });
+
+  test('paginates 25 per page — the summary total counts every page, not just the one shown', async () => {
+    // Relative to whatever this suite already confirmed for financeToken
+    // today (other tests above add a few) — 27 more guarantees at least a
+    // second page regardless of run order.
+    const before = (await myConfirmations(financeToken)).pagination.total;
+    for (let i = 0; i < 27; i += 1) {
+      const id = await orderAwaitingFinance();
+      await confirm(financeToken, id);
+    }
+    const expectedTotal = before + 27;
+
+    const page1 = await myConfirmations(financeToken, '?page=1');
+    expect(page1.orders.length).toBe(25);
+    expect(page1.pagination.page).toBe(1);
+    expect(page1.pagination.limit).toBe(25);
+    expect(page1.pagination.total).toBe(expectedTotal);
+    expect(page1.summary.count).toBe(expectedTotal);
+
+    const page2 = await myConfirmations(financeToken, '?page=2');
+    expect(page2.orders.length).toBe(expectedTotal - 25);
+    expect(page2.pagination.page).toBe(2);
+    // No overlap between pages.
+    const ids1 = new Set(page1.orders.map((o) => o.id));
+    expect(page2.orders.every((o) => !ids1.has(o.id))).toBe(true);
+  });
 });

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, useIsFetching, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3 } from 'lucide-react';
 import client from '../../api/client';
@@ -141,7 +141,24 @@ const FinanceQueuePage = () => {
   const counts = data?.data?.counts || { getmeds: 0, zoho: 0, total: 0 };
   const recent = data?.data?.recent || [];
   const stats = data?.data?.stats || {};
-  const pagination = data?.data?.pagination || { page: 1, pages: 1, total: 0, limit: 20 };
+  const pagination = data?.data?.pagination || { page: 1, pages: 1, total: 0, limit: 25 };
+
+  // Sep 19, 2026: "fix refresh button" — it used to always refetch the
+  // shared queue's own query, even while My Confirmations or Reports (each
+  // with its OWN useQuery, and its own query key) was the thing actually on
+  // screen — the icon span reflected the wrong request, and clicking it
+  // silently refreshed data nobody could see. useIsFetching reads a panel's
+  // in-flight state without lifting its query up here; invalidateQueries by
+  // key prefix refreshes it without each panel needing a passed-down
+  // refetch prop.
+  const mineFetching = useIsFetching({ queryKey: ['finance-my-confirmations'] }) > 0;
+  const reportsFetching = useIsFetching({ queryKey: ['finance-sales-by-salesperson'] }) > 0;
+  const activeIsFetching = activePanel === 'mine' ? mineFetching : activePanel === 'reports' ? reportsFetching : isFetching;
+  const handleRefresh = () => {
+    if (activePanel === 'mine') qc.invalidateQueries({ queryKey: ['finance-my-confirmations'] });
+    else if (activePanel === 'reports') qc.invalidateQueries({ queryKey: ['finance-sales-by-salesperson'] });
+    else refetch();
+  };
   // Sep 12, 2026: GETMEDS_WORKFLOW_V2, as reported by the server. When on,
   // Finance's Confirm order acts on the draft Sales Order (so_created) and
   // confirms it in Zoho from here; the invoice is then Dispatch's.
@@ -558,8 +575,8 @@ const FinanceQueuePage = () => {
           >
             <BarChart3 className="w-4 h-4" /> Reports
           </button>
-          <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0">
-            <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
+          <button onClick={handleRefresh} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0">
+            <RefreshCw className={`w-4 h-4 ${activeIsFetching ? 'animate-spin' : ''}`} /> Refresh
           </button>
         </div>
       </div>

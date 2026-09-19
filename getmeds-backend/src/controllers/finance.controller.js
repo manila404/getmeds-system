@@ -216,9 +216,13 @@ exports.getQueue = async (req, res, next) => {
      * Paginated, and not optionally: widening to every status put 60,948
      * imported orders behind the Zoho tab. The previous version had no LIMIT
      * because four statuses could only ever match a few hundred rows.
+     *
+     * Sep 19, 2026: default bumped 20 -> 25 — "always paginate tables into
+     * 25 entry," now the same page size as My Confirmations and the Reports
+     * tab, so a page number means the same thing everywhere on this screen.
      */
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
     const offset = (page - 1) * limit;
     /**
      * The three reads below are independent, so they are issued together.
@@ -385,23 +389,47 @@ exports.getMyConfirmations = async (req, res, next) => {
     const dateFrom = DATE_RE.test(rawFrom) ? rawFrom : today;
     const dateTo = DATE_RE.test(rawTo) ? rawTo : today;
 
-    const rows = await db
-      .prepare(
-        `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount,
-                o.zoho_so_number, o.zoho_invoice_number,
-                c.name AS customer_name,
-                fe.created_at AS confirmed_at
-           FROM order_events fe
-           JOIN orders o ON o.id = fe.order_id
-           LEFT JOIN customers c ON c.id = o.customer_id
-          WHERE fe.event_type = 'FINANCE_VERIFIED'
-            AND fe.actor_id = ?
-            AND fe.created_at >= ? AND fe.created_at <= ?
-          ORDER BY fe.created_at DESC`
-      )
-      .all(req.user.id, `${dateFrom}T00:00:00.000Z`, `${dateTo}T23:59:59.999Z`);
+    // Sep 19, 2026: "always paginate tables into 25 entry" — 25 rows per
+    // page, same default as every other list on this page. The summary
+    // (count + total amount) is a SEPARATE aggregate over the whole date
+    // range, not the current page — narrowing to page 2 must not make the
+    // "Confirmed" tile at the top look like only 25 orders happened.
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const offset = (page - 1) * limit;
+    const fromIso = `${dateFrom}T00:00:00.000Z`;
+    const toIso = `${dateTo}T23:59:59.999Z`;
 
-    const totalAmount = rows.reduce((sum, r) => sum + (Number(r.total_amount) || 0), 0);
+    const [rows, summaryRow] = await Promise.all([
+      db
+        .prepare(
+          `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount,
+                  o.zoho_so_number, o.zoho_invoice_number,
+                  c.name AS customer_name,
+                  fe.created_at AS confirmed_at
+             FROM order_events fe
+             JOIN orders o ON o.id = fe.order_id
+             LEFT JOIN customers c ON c.id = o.customer_id
+            WHERE fe.event_type = 'FINANCE_VERIFIED'
+              AND fe.actor_id = ?
+              AND fe.created_at >= ? AND fe.created_at <= ?
+            ORDER BY fe.created_at DESC
+            LIMIT ? OFFSET ?`
+        )
+        .all(req.user.id, fromIso, toIso, limit, offset),
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n, COALESCE(SUM(o.total_amount), 0) AS total_amount
+             FROM order_events fe
+             JOIN orders o ON o.id = fe.order_id
+            WHERE fe.event_type = 'FINANCE_VERIFIED'
+              AND fe.actor_id = ?
+              AND fe.created_at >= ? AND fe.created_at <= ?`
+        )
+        .get(req.user.id, fromIso, toIso),
+    ]);
+
+    const count = Number(summaryRow?.n || 0);
 
     res.json({
       success: true,
@@ -409,7 +437,8 @@ exports.getMyConfirmations = async (req, res, next) => {
         orders: rows,
         date_from: dateFrom,
         date_to: dateTo,
-        summary: { count: rows.length, totalAmount },
+        summary: { count, totalAmount: Number(summaryRow?.total_amount || 0) },
+        pagination: { page, limit, total: count, pages: Math.max(1, Math.ceil(count / limit)) },
       },
     });
   } catch (err) { next(err); }
@@ -458,29 +487,63 @@ exports.getSalesBySalesperson = async (req, res, next) => {
     const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
     const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
 
-    const rows = await db
-      .prepare(
-        `SELECT COALESCE(NULLIF(TRIM(o.salesperson), ''), 'Unassigned') AS name,
-                COUNT(*) AS order_count,
-                COALESCE(SUM(o.total_amount), 0) AS order_total
-           FROM orders o
-          WHERE o.created_at >= ? AND o.created_at <= ?${originAnd}${scopeAnd}
-          GROUP BY 1
-          ORDER BY order_total DESC`
-      )
-      .all(`${dateFrom}T00:00:00.000Z`, `${dateTo}T23:59:59.999Z`, ...scopeParams);
+    // Sep 19, 2026: "always paginate tables into 25 entry." Paginates the
+    // GROUPED rows (salespersons), 25 per page — the Total row below is a
+    // separate, ungrouped aggregate over the WHOLE filtered set, so it stays
+    // the grand total on every page rather than only summing whichever 25
+    // salespersons happen to be showing.
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const offset = (page - 1) * limit;
+    const fromIso = `${dateFrom}T00:00:00.000Z`;
+    const toIso = `${dateTo}T23:59:59.999Z`;
+    const where = `WHERE o.created_at >= ? AND o.created_at <= ?${originAnd}${scopeAnd}`;
 
-    const total = rows.reduce(
-      (acc, r) => ({
-        order_count: acc.order_count + Number(r.order_count || 0),
-        order_total: acc.order_total + Number(r.order_total || 0),
-      }),
-      { order_count: 0, order_total: 0 }
-    );
+    const [rows, totalRow, groupCountRow] = await Promise.all([
+      db
+        .prepare(
+          `SELECT COALESCE(NULLIF(TRIM(o.salesperson), ''), 'Unassigned') AS name,
+                  COUNT(*) AS order_count,
+                  COALESCE(SUM(o.total_amount), 0) AS order_total
+             FROM orders o
+            ${where}
+            GROUP BY 1
+            ORDER BY order_total DESC
+            LIMIT ? OFFSET ?`
+        )
+        .all(fromIso, toIso, ...scopeParams, limit, offset),
+      db
+        .prepare(
+          `SELECT COUNT(*) AS order_count, COALESCE(SUM(o.total_amount), 0) AS order_total
+             FROM orders o
+            ${where}`
+        )
+        .get(fromIso, toIso, ...scopeParams),
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM (
+             SELECT 1 FROM orders o ${where} GROUP BY COALESCE(NULLIF(TRIM(o.salesperson), ''), 'Unassigned')
+           ) g`
+        )
+        .get(fromIso, toIso, ...scopeParams),
+    ]);
+
+    const total = {
+      order_count: Number(totalRow?.order_count || 0),
+      order_total: Number(totalRow?.order_total || 0),
+    };
+    const groupCount = Number(groupCountRow?.n || 0);
 
     res.json({
       success: true,
-      data: { rows, total, date_from: dateFrom, date_to: dateTo, origin },
+      data: {
+        rows,
+        total,
+        date_from: dateFrom,
+        date_to: dateTo,
+        origin,
+        pagination: { page, limit, total: groupCount, pages: Math.max(1, Math.ceil(groupCount / limit)) },
+      },
     });
   } catch (err) { next(err); }
 };
