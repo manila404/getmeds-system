@@ -20,6 +20,11 @@ router.param('id', (req, res, next) => requireOrderScope(req, res, next));
 // this app to Zoho have been retired; these two just show what Zoho already
 // reported.
 router.get('/queue', c.getQueue);
+// Sep 19, 2026: "each finance can see their approved/verified SO, filter it
+// one day (today) and can select dates" — the signed-in user's OWN
+// confirmations only; see the handler's own header for why this stays
+// personal rather than a roll-up across Finance users.
+router.get('/my-confirmations', c.getMyConfirmations);
 router.get('/orders/:id/payment', c.getPayment);
 
 // Sep 1, 2026 (8): the exception to the read-only rule above. Finance

@@ -15,6 +15,15 @@ const { isWorkflowV2Enabled } = require('../services/workflowFlags');
 const { zohoWriteMode } = require('../services/zohoWriteGuard');
 const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 
+// Sep 19, 2026: same tiny helper as LiveZohoAdapter.js/MockZohoAdapter.js's
+// own manilaTodayDateString — a fixed +8h offset (no DST in the Philippines),
+// not worth a shared module for three lines. Used only to default
+// getMyConfirmations' date range to "today" when neither end is given.
+function manilaTodayDateString(now = new Date()) {
+  const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+  return new Date(now.getTime() + MANILA_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 
 // ─── Finance visibility (read-only) ────────────────────────────────────────
 //
@@ -179,6 +188,31 @@ exports.getQueue = async (req, res, next) => {
     const stageParams = stage ? [stageStatuses] : [];
 
     /**
+     * Sep 19, 2026: "why does the system only show 9 when [Zoho] shows a
+     * total of 20" — it wasn't a bug, the two were never the same number
+     * (Zoho's report counts invoices raised org-wide today; this queue's
+     * counts are an all-time total, GetMeds-origin only). The actual fix
+     * asked for is a way to narrow THIS queue to a day, so it can mean
+     * "how many reached this stage today" instead of "how many ever have."
+     *
+     * Filtered on o.updated_at, not created_at: an order raised last week
+     * that was only confirmed or completed today should count as today's
+     * activity, and created_at would miss it entirely — most orders don't
+     * finish the same day they start. Same day-boundary convention as
+     * management.controller.js's date_from/date_to.
+     */
+    const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    const rawDateFrom = req.query.date_from ? String(req.query.date_from).trim() : null;
+    const rawDateTo = req.query.date_to ? String(req.query.date_to).trim() : null;
+    const dateFrom = DATE_RE.test(rawDateFrom || '') ? rawDateFrom : null;
+    const dateTo = DATE_RE.test(rawDateTo || '') ? rawDateTo : null;
+    const dateParts = [];
+    const dateParams = [];
+    if (dateFrom) { dateParts.push('o.updated_at >= ?'); dateParams.push(`${dateFrom}T00:00:00.000Z`); }
+    if (dateTo) { dateParts.push('o.updated_at <= ?'); dateParams.push(`${dateTo}T23:59:59.999Z`); }
+    const dateAnd = dateParts.length ? ` AND ${dateParts.join(' AND ')}` : '';
+
+    /**
      * Paginated, and not optionally: widening to every status put 60,948
      * imported orders behind the Zoho tab. The previous version had no LIMIT
      * because four statuses could only ever match a few hundred rows.
@@ -195,7 +229,7 @@ exports.getQueue = async (req, res, next) => {
      * latency was the bill.
      */
     const ordersQuery = db.prepare(`${QUEUE_ROW_SELECT}
-      WHERE 1 = 1${scopeAnd}${originAnd}${stageAnd}
+      WHERE 1 = 1${scopeAnd}${originAnd}${stageAnd}${dateAnd}
       -- Newest first. The old queue sorted oldest-first because it held only
       -- work waiting to be done and the oldest was the most overdue; this list
       -- is now mostly finished orders, where the useful end is the recent one.
@@ -206,7 +240,7 @@ exports.getQueue = async (req, res, next) => {
       -- as well, which is the point of the exercise.
       ORDER BY o.created_at DESC
       LIMIT ? OFFSET ?
-    `).all(...scopeParams, ...stageParams, limit, offset);
+    `).all(...scopeParams, ...stageParams, ...dateParams, limit, offset);
 
     /**
      * Tab sizes: scope-limited and stage-limited, but deliberately NOT
@@ -228,13 +262,13 @@ exports.getQueue = async (req, res, next) => {
         COUNT(*) FILTER (WHERE NOT (${importedSql('o')})) AS getmeds,
         COUNT(*)                                          AS total
       FROM orders o
-      WHERE 1 = 1${scopeAnd}${stageAnd}
+      WHERE 1 = 1${scopeAnd}${stageAnd}${dateAnd}
     `)
       // One array argument, not spread: db/pg.js's flatten() unwraps a lone
       // array into the parameter list, so a bare `.get(stageStatuses)` would
       // send the first status as $1. Bites only when scopeParams is empty,
       // which is every unscoped user.
-      .get([...scopeParams, ...stageParams]);
+      .get([...scopeParams, ...stageParams, ...dateParams]);
 
     /**
      * Per-stage counts for the cards and the filter chips.
@@ -254,8 +288,8 @@ exports.getQueue = async (req, res, next) => {
         ${stageCols},
         COUNT(*) AS total
       FROM orders o
-      WHERE 1 = 1${scopeAnd}${originAnd}
-    `).get(...STAGE_GROUPS.map((g) => g.statuses), ...scopeParams);
+      WHERE 1 = 1${scopeAnd}${originAnd}${dateAnd}
+    `).get(...STAGE_GROUPS.map((g) => g.statuses), ...scopeParams, ...dateParams);
 
     /**
      * The handful of orders actually waiting on Finance, newest first.
@@ -305,6 +339,8 @@ exports.getQueue = async (req, res, next) => {
         recent,
         origin,
         stage: stage || null,
+        date_from: dateFrom,
+        date_to: dateTo,
         counts: {
           getmeds: Number(counts?.getmeds || 0),
           zoho: Number(counts?.zoho || 0),
@@ -320,6 +356,60 @@ exports.getQueue = async (req, res, next) => {
           total: filtered,
           pages: Math.max(1, Math.ceil(filtered / limit)),
         },
+      },
+    });
+  } catch (err) { next(err); }
+};
+
+/**
+ * GET /api/finance/my-confirmations — "each finance can see their approved/
+ * verified SO, filter it one day (today) and can select dates."
+ *
+ * Sep 19, 2026. Deliberately personal and deliberately narrow: this answers
+ * "what did I confirm, and when" for the signed-in Finance user — not a
+ * roll-up across every Finance user (that's Zoho's own "Sales by
+ * Salesperson" report, a different tool for a different question — see
+ * getQueue's date_from/date_to above for the queue-side half of this fix).
+ *
+ * Reads the FINANCE_VERIFIED trail verifyAccount below already writes, by
+ * actor_id — no new tracking. A hold (FINANCE_REJECTED) never appears here;
+ * this is confirmations only, the same event getQueue's own
+ * finance_confirmed_at/finance_confirmed_by columns already read.
+ */
+exports.getMyConfirmations = async (req, res, next) => {
+  try {
+    const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    const today = manilaTodayDateString();
+    const rawFrom = req.query.date_from ? String(req.query.date_from).trim() : '';
+    const rawTo = req.query.date_to ? String(req.query.date_to).trim() : '';
+    const dateFrom = DATE_RE.test(rawFrom) ? rawFrom : today;
+    const dateTo = DATE_RE.test(rawTo) ? rawTo : today;
+
+    const rows = await db
+      .prepare(
+        `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount,
+                o.zoho_so_number, o.zoho_invoice_number,
+                c.name AS customer_name,
+                fe.created_at AS confirmed_at
+           FROM order_events fe
+           JOIN orders o ON o.id = fe.order_id
+           LEFT JOIN customers c ON c.id = o.customer_id
+          WHERE fe.event_type = 'FINANCE_VERIFIED'
+            AND fe.actor_id = ?
+            AND fe.created_at >= ? AND fe.created_at <= ?
+          ORDER BY fe.created_at DESC`
+      )
+      .all(req.user.id, `${dateFrom}T00:00:00.000Z`, `${dateTo}T23:59:59.999Z`);
+
+    const totalAmount = rows.reduce((sum, r) => sum + (Number(r.total_amount) || 0), 0);
+
+    res.json({
+      success: true,
+      data: {
+        orders: rows,
+        date_from: dateFrom,
+        date_to: dateTo,
+        summary: { count: rows.length, totalAmount },
       },
     });
   } catch (err) { next(err); }

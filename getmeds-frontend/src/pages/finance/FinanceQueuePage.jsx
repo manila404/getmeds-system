@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download } from 'lucide-react';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
+import MyConfirmationsPanel from '../../components/finance/MyConfirmationsPanel';
 import { useSearchParams } from 'react-router-dom';
 import { FINANCE_STAGES, financeStageLabel } from '../../constants/financeStages';
 import { formatPHT } from '../../utils/dateUtils';
@@ -47,6 +48,10 @@ const FinanceQueuePage = () => {
    */
   const [origin, setOrigin] = useState('getmeds');
 
+  // Sep 19, 2026: "each finance can see their approved/verified SO" — a
+  // personal, date-filterable view, separate from the shared queue.
+  const [showMine, setShowMine] = useState(false);
+
   /**
    * Sep 12, 2026: which order is open in the details panel.
    *
@@ -86,13 +91,24 @@ const FinanceQueuePage = () => {
   const stage = searchParams.get('stage') || null;
   const [page, setPage] = useState(1);
 
+  // Sep 19, 2026: "why does it only show 9 when [Zoho] shows a total of 20"
+  // — the two were never the same number (Zoho's own report is invoices
+  // raised org-wide TODAY; this queue's counts were an all-time total with
+  // no date filter at all). Optional, and empty by default — the queue
+  // still means "everything outstanding" unless a range is picked, same as
+  // ManagementDashboardPage.jsx's own date_from/date_to.
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const hasDateFilter = Boolean(dateFrom || dateTo);
+  const clearDateFilter = () => { setDateFrom(''); setDateTo(''); setPage(1); };
+
   // Paging is per-view, so a stage arriving from the URL must not land on
   // page 7 of the view that was open before it.
-  useEffect(() => { setPage(1); }, [stage]);
+  useEffect(() => { setPage(1); }, [stage, dateFrom, dateTo]);
 
   const { data, isLoading, refetch, isFetching } = useQuery({
     // Every input is part of the key, or a tab would serve another's rows.
-    queryKey: ['finance-queue', origin, stage, page],
+    queryKey: ['finance-queue', origin, stage, page, dateFrom, dateTo],
     queryFn: () =>
       client
         .get('/api/finance/queue', {
@@ -100,6 +116,8 @@ const FinanceQueuePage = () => {
             origin,
             stage: stage || undefined,
             page,
+            date_from: dateFrom || undefined,
+            date_to: dateTo || undefined,
             // The dashboard renders no list, so it asks for the smallest page
             // the endpoint allows rather than 20 rows nobody sees — this
             // refetches every 30s, and on the Zoho tab those rows are drawn
@@ -507,16 +525,36 @@ const FinanceQueuePage = () => {
             </>
           )}
         </div>
-        <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0">
-          <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Sep 19, 2026: "each finance can see their approved/verified SO" —
+              a personal report, separate from the shared queue above. Toggles
+              the whole page body rather than living inside it, the same way
+              picking a stage does. */}
+          <button
+            onClick={() => setShowMine((v) => !v)}
+            aria-pressed={showMine}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-semibold shrink-0 border ${
+              showMine
+                ? 'bg-getmeds-blue text-white border-getmeds-blue'
+                : 'border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4" /> My Confirmations
+          </button>
+          <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0">
+            <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
+          </button>
+        </div>
       </div>
 
+      {showMine && <MyConfirmationsPanel onClose={() => setShowMine(false)} />}
+
+      {!showMine && (<>
       {/* Sep 12, 2026: the split. Both tabs always show, both always carry
           their count — an empty GetMeds tab beside "Imported from Zoho (138)"
           says the queue is clear, where a single merged list of 143 said
           nothing at all. */}
-      <div className="flex flex-wrap gap-2" role="tablist">
+      <div className="flex flex-wrap items-center gap-2" role="tablist">
         {TABS.map(t => (
           <button
             key={t.key}
@@ -536,7 +574,49 @@ const FinanceQueuePage = () => {
             </span>
           </button>
         ))}
+
+        {/* Sep 19, 2026: optional — every count above is all-time unless this
+            is set, same as it always was. Filters on when an order last
+            changed (updated_at), so "Completed, today" means "reached
+            Completed today," not "raised today." */}
+        <span className="ml-auto flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+            From
+            <input
+              type="date"
+              value={dateFrom}
+              max={dateTo || undefined}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="px-2 py-1 border border-slate-200 rounded text-xs text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+            To
+            <input
+              type="date"
+              value={dateTo}
+              min={dateFrom || undefined}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="px-2 py-1 border border-slate-200 rounded text-xs text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+            />
+          </label>
+          {hasDateFilter && (
+            <button
+              type="button"
+              onClick={clearDateFilter}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-ink-secondary hover:text-ink-primary border border-slate-200 rounded hover:bg-surface"
+            >
+              <XCircle className="w-3 h-3" /> Clear dates
+            </button>
+          )}
+        </span>
       </div>
+      {hasDateFilter && (
+        <p className="text-[11px] text-ink-secondary -mt-3">
+          Counts below are narrowed to this range. This still won't match a Zoho report for the same days —
+          Zoho counts invoices org-wide; these counts are GetMeds orders only, by their own stage.
+        </p>
+      )}
 
       {/* Sep 12, 2026: the same dashboard shape the MedRep gets, counting the
           things Finance acts on. Each card OPENS that stage rather than
@@ -1131,6 +1211,7 @@ const FinanceQueuePage = () => {
           </div>
         </div>
       )}
+      </>)}
       </>)}
 
 
