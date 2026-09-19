@@ -880,6 +880,41 @@ async function reconcileOrderItemsPriceRemark(client) {
   console.log('  ✔ order_items.price_remark present');
 }
 
+/**
+ * Sep 19, 2026: MedRep-requested, Management-approved attachment deletion —
+ * see paymentProof.controller.js's requestDelete/decideDelete.
+ *
+ * `deletion_status` is the marker checked for the whole group: added first,
+ * inline with its CHECK, the same way reconcileOrderEventsActorRole adds
+ * actor_role. The rest are plain nullable columns with no default, added
+ * alongside it — existing rows simply have nothing recorded, same reasoning
+ * as reconcileWorkflowV2Columns.
+ */
+async function reconcileAttachmentDeletion(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'payment_proofs' AND column_name = 'deletion_status'`
+  );
+  if (rows.length) {
+    console.log('  ✔ payment_proofs deletion-request columns already present');
+    return;
+  }
+  console.log('  ↻ payment_proofs deletion-request columns are missing — adding');
+  await client.query(
+    `ALTER TABLE payment_proofs ADD COLUMN deletion_status TEXT NOT NULL DEFAULT 'none'
+       CHECK (deletion_status IN ('none','requested','approved','rejected'))`
+  );
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS zoho_pushed BOOLEAN NOT NULL DEFAULT false');
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS deletion_reason TEXT');
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS deletion_requested_by INTEGER REFERENCES users(id)');
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS deletion_requested_at TEXT');
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS deletion_decided_by INTEGER REFERENCES users(id)');
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS deletion_decided_at TEXT');
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS deletion_decision_note TEXT');
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS deleted_at TEXT');
+  console.log('  ✔ payment_proofs deletion-request columns added');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -922,6 +957,7 @@ async function main() {
     await reconcileProductTaxColumns(client);
     await reconcileOrderEventsActorRole(client);
     await reconcileOrderItemsPriceRemark(client);
+    await reconcileAttachmentDeletion(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

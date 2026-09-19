@@ -527,7 +527,28 @@ CREATE TABLE IF NOT EXISTS payment_proofs (
   verified_by INTEGER REFERENCES users(id),
   verified_at TEXT,
   rejection_reason TEXT,
-  created_at TEXT DEFAULT iso_now()
+  created_at TEXT DEFAULT iso_now(),
+  -- Sep 19, 2026: whether THIS file actually reached the Zoho Sales Order's
+  -- own "Attach File(s)" section (addSalesOrderAttachment is best-effort and
+  -- can fail silently at upload time — see paymentProof.controller.js's
+  -- attach). Read by the deletion flow below: this app has no delete-type
+  -- Zoho write, so a deletion request on a file already pushed there is
+  -- flagged for a human to also remove it in Zoho, rather than guessed at.
+  zoho_pushed BOOLEAN NOT NULL DEFAULT false,
+  -- Sep 19, 2026: a MedRep asks to delete an attachment (wrong file, wrong
+  -- order, duplicate), with a note saying why; Management approves or
+  -- declines before anything is actually removed. 'approved' sets deleted_at
+  -- and best-effort frees the storage object — the row itself stays (a
+  -- soft delete), so who asked, why, who decided and when all remain on the
+  -- record the same way a rejected proof's reason does.
+  deletion_status TEXT NOT NULL DEFAULT 'none' CHECK(deletion_status IN ('none','requested','approved','rejected')),
+  deletion_reason TEXT,
+  deletion_requested_by INTEGER REFERENCES users(id),
+  deletion_requested_at TEXT,
+  deletion_decided_by INTEGER REFERENCES users(id),
+  deletion_decided_at TEXT,
+  deletion_decision_note TEXT,
+  deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS order_events (

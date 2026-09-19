@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
-  Receipt, Upload, FileText, ShieldCheck, XCircle, Clock, AlertCircle, RefreshCw, Camera, Paperclip, Download,
+  Receipt, Upload, FileText, ShieldCheck, XCircle, Clock, AlertCircle, RefreshCw, Camera, Paperclip, Download, Trash2,
 } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
@@ -100,16 +100,111 @@ const prettySize = (bytes) => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 
+/**
+ * Sep 19, 2026: "medrep will add note why they want to delete an attachment
+ * and management should check the reason and approve it" — an attachment was
+ * permanent once uploaded until now. This never deletes anything itself; it
+ * only asks. decideDelete (Management/admin only) is the one write that can
+ * actually remove it.
+ */
+const DELETE_STATUS = {
+  requested: {
+    label: 'Deletion requested — awaiting Management',
+    icon: Trash2,
+    className: 'bg-state-warning-light text-amber-950 border-state-warning',
+  },
+  rejected: {
+    label: 'Deletion request declined',
+    icon: XCircle,
+    className: 'bg-slate-100 text-ink-secondary border-slate-300',
+  },
+};
+
 /** One attachment row — a proof of payment (with its review status) or an
  * 'other' file (informational, no status to show). */
-const AttachmentCard = ({ attachment, orderGetmedsId, onRefetch, isFetching }) => {
+const AttachmentCard = ({
+  attachment, orderGetmedsId, onRefetch, isFetching,
+  canRequestDelete, canDecideDelete, onRequestDelete, onDecideDelete, deleteBusy,
+}) => {
   const isProof = attachment.file_type === 'payment_proof';
   const isImage = attachment.content_type?.startsWith('image/');
   const stage = isProof ? PROOF_STATUS[attachment.status] : null;
   const StageIcon = stage?.icon;
 
+  const [requestingDelete, setRequestingDelete] = useState(false);
+  const [deleteReason, setDeleteReason] = useState('');
+  const [decliningDelete, setDecliningDelete] = useState(false);
+  const [declineNote, setDeclineNote] = useState('');
+
+  const deletionStage = DELETE_STATUS[attachment.deletion_status];
+  const DeletionIcon = deletionStage?.icon;
+
   return (
     <div className="rounded-lg border border-slate-200 overflow-hidden bg-surface">
+      {deletionStage && (
+        <div className={`flex items-start gap-2 px-3 py-2 text-xs border-b ${deletionStage.className}`}>
+          <DeletionIcon className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold">{deletionStage.label}</p>
+            <p className="opacity-90 mt-0.5">
+              {attachment.deletion_status === 'requested' ? 'Reason: ' : 'Asked because: '}
+              {attachment.deletion_reason}
+            </p>
+            {attachment.deletion_status === 'rejected' && attachment.deletion_decision_note && (
+              <p className="opacity-90 mt-0.5">Management said: {attachment.deletion_decision_note}</p>
+            )}
+            {attachment.deletion_status === 'requested' && canDecideDelete && !decliningDelete && (
+              <div className="flex gap-2 mt-1.5">
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => onDecideDelete(attachment.id, true, null)}
+                  className="px-2.5 py-1 rounded bg-state-error text-white text-[11px] font-semibold hover:opacity-90 disabled:opacity-50"
+                >
+                  Approve — delete it
+                </button>
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => setDecliningDelete(true)}
+                  className="px-2.5 py-1 rounded border border-slate-300 bg-white text-[11px] font-semibold text-ink-secondary hover:bg-surface disabled:opacity-50"
+                >
+                  Decline
+                </button>
+              </div>
+            )}
+            {attachment.deletion_status === 'requested' && canDecideDelete && decliningDelete && (
+              <div className="mt-1.5 space-y-1.5">
+                <textarea
+                  autoFocus
+                  rows={2}
+                  value={declineNote}
+                  onChange={(e) => setDeclineNote(e.target.value)}
+                  placeholder="Why keep it? (optional, the requester sees this)"
+                  className="w-full text-xs rounded border border-slate-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={deleteBusy}
+                    onClick={() => { onDecideDelete(attachment.id, false, declineNote.trim() || null); setDecliningDelete(false); setDeclineNote(''); }}
+                    className="px-2.5 py-1 rounded bg-getmeds-blue text-white text-[11px] font-semibold hover:opacity-90 disabled:opacity-50"
+                  >
+                    Confirm decline
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setDecliningDelete(false); setDeclineNote(''); }}
+                    className="px-2.5 py-1 rounded border border-slate-300 bg-white text-[11px] text-ink-secondary hover:bg-surface"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {isProof ? (
         <div className={`flex items-start gap-2 px-3 py-2 text-xs border-b ${stage.className}`}>
           <StageIcon className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -201,6 +296,55 @@ const AttachmentCard = ({ attachment, orderGetmedsId, onRefetch, isFetching }) =
           </a>
         </div>
       )}
+
+      {/* "add delete feature on attachments, medrep will add note why they
+          want to delete" — hidden once a request is already pending
+          (the banner above covers that) or already declined without a
+          fresh reason to give. */}
+      {canRequestDelete && attachment.deletion_status !== 'requested' && !requestingDelete && (
+        <div className="px-3 py-2 border-t border-slate-200">
+          <button
+            type="button"
+            onClick={() => setRequestingDelete(true)}
+            className="flex items-center gap-1.5 text-xs text-state-error hover:underline"
+          >
+            <Trash2 className="w-3.5 h-3.5" /> Request deletion
+          </button>
+        </div>
+      )}
+      {requestingDelete && (
+        <div className="px-3 py-2 border-t border-slate-200 bg-state-error-light/40 space-y-1.5">
+          <label className="block text-xs font-semibold text-red-900">Why should this be deleted?</label>
+          <textarea
+            autoFocus
+            rows={2}
+            value={deleteReason}
+            onChange={(e) => setDeleteReason(e.target.value)}
+            placeholder="e.g. wrong file, attached to the wrong order"
+            className="w-full text-sm rounded border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400"
+          />
+          <p className="text-[11px] text-ink-secondary">
+            Management sees this and decides — the file stays until they approve it.
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={!deleteReason.trim() || deleteBusy}
+              onClick={() => { onRequestDelete(attachment.id, deleteReason.trim()); setRequestingDelete(false); setDeleteReason(''); }}
+              className="px-3 py-1.5 rounded-md bg-state-error text-white text-xs font-semibold disabled:opacity-50"
+            >
+              Send request
+            </button>
+            <button
+              type="button"
+              onClick={() => { setRequestingDelete(false); setDeleteReason(''); }}
+              className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs text-ink-secondary"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -240,6 +384,41 @@ const PaymentProofPanel = ({ orderId, order }) => {
   // always has — it is the evidence Finance already cleared the order on.
   // 'other' files never lock; they can be added any time.
   const proofLocked = latestProof?.status === 'verified';
+
+  // Sep 19, 2026: who can request an attachment's deletion (same population
+  // as canUpload — the file is theirs to ask about either way) and who can
+  // decide one (Management/admin only — the server's requireRole is the real
+  // gate, this only controls whether the buttons show).
+  const canRequestDelete = canUpload;
+  const canDecideDelete = role === 'admin' || role === 'management';
+
+  const requestDeleteMutation = useMutation({
+    mutationFn: ({ attachmentId, reason }) =>
+      client.post(`/api/orders/${orderId}/attachments/${attachmentId}/request-delete`, { reason }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Deletion requested — Management will review it.');
+      qc.invalidateQueries({ queryKey: ['order-attachments', orderId] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not send that request'),
+  });
+
+  const decideDeleteMutation = useMutation({
+    mutationFn: ({ attachmentId, approved, note }) =>
+      client.post(`/api/orders/${orderId}/attachments/${attachmentId}/decide-delete`, { approved, note }).then(r => r.data),
+    onSuccess: (res) => {
+      if (res.data?.deleted) {
+        toast.success(
+          res.data?.stillOnZoho
+            ? `Deleted. It was already on Zoho Sales Order ${res.data.zohoSoNumber || ''} — remove it there too.`
+            : 'Deleted.'
+        );
+      } else {
+        toast.success('Declined — the attachment was kept.');
+      }
+      qc.invalidateQueries({ queryKey: ['order-attachments', orderId] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that decision'),
+  });
 
   // Sep 18, 2026: a file no longer uploads the instant it's picked — this
   // holds it until confirmed. A proof-of-payment upload reopens a Finance
@@ -418,6 +597,11 @@ const PaymentProofPanel = ({ orderId, order }) => {
           orderGetmedsId={order?.getmeds_order_id}
           onRefetch={refetch}
           isFetching={isFetching}
+          canRequestDelete={canRequestDelete}
+          canDecideDelete={canDecideDelete}
+          onRequestDelete={(attachmentId, reason) => requestDeleteMutation.mutate({ attachmentId, reason })}
+          onDecideDelete={(attachmentId, approved, note) => decideDeleteMutation.mutate({ attachmentId, approved, note })}
+          deleteBusy={requestDeleteMutation.isPending || decideDeleteMutation.isPending}
         />
       ))}
 
@@ -429,6 +613,11 @@ const PaymentProofPanel = ({ orderId, order }) => {
           orderGetmedsId={order?.getmeds_order_id}
           onRefetch={refetch}
           isFetching={isFetching}
+          canRequestDelete={canRequestDelete}
+          canDecideDelete={canDecideDelete}
+          onRequestDelete={(attachmentId, reason) => requestDeleteMutation.mutate({ attachmentId, reason })}
+          onDecideDelete={(attachmentId, approved, note) => decideDeleteMutation.mutate({ attachmentId, approved, note })}
+          deleteBusy={requestDeleteMutation.isPending || decideDeleteMutation.isPending}
         />
       ))}
 

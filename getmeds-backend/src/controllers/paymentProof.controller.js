@@ -6,7 +6,7 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const zoho = require('../integrations/zoho');
-const { constraintAllows } = require('../services/schemaColumns');
+const { constraintAllows, hasColumn } = require('../services/schemaColumns');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -378,6 +378,15 @@ exports.attach = async (req, res, next) => {
       }
     }
 
+    // Sep 19, 2026: persisted (rather than only returned in the response
+    // below) so a later deletion request can tell whether this specific file
+    // is also sitting on the real Zoho Sales Order — see requestDelete/
+    // decideDelete. Best-effort like everything else here: a schema not yet
+    // migrated just means that flag stays unavailable, never fails the upload.
+    if (await hasColumn('payment_proofs', 'zoho_pushed')) {
+      await db.prepare('UPDATE payment_proofs SET zoho_pushed = ? WHERE id = ?').run(zohoPushed, inserted.lastInsertRowid);
+    }
+
     // Sep 15, 2026: the MedRep who created the order (and whoever raised it)
     // is told when Dispatch attaches a proof — after the Zoho push, so the
     // message can say whether it reached the Sales Order. Best-effort: the
@@ -422,6 +431,12 @@ exports.list = async (req, res, next) => {
     const order = await loadOrder(req.params.id);
     if (!order) return notFound(res, 'Order not found');
 
+    // Sep 19, 2026: a deleted attachment (see decideDelete) is a soft
+    // delete — the row stays for the trail, but disappears from every list
+    // that shows what's actually on the order. Conditional on the column
+    // existing yet: pre-migration, nothing can be deleted, so there is
+    // nothing to filter.
+    const excludeDeleted = await hasColumn('payment_proofs', 'deleted_at');
     const rows = await db
       .prepare(
         `SELECT p.*,
@@ -430,7 +445,7 @@ exports.list = async (req, res, next) => {
            FROM payment_proofs p
            LEFT JOIN users up ON p.uploaded_by = up.id
            LEFT JOIN users vp ON p.verified_by = vp.id
-          WHERE p.order_id = ?
+          WHERE p.order_id = ?${excludeDeleted ? ' AND p.deleted_at IS NULL' : ''}
           ORDER BY p.uploaded_at DESC`
       )
       .all(order.id);
@@ -470,6 +485,7 @@ exports.list = async (req, res, next) => {
 
 exports.get = async (req, res, next) => {
   try {
+    const excludeDeleted = await hasColumn('payment_proofs', 'deleted_at');
     const proof = await db
       .prepare(
         `SELECT p.*,
@@ -478,7 +494,7 @@ exports.get = async (req, res, next) => {
            FROM payment_proofs p
            LEFT JOIN users up ON p.uploaded_by = up.id
            LEFT JOIN users vp ON p.verified_by = vp.id
-          WHERE p.order_id = ? AND p.file_type = 'payment_proof'
+          WHERE p.order_id = ? AND p.file_type = 'payment_proof'${excludeDeleted ? ' AND p.deleted_at IS NULL' : ''}
           ORDER BY p.uploaded_at DESC
           LIMIT 1`
       )
@@ -578,6 +594,225 @@ exports.reject = async (req, res, next) => {
       return res.status(409).json({
         success: false,
         error: { code: err.code || 'CONFLICT', message: err.message },
+      });
+    }
+    next(err);
+  }
+};
+
+// ─── 5. Request deletion of an attachment (Sep 19, 2026) ────────────────────
+//
+// "the only resubmits from medreps are only message" led to this the same
+// way it led to resubmit's own widening — a MedRep who uploaded the wrong
+// file, or the wrong order's file, had no way to get rid of it: attachments
+// were permanent once created (no DELETE, no soft-delete column, anywhere in
+// this file — confirmed before writing this).
+//
+// This does not delete anything. It only marks the attachment as awaiting a
+// decision, the same way a Finance hold is a request rather than an
+// action — decideDelete below is the one write that can actually remove it,
+// and only Management/admin can call that (requireRole, orders.routes.js).
+// Same ownership rule as attaching in the first place (canAttach): the
+// MedRep who owns or raised the order, or management/admin.
+exports.requestDelete = async (req, res, next) => {
+  try {
+    if (!(await hasColumn('payment_proofs', 'deletion_status'))) {
+      return res.status(503).json({
+        success: false,
+        error: {
+          code: 'MIGRATION_PENDING',
+          message: 'Requesting a deletion needs a database update first. Ask IT to run: node src/db/migrate.pg.js'
+        }
+      });
+    }
+
+    const cleanReason = String(req.body?.reason || '').trim();
+    if (!cleanReason) return badRequest(res, 'Say why this should be deleted.');
+    if (cleanReason.length > 500) {
+      return badRequest(res, 'The reason is too long (500 characters at most).');
+    }
+
+    const order = await loadOrder(req.params.id);
+    if (!order) return notFound(res, 'Order not found');
+
+    const attachment = await db
+      .prepare('SELECT * FROM payment_proofs WHERE id = ? AND order_id = ?')
+      .get(req.params.attachmentId, order.id);
+    if (!attachment) return notFound(res, 'Attachment not found on this order.');
+    if (!canAttach(req.user, order, attachment.file_type)) return forbidden(res, req.user, attachment.file_type);
+
+    if (attachment.deleted_at) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'ALREADY_DELETED', message: 'This attachment was already deleted.' }
+      });
+    }
+    if (attachment.deletion_status === 'requested') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'ALREADY_REQUESTED', message: 'A deletion request for this attachment is already awaiting Management.' }
+      });
+    }
+
+    const actor = await resolveActor(req.user, (req.user.role || '').toLowerCase());
+    const now = new Date().toISOString();
+
+    await db.transaction(async () => {
+      await db
+        .prepare(
+          `UPDATE payment_proofs
+              SET deletion_status = 'requested', deletion_reason = ?, deletion_requested_by = ?, deletion_requested_at = ?,
+                  deletion_decided_by = NULL, deletion_decided_at = NULL, deletion_decision_note = NULL
+            WHERE id = ?`
+        )
+        .run(cleanReason, actor.id, now, attachment.id);
+
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ATTACHMENT_DELETE_REQUESTED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Requested deletion of "${attachment.file_name || 'a file'}": ${cleanReason}`,
+        metadata: { attachmentId: attachment.id, fileName: attachment.file_name, reason: cleanReason }
+      });
+
+      await notify({
+        orderId: order.id,
+        recipientIds: await getUserIdsByRole('management'),
+        message: `Order ${order.getmeds_order_id}: ${actor.name} wants to delete "${attachment.file_name || 'a file'}" — ${cleanReason}`,
+        eventType: 'ATTACHMENT_DELETE_REQUESTED',
+        orderData: order
+      });
+    })();
+
+    res.json({ success: true, data: { id: attachment.id, deletion_status: 'requested' } });
+  } catch (err) { next(err); }
+};
+
+// ─── 6. Management decides a pending deletion request (Sep 19, 2026) ────────
+//
+// approved -> the attachment is actually removed: the row is soft-deleted
+// (deleted_at set, so it drops out of list/get above but the request/
+// decision stay on it for the trail) and its storage object is best-effort
+// freed. rejected -> nothing is removed; the row goes back to normal, with
+// the decision note recorded for the MedRep to read.
+//
+// Deliberately LOCAL-ONLY. This app has no delete-type Zoho write at
+// all (ZohoAdapter.js: "no delete, no void" — addSalesOrderAttachment can
+// only ADD one) and building the first one blind, bundled into this, is
+// exactly the kind of thing that goes wrong quietly. If the file was
+// already pushed to the real Zoho Sales Order (zoho_pushed, set at upload
+// time), the response and the trail both say so, so a human removes it
+// there on purpose instead of this app guessing at an untested API.
+exports.decideDelete = async (req, res, next) => {
+  try {
+    if (!(await hasColumn('payment_proofs', 'deletion_status'))) {
+      return res.status(503).json({
+        success: false,
+        error: {
+          code: 'MIGRATION_PENDING',
+          message: 'Deciding a deletion request needs a database update first. Ask IT to run: node src/db/migrate.pg.js'
+        }
+      });
+    }
+
+    const { approved } = req.body || {};
+    if (typeof approved !== 'boolean') return badRequest(res, 'approved (true or false) is required.');
+    const cleanNote = String(req.body?.note || '').trim() || null;
+
+    const order = await loadOrder(req.params.id);
+    if (!order) return notFound(res, 'Order not found');
+
+    const attachment = await db
+      .prepare('SELECT * FROM payment_proofs WHERE id = ? AND order_id = ?')
+      .get(req.params.attachmentId, order.id);
+    if (!attachment) return notFound(res, 'Attachment not found on this order.');
+
+    if (attachment.deletion_status !== 'requested') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_AWAITING_DECISION', message: 'No deletion request is awaiting a decision on this attachment.' }
+      });
+    }
+
+    const actor = await resolveActor(req.user, 'management');
+    const now = new Date().toISOString();
+    // Set only on approval, and only here — deleted_at is what list/get
+    // actually filter on, deletion_status is the human-readable record beside it.
+    const stillOnZoho = approved && Boolean(attachment.zoho_pushed) && Boolean(order.zoho_so_id);
+
+    await db.transaction(async () => {
+      // Guarded on deletion_status = 'requested' so two Management users
+      // deciding at once produce one write, not two conflicting ones.
+      const upd = await db
+        .prepare(
+          `UPDATE payment_proofs
+              SET deletion_status = ?, deletion_decided_by = ?, deletion_decided_at = ?, deletion_decision_note = ?,
+                  deleted_at = ?
+            WHERE id = ? AND deletion_status = 'requested'`
+        )
+        .run(approved ? 'approved' : 'rejected', actor.id, now, cleanNote, approved ? now : null, attachment.id);
+
+      if (!upd.changes) {
+        const conflict = new Error('This deletion request was already decided by someone else.');
+        conflict.statusCode = 409;
+        conflict.code = 'ALREADY_DECIDED';
+        throw conflict;
+      }
+
+      await logEvent({
+        orderId: order.id,
+        eventType: approved ? 'ATTACHMENT_DELETED' : 'ATTACHMENT_DELETE_REJECTED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: approved
+          ? `Deleted "${attachment.file_name || 'a file'}" — requested: ${attachment.deletion_reason}` +
+            `${cleanNote ? ` · ${cleanNote}` : ''}` +
+            `${stillOnZoho ? ` — still on Zoho Sales Order ${order.zoho_so_number || order.zoho_so_id}; not removed there automatically.` : ''}`
+          : `Declined to delete "${attachment.file_name || 'a file'}"${cleanNote ? `: ${cleanNote}` : ''}`,
+        metadata: {
+          attachmentId: attachment.id,
+          fileName: attachment.file_name,
+          requestReason: attachment.deletion_reason,
+          decisionNote: cleanNote,
+          stillOnZoho
+        }
+      });
+
+      if (approved) {
+        await proofStorage.removeQuietly(attachment.storage_path);
+      }
+
+      await notify({
+        orderId: order.id,
+        recipientIds: [attachment.deletion_requested_by].filter(Boolean),
+        message: approved
+          ? `Order ${order.getmeds_order_id}: "${attachment.file_name || 'your file'}" was deleted as requested.`
+          : `Order ${order.getmeds_order_id}: your request to delete "${attachment.file_name || 'a file'}" was declined${cleanNote ? `: ${cleanNote}` : ''}.`,
+        eventType: approved ? 'ATTACHMENT_DELETED' : 'ATTACHMENT_DELETE_REJECTED',
+        orderData: order
+      });
+    })();
+
+    res.json({
+      success: true,
+      data: {
+        id: attachment.id,
+        deletion_status: approved ? 'approved' : 'rejected',
+        deleted: approved,
+        stillOnZoho,
+        zohoSoNumber: order.zoho_so_number || null
+      }
+    });
+  } catch (err) {
+    if (err && err.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        error: { code: err.code || 'CONFLICT', message: err.message }
       });
     }
     next(err);

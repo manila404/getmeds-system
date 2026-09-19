@@ -138,6 +138,15 @@ router.post('/:id/attachments/upload-url', blockMedrepWritesOnImported, proof.ge
 router.post('/:id/attachments', blockMedrepWritesOnImported, proof.attach);
 router.get('/:id/attachments', proof.list);
 
+// Sep 19, 2026: an attachment is permanent once uploaded (no delete, no
+// soft-delete, anywhere before this) — a MedRep can now ASK for one to be
+// removed, with a note saying why. request-delete follows the same
+// ownership rule as attaching (no requireRole — canAttach checks it inside
+// the controller); decide-delete is the one write that can actually remove
+// it, and is Management/admin only, same as resume/setException below.
+router.post('/:id/attachments/:attachmentId/request-delete', blockMedrepWritesOnImported, proof.requestDelete);
+router.post('/:id/attachments/:attachmentId/decide-delete', requireRole('management', 'admin'), proof.decideDelete);
+
 // Legacy aliases — do not remove without checking FinanceQueuePage.jsx and
 // finance.routes.js's reject route, both of which still call these paths.
 router.post('/:id/payment-proof/upload-url', blockMedrepWritesOnImported, proof.getUploadUrl);
