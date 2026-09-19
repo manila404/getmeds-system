@@ -36,6 +36,7 @@ jest.mock('../src/services/paymentProofStorage', () => {
       path: storagePath,
     })),
     createViewUrl: jest.fn(async (p) => `https://storage.test/view/${p}`),
+    createDownloadUrl: jest.fn(async (p) => `https://storage.test/view/${p}&download`),
     downloadFile: jest.fn(async () => Buffer.from('x')),
     removeQuietly: jest.fn(async () => true),
   };

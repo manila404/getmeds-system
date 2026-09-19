@@ -38,6 +38,7 @@ jest.mock('../src/services/paymentProofStorage', () => {
       path: storagePath,
     })),
     createViewUrl: jest.fn(async (storagePath) => `https://storage.test/object/sign/pod/${storagePath}?token=fake`),
+    createDownloadUrl: jest.fn(async (storagePath) => `https://storage.test/object/sign/pod/${storagePath}?token=fake&download`),
     removeQuietly: jest.fn(async () => true),
   };
 });

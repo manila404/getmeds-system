@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
-  Receipt, Upload, FileText, ShieldCheck, XCircle, Clock, AlertCircle, RefreshCw, Camera, Paperclip,
+  Receipt, Upload, FileText, ShieldCheck, XCircle, Clock, AlertCircle, RefreshCw, Camera, Paperclip, Download,
 } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
@@ -157,12 +157,28 @@ const AttachmentCard = ({ attachment, orderGetmedsId, onRefetch, isFetching }) =
           a new one. */}
       <div className="px-3 py-2 border-t border-slate-200 flex items-center justify-between gap-2">
         <span className="text-xs font-semibold text-ink-primary">Attached document</span>
-        <button
-          onClick={onRefetch}
-          className="flex items-center gap-1.5 text-xs text-ink-secondary hover:text-ink-primary"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? 'animate-spin' : ''}`} /> Refresh link
-        </button>
+        <div className="flex items-center gap-3">
+          {/* Sep 19, 2026: "add download feature for all users to download
+              attachments" — the same signed URL as the view above, minted
+              with Content-Disposition: attachment so this saves the file
+              instead of opening it. No role check beyond canUpload's own
+              ownership rule above this component — anyone who can see a
+              file here can save it. */}
+          {attachment.downloadUrl && (
+            <a
+              href={attachment.downloadUrl}
+              className="flex items-center gap-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+            >
+              <Download className="w-3.5 h-3.5" /> Download
+            </a>
+          )}
+          <button
+            onClick={onRefetch}
+            className="flex items-center gap-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? 'animate-spin' : ''}`} /> Refresh link
+          </button>
+        </div>
       </div>
       {isImage ? (
         <a href={attachment.viewUrl} target="_blank" rel="noopener noreferrer" className="block bg-white">

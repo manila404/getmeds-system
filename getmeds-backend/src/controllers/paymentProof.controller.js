@@ -438,8 +438,19 @@ exports.list = async (req, res, next) => {
     // Minted per request, short-lived, never stored — same as the old single
     // `get`. A view URL per row is one Supabase call each; fine at the scale
     // an order's attachment list actually reaches (a handful of files).
+    //
+    // Sep 19, 2026: downloadUrl alongside it — "add download feature for all
+    // users to download attachments". Same object, same short-lived signed
+    // URL mechanism, just minted with Content-Disposition: attachment so a
+    // click saves the file instead of opening it. No role check beyond the
+    // one already on this route (order ownership, via loadOrder above) —
+    // whoever could already view a file can now also save it.
     const attachments = await Promise.all(
-      rows.map(async (row) => ({ ...row, viewUrl: await proofStorage.createViewUrl(row.storage_path) }))
+      rows.map(async (row) => ({
+        ...row,
+        viewUrl: await proofStorage.createViewUrl(row.storage_path),
+        downloadUrl: await proofStorage.createDownloadUrl(row.storage_path, row.file_name)
+      }))
     );
 
     res.json({ success: true, data: { attachments } });
@@ -476,8 +487,9 @@ exports.get = async (req, res, next) => {
     if (!proof) return notFound(res, 'No proof of payment attached to this order.');
 
     const viewUrl = await proofStorage.createViewUrl(proof.storage_path);
+    const downloadUrl = await proofStorage.createDownloadUrl(proof.storage_path, proof.file_name);
 
-    res.json({ success: true, data: { proof: { ...proof, viewUrl } } });
+    res.json({ success: true, data: { proof: { ...proof, viewUrl, downloadUrl } } });
   } catch (err) {
     next(err);
   }

@@ -53,6 +53,22 @@ const QUEUE_ROW_SELECT = `
   SELECT o.*, c.name as customer_name, c.contact_number,
          u.name as medrep_name, u.email as medrep_email,
          p.status as payment_status, p.payment_reference, p.amount as payment_amount,
+         -- Sep 19, 2026: "add dates when it was confirmed and sync to Zoho" —
+         -- neither date lives on orders itself, only in the audit trail, so
+         -- both are pulled from order_events the same way dispatch.controller.js
+         -- already does for its own "finance confirmed" column.
+         --
+         -- fc.finance_confirmed_at: the FINANCE_VERIFIED event Finance's own
+         -- Confirm button logs (finance.controller.js's verifyOrder below) —
+         -- null until this order actually has been confirmed.
+         --
+         -- zs.zoho_synced_at: the STATUS_CHANGE hop to 'so_created', logged in
+         -- the same transaction as the Sales Order create call (orders.
+         -- controller.js's submit()) whether or not that call succeeded — so
+         -- it only means "synced" when read alongside o.zoho_so_id, which is
+         -- null unless the create actually went through.
+         fc.finance_confirmed_at, fc.finance_confirmed_by,
+         zs.zoho_synced_at,
          -- Sep 4, 2026: the proof of payment rides along, so a row at
          -- ready_for_finance_verified can show it beside the Verify button
          -- without a second request per row. NULL simply means none was
@@ -92,6 +108,18 @@ const QUEUE_ROW_SELECT = `
     WHERE proofs.file_type = 'payment_proof'
     GROUP BY proofs.order_id
   ) pp ON pp.order_id = o.id
+  LEFT JOIN LATERAL (
+    SELECT fe.created_at AS finance_confirmed_at, fe.actor_name AS finance_confirmed_by
+      FROM order_events fe
+     WHERE fe.order_id = o.id AND fe.event_type = 'FINANCE_VERIFIED'
+     ORDER BY fe.id DESC LIMIT 1
+  ) fc ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT se.created_at AS zoho_synced_at
+      FROM order_events se
+     WHERE se.order_id = o.id AND se.event_type = 'STATUS_CHANGE' AND se.new_status = 'so_created'
+     ORDER BY se.id DESC LIMIT 1
+  ) zs ON TRUE
 `;
 
 exports.getQueue = async (req, res, next) => {

@@ -1,6 +1,6 @@
 import React from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Paperclip } from 'lucide-react';
+import { Paperclip, Download } from 'lucide-react';
 import Modal from '../ui/Modal';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
@@ -122,17 +122,24 @@ const OrderOverviewModal = ({ order, items = [], onClose }) => {
           <div className="bg-surface rounded-xl p-3 border border-slate-200 text-xs text-ink-primary space-y-1.5">
             {files.isLoading && <span className="text-ink-secondary">Loading…</span>}
             {attachments.map((a) => (
-              <a
-                key={a.id}
-                href={a.viewUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 hover:text-getmeds-blue"
-              >
-                <Paperclip size={11} className="text-ink-secondary shrink-0" />
-                <span className="truncate">{a.file_name}</span>
-                <span className="text-ink-secondary shrink-0">({attachmentLabel(a.file_type)})</span>
-              </a>
+              <div key={a.id} className="flex items-center gap-1.5">
+                <a
+                  href={a.viewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 min-w-0 hover:text-getmeds-blue"
+                >
+                  <Paperclip size={11} className="text-ink-secondary shrink-0" />
+                  <span className="truncate">{a.file_name}</span>
+                  <span className="text-ink-secondary shrink-0">({attachmentLabel(a.file_type)})</span>
+                </a>
+                {/* Sep 19, 2026: download for all users, alongside view. */}
+                {a.downloadUrl && (
+                  <a href={a.downloadUrl} title={`Download ${a.file_name || 'file'}`} className="shrink-0 text-ink-secondary hover:text-getmeds-blue">
+                    <Download size={11} />
+                  </a>
+                )}
+              </div>
             ))}
             {!files.isLoading && !hasProof && (
               <span className="flex items-center gap-1.5">

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck } from 'lucide-react';
+import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, Download } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import { attachmentLabel, HOSPITAL_REQUIRED_TYPES } from '../../constants/attachmentTypes';
@@ -282,13 +282,28 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
                   {attachments.map((a) => {
                     const isImage = String(a.content_type || '').startsWith('image/');
                     return (
-                      <a
+                      <div
                         key={a.id}
-                        href={a.viewUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block bg-white border border-slate-200 rounded-lg overflow-hidden hover:border-getmeds-blue transition-colors"
+                        className="relative block bg-white border border-slate-200 rounded-lg overflow-hidden hover:border-getmeds-blue transition-colors"
                       >
+                        {/* Sep 19, 2026: "add download feature for all users
+                            to download attachments" — same signed object,
+                            minted with Content-Disposition: attachment so
+                            this saves the file instead of opening the view
+                            tab the rest of the card still opens. A sibling of
+                            the view link below, not nested inside it — an
+                            <a> inside an <a> is invalid HTML and browsers
+                            handle it inconsistently. */}
+                        {a.downloadUrl && (
+                          <a
+                            href={a.downloadUrl}
+                            title={`Download ${a.file_name || 'file'}`}
+                            className="absolute top-1.5 right-1.5 z-10 p-1.5 rounded-md bg-white/90 border border-slate-200 text-ink-secondary hover:text-getmeds-blue hover:border-getmeds-blue shadow-sm"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </a>
+                        )}
+                        <a href={a.viewUrl} target="_blank" rel="noopener noreferrer" className="block">
                         {/* Images preview inline; a PDF or scanned document
                             gets an honest placeholder rather than a broken
                             <img> that reads as a failed upload. */}
@@ -304,6 +319,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
                             <FileText className="w-8 h-8 text-ink-secondary" />
                           </div>
                         )}
+                        </a>
                         <div className="px-2.5 py-2">
                           <p className="text-[11px] font-bold uppercase tracking-wide text-getmeds-blue-dark">
                             {attachmentLabel(a.file_type)}
@@ -336,7 +352,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
                             </p>
                           )}
                         </div>
-                      </a>
+                      </div>
                     );
                   })}
                 </div>

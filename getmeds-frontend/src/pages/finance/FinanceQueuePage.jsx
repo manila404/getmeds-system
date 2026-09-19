@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft } from 'lucide-react';
+import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download } from 'lucide-react';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import { useSearchParams } from 'react-router-dom';
 import { FINANCE_STAGES, financeStageLabel } from '../../constants/financeStages';
+import { formatPHT } from '../../utils/dateUtils';
 
 // Almost read-only. Every stage below EXCEPT the first is reported by Zoho:
 //   1. MedRep submits an order here -> it syncs to Zoho as a Sales Order.
@@ -307,6 +308,24 @@ const FinanceQueuePage = () => {
     if (!order.submitted_at) return '—';
     const h = (Date.now() - new Date(order.submitted_at).getTime()) / 3600000;
     return h < 1 ? `${Math.round(h * 60)}m` : `${h.toFixed(1)}h`;
+  };
+
+  // Sep 19, 2026: "add dates when it was confirmed and sync to Zoho" — both
+  // come from finance.controller.js's QUEUE_ROW_SELECT, sourced from the
+  // audit trail (order_events) rather than a column on the order itself.
+  // zoho_synced_at is only meaningful alongside zoho_so_id — the event that
+  // produces it is logged whether or not the Zoho create call actually
+  // succeeded, so an order with no zoho_so_id never shows a synced date even
+  // if the row is present.
+  const financeDates = (order) => {
+    const rows = [];
+    if (order.zoho_so_id && order.zoho_synced_at) {
+      rows.push(`Synced to Zoho ${formatPHT(order.zoho_synced_at, 'short-datetime')}`);
+    }
+    if (order.finance_confirmed_at) {
+      rows.push(`Confirmed ${formatPHT(order.finance_confirmed_at, 'short-datetime')}${order.finance_confirmed_by ? ` by ${order.finance_confirmed_by}` : ''}`);
+    }
+    return rows;
   };
 
   // Sep 1, 2026: rewritten for the renamed pipeline. This used to be a
@@ -619,6 +638,9 @@ const FinanceQueuePage = () => {
                       {order.customer_name}
                       <span className="text-ink-secondary"> · {order.medrep_name}</span>
                     </p>
+                    {financeDates(order).map((row, i) => (
+                      <p key={i} className="text-[11px] text-ink-secondary">{row}</p>
+                    ))}
                   </div>
 
                   <div className="text-right shrink-0">
@@ -735,6 +757,9 @@ const FinanceQueuePage = () => {
                           {order.zoho_invoice_number && <> · Invoice: <span className="font-mono">{order.zoho_invoice_number}</span></>}
                         </p>
                       )}
+                      {financeDates(order).map((row, i) => (
+                        <p key={i} className="text-xs text-ink-secondary">{row}</p>
+                      ))}
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
@@ -825,14 +850,31 @@ const FinanceQueuePage = () => {
                             Show {order.payment_proof_file_name || 'the document'}
                           </button>
                         ) : isImage ? (
-                          <a href={proof.viewUrl} target="_blank" rel="noopener noreferrer" className="block bg-white">
-                            <img src={proof.viewUrl} alt={`Proof of payment for ${order.getmeds_order_id}`} className="max-h-80 w-auto mx-auto" />
-                          </a>
+                          <div className="bg-white">
+                            <a href={proof.viewUrl} target="_blank" rel="noopener noreferrer" className="block">
+                              <img src={proof.viewUrl} alt={`Proof of payment for ${order.getmeds_order_id}`} className="max-h-80 w-auto mx-auto" />
+                            </a>
+                            {proof.downloadUrl && (
+                              <div className="px-3 py-1.5 border-t border-slate-100 text-right">
+                                <a
+                                  href={proof.downloadUrl}
+                                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
+                                >
+                                  <Download className="w-3 h-3" /> Download
+                                </a>
+                              </div>
+                            )}
+                          </div>
                         ) : (
-                          <div className="p-4 text-center">
+                          <div className="p-4 text-center flex items-center justify-center gap-4">
                             <a href={proof.viewUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-semibold text-getmeds-blue underline">
                               Open {proof.file_name || 'document'}
                             </a>
+                            {proof.downloadUrl && (
+                              <a href={proof.downloadUrl} className="inline-flex items-center gap-1 text-sm font-semibold text-getmeds-blue hover:text-getmeds-blue-dark">
+                                <Download className="w-3.5 h-3.5" /> Download
+                              </a>
+                            )}
                           </div>
                         )}
 

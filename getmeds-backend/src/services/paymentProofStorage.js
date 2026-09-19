@@ -163,6 +163,23 @@ async function createViewUrl(storagePath, expiresIn = VIEW_URL_TTL_SECONDS) {
 }
 
 /**
+ * Sep 19, 2026: same signed URL as createViewUrl, but with `download` passed
+ * to Supabase — it answers with `Content-Disposition: attachment` instead of
+ * inline, so clicking it saves the file under its own name instead of
+ * opening in a browser tab. Open and download are two different things a
+ * signed URL from this bucket can do; view stays the default everywhere it
+ * already was, this is only minted where a caller adds an explicit Download
+ * control.
+ */
+async function createDownloadUrl(storagePath, fileName, expiresIn = VIEW_URL_TTL_SECONDS) {
+  const { data, error } = await client()
+    .storage.from(BUCKET)
+    .createSignedUrl(storagePath, expiresIn, { download: fileName || true });
+  if (error) throw error;
+  return data.signedUrl;
+}
+
+/**
  * Best-effort delete of a superseded object. Never allowed to fail a request:
  * an orphaned file in a private bucket costs a few KB, while a failed delete
  * blocking a re-upload would stop a MedRep replacing a rejected proof.
@@ -207,6 +224,7 @@ module.exports = {
   validateUpload,
   createUploadUrl,
   createViewUrl,
+  createDownloadUrl,
   removeQuietly,
   downloadFile,
   _resetClient,
