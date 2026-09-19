@@ -76,21 +76,63 @@ describe('re-submitting a held order to Finance', () => {
     expect(notes.some((n) => financeIds.includes(n.recipient_id) && /settled the overdue balance/.test(n.message))).toBe(true);
   });
 
-  test('the order page is told it can be re-submitted — only for a Finance hold', async () => {
+  test('the order page is told it can be re-submitted — a Finance hold, or any hold/exception whose prior stage is known', async () => {
     const financeHold = await heldOrder();
     const otherHold = await heldOrder('picking_packing');
+    const unresolvable = await heldOrder('draft'); // 'draft' is not a resumable stage
     const a = await request(app).get(`/api/orders/${financeHold}`).set(auth(medrepToken));
     const b = await request(app).get(`/api/orders/${otherHold}`).set(auth(medrepToken));
+    const c = await request(app).get(`/api/orders/${unresolvable}`).set(auth(medrepToken));
     expect(a.body.data.order.resubmittable).toBe(true);
-    expect(b.body.data.order.resubmittable).toBe(false);
+    expect(b.body.data.order.resubmittable).toBe(true);
+    expect(c.body.data.order.resubmittable).toBe(false);
   });
 
-  test('a hold someone other than Finance put on is refused, and says who to ask', async () => {
+  // Sep 19, 2026: this used to be refused outright ("Ask Management to
+  // release it") — resubmit now resolves a non-Finance hold the same way
+  // "Resume order" would, back to wherever the trail says it was before.
+  test('a hold Management put on resubmits back to its prior stage, not to Finance', async () => {
     const id = await heldOrder('picking_packing');
+    const res = await resubmit(id, 'Stock is back — re-picking now');
+    expect(res.status).toBe(200);
+    expect(await statusOf(id)).toBe('picking_packing');
+
+    const ev = await db.prepare("SELECT notes FROM order_events WHERE order_id = ? AND event_type = 'ORDER_RESUBMITTED'").get(id);
+    expect(ev.notes).toMatch(/Stock is back — re-picking now/);
+    // exception_reason is cleared the same way exports.resume clears it — a
+    // held order that resubmits no longer shows a stale hold reason.
+    expect((await db.prepare('SELECT exception_reason FROM orders WHERE id = ?').get(id)).exception_reason).toBeNull();
+  });
+
+  test('a hold with no resolvable prior stage is refused, and says who to ask', async () => {
+    const id = await heldOrder('draft');
     const res = await resubmit(id, 'Proof of payment uploaded');
     expect(res.status).toBe(409);
-    expect(res.body.error.code).toBe('NOT_FINANCE_HOLD');
+    expect(res.body.error.code).toBe('CANNOT_RESUBMIT');
     expect(await statusOf(id)).toBe('on_hold');
+  });
+
+  test('an order Management put in exception also resubmits back to its prior stage', async () => {
+    const ref = `GM-RESUB-EXC-${Date.now()}`;
+    await db
+      .prepare(
+        `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
+                             delivery_address, exception_reason)
+         VALUES (?, ?, ?, 'exception', 'credit', 35000, '1 Hold St', 'Waiting on additional payment')`
+      )
+      .run(ref, customerId, medrepId);
+    const { id } = await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(ref);
+    created.push(id);
+    await db
+      .prepare(
+        `INSERT INTO order_events (order_id, event_type, old_status, new_status, actor_name, notes)
+         VALUES (?, 'EXCEPTION_SET', 'ready_for_dispatch', 'exception', 'Management Getmeds', 'held for the test')`
+      )
+      .run(id);
+
+    const res = await resubmit(id, 'Additional payment received');
+    expect(res.status).toBe(200);
+    expect(await statusOf(id)).toBe('ready_for_dispatch');
   });
 
   test('a reason is required', async () => {

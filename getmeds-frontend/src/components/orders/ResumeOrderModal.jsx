@@ -14,7 +14,11 @@ export const RESUME_STAGES = [
   ['dispatched', 'Dispatched'],
   ['tracking_shared', 'Tracking shared']
 ];
-const stageLabel = (s) => (RESUME_STAGES.find(([k]) => k === s) || [s, String(s || '').replace(/_/g, ' ')])[1];
+// Sep 19, 2026: exported so ResubmitHoldModal.jsx can name the same
+// destination for a MedRep's own resubmit — resume's default and resubmit's
+// only option resolve to the same stage (statusBeforeHold), so the label
+// should read identically either way.
+export const stageLabel = (s) => (RESUME_STAGES.find(([k]) => k === s) || [s, String(s || '').replace(/_/g, ' ')])[1];
 
 const ResumeOrderModal = ({ order, onClose, onSubmit, saving }) => {
   // '' = where it was before the hold; resume_to is only known on the order page.

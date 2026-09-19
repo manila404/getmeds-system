@@ -255,11 +255,15 @@ const OrderDetailPage = () => {
   const [resubmitOpen, setResubmitOpen] = useState(false);
   // Sep 15, 2026: the whole order on one screen, like the submission review.
   const [overviewOpen, setOverviewOpen] = useState(false);
-  // Sep 18, 2026: reason first (moves the order off Finance's hold with the
-  // MedRep's own words on the trail), then the file — attaching afterwards
-  // is harmless even though attaching to a held order already returns it to
-  // Finance on its own (financeHoldService), because by then the order has
-  // already left on_hold and that auto-return is a no-op.
+  // Sep 18, 2026: reason first (moves the order off the hold/exception with
+  // the MedRep's own words on the trail), then the file — attaching
+  // afterwards is harmless even for a Finance hold specifically, where
+  // attaching to a held order already returns it to Finance on its own
+  // (financeHoldService), because by then the order has already left
+  // on_hold and that auto-return is a no-op.
+  // Sep 19, 2026: resubmit() itself now also resolves a Management hold or
+  // exception (not just Finance's) — this mutation didn't need to change,
+  // since it only ever cared that /resubmit succeeded before it uploads.
   const resubmitMutation = useMutation({
     mutationFn: async ({ reason, file, fileType }) => {
       const res = await client.post(`/api/orders/${id}/resubmit`, { reason }).then(r => r.data);
@@ -1252,7 +1256,11 @@ const OrderDetailPage = () => {
                 label="Attach the corrected document (optional)"
               />
             )}
-            {order.status === 'on_hold' && order.resubmittable &&
+            {/* Sep 19, 2026: 'exception' added — resubmit used to work only
+                for a Finance hold, so this banner showed the reason with no
+                way back for anything Management put on. resubmittable now
+                covers both (orders.controller.js). */}
+            {['on_hold', 'exception'].includes(order.status) && order.resubmittable &&
               (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
               <button
                 type="button"
@@ -1261,6 +1269,18 @@ const OrderDetailPage = () => {
               >
                 ↩ Re-submit for verification
               </button>
+            )}
+            {/* Sep 19, 2026: resubmittable false but still held/exception —
+                say why there's no button rather than the MedRep wondering
+                whether the page is broken. Attaching from the tab above still
+                works; it just won't auto-clear this hold without a resolvable
+                prior stage. */}
+            {['on_hold', 'exception'].includes(order.status) && !order.resubmittable &&
+              (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+              <p className="text-[11px] text-amber-900">
+                Could not tell which stage this was at before the hold, so it can't be re-submitted automatically —
+                attach what's needed above and ask Management to release it.
+              </p>
             )}
           </div>
         )}

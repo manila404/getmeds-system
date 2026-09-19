@@ -777,9 +777,16 @@ exports.getById = async (req, res, next) => {
     // Sep 15, 2026: whether the order page offers "Re-submit for
     // verification" — only on a hold Finance put on. The endpoint checks the
     // same thing again; this only decides whether to show the button.
-    const resubmittable = order.status === 'on_hold' ? await isFinanceHold(order) : false;
+    // Sep 19, 2026: widened from "only a Finance hold" — resubmit now also
+    // covers a hold or exception Management put on, resolved the same way
+    // "Resume order" resolves one (statusBeforeHold, right below) rather than
+    // returning to Finance specifically. True whenever the MedRep's own
+    // resubmit would actually succeed: a genuine Finance hold, or any other
+    // hold/exception whose prior stage the trail can name.
+    const isFinHold = order.status === 'on_hold' ? await isFinanceHold(order) : false;
     // Sep 15, 2026: where "Resume order" would take a held order back to.
     const resumeTo = ['on_hold', 'exception'].includes(order.status) ? await statusBeforeHold(order.id) : null;
+    const resubmittable = isFinHold || (['on_hold', 'exception'].includes(order.status) && resumeTo != null);
 
     // Sep 15, 2026: the tracking number Dispatch typed in (the latest one),
     // for the Dispatch tab — Zoho's own number is on `dispatch` above.
@@ -2713,7 +2720,7 @@ exports.sendBack = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ─── RE-SUBMIT A HELD ORDER TO FINANCE (Sep 15, 2026) ──────────────────────
+// ─── RE-SUBMIT A HELD OR EXCEPTION ORDER (Sep 15, 2026; widened Sep 19, 2026) ──
 //
 // Finance holds an order ("overdue invoices", "no proof of payment"); the
 // MedRep sorts it out. An upload or an edit already sends a Finance hold back
@@ -2723,8 +2730,17 @@ exports.sendBack = async (req, res, next) => {
 // twice and returned only when Finance reopened it themselves.
 //
 // This is the MedRep saying so, with the reason: picked ("Proof of payment
-// uploaded") or typed. Only a hold Finance put on — a warehouse or Management
-// hold is not Finance's to re-check, and is refused with who to ask instead.
+// uploaded") or typed.
+//
+// Sep 19, 2026: widened from "only a Finance hold". Until now a hold or
+// exception Management put on had no MedRep-facing way back at all — only
+// "Resume order" (management/admin-only) could move it, and the reason given
+// was "attach the fix from the Attachments tab", which existed but nothing on
+// the order page ever told a MedRep it was there, or invited a reason
+// alongside it. A Finance hold still goes back to Finance specifically
+// (unchanged, below); anything else resolves to the stage the trail says the
+// order was at right before the hold — the same default exports.resume uses —
+// and is refused, naming Management, only when that stage cannot be told.
 exports.resubmit = async (req, res, next) => {
   try {
     const reason = String(req.body?.reason || '').trim();
@@ -2751,39 +2767,86 @@ exports.resubmit = async (req, res, next) => {
         error: { code: 'FORBIDDEN', message: 'Only the MedRep on this order, or Management, can re-submit it.' }
       });
     }
-    if (order.status !== 'on_hold') {
+    if (!['on_hold', 'exception'].includes(order.status)) {
       return res.status(409).json({
         success: false,
-        error: { code: 'NOT_ON_HOLD', message: `This order is not on hold — it is at "${order.status}".` }
-      });
-    }
-    if (!(await isFinanceHold(order))) {
-      return res.status(409).json({
-        success: false,
-        error: {
-          code: 'NOT_FINANCE_HOLD',
-          message: 'This hold was not put on by Finance, so it cannot be re-submitted to them. Ask Management to release it.'
-        }
+        error: { code: 'NOT_ON_HOLD', message: `This order is not on hold or in exception — it is at "${order.status}".` }
       });
     }
 
     const actor = await resolveActor(req.user, role === 'medrep' ? 'medrep' : 'management');
-    const moved = await returnToFinanceIfHeld(order, actor, {
-      reason,
-      notes: `Re-submitted for verification by ${actor.name}: ${reason}`,
-      notifyMessage: `Order ${order.getmeds_order_id} was re-submitted by ${actor.name}: ${reason} — ready for your re-check.`
-    });
-    if (!moved) {
-      return res.status(409).json({
-        success: false,
-        error: { code: 'NOT_MOVED', message: 'The order could not be sent back to Finance. Refresh the page and try again.' }
+
+    // The Finance-hold path — unchanged since Sep 15, 2026: goes back to
+    // Finance specifically, via the same helper an attachment or an edit
+    // triggers automatically while under this exact kind of hold.
+    if (order.status === 'on_hold' && (await isFinanceHold(order))) {
+      const moved = await returnToFinanceIfHeld(order, actor, {
+        reason,
+        notes: `Re-submitted for verification by ${actor.name}: ${reason}`,
+        notifyMessage: `Order ${order.getmeds_order_id} was re-submitted by ${actor.name}: ${reason} — ready for your re-check.`
+      });
+      if (!moved) {
+        return res.status(409).json({
+          success: false,
+          error: { code: 'NOT_MOVED', message: 'The order could not be sent back to Finance. Refresh the page and try again.' }
+        });
+      }
+      const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+      return res.json({
+        success: true,
+        data: { order: updatedOrder, status: updatedOrder.status, message: 'Re-submitted — back with Finance for verification.' }
       });
     }
+
+    // Sep 19, 2026: a hold or exception Management put on — the MedRep's own
+    // way back, alongside attaching whatever fixes it (a corrected file, a
+    // replacement document). Resolved exactly the way exports.resume resolves
+    // it by default: the stage the trail says the order was at right before
+    // this hold, not a stage the MedRep gets to pick.
+    const target = await statusBeforeHold(order.id);
+    if (!target) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'CANNOT_RESUBMIT',
+          message: 'Could not tell which stage this order was at before the hold — ask Management to release it.'
+        }
+      });
+    }
+
+    const txn = db.transaction(async () => {
+      await db.prepare("UPDATE orders SET status = ?, exception_reason = NULL, updated_at = datetime('now') WHERE id = ?")
+        .run(target, order.id);
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ORDER_RESUBMITTED',
+        oldStatus: order.status,
+        newStatus: target,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Re-submitted by ${actor.name}: ${reason}${order.exception_reason ? ` (was held for: ${order.exception_reason})` : ''}`
+      });
+    });
+    await txn();
+
+    const stageRole = FINANCE_STAGES.includes(target) ? 'finance' : DISPATCH_STAGES.includes(target) ? 'dispatch' : null;
+    const recipients = new Set([order.medrep_id, order.raised_by_id, ...(await getUserIdsByRole('management'))]);
+    if (stageRole) (await getUserIdsByRole(stageRole)).forEach((uid) => recipients.add(uid));
+    recipients.delete(actor.id);
+    recipients.delete(null);
+    recipients.delete(undefined);
+    await notify({
+      orderId: order.id,
+      recipientIds: [...recipients],
+      message: `Order ${order.getmeds_order_id} was re-submitted by ${actor.name} and continues at ${target}. Reason: ${reason}`,
+      eventType: 'ORDER_RESUBMITTED',
+      orderData: order
+    });
 
     const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
     res.json({
       success: true,
-      data: { order: updatedOrder, status: updatedOrder.status, message: 'Re-submitted — back with Finance for verification.' }
+      data: { order: updatedOrder, status: updatedOrder.status, message: `Re-submitted — continues at ${target}.` }
     });
   } catch (err) { next(err); }
 };
