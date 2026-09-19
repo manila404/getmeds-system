@@ -416,6 +416,76 @@ exports.getMyConfirmations = async (req, res, next) => {
 };
 
 /**
+ * GET /api/finance/reports/sales-by-salesperson — "create a report tab so
+ * the finance can see these details."
+ *
+ * Sep 19, 2026. NOT a reproduction of Zoho's own "Sales by Salesperson"
+ * report — that one is built from Zoho Books' Invoices and Credit Notes,
+ * neither of which this app tracks as its own record (only a
+ * zoho_invoice_number string reference on the order). This is the
+ * equivalent report built from what this app actually has: order count and
+ * order total, grouped by `orders.salesperson` (the same free-text field
+ * Zoho's own report groups by — see schema.pg.sql's note on why that string
+ * is not always uniformly formatted).
+ *
+ * Filtered on created_at (when the order was raised), same convention as
+ * ManagementDashboardPage's own date_from/date_to — this answers "how much
+ * business came in during this window," unlike getQueue's date filter
+ * above, which deliberately uses updated_at to answer "how many reached a
+ * stage in this window."
+ *
+ * Defaults to origin=all (unlike the queue's origin=getmeds default): Zoho's
+ * own report is org-wide, so the closest comparison starts from every order
+ * this app knows about, imported history included, rather than only what
+ * was raised here.
+ */
+exports.getSalesBySalesperson = async (req, res, next) => {
+  try {
+    const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    const today = manilaTodayDateString();
+    const rawFrom = req.query.date_from ? String(req.query.date_from).trim() : '';
+    const rawTo = req.query.date_to ? String(req.query.date_to).trim() : '';
+    const dateFrom = DATE_RE.test(rawFrom) ? rawFrom : today;
+    const dateTo = DATE_RE.test(rawTo) ? rawTo : today;
+
+    const origin = normalizeOrigin(req.query.origin || 'all');
+    const originClause = originSql(origin, 'o');
+    const originAnd = originClause ? ` AND ${originClause}` : '';
+
+    // Division-scoped managers see only their own — same scoping every other
+    // Finance-router read applies. Finance/admin are unscoped and see all.
+    const scope = await loadScope(req.user);
+    const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
+    const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
+
+    const rows = await db
+      .prepare(
+        `SELECT COALESCE(NULLIF(TRIM(o.salesperson), ''), 'Unassigned') AS name,
+                COUNT(*) AS order_count,
+                COALESCE(SUM(o.total_amount), 0) AS order_total
+           FROM orders o
+          WHERE o.created_at >= ? AND o.created_at <= ?${originAnd}${scopeAnd}
+          GROUP BY 1
+          ORDER BY order_total DESC`
+      )
+      .all(`${dateFrom}T00:00:00.000Z`, `${dateTo}T23:59:59.999Z`, ...scopeParams);
+
+    const total = rows.reduce(
+      (acc, r) => ({
+        order_count: acc.order_count + Number(r.order_count || 0),
+        order_total: acc.order_total + Number(r.order_total || 0),
+      }),
+      { order_count: 0, order_total: 0 }
+    );
+
+    res.json({
+      success: true,
+      data: { rows, total, date_from: dateFrom, date_to: dateTo, origin },
+    });
+  } catch (err) { next(err); }
+};
+
+/**
  * Pull a held order back for another look.
  *
  * Sep 12, 2026. Finance can put an order on hold; until now only the MedRep

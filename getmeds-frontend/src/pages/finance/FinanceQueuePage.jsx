@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download } from 'lucide-react';
+import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3 } from 'lucide-react';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import MyConfirmationsPanel from '../../components/finance/MyConfirmationsPanel';
+import SalesBySalespersonPanel from '../../components/finance/SalesBySalespersonPanel';
 import { useSearchParams } from 'react-router-dom';
 import { FINANCE_STAGES, financeStageLabel } from '../../constants/financeStages';
 import { formatPHT } from '../../utils/dateUtils';
@@ -48,9 +49,11 @@ const FinanceQueuePage = () => {
    */
   const [origin, setOrigin] = useState('getmeds');
 
-  // Sep 19, 2026: "each finance can see their approved/verified SO" — a
-  // personal, date-filterable view, separate from the shared queue.
-  const [showMine, setShowMine] = useState(false);
+  // Sep 19, 2026: two extra views beside the shared queue — "My
+  // Confirmations" (a personal, date-filterable log) and "Reports" (sales by
+  // salesperson, built from this app's own orders). Mutually exclusive with
+  // the queue and each other, so one string rather than two booleans.
+  const [activePanel, setActivePanel] = useState(null); // null | 'mine' | 'reports'
 
   /**
    * Sep 12, 2026: which order is open in the details panel.
@@ -526,20 +529,34 @@ const FinanceQueuePage = () => {
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {/* Sep 19, 2026: "each finance can see their approved/verified SO" —
-              a personal report, separate from the shared queue above. Toggles
-              the whole page body rather than living inside it, the same way
-              picking a stage does. */}
+          {/* Sep 19, 2026: two views beside the shared queue, each toggling
+              the whole page body rather than living inside it — the same way
+              picking a stage does. "each finance can see their approved/
+              verified SO" -> My Confirmations; "create a report tab" ->
+              Reports (sales by salesperson, built from this app's own
+              orders — see SalesBySalespersonPanel's own header for why it
+              can't match Zoho's report column-for-column). */}
           <button
-            onClick={() => setShowMine((v) => !v)}
-            aria-pressed={showMine}
+            onClick={() => setActivePanel((v) => (v === 'mine' ? null : 'mine'))}
+            aria-pressed={activePanel === 'mine'}
             className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-semibold shrink-0 border ${
-              showMine
+              activePanel === 'mine'
                 ? 'bg-getmeds-blue text-white border-getmeds-blue'
                 : 'border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary'
             }`}
           >
             <ShieldCheck className="w-4 h-4" /> My Confirmations
+          </button>
+          <button
+            onClick={() => setActivePanel((v) => (v === 'reports' ? null : 'reports'))}
+            aria-pressed={activePanel === 'reports'}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-semibold shrink-0 border ${
+              activePanel === 'reports'
+                ? 'bg-getmeds-blue text-white border-getmeds-blue'
+                : 'border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" /> Reports
           </button>
           <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0">
             <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
@@ -547,9 +564,10 @@ const FinanceQueuePage = () => {
         </div>
       </div>
 
-      {showMine && <MyConfirmationsPanel onClose={() => setShowMine(false)} />}
+      {activePanel === 'mine' && <MyConfirmationsPanel onClose={() => setActivePanel(null)} />}
+      {activePanel === 'reports' && <SalesBySalespersonPanel onClose={() => setActivePanel(null)} />}
 
-      {!showMine && (<>
+      {!activePanel && (<>
       {/* Sep 12, 2026: the split. Both tabs always show, both always carry
           their count — an empty GetMeds tab beside "Imported from Zoho (138)"
           says the queue is clear, where a single merged list of 143 said
