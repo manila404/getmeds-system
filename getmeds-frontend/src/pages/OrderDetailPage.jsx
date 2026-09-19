@@ -21,6 +21,7 @@ import { uploadOrderAttachment } from '../utils/attachmentUpload';
 import { roleLabel } from '../constants/roles';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
+import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../constants/paymentTerms';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
 import { TRACKING_EDITABLE_STATUSES, TrackingValue } from '../components/dispatch/DeliveryActions';
 import { TAX_OPTIONS, inferTaxOption } from '../utils/orderLines';
@@ -57,13 +58,9 @@ const DELIVERY_METHOD_SUGGESTIONS = [
   'Own Rider / Company Vehicle', 'LBC Express', 'Grab Express', 'J&T Express',
   'Lalamove', 'Customer Pick-up', 'Distributor Delivery'
 ];
-const PAYMENT_TERMS_SUGGESTIONS = [
-  'Due end of next month', 'Due end of the month', 'Paid', 'Advanced Payment',
-  'Advanced Payment - Partial', 'Donation/Charity', 'Samples', 'Due on Receipt',
-  '60% DP 40% UPON DEL', 'CASH', 'COD', 'Net', 'Net 15', '30 days', '45 Day',
-  'BPO WALLET', '60 Day', 'DSWD/PCSO', 'net', 'OP', '90 Day', 'INITIAL STOCKING',
-  '120 Day', '180 Day'
-];
+// Sep 19, 2026: moved to constants/paymentTerms.js, imported below — this
+// used to be a second hand-copy of OrderForm.jsx's own list, with no shared
+// source, so the two could only ever drift the next time either changed.
 
 const STATUS_COLORS = {
   draft: 'bg-slate-100 text-slate-700 border border-slate-300',
@@ -947,11 +944,18 @@ const OrderDetailPage = () => {
                     <label className="block text-xs font-medium text-ink-secondary mb-1">Payment Terms</label>
                     <input type="text" list="payment-terms-suggestions" value={draftDetails.payment_terms}
                       onChange={(e) => updateDraftDetail('payment_terms', e.target.value)}
-                      placeholder="e.g. Net 15, 30 days"
+                      placeholder="e.g. PDC 30, NET 30, Net 15"
                       className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
                     <datalist id="payment-terms-suggestions">
                       {PAYMENT_TERMS_SUGGESTIONS.map((s) => <option key={s} value={s} />)}
                     </datalist>
+                    {/* Sep 19, 2026: what to attach as proof — see
+                        constants/paymentTerms.js's paymentTermsProofHint. */}
+                    {paymentTermsProofHint(draftDetails.payment_terms) && (
+                      <p className="text-[11px] text-amber-800 bg-state-warning-light border border-state-warning/30 rounded px-2 py-1 mt-1.5">
+                        {paymentTermsProofHint(draftDetails.payment_terms)}
+                      </p>
+                    )}
                   </div>
 
                   <div>

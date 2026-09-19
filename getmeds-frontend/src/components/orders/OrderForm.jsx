@@ -35,6 +35,7 @@ import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ORDER_SOURCES } from '../../constants/orderSources';
+import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../../constants/paymentTerms';
 import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
 import StockWarningModal from './StockWarningModal';
 import { usePasteImage } from '../../hooks/usePasteImage';
@@ -194,45 +195,12 @@ const DELIVERY_METHOD_SUGGESTIONS = [
   'Distributor Delivery'
 ];
 
-// Payment Terms — mirrors the exact list configured on Zoho's own Sales
-// Order screen. Same pattern as Delivery Method above: suggestions via
-// SuggestField, not a locked dropdown, since Zoho's own field accepts a
-// custom typed value too (not just one of these presets) — there's no
-// Zoho Inventory API to read this list live (checked Sep 5, 2026: only an
-// undocumented, Books-only settings endpoint exists, not guaranteed to work
-// or stay working), and a typed field with suggestions is exactly how Zoho
-// itself behaves here, so hardcoding stays the right call. Refreshed Sep 5,
-// 2026 against the org's current dropdown (grew from 6 to 24 entries since
-// the Aug 30 list below was captured) — kept in Zoho's own display order.
-// 'net' (lowercase) is listed twice in Zoho itself, alongside 'Net' — kept
-// as two separate suggestions since that's genuinely what's configured
-// there, not a typo on this end.
-const PAYMENT_TERMS_SUGGESTIONS = [
-  'Due end of next month',
-  'Due end of the month',
-  'Paid',
-  'Advanced Payment',
-  'Advanced Payment - Partial',
-  'Donation/Charity',
-  'Samples',
-  'Due on Receipt',
-  '60% DP 40% UPON DEL',
-  'CASH',
-  'COD',
-  'Net',
-  'Net 15',
-  '30 days',
-  '45 Day',
-  'BPO WALLET',
-  '60 Day',
-  'DSWD/PCSO',
-  'net',
-  'OP',
-  '90 Day',
-  'INITIAL STOCKING',
-  '120 Day',
-  '180 Day'
-];
+// Sep 19, 2026: PAYMENT_TERMS_SUGGESTIONS and paymentTermsProofHint moved to
+// constants/paymentTerms.js — this used to be a locally-defined list that
+// OrderDetailPage.jsx had ALSO hand-copied, identical at the time but with
+// no shared source, so the two could only ever drift the next time either
+// changed. See that file for the full history, including why PDC/NET are
+// now explicit presets alongside Zoho's own list.
 
 // Simple flat-rate tax presets for the per-line Tax column. Zero-Rated and
 // VAT-Exempt both compute to ₱0 tax but are kept as distinct choices since
@@ -2012,13 +1980,22 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              <Field label="Payment Terms" required help="Type to see suggestions (matches Zoho's list), or enter your own.">
+              <Field label="Payment Terms" required help="Type to see suggestions (matches Zoho's list, plus PDC/NET), or enter your own.">
                 <SuggestField
                   value={paymentTerms}
                   onChange={setPaymentTerms}
                   suggestions={PAYMENT_TERMS_SUGGESTIONS}
-                  placeholder="e.g. Net 15, 30 days"
+                  placeholder="e.g. PDC 30, NET 30, Net 15"
                 />
+                {/* Sep 19, 2026: what to attach as proof, driven by whichever
+                    of PDC/NET is in what's typed — a post-dated cheque and a
+                    bank transfer are different proof, and the two are easy to
+                    conflate at a glance. */}
+                {paymentTermsProofHint(paymentTerms) && (
+                  <p className="text-[11px] text-amber-800 bg-state-warning-light border border-state-warning/30 rounded px-2 py-1 mt-1.5">
+                    {paymentTermsProofHint(paymentTerms)}
+                  </p>
+                )}
               </Field>
 
               <Field label="Source" required>
