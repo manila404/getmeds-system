@@ -78,6 +78,17 @@ const QUEUE_ROW_SELECT = `
          -- null unless the create actually went through.
          fc.finance_confirmed_at, fc.finance_confirmed_by,
          zs.zoho_synced_at,
+         -- Sep 19, 2026: "the finance will see the resubmit in [their] queue"
+         -- — a MedRep resubmitting a held/exception order already required a
+         -- reason (orders.controller.js's resubmit); it just never surfaced
+         -- anywhere on this row, only buried in the order's own trail. Two
+         -- event types can put an order back here: RETURNED_TO_FINANCE (a
+         -- Finance hold specifically, financeHoldService.js) and
+         -- ORDER_RESUBMITTED landing at this exact status (a Management
+         -- hold/exception the MedRep resolved). Either way rsub.resubmit_note
+         -- already reads as a full sentence ("Re-submitted by X: reason") —
+         -- nothing here reformats it.
+         rsub.resubmitted_at, rsub.resubmit_note,
          -- Sep 4, 2026: the proof of payment rides along, so a row at
          -- ready_for_finance_verified can show it beside the Verify button
          -- without a second request per row. NULL simply means none was
@@ -123,6 +134,14 @@ const QUEUE_ROW_SELECT = `
      WHERE fe.order_id = o.id AND fe.event_type = 'FINANCE_VERIFIED'
      ORDER BY fe.id DESC LIMIT 1
   ) fc ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT rs.created_at AS resubmitted_at, rs.notes AS resubmit_note
+      FROM order_events rs
+     WHERE rs.order_id = o.id
+       AND (rs.event_type = 'RETURNED_TO_FINANCE'
+            OR (rs.event_type = 'ORDER_RESUBMITTED' AND rs.new_status = 'ready_for_finance_verified'))
+     ORDER BY rs.id DESC LIMIT 1
+  ) rsub ON TRUE
   LEFT JOIN LATERAL (
     SELECT se.created_at AS zoho_synced_at
       FROM order_events se

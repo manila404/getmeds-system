@@ -761,6 +761,15 @@ const FinanceQueuePage = () => {
                     {financeDates(order).map((row, i) => (
                       <p key={i} className="text-[11px] text-ink-secondary">{row}</p>
                     ))}
+                    {/* "the finance will see the resubmit in queue" — the
+                        MedRep's own remarks, right on the row, not just in
+                        Details & files. */}
+                    {order.resubmitted_at && (
+                      <p className="text-[11px] text-indigo-700 mt-0.5 flex items-start gap-1">
+                        <RefreshCw className="w-3 h-3 mt-0.5 shrink-0" />
+                        <span>{order.resubmit_note}</span>
+                      </p>
+                    )}
                   </div>
 
                   <div className="text-right shrink-0">
@@ -885,6 +894,16 @@ const FinanceQueuePage = () => {
                       {financeDates(order).map((row, i) => (
                         <p key={i} className="text-xs text-ink-secondary">{row}</p>
                       ))}
+                      {/* Only while it's still awaiting Finance — a stale
+                          "just resubmitted" note on a long-since-confirmed
+                          order (e.g. viewed under the Completed stage) would
+                          read as current when it isn't. */}
+                      {needsVerification && order.resubmitted_at && (
+                        <p className="text-xs text-indigo-700 mt-1 flex items-start gap-1">
+                          <RefreshCw className="w-3 h-3 mt-0.5 shrink-0" />
+                          <span>{order.resubmit_note}</span>
+                        </p>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>

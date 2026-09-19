@@ -153,4 +153,70 @@ describe('re-submitting a held order to Finance', () => {
     const id = await heldOrder();
     expect((await resubmit(id, 'Proof of payment uploaded', dispatchToken)).status).toBe(403);
   });
+
+  // Sep 19, 2026: "the finance will see the resubmit in [their] queue" — the
+  // MedRep's remarks used to only reach Finance's notification and the
+  // order's own trail; now they ride on the queue row itself.
+  describe('Finance sees the resubmit on their own queue', () => {
+    let financeToken;
+    beforeAll(async () => { financeToken = await loginAs('finance@getmeds.ph'); });
+
+    const queueRow = async (id) => {
+      const res = await request(app).get('/api/finance/queue').set(auth(financeToken)).query({ stage: 'actionable', limit: 100 });
+      expect(res.status).toBe(200);
+      return res.body.data.orders.find((o) => o.id === id);
+    };
+
+    test('a Finance-hold resubmit shows the remarks on the queue row', async () => {
+      const id = await heldOrder();
+      await resubmit(id, 'Customer has settled the overdue balance');
+      const row = await queueRow(id);
+      expect(row).toBeTruthy();
+      expect(row.resubmitted_at).toBeTruthy();
+      expect(row.resubmit_note).toMatch(/Customer has settled the overdue balance/);
+    });
+
+    test('a Management-hold resubmit that lands back at Finance also shows on the queue row', async () => {
+      const ref = `GM-RESUB-EXC2-${Date.now()}`;
+      await db
+        .prepare(
+          `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
+                               delivery_address, exception_reason)
+           VALUES (?, ?, ?, 'exception', 'credit', 35000, '1 Hold St', 'Needs a corrected slip')`
+        )
+        .run(ref, customerId, medrepId);
+      const { id } = await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(ref);
+      created.push(id);
+      await db
+        .prepare(
+          `INSERT INTO order_events (order_id, event_type, old_status, new_status, actor_name, notes)
+           VALUES (?, 'EXCEPTION_SET', 'ready_for_finance_verified', 'exception', 'Management Getmeds', 'held for the test')`
+        )
+        .run(id);
+
+      const res = await resubmit(id, 'Uploaded the corrected slip');
+      expect(res.status).toBe(200);
+      expect(await statusOf(id)).toBe('ready_for_finance_verified');
+
+      const row = await queueRow(id);
+      expect(row.resubmitted_at).toBeTruthy();
+      expect(row.resubmit_note).toMatch(/Uploaded the corrected slip/);
+    });
+
+    test('a fresh order that was never resubmitted shows nothing', async () => {
+      const ref = `GM-RESUB-FRESH-${Date.now()}`;
+      await db
+        .prepare(
+          `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount, delivery_address)
+           VALUES (?, ?, ?, 'ready_for_finance_verified', 'credit', 1200, '1 Fresh St')`
+        )
+        .run(ref, customerId, medrepId);
+      const { id } = await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(ref);
+      created.push(id);
+
+      const row = await queueRow(id);
+      expect(row.resubmitted_at).toBeNull();
+      expect(row.resubmit_note).toBeNull();
+    });
+  });
 });
