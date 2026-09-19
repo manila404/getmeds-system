@@ -25,6 +25,8 @@ import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../constants/p
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
 import { TRACKING_EDITABLE_STATUSES, TrackingValue } from '../components/dispatch/DeliveryActions';
 import { TAX_OPTIONS, inferTaxOption } from '../utils/orderLines';
+import ZohoSalespersonCombo from '../components/orders/ZohoSalespersonCombo';
+import ConfirmChangesModal from '../components/orders/ConfirmChangesModal';
 
 // Sep 7, 2026 (2): mirrors orders.controller.js's / OrderForm.jsx's exact
 // lists for the new "Edit Details" panel below — kept as a duplicate
@@ -221,6 +223,11 @@ const OrderDetailPage = () => {
   // items. See updateDetails on the backend.
   const [isEditingDetails, setIsEditingDetails] = useState(false);
   const [draftDetails, setDraftDetails] = useState(null);
+  // Sep 19, 2026: "Save Changes" on Details/Items used to write straight
+  // through with no review step. This holds the pending save (its diff, its
+  // Zoho warning, and the payload to actually send) while ConfirmChangesModal
+  // asks first — null when no confirmation is showing.
+  const [pendingConfirm, setPendingConfirm] = useState(null);
   const { data: products = [] } = useProducts();
 
   const { data, isLoading, error } = useQuery({
@@ -228,6 +235,21 @@ const OrderDetailPage = () => {
     queryFn: () => client.get(`/api/orders/${id}`).then(r => r.data),
     refetchInterval: 15000
   });
+
+  // Sep 19, 2026: Zoho's own Salesperson list, for the Edit Details picker
+  // below — same list and same endpoint OrderForm.jsx uses for order
+  // creation (GET /api/orders/meta/medreps also carries `salespersons`, not
+  // only the medrep list — see orders.controller.js's getMedreps). Only a
+  // Management/admin session can edit Salesperson here, and only while the
+  // details panel is open, so there's no reason to fetch it otherwise.
+  const isManagementUser = ['management', 'admin'].includes(user?.role);
+  const { data: medrepMeta } = useQuery({
+    queryKey: ['orders-meta-medreps'],
+    queryFn: () => client.get('/api/orders/meta/medreps').then(r => r.data),
+    enabled: isManagementUser && isEditingDetails,
+    staleTime: 30000
+  });
+  const zohoSalespersonNames = medrepMeta?.data?.salespersons || [];
 
   // Sep 15, 2026: re-submit an order Finance held, with the reason.
   const [resubmitOpen, setResubmitOpen] = useState(false);
@@ -559,10 +581,56 @@ const OrderDetailPage = () => {
   const activeProductIds = new Set(products.map((p) => String(p.id)));
   const hasInactiveDraftRow = draftItems.some((row) => !activeProductIds.has(String(row.product_id)));
 
+  // Sep 19, 2026: a one-line description of a line item's numbers, shared by
+  // both sides of the Items diff below so "before" and "after" are always
+  // built the exact same way and a real change can't hide behind formatting.
+  const describeDraftLine = ({ quantity, rate, discount, tax_percent, price_remark }) => {
+    const qty = quantity ?? 0;
+    const price = Number(rate) || 0;
+    const disc = Number(discount) || 0;
+    const tax = tax_percent != null && tax_percent !== '' ? `${tax_percent}%` : 'none';
+    const remark = (price_remark || '').trim();
+    return `Qty ${qty} · ₱${price.toFixed(2)}${disc ? ` · -₱${disc.toFixed(2)} disc` : ''} · Tax ${tax}${remark ? ` · “${remark}”` : ''}`;
+  };
+
+  const diffOrderItems = () => {
+    const origByProduct = new Map((data?.data?.items || []).map((it) => [String(it.product_id), it]));
+    const changes = [];
+    const seen = new Set();
+    for (const row of draftItems) {
+      const pid = String(row.product_id);
+      seen.add(pid);
+      const orig = origByProduct.get(pid);
+      const name = row.name || orig?.product_name || pid;
+      const after = describeDraftLine(row);
+      if (!orig) {
+        changes.push({ label: `${name} — added`, before: '—', after });
+        continue;
+      }
+      const before = describeDraftLine({
+        quantity: orig.quantity, rate: orig.unit_price, discount: orig.discount_amount,
+        tax_percent: orig.tax_percent, price_remark: orig.price_remark
+      });
+      if (before !== after) changes.push({ label: name, before, after });
+    }
+    for (const [pid, orig] of origByProduct) {
+      if (seen.has(pid)) continue;
+      changes.push({
+        label: `${orig.product_name} — removed`,
+        before: describeDraftLine({
+          quantity: orig.quantity, rate: orig.unit_price, discount: orig.discount_amount,
+          tax_percent: orig.tax_percent, price_remark: orig.price_remark
+        }),
+        after: '—'
+      });
+    }
+    return changes;
+  };
+
   const saveDraftItems = () => {
     if (draftItems.length === 0) { toast.error('Add at least one item.'); return; }
     if (hasInactiveDraftRow) { toast.error('Replace the flagged item(s) before saving — they are no longer active in Zoho.'); return; }
-    updateItemsMutation.mutate(draftItems.map((row) => ({
+    const payloadItems = draftItems.map((row) => ({
       product_id: row.product_id,
       quantity: Math.max(1, parseInt(row.quantity, 10) || 1),
       rate: Number(row.rate) || 0,
@@ -570,10 +638,19 @@ const OrderDetailPage = () => {
       tax_percent: row.tax_percent,
       tax_label: row.tax_label,
       price_remark: (row.price_remark || '').trim() || null
-    })));
+    }));
+    const changes = diffOrderItems();
+    if (!changes.length) { toast('No changes to save.'); return; }
+    const o = data?.data?.order;
+    setPendingConfirm({
+      title: `${o?.getmeds_order_id || 'This order'} — confirm item changes before saving`,
+      warning: o?.zoho_so_id
+        ? `Already in Zoho${o.zoho_so_number ? ` (${o.zoho_so_number})` : ''} — confirming this updates the real Sales Order too.`
+        : null,
+      changes,
+      onConfirm: () => updateItemsMutation.mutate(payloadItems)
+    });
   };
-
-  const isManagementUser = ['management', 'admin'].includes(user?.role);
 
   const startEditingDetails = (o) => {
     setDraftDetails({
@@ -596,6 +673,34 @@ const OrderDetailPage = () => {
   };
 
   const updateDraftDetail = (field, value) => setDraftDetails((d) => ({ ...d, [field]: value }));
+
+  // Sep 19, 2026: field-by-field, against the order as it stood before this
+  // edit — same DETAIL_FIELDS list saveDraftDetails sends, plus
+  // Division/Salesperson when this session can touch them, so the confirm
+  // step always matches exactly what's about to be saved.
+  const diffOrderDetails = (o) => {
+    const rows = [
+      ['Delivery Address', o.delivery_address, draftDetails.delivery_address],
+      ['Delivery Notes', o.delivery_notes, draftDetails.delivery_notes],
+      ['Sub-division', o.sub_division, draftDetails.sub_division],
+      ['Headquarter', o.headquarter, draftDetails.headquarter],
+      ['Doctor Name', o.intake_doctor, draftDetails.doctor_name],
+      ['Receiver Name', o.intake_receiver, draftDetails.receiver_name],
+      ['Receiver Contact No.', o.intake_contact_no, draftDetails.receiver_contact_no],
+      ['Source', o.intake_source, draftDetails.order_source],
+      ['Delivery Method', o.intake_delivery_method, draftDetails.delivery_method],
+      ['Terms / Conditions', o.intake_terms, draftDetails.terms],
+      ['Payment Terms', o.intake_payment_terms, draftDetails.payment_terms],
+      ['Invoicing From', o.invoicing_from, draftDetails.invoicing_from]
+    ];
+    if (isManagementUser) {
+      rows.push(['Division', o.division, draftDetails.division]);
+      rows.push(['Salesperson', o.salesperson, draftDetails.salesperson]);
+    }
+    return rows
+      .map(([label, before, after]) => ({ label, before: String(before || '').trim(), after: String(after || '').trim() }))
+      .filter((r) => r.before !== r.after);
+  };
 
   const saveDraftDetails = () => {
     if (!draftDetails.delivery_address.trim()) { toast.error('Delivery address cannot be blank.'); return; }
@@ -621,7 +726,18 @@ const OrderDetailPage = () => {
       payload.division = draftDetails.division;
       payload.salesperson = draftDetails.salesperson;
     }
-    updateDetailsMutation.mutate(payload);
+
+    const o = data?.data?.order;
+    const changes = diffOrderDetails(o);
+    if (!changes.length) { toast('No changes to save.'); return; }
+    setPendingConfirm({
+      title: `${o?.getmeds_order_id || 'This order'} — confirm detail changes before saving`,
+      warning: o?.zoho_so_id
+        ? `Already in Zoho${o.zoho_so_number ? ` (${o.zoho_so_number})` : ''} — confirming this updates the real Sales Order too.`
+        : null,
+      changes,
+      onConfirm: () => updateDetailsMutation.mutate(payload)
+    });
   };
 
   if (isLoading) return <div className="flex justify-center py-20"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-getmeds-blue" /></div>;
@@ -696,6 +812,18 @@ const OrderDetailPage = () => {
           </div>
         </div>
         {overviewOpen && <OrderOverviewModal order={order} items={items} onClose={() => setOverviewOpen(false)} />}
+        {pendingConfirm && (
+          <ConfirmChangesModal
+            title={pendingConfirm.title}
+            warning={pendingConfirm.warning}
+            changes={pendingConfirm.changes}
+            onCancel={() => setPendingConfirm(null)}
+            onConfirm={() => {
+              pendingConfirm.onConfirm();
+              setPendingConfirm(null);
+            }}
+          />
+        )}
 
         {/* Delivery Info */}
         <div className="mt-4 pt-4 border-t border-gray-100 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
@@ -890,10 +1018,16 @@ const OrderDetailPage = () => {
                   {isManagementUser && (
                     <div>
                       <label className="block text-xs font-medium text-ink-secondary mb-1">Salesperson</label>
-                      <input type="text" value={draftDetails.salesperson}
-                        onChange={(e) => updateDraftDetail('salesperson', e.target.value)}
-                        placeholder="Must match a Salesperson Zoho recognizes"
-                        className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                      <ZohoSalespersonCombo
+                        names={zohoSalespersonNames}
+                        value={draftDetails.salesperson}
+                        onSelect={(name) => updateDraftDetail('salesperson', name)}
+                      />
+                      <p className="text-[11px] mt-1 text-ink-secondary">
+                        Picked from Zoho's own Salesperson list — a typed name Zoho does not
+                        recognize would be created there as a new one, so this only offers names it
+                        already has.
+                      </p>
                     </div>
                   )}
 

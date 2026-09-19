@@ -89,6 +89,14 @@ const ZohoSalespersonCombo = ({ names, preferred = [], value, onSelect, disabled
         <input
           type="text"
           disabled={disabled}
+          // Sep 19, 2026: "it should be dropdown while it retains the
+          // original salesperson so to check" — the box used to either show
+          // the value (closed) or blank straight to an empty search box
+          // (open), and blanking it read as if the current Salesperson had
+          // just been erased. Now the typed QUERY is always what's on
+          // screen while open — empty until you actually type — so the full
+          // list is there to browse/check, and the current value stays
+          // visible as the placeholder underneath it rather than vanishing.
           value={open ? query : value || query}
           onChange={(e) => {
             setQuery(e.target.value);
@@ -96,7 +104,7 @@ const ZohoSalespersonCombo = ({ names, preferred = [], value, onSelect, disabled
           }}
           onFocus={() => setOpen(true)}
           onKeyDown={onKeyDown}
-          placeholder="Search Zoho Salespersons…"
+          placeholder={value ? `Current: ${value}` : 'Search Zoho Salespersons…'}
           className="w-full text-sm border border-slate-300 rounded-md pl-8 pr-8 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-getmeds-blue focus:border-transparent"
         />
         {value && !open && (
