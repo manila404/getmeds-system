@@ -226,6 +226,13 @@ function _resetForTest() {
 // their block in ZohoAdapter.js.
 const facadeMethods = [
   'createSalesOrder',
+  // Sep 19, 2026: added HERE, in the SAME commit as the method itself — the
+  // lesson every entry below already learned the hard way (five separate
+  // times: listSalespersons, updateContactTin, addSalesOrderAttachment,
+  // createContact, confirmSalesOrder). A method can exist on the base
+  // contract, the Live adapter and the Mock and still be `undefined`
+  // through the one module every controller actually imports.
+  'updateSalesOrder',
   'getSalesOrder',
   'listSalesOrders',
   'listRecentSalesOrders',

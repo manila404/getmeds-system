@@ -41,7 +41,12 @@ const OrderItemsEditor = ({
   onAdd,
   onCancel,
   onSave,
-  saving
+  saving,
+  // Sep 19, 2026: true only for Management editing an order Zoho already
+  // has — changes the banner below so it doesn't claim nothing reaches
+  // Zoho when, for this caller, it actually does (orders.controller.js's
+  // updateItems pushes the edit to the real Sales Order in that case).
+  alreadySynced
 }) => {
   const lines = rows.map((r) =>
     computeLineAmounts({ quantity: r.quantity, rate: r.rate, discount: r.discount, taxPercent: r.tax_percent }, inclusive)
@@ -64,8 +69,10 @@ const OrderItemsEditor = ({
 
   return (
     <div className="space-y-4">
-      <div className="bg-getmeds-blue/5 border border-getmeds-blue/20 rounded-lg p-3 text-xs text-ink-secondary">
-        Editing items here only — nothing is sent to Zoho until the order syncs.
+      <div className={`border rounded-lg p-3 text-xs ${alreadySynced ? 'bg-state-warning-light border-state-warning/30 text-amber-950' : 'bg-getmeds-blue/5 border-getmeds-blue/20 text-ink-secondary'}`}>
+        {alreadySynced
+          ? 'This order already has a Zoho Sales Order — saving here also updates it there.'
+          : 'Editing items here only — nothing is sent to Zoho until the order syncs.'}
         {hasInactive && ' A row in red is no longer an active product in Zoho: remove it and add a replacement before saving.'}
       </div>
 

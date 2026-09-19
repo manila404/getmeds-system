@@ -41,6 +41,12 @@ const { setCustomerTin } = require('../services/customerTinService');
 // name. Zoho has Salesperson as a mandatory Sales Order field here.
 const salespersonService = require('../services/salespersonService');
 const { returnToFinanceIfHeld, isFinanceHold } = require('../services/financeHoldService');
+// Sep 19, 2026: rebuilds a Sales Order payload fresh from the order's
+// current database state — already used to re-send a queued retry with
+// whatever was last corrected (see that file's header note); reused here
+// so a Management edit pushed to an already-synced Zoho Sales Order sends
+// exactly the order's current state, not a hand-assembled subset of it.
+const { buildZohoSalesOrderPayload } = require('../services/zohoPayloadBuilder');
 const { isTestModeEnabled } = require('../middleware/testMode');
 const { computeLine, parseInclusiveTax } = require('../services/lineAmounts');
 const { hasColumn, tableExists } = require('../services/schemaColumns');
@@ -2786,13 +2792,16 @@ exports.resubmit = async (req, res, next) => {
 //
 // updateItems() above already lets the line items be corrected before Zoho
 // exists for an order — this is the same idea for everything else on the
-// order: delivery/intake fields, Division, Sub-division, Salesperson.
-// Same precondition (order.zoho_so_id must still be null — once a real Zoho
-// Sales Order exists, editing here would silently desync from it) and same
+// order: delivery/intake fields, Division, Sub-division, Salesperson. Same
 // ownership rule as updateItems (a MedRep may edit only their own order;
-// Management/admin may edit any). Scoped to 'draft' and
-// 'pending_management_approval' — editing an order already past the gate
-// makes no sense since Zoho already has (or is about to have) the record.
+// Management/admin may edit any).
+//
+// Once order.zoho_so_id is set a MedRep is refused, same as updateItems —
+// editing here would silently desync it from the real Zoho record.
+// Sep 19, 2026: Management/admin is the deliberate exception (see the
+// zoho_so_id check below) — they CAN edit an order Zoho already has, and
+// the edit is pushed to the real Sales Order right after, best-effort, and
+// logged in the trail either way.
 //
 // Deliberately does NOT allow changing customer_id, medrep_id, or
 // customer_type here — each has its own cascading implications (Zoho
@@ -2813,13 +2822,15 @@ exports.updateDetails = async (req, res, next) => {
     if (!canEditOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
-    if (order.zoho_so_id) {
+    const isManagementCaller = ['management', 'admin'].includes((req.user.role || '').toLowerCase());
+    const wasAlreadySynced = Boolean(order.zoho_so_id);
+    if (wasAlreadySynced && !isManagementCaller) {
       return res.status(409).json({
         success: false,
         error: {
           code: 'ALREADY_SYNCED',
           message: 'This order already has a Zoho Sales Order (' + (order.zoho_so_number || order.zoho_so_id) +
-            ') — details can no longer be edited here, since Zoho\'s own record would then be out of date.'
+            ') — only Management can still edit details on it, since editing here also updates the Zoho record.'
         }
       });
     }
@@ -2833,11 +2844,12 @@ exports.updateDetails = async (req, res, next) => {
      * "walang shipment date" could edit the price but not add the shipment
      * date they were being asked for (GM-20260912-0004).
      *
-     * The Zoho guard above is the real boundary: once a Sales Order exists,
-     * editing here would silently diverge from the record everyone else works
-     * from. Before that, the order is this app's alone and a correction is
-     * exactly what should happen. Terminal statuses are still refused —
-     * cancelled and deleted orders are finished, whatever Zoho knows.
+     * The Zoho guard above is the real boundary for a MedRep: once a Sales
+     * Order exists, editing here would silently diverge from the record
+     * everyone else works from — Management is the one exception, and pushes
+     * the edit back to Zoho rather than letting it diverge (see wasAlreadySynced
+     * above). Terminal statuses are refused for everyone regardless — cancelled
+     * and deleted orders are finished, whatever Zoho knows.
      */
     if (stateMachine.isTerminal(order.status)) {
       return res.status(409).json({
@@ -2847,7 +2859,9 @@ exports.updateDetails = async (req, res, next) => {
     }
 
     const clean = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
-    const isManagement = ['management', 'admin'].includes((req.user.role || '').toLowerCase());
+    // Same value as isManagementCaller above, just named the way the rest
+    // of this function already reads it (Division/Salesperson gating below).
+    const isManagement = isManagementCaller;
     const ALLOWED_INVOICING_FROM = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
     const body = req.body || {};
 
@@ -3016,25 +3030,48 @@ exports.updateDetails = async (req, res, next) => {
     const now = new Date().toISOString();
     const effectiveActor = await resolveActor(req.user, req.user.role === 'medrep' ? 'medrep' : 'management');
 
-    await db.transaction(async () => {
-      const setClause = Object.keys(updates).map((col) => `${col} = ?`).join(', ');
-      await db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`)
-        .run(...Object.values(updates), now, order.id);
+    // Sep 19, 2026: no longer one db.transaction() around the write AND the
+    // audit log — same reasoning as updateItems just above: a Zoho push has
+    // to happen in between now, and a network call has no business sitting
+    // inside an open Postgres transaction. The local write still fully
+    // commits on its own first.
+    const setClause = Object.keys(updates).map((col) => `${col} = ?`).join(', ');
+    await db.prepare(`UPDATE orders SET ${setClause}, updated_at = ? WHERE id = ?`)
+      .run(...Object.values(updates), now, order.id);
 
-      await logEvent({
-        orderId: order.id,
-        eventType: 'ORDER_DETAILS_EDITED',
-        oldStatus: order.status,
-        newStatus: order.status,
-        actorId: effectiveActor.id,
-        actorName: effectiveActor.name,
-        notes: `Order details changed before this order was sent to Zoho — ${changedSummary.join('; ')}.`,
-        metadata: { changes: updates }
-      });
-    })();
+    // Sep 19, 2026: Management editing details on an order Zoho already has
+    // — push the change to the real Sales Order. Best-effort: the local
+    // write above has already committed and is never undone by this
+    // failing; the outcome is only reported, in the trail and the response.
+    let zohoPushed = false;
+    let zohoError = null;
+    if (wasAlreadySynced) {
+      try {
+        const freshPayload = await buildZohoSalesOrderPayload(order.id);
+        await zoho.updateSalesOrder(order.zoho_so_id, freshPayload);
+        zohoPushed = true;
+      } catch (err) {
+        zohoError = err.message;
+      }
+    }
+
+    await logEvent({
+      orderId: order.id,
+      eventType: 'ORDER_DETAILS_EDITED',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: effectiveActor.id,
+      actorName: effectiveActor.name,
+      notes: wasAlreadySynced
+        ? `Order details changed by ${effectiveActor.name} after this order was already synced to Zoho ` +
+          `(${order.zoho_so_number || order.zoho_so_id}) — ${changedSummary.join('; ')}. ` +
+          (zohoPushed ? 'Pushed to the Zoho Sales Order.' : `Could NOT push to Zoho — ${zohoError}`)
+        : `Order details changed before this order was sent to Zoho — ${changedSummary.join('; ')}.`,
+      metadata: { changes: updates, zoho_pushed: zohoPushed, zoho_error: zohoError }
+    });
 
     const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
-    res.json({ success: true, data: { order: updatedOrder } });
+    res.json({ success: true, data: { order: updatedOrder, zoho_pushed: zohoPushed, zoho_error: zohoError } });
   } catch (err) { next(err); }
 };
 
@@ -3164,13 +3201,19 @@ exports.statusBeforeHold = statusBeforeHold;
 // can never recover on its own from a bad item — only replacing the item
 // does.
 //
-// Deliberately scoped to ONLY before a real Zoho Sales Order exists
-// (order.zoho_so_id is still null). Once zoho_so_id is set, the Sales
-// Order is a real record in Zoho — changing order_items here without also
-// updating that Zoho record would silently desync the two, which is a
-// different (harder, unsolved) problem than this endpoint is for. In
-// practice that means this only ever helps while zoho_sync_status is
-// 'failed' or 'pending' — exactly the case that motivated it.
+// Originally scoped to ONLY before a real Zoho Sales Order exists
+// (order.zoho_so_id null) — a MedRep still can't touch items past that
+// point, for exactly the reason this used to apply to everyone: changing
+// order_items without also updating the Zoho record would silently desync
+// the two. In practice that means it only ever helps a MedRep while
+// zoho_sync_status is 'failed' or 'pending' — the case that motivated it.
+//
+// Sep 19, 2026: Management/admin is the deliberate exception — see the
+// zoho_so_id check below. They CAN edit items on an order Zoho already
+// has, and the edit is pushed to the real Zoho Sales Order right after
+// (best-effort — the local edit is never undone by a Zoho failure, same
+// as every other best-effort push in this app), logged in the order's
+// trail either way.
 //
 // PATCH /api/orders/:id/items — body: { items: [{ product_id, quantity,
 // rate?, discount?, tax_percent?, tax_label? }, ...] }. Re-validates and
@@ -3187,18 +3230,20 @@ exports.updateItems = async (req, res, next) => {
     if (!canEditOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
-    if (order.zoho_so_id) {
+    const isManagementCaller = ['management', 'admin'].includes((req.user.role || '').toLowerCase());
+    const wasAlreadySynced = Boolean(order.zoho_so_id);
+    if (wasAlreadySynced && !isManagementCaller) {
       return res.status(409).json({
         success: false,
         error: {
           code: 'ALREADY_SYNCED',
           message: 'This order already has a Zoho Sales Order (' + (order.zoho_so_number || order.zoho_so_id) +
-            ') — items can no longer be edited here, since Zoho\'s own record would then be out of date.'
+            ') — only Management can still edit items on it, since editing here also updates the Zoho record.'
         }
       });
     }
-    if (order.status === 'cancelled') {
-      return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'Order is cancelled.' } });
+    if (stateMachine.isTerminal(order.status)) {
+      return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: `Order is ${order.status} — it can no longer be edited.` } });
     }
 
     const { items } = req.body;
@@ -3290,7 +3335,13 @@ exports.updateItems = async (req, res, next) => {
     const newItemsSummary = resolvedItems.map((it) => `${it.quantity}x ${it.name}`).join(', ');
 
     const now = new Date().toISOString();
-    const txn = db.transaction(async () => {
+    // Sep 19, 2026: no longer one db.transaction() around the write AND the
+    // audit log — a Zoho push has to happen between them now (so the trail
+    // can say whether it worked), and a slow/failing network call has no
+    // business sitting inside an open Postgres transaction holding a
+    // connection and row locks. The local write below still fully commits
+    // on its own before anything Zoho-related is even attempted.
+    await db.transaction(async () => {
       await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(order.id);
       // Sep 18, 2026: price_remark — same guard as create()'s item insert.
       const canWriteRemark = await hasColumn('order_items', 'price_remark');
@@ -3306,19 +3357,42 @@ exports.updateItems = async (req, res, next) => {
         await insertItem.run(...values);
       }
       await db.prepare('UPDATE orders SET total_amount = ?, updated_at = ? WHERE id = ?').run(total_amount, now, order.id);
+    })();
 
-      await logEvent({
-        orderId: order.id,
-        eventType: 'ORDER_ITEMS_EDITED',
-        oldStatus: order.status,
-        newStatus: order.status,
-        actorId: req.user?.id || null,
-        actorName: req.user?.name || 'User',
-        notes: `Order items changed before this order was sent to Zoho — was: ${oldItemsSummary}; now: ${newItemsSummary}. New total: ₱${total_amount.toFixed(2)}.`,
-        metadata: { oldItemsSummary, newItemsSummary, total_amount }
-      });
+    // Sep 19, 2026: Management editing items on an order Zoho already has —
+    // push the new items to the real Sales Order. Best-effort, same as
+    // every other Zoho push in this app: the local edit above has already
+    // committed and is never undone by this failing; the outcome is just
+    // reported, in the trail and in the response, rather than blocking
+    // anything on it.
+    let zohoPushed = false;
+    let zohoError = null;
+    if (wasAlreadySynced) {
+      try {
+        const freshPayload = await buildZohoSalesOrderPayload(order.id);
+        await zoho.updateSalesOrder(order.zoho_so_id, freshPayload);
+        zohoPushed = true;
+      } catch (err) {
+        zohoError = err.message;
+      }
+    }
+
+    const actorForLog = await resolveActor(req.user, isManagementCaller ? 'management' : 'medrep');
+    await logEvent({
+      orderId: order.id,
+      eventType: 'ORDER_ITEMS_EDITED',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: actorForLog.id,
+      actorName: actorForLog.name,
+      notes: wasAlreadySynced
+        ? `Order items changed by ${actorForLog.name} after this order was already synced to Zoho ` +
+          `(${order.zoho_so_number || order.zoho_so_id}) — was: ${oldItemsSummary}; now: ${newItemsSummary}. ` +
+          `New total: ₱${total_amount.toFixed(2)}. ` +
+          (zohoPushed ? 'Pushed to the Zoho Sales Order.' : `Could NOT push to Zoho — ${zohoError}`)
+        : `Order items changed before this order was sent to Zoho — was: ${oldItemsSummary}; now: ${newItemsSummary}. New total: ₱${total_amount.toFixed(2)}.`,
+      metadata: { oldItemsSummary, newItemsSummary, total_amount, zoho_pushed: zohoPushed, zoho_error: zohoError }
     });
-    await txn();
 
     const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
     const updatedItems = await db.prepare(`
@@ -3327,13 +3401,12 @@ exports.updateItems = async (req, res, next) => {
     `).all(order.id);
 
     // Sep 12, 2026: re-pricing or re-lining a held order answers whatever
-    // Finance asked for, so it goes back to them. Reachable only before the
-    // order reaches Zoho (the guard above), which is exactly when a correction
-    // is still possible. Deliberately NOT wired into updateDetails: that
-    // endpoint refuses anything but draft/pending_management_approval, so it
-    // can never see a held order and the call would be dead code.
+    // Finance asked for, so it goes back to them. Only ever fires for an
+    // order still on_hold-by-Finance (checked inside), which an
+    // already-synced order past the whole Finance stage will never be —
+    // harmless no-op there.
     await returnToFinanceIfHeld(order, req.user, { reason: 'Order items updated' });
 
-    res.json({ success: true, data: { order: updatedOrder, items: updatedItems } });
+    res.json({ success: true, data: { order: updatedOrder, items: updatedItems, zoho_pushed: zohoPushed, zoho_error: zohoError } });
   } catch (err) { next(err); }
 };

@@ -73,6 +73,33 @@
  *   `updateContactTin` above remains the only edit this app can make to a
  *   contact, and it still only touches that one field.
  *
+ *   Sep 19, 2026: `updateSalesOrder` is a FIFTH deliberate, reviewed
+ *   exception, and the one closest to the create-only line this file has
+ *   drawn since Aug 27 — it changes a Sales Order that already exists.
+ *
+ *   It exists because Management asked for it directly: an order can sit
+ *   as a draft for days before it finally reaches Zoho, and by the time a
+ *   correction is needed the order already has a real Sales Order there —
+ *   until now, that meant the correction could only ever be made by hand,
+ *   in Zoho, with nothing in this app's own trail to show it happened.
+ *
+ *   Deliberately NOT available to a MedRep — orders.controller.js's
+ *   updateDetails/updateItems still refuse them the moment zoho_so_id is
+ *   set, exactly as before this existed. Management/admin only, and every
+ *   use logs an ORDER_DETAILS_EDITED/ORDER_ITEMS_EDITED event either way —
+ *   whether the push to Zoho succeeded or not.
+ *
+ *   Resends the Sales Order's full current state (customer, every line
+ *   item, every field createSalesOrder itself would send) rather than a
+ *   partial patch — the same "replace wholesale" shape
+ *   orders.controller.js's own updateItems already uses locally
+ *   (DELETE + re-INSERT order_items), so there is one mental model for
+ *   what an edit means, not two. No local pre-check on the Sales Order's
+ *   own Zoho status (invoiced, shipped, paid...) gates this — Zoho's own
+ *   API is the judge of whether a given edit is still possible on a Sales
+ *   Order in that state, and its refusal is surfaced as the error rather
+ *   than guessed at here.
+ *
  *   Sep 8, 2026 (2): `addSalesOrderAttachment` is a THIRD deliberate,
  *   reviewed exception, same day, same reasoning. This app already lets
  *   MedRep/Management/Finance attach files to an order locally (Proof of
@@ -113,6 +140,23 @@ class ZohoAdapter {
    * @returns {Promise<{code:number, message:string, salesorder:object}>}
    */
   async createSalesOrder(orderData) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Sep 19, 2026: update an EXISTING Sales Order — see this class's header
+   * comment for why this is the fifth deliberate exception to create-only.
+   * Management/admin only, gated at orders.controller.js, never called for
+   * an order still owned by the MedRep who raised it. Resends the order's
+   * full current state, same shape as createSalesOrder's `orderData` — see
+   * services/zohoPayloadBuilder.js, which builds exactly that shape fresh
+   * from the database for this call.
+   *
+   * @param {string} salesorderId - an existing Zoho Sales Order id
+   * @param {object} orderData - same shape as createSalesOrder's
+   * @returns {Promise<{code:number, message:string, salesorder:object}>}
+   */
+  async updateSalesOrder(salesorderId, orderData) {
     throw new Error('Not implemented');
   }
 

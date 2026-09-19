@@ -143,6 +143,21 @@ describe('ZohoAdapter contract — named workflow writes only; no payment, conta
     }
   });
 
+  // Sep 19, 2026: same "declared everywhere" check every other new write
+  // method has gotten here (see the file's own comments on
+  // listSalespersons, updateContactTin, addSalesOrderAttachment,
+  // createContact, confirmSalesOrder all having been forgotten from the
+  // facade at least once) — updateSalesOrder is the first write against an
+  // EXISTING Sales Order this app makes at all, so it earns the same check.
+  it('declares updateSalesOrder on the contract, both adapters, and the facade', () => {
+    const LiveZohoAdapter = require('../src/integrations/zoho/LiveZohoAdapter');
+    const zoho = require('../src/integrations/zoho');
+    expect(Object.getOwnPropertyNames(ZohoAdapter.prototype)).toContain('updateSalesOrder');
+    expect(Object.getOwnPropertyNames(LiveZohoAdapter.prototype)).toContain('updateSalesOrder');
+    expect(Object.getOwnPropertyNames(MockZohoAdapter.prototype)).toContain('updateSalesOrder');
+    expect(typeof zoho.updateSalesOrder).toBe('function');
+  });
+
   const WORKFLOW_METHODS = [
     'confirmSalesOrder', 'createInvoiceFromSalesOrder', 'markInvoiceSent',
     'createPackageForSalesOrder', 'createShipmentForPackage', 'markShipmentDelivered'

@@ -11,6 +11,18 @@ const RETRY_BASE_MS = Number(process.env.ZOHO_REQUEST_RETRY_BASE_MS) || 800;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Today's date in the Philippines, as YYYY-MM-DD — comparable directly
+ * against expected_shipment_date, which is stored the same way. Manila is
+ * UTC+8 all year, no daylight saving, so a fixed offset is exact rather
+ * than an approximation (same technique as dispatch.controller.js's
+ * manilaTodayStartIso).
+ */
+function manilaTodayDateString(now = new Date()) {
+  const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+  return new Date(now.getTime() + MANILA_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/**
  * Turn undici's opaque `TypeError: fetch failed` into something that names
  * the actual problem.
  *
@@ -235,6 +247,44 @@ class LiveZohoAdapter extends ZohoAdapter {
       );
     }
 
+    const body = await this._buildSalesOrderBody(orderData);
+    body.customer_id = contactId;
+    body.date = new Date().toISOString().slice(0, 10);
+
+    const result = await this._request('POST', '/salesorders', { body });
+    return { code: 0, message: 'Sales order created successfully', salesorder: result.salesorder };
+  }
+
+  /**
+   * Sep 19, 2026: see ZohoAdapter.js's header note on why this exists.
+   * Same body as createSalesOrder, built the same way (_buildSalesOrderBody
+   * below), so the two can never quietly drift on what a field means — the
+   * only differences are the HTTP verb/path and that `date` (when the
+   * order was originally raised) is deliberately left untouched here: an
+   * edit is not a new order, and overwriting it with today's date would
+   * misdate every Sales Order the moment it was ever corrected.
+   */
+  async updateSalesOrder(salesorderId, orderData) {
+    if (!salesorderId) throw new Error('updateSalesOrder requires an existing Zoho Sales Order id');
+    const contactId = orderData.zoho_customer_id;
+    if (!contactId) {
+      throw new Error('updateSalesOrder requires an existing Zoho contact id (zoho_customer_id)');
+    }
+
+    const body = await this._buildSalesOrderBody(orderData);
+    body.customer_id = contactId;
+
+    const result = await this._request('PUT', `/salesorders/${salesorderId}`, { body });
+    return { code: 0, message: 'Sales order updated successfully', salesorder: result.salesorder };
+  }
+
+  /**
+   * Everything createSalesOrder and updateSalesOrder share — every field
+   * except `customer_id` (set by each caller, since only createSalesOrder's
+   * even requires it up front) and `date` (createSalesOrder's own concern —
+   * see updateSalesOrder's note on why an edit must never touch it).
+   */
+  async _buildSalesOrderBody(orderData) {
     const lineItems = (orderData.items || []).map((item) => {
       const li = {
         name: item.name,
@@ -262,8 +312,8 @@ class LiveZohoAdapter extends ZohoAdapter {
       : `Order No.: ${orderData.getmeds_order_id}`;
 
     const body = {
-      customer_id: contactId,
-      date: new Date().toISOString().slice(0, 10),
+      // customer_id and date are each caller's own concern — see this
+      // method's header note.
       reference_number: orderData.getmeds_order_id,
       notes,
       line_items: lineItems
@@ -450,12 +500,23 @@ class LiveZohoAdapter extends ZohoAdapter {
     // entirely when blank, the same convention as every optional field here:
     // an omitted field leaves Zoho's own default alone rather than writing an
     // empty string over it.
-    if (orderData.expected_shipment_date) {
+    //
+    // Sep 19, 2026: also omitted when it has already passed. Management
+    // asked for this directly — an order can sit as a draft for days (a
+    // customer held for Zoho, an approval waiting on someone), and by the
+    // time it is finally raised the date the MedRep picked at intake is
+    // behind today. Sending it anyway is what was blocking the Sales Order
+    // from being created at all. Rather than guess a replacement date
+    // (today? tomorrow? neither is what anyone actually meant), this leaves
+    // the field out — Zoho's own default applies, same as an order that
+    // never had one. What the MedRep originally entered is untouched in
+    // this app's own record (orders.intake_expected_shipment_date); only
+    // what gets sent to Zoho is adjusted.
+    if (orderData.expected_shipment_date && orderData.expected_shipment_date >= manilaTodayDateString()) {
       body.shipment_date = orderData.expected_shipment_date;
     }
 
-    const result = await this._request('POST', '/salesorders', { body });
-    return { code: 0, message: 'Sales order created successfully', salesorder: result.salesorder };
+    return body;
   }
 
   async getSalesOrder(salesorderId) {

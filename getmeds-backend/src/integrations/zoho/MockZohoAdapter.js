@@ -11,6 +11,12 @@ const TEMPLATE_ID_BY_INVOICING_FROM = {
   'Getmeds Philippines Inc.': '2254168000000019003'
 };
 
+// Sep 19, 2026: mirrors LiveZohoAdapter's manilaTodayDateString exactly.
+function manilaTodayDateString(now = new Date()) {
+  const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+  return new Date(now.getTime() + MANILA_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 /**
  * MockZohoAdapter — pure in-memory, zero network calls, zero external
  * dependency. This is the default and the safest possible mode: it is
@@ -114,6 +120,78 @@ class MockZohoAdapter extends ZohoAdapter {
     }
 
     const { salesorder_id, salesorder_number } = this._nextSalesOrderId();
+
+    // Mirrors the real request body shape (organization_id + auth would be
+    // added by LiveZohoAdapter; here we just log what *would* be sent).
+    this._log('[ZOHO_MOCK] Would POST /inventory/v1/salesorders:', {
+      customer_id: contact.contact_id,
+      reference_number: orderData.getmeds_order_id,
+      // Mirrors Zoho: an order that states no preference is VAT-inclusive.
+      is_inclusive_tax: typeof orderData.is_inclusive_tax === 'boolean' ? orderData.is_inclusive_tax : true,
+      line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity }))
+    });
+
+    const salesorder = {
+      salesorder_id,
+      salesorder_number,
+      status: 'draft',
+      customer_id: contact.contact_id,
+      customer_name: contact.contact_name || orderData.customer_name,
+      date: new Date().toISOString().slice(0, 10),
+      ...(await this._buildSalesOrderFields(orderData)),
+      created_time: new Date().toISOString(),
+      _mock: true
+    };
+
+    this._salesOrders.set(salesorder_id, salesorder);
+    return { code: 0, message: 'Sales order created successfully [MOCK MODE]', salesorder };
+  }
+
+  /**
+   * Sep 19, 2026: mirrors LiveZohoAdapter's updateSalesOrder — see that
+   * file's header note and ZohoAdapter.js's for why this exists at all.
+   * Same shared field-builder as createSalesOrder (_buildSalesOrderFields
+   * below), so the two can't quietly drift; identity fields
+   * (salesorder_id/number/status/date/created_time) are preserved exactly
+   * as they already were, same reasoning as LiveZohoAdapter never touching
+   * `date` on an edit.
+   */
+  async updateSalesOrder(salesorderId, orderData) {
+    if (this._simulatedOutage) {
+      throw new Error('Simulated Zoho API outage (Test Mode) — updateSalesOrder rejected on purpose.');
+    }
+    const existing = this._salesOrders.get(salesorderId);
+    if (!existing) {
+      throw new Error(`The Sales Order ID given seems to be incorrect. [MOCK MODE] (${salesorderId})`);
+    }
+
+    let contact = orderData.zoho_customer_id ? this._contacts.get(orderData.zoho_customer_id) : null;
+    if (!contact) {
+      contact = { contact_id: orderData.zoho_customer_id || existing.customer_id, contact_name: orderData.customer_name };
+    }
+
+    this._log('[ZOHO_MOCK] Would PUT /inventory/v1/salesorders/' + salesorderId, {
+      customer_id: contact.contact_id,
+      line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity }))
+    });
+
+    const salesorder = {
+      ...existing,
+      customer_id: contact.contact_id,
+      customer_name: contact.contact_name || orderData.customer_name || existing.customer_name,
+      ...(await this._buildSalesOrderFields(orderData))
+    };
+
+    this._salesOrders.set(salesorderId, salesorder);
+    return { code: 0, message: 'Sales order updated successfully [MOCK MODE]', salesorder };
+  }
+
+  /**
+   * Everything createSalesOrder and updateSalesOrder share — every field
+   * except the identity ones each caller sets itself
+   * (salesorder_id/number/status/date/customer_id/customer_name).
+   */
+  async _buildSalesOrderFields(orderData) {
     const isCredit =
       orderData.customer_type === 'credit' || orderData.customer_master_type === 'credit';
     const customerTypeLabel = isCredit ? 'Credit Customer' : 'Non-Credit Patient';
@@ -129,16 +207,6 @@ class MockZohoAdapter extends ZohoAdapter {
       ? `TEST — DO NOT FULFILL. Order No.: ${orderData.getmeds_order_id}`
       : `Order No.: ${orderData.getmeds_order_id}`;
 
-    // Mirrors the real request body shape (organization_id + auth would be
-    // added by LiveZohoAdapter; here we just log what *would* be sent).
-    this._log('[ZOHO_MOCK] Would POST /inventory/v1/salesorders:', {
-      customer_id: contact.contact_id,
-      reference_number: orderData.getmeds_order_id,
-      // Mirrors Zoho: an order that states no preference is VAT-inclusive.
-      is_inclusive_tax: typeof orderData.is_inclusive_tax === 'boolean' ? orderData.is_inclusive_tax : true,
-      line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity }))
-    });
-
     // Mirrors LiveZohoAdapter's salesperson resolution exactly, refusal
     // included: the name is resolved to an id against this mock's own list
     // and an unmatched one throws. Being lenient here would let the suite
@@ -153,23 +221,21 @@ class MockZohoAdapter extends ZohoAdapter {
       throw new SalespersonNotFoundError(salespersonName);
     }
 
-    const salesorder = {
-      salesorder_id,
-      salesorder_number,
-      status: 'draft',
-      customer_id: contact.contact_id,
-      customer_name: contact.contact_name || orderData.customer_name,
+    return {
       total: orderData.total_amount,
       reference_number: orderData.getmeds_order_id,
       notes,
       salesperson_id: salespersonMatch.salesperson_id,
       salesperson_name: salespersonMatch.salesperson_name,
-      date: new Date().toISOString().slice(0, 10),
       // Sep 9, 2026: mirrors LiveZohoAdapter's shipment_date so a test can
       // assert what would have been sent. Omitted when blank, exactly as
       // there — the mock being lenient where live is strict is the divergence
       // that hid the listSalespersons parsing bug.
-      ...(orderData.expected_shipment_date ? { shipment_date: orderData.expected_shipment_date } : {}),
+      // Sep 19, 2026: also omitted when it has already passed — see
+      // LiveZohoAdapter's Sep 19 note on why.
+      ...(orderData.expected_shipment_date && orderData.expected_shipment_date >= manilaTodayDateString()
+        ? { shipment_date: orderData.expected_shipment_date }
+        : {}),
       line_items: (orderData.items || []).map((item) => ({
         item_id: item.zoho_item_id || null,
         name: item.name,
@@ -197,13 +263,8 @@ class MockZohoAdapter extends ZohoAdapter {
       // what would have been sent without needing a live Zoho call.
       ...(TEMPLATE_ID_BY_INVOICING_FROM[orderData.invoicing_from]
         ? { template_id: TEMPLATE_ID_BY_INVOICING_FROM[orderData.invoicing_from], template_name: orderData.invoicing_from === '2mg Incorporated' ? '2MG Template' : 'Standard Template' }
-        : {}),
-      created_time: new Date().toISOString(),
-      _mock: true
+        : {})
     };
-
-    this._salesOrders.set(salesorder_id, salesorder);
-    return { code: 0, message: 'Sales order created successfully [MOCK MODE]', salesorder };
   }
 
   async getSalesOrder(salesorderId) {

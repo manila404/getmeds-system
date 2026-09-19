@@ -338,13 +338,22 @@ const OrderDetailPage = () => {
   });
 
   // Aug 31, 2026: saves a corrected line-item list (see isEditingItems
-  // above). Only ever reachable while order.zoho_so_id is still null —
-  // the backend rejects this outright once a real Zoho Sales Order exists,
-  // so there's no risk of silently desyncing this app from Zoho.
+  // above). A MedRep only ever reaches this while order.zoho_so_id is still
+  // null — the backend refuses it outright once a real Zoho Sales Order
+  // exists.
+  // Sep 19, 2026: Management is the exception — the backend now pushes the
+  // corrected items to the real Sales Order for them instead of refusing.
   const updateItemsMutation = useMutation({
     mutationFn: (payloadItems) => client.patch(`/api/orders/${id}/items`, { items: payloadItems }).then(r => r.data),
-    onSuccess: () => {
-      toast.success('Order items updated.');
+    onSuccess: (res) => {
+      if (res.data?.zoho_pushed) {
+        toast.success('Order items updated, and pushed to the Zoho Sales Order.');
+      } else if (res.data?.zoho_error) {
+        toast.success('Order items updated.');
+        toast.error(`Could not push the change to Zoho: ${res.data.zoho_error}`, { duration: 8000 });
+      } else {
+        toast.success('Order items updated.');
+      }
       setIsEditingItems(false);
       qc.invalidateQueries({ queryKey: ['order', id] });
     },
@@ -352,12 +361,20 @@ const OrderDetailPage = () => {
   });
 
   // Sep 7, 2026 (2): saves the order-level fields (see isEditingDetails
-  // above). Same "before Zoho exists" precondition as items — the backend
-  // rejects this outright once order.zoho_so_id is set.
+  // above). Same precondition and Sep 19 Management exception as items.
   const updateDetailsMutation = useMutation({
     mutationFn: (payload) => client.patch(`/api/orders/${id}/details`, payload).then(r => r.data),
-    onSuccess: () => {
-      toast.success('Order details updated.');
+    onSuccess: (res) => {
+      // Sep 19, 2026: only present at all once this order already had a
+      // Zoho Sales Order — see orders.controller.js's updateDetails.
+      if (res.data?.zoho_pushed) {
+        toast.success('Order details updated, and pushed to the Zoho Sales Order.');
+      } else if (res.data?.zoho_error) {
+        toast.success('Order details updated.');
+        toast.error(`Could not push the change to Zoho: ${res.data.zoho_error}`, { duration: 8000 });
+      } else {
+        toast.success('Order details updated.');
+      }
       setIsEditingDetails(false);
       qc.invalidateQueries({ queryKey: ['order', id] });
     },
@@ -748,12 +765,23 @@ const OrderDetailPage = () => {
             edit window became "until Zoho has it", so a held or
             awaiting-Finance order that never synced (GM-20260913-0002) had an
             edit the API would accept and no way to reach it. Finished orders
-            are still read-only. Once an order IS in Zoho, it is edited there
-            and the change is copied back automatically. */}
-        {!order.zoho_so_id && !['completed', 'cancelled', 'deleted'].includes(order.status) && (
+            are still read-only.
+
+            Sep 19, 2026: Management can now edit this even once Zoho HAS the
+            order — orders.controller.js's updateDetails pushes the change to
+            the real Sales Order in that case rather than refusing it. A
+            MedRep still only gets here before Zoho has it, same as before. */}
+        {(!order.zoho_so_id || isManagementUser) && !['completed', 'cancelled', 'deleted'].includes(order.status) && (
           <div className="mt-4 pt-4 border-t border-gray-100">
             <div className="flex items-center justify-between mb-3">
-              <p className="text-xs font-medium text-ink-secondary uppercase">Order Details</p>
+              <p className="text-xs font-medium text-ink-secondary uppercase">
+                Order Details
+                {order.zoho_so_id && (
+                  <span className="ml-2 normal-case font-normal text-amber-700">
+                    · already in Zoho — an edit here updates the real Sales Order too
+                  </span>
+                )}
+              </p>
               {!isEditingDetails && (
                 <button
                   type="button"
@@ -1151,17 +1179,22 @@ const OrderDetailPage = () => {
                   <p className="text-xs text-ink-secondary">
                     {/* Sep 14, 2026: says where to go, not just "no". Edits made in
                         Zoho are copied into these items and the total
-                        automatically (zohoLineSyncService). */}
+                        automatically (zohoLineSyncService).
+                        Sep 19, 2026: Management gets "Edit Items" here too now
+                        (below) instead of being sent to Zoho — the edit is
+                        pushed there for them. */}
                     {order.zoho_so_id
-                      ? `This order is in Zoho${order.zoho_so_number ? ` (${order.zoho_so_number})` : ''} — edit its items there. Changes made in Zoho are copied here automatically; use Sync from Zoho to pull them now.`
+                      ? isManagementUser
+                        ? `This order is in Zoho${order.zoho_so_number ? ` (${order.zoho_so_number})` : ''} — editing here also updates the real Sales Order.`
+                        : `This order is in Zoho${order.zoho_so_number ? ` (${order.zoho_so_number})` : ''} — edit its items there. Changes made in Zoho are copied here automatically; use Sync from Zoho to pull them now.`
                       : ''}
                   </p>
-                  {!order.zoho_so_id && !['completed', 'cancelled', 'deleted'].includes(order.status) && (
+                  {(!order.zoho_so_id || isManagementUser) && !['completed', 'cancelled', 'deleted'].includes(order.status) && (
                     <button
                       type="button"
                       onClick={() => startEditingItems(items)}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-getmeds-blue/40 text-getmeds-blue-dark rounded hover:bg-getmeds-blue/10"
-                      title="Fix a bad line item (e.g. a product that's since gone inactive in Zoho) before this order syncs"
+                      title={order.zoho_so_id ? 'This order is already in Zoho — the edit is pushed to the real Sales Order too' : "Fix a bad line item (e.g. a product that's since gone inactive in Zoho) before this order syncs"}
                     >
                       <Pencil className="w-3.5 h-3.5" /> Edit Items
                     </button>
@@ -1217,6 +1250,7 @@ const OrderDetailPage = () => {
                   onCancel={() => setIsEditingItems(false)}
                   onSave={saveDraftItems}
                   saving={updateItemsMutation.isPending}
+                  alreadySynced={Boolean(order.zoho_so_id)}
                 />
               )}
             </div>
