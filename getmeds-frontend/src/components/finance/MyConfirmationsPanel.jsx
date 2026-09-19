@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { X, ShieldCheck, Calendar, Loader2 } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
@@ -117,7 +118,15 @@ const MyConfirmationsPanel = ({ onClose }) => {
           {orders.map((o) => (
             <li key={o.id} className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1">
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}</p>
+                {/* "orders should be clickable so the details and trail will
+                    show" — this was styled like a link (blue, mono, bold)
+                    without ever being one. */}
+                <Link
+                  to={`/orders/${o.id}`}
+                  className="block text-sm font-mono font-semibold text-getmeds-blue hover:text-getmeds-blue-dark hover:underline w-fit"
+                >
+                  {o.getmeds_order_id}
+                </Link>
                 <p className="text-[13px] text-ink-primary truncate">{o.customer_name || '—'}</p>
                 {o.zoho_so_number && (
                   <p className="text-[11px] text-ink-secondary">

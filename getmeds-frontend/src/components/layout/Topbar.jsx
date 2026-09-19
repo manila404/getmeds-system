@@ -78,7 +78,11 @@ const Topbar = ({ onToggleSidebar }) => {
   const goToOrder = (order) => {
     setIsSearchOpen(false);
     setSearchQuery('');
-    navigate(`/orders/${order.getmeds_order_id}`);
+    // The route (and GET /api/orders/:id) takes the numeric row id, not the
+    // human-readable order number — every other working order link in this
+    // app uses order.id; this one didn't, and 500'd on click. Fixed here and
+    // everywhere else that copied the same wrong assumption.
+    navigate(`/orders/${order.id}`);
   };
 
   // Close notification popover on outside click

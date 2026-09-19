@@ -121,7 +121,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
           <div className="flex items-center gap-2 shrink-0">
             {order && (
               <a
-                href={`/orders/${order.getmeds_order_id}`}
+                href={`/orders/${order.id}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"

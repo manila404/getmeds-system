@@ -6,7 +6,7 @@ import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import MyConfirmationsPanel from '../../components/finance/MyConfirmationsPanel';
 import SalesBySalespersonPanel from '../../components/finance/SalesBySalespersonPanel';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, Link } from 'react-router-dom';
 import { FINANCE_STAGES, financeStageLabel } from '../../constants/financeStages';
 import { formatPHT } from '../../utils/dateUtils';
 
@@ -746,9 +746,14 @@ const FinanceQueuePage = () => {
               return (
                 <li key={order.id} className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-mono font-semibold text-getmeds-blue">
+                    {/* "orders should be clickable so the details and trail
+                        will show" — was styled like a link, never was one. */}
+                    <Link
+                      to={`/orders/${order.id}`}
+                      className="block text-sm font-mono font-semibold text-getmeds-blue hover:text-getmeds-blue-dark hover:underline w-fit"
+                    >
                       {order.getmeds_order_id}
-                    </p>
+                    </Link>
                     <p className="text-[13px] text-ink-primary truncate">
                       {order.customer_name}
                       <span className="text-ink-secondary"> · {order.medrep_name}</span>
@@ -863,7 +868,12 @@ const FinanceQueuePage = () => {
                 <li key={order.id} className="p-4">
                   <div className="flex justify-between items-start gap-4">
                     <div className="min-w-0">
-                      <p className="text-sm font-mono font-semibold text-getmeds-blue">{order.getmeds_order_id}</p>
+                      <Link
+                        to={`/orders/${order.id}`}
+                        className="block text-sm font-mono font-semibold text-getmeds-blue hover:text-getmeds-blue-dark hover:underline w-fit"
+                      >
+                        {order.getmeds_order_id}
+                      </Link>
                       <p className="text-sm text-ink-primary mt-0.5 font-medium truncate">{order.customer_name}</p>
                       <p className="text-xs text-ink-secondary">{order.medrep_name}</p>
                       {order.zoho_so_number && (
