@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import client from '../../api/client';
+import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
 import { useSyncJobs } from '../../context/SyncJobsContext';
@@ -81,6 +82,18 @@ const assignedTo = (order) => {
 };
 
 const ManagementDashboardPage = () => {
+  // Sep 21, 2026: this component is now also mounted at /team-lead. That
+  // route is read-only by design — see App.jsx's route comment — so the two
+  // Zoho-sync buttons below (the only things on this page that write
+  // anything, even though it's only local rows) are hidden for this role,
+  // and the heading reads as a team view rather than a global one. Nothing
+  // else on this page changes: the KPI cards, status breakdown, filters, CSV
+  // export and the table's "View" link are all already read/navigate-only,
+  // and the API already returns this account's team instead of a division
+  // once the caller's role is 'team_lead' — see management.controller.js.
+  const { user } = useAuth();
+  const isTeamLead = (user?.role || '').toLowerCase() === 'team_lead';
+
   const [statusFilter, setStatusFilter] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -242,8 +255,14 @@ const ManagementDashboardPage = () => {
       <StockAnnouncementsBanner />
       <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-ink-primary">Management Dashboard</h1>
-          <p className="text-sm text-ink-secondary mt-1">Real-time overview of all orders and KPIs.</p>
+          <h1 className="text-2xl font-semibold text-ink-primary">
+            {isTeamLead ? 'My Team' : 'Management Dashboard'}
+          </h1>
+          <p className="text-sm text-ink-secondary mt-1">
+            {isTeamLead
+              ? 'Real-time overview of your team\'s orders and KPIs — view only.'
+              : 'Real-time overview of all orders and KPIs.'}
+          </p>
         </div>
 
         <div className="flex flex-col items-start md:items-end gap-1.5">
@@ -252,57 +271,69 @@ const ManagementDashboardPage = () => {
               <RefreshCw className="w-4 h-4" /> Refresh
             </button>
 
-            <button
-              onClick={() => startSync('salesorders', 'quick')}
-              disabled={importBusy}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
-              title="Fast — only the Sales Orders created or changed in Zoho since the last import (read-only)"
-            >
-              <Zap size={15} />
-              Quick Sync Orders
-            </button>
+            {/* Sep 21, 2026: the only two controls on this page that write
+                anything — a Team Lead's view is read only, full stop, so
+                these (and the sync status they report on below) don't show
+                for that role. See this component's own top-of-file note. */}
+            {!isTeamLead && (
+              <>
+                <button
+                  onClick={() => startSync('salesorders', 'quick')}
+                  disabled={importBusy}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                  title="Fast — only the Sales Orders created or changed in Zoho since the last import (read-only)"
+                >
+                  <Zap size={15} />
+                  Quick Sync Orders
+                </button>
 
-            <button
-              onClick={() => startSync('salesorders', 'full')}
-              disabled={importBusy}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
-              title={
-                `Pulls Sales Orders straight from Zoho — including ones raised in Zoho rather than here — and rebuilds ` +
-                `each order's trail from Zoho's own history. Read-only: nothing is ever written to Zoho. ` +
-                `Up to ${importStatus.per_run_limit || 500} per run; run it again to continue a large history.`
-              }
-            >
-              <DownloadCloud size={15} />
-              Retrieve All Sales Orders
-            </button>
+                <button
+                  onClick={() => startSync('salesorders', 'full')}
+                  disabled={importBusy}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                  title={
+                    `Pulls Sales Orders straight from Zoho — including ones raised in Zoho rather than here — and rebuilds ` +
+                    `each order's trail from Zoho's own history. Read-only: nothing is ever written to Zoho. ` +
+                    `Up to ${importStatus.per_run_limit || 500} per run; run it again to continue a large history.`
+                  }
+                >
+                  <DownloadCloud size={15} />
+                  Retrieve All Sales Orders
+                </button>
+              </>
+            )}
           </div>
 
-          <SyncProgressIndicator
-            job={importJob}
-            labels={{ full: 'Retrieving Sales Orders from Zoho', quick: 'Quick Sync (Sales Orders)' }}
-          />
+          {!isTeamLead && (
+            <>
+              <SyncProgressIndicator
+                job={importJob}
+                labels={{ full: 'Retrieving Sales Orders from Zoho', quick: 'Quick Sync (Sales Orders)' }}
+              />
 
-          {!importJob && (importStatus.imported_orders > 0 || importStatus.last_full_import_at) && (
-            <p className="text-[11px] text-ink-secondary text-right">
-              {(importStatus.imported_orders || 0).toLocaleString()} order(s) imported from Zoho
-              {importStatus.zoho_log_entries
-                ? `, ${importStatus.zoho_log_entries.toLocaleString()} Zoho log entries on file`
-                : ''}
-              {importStatus.last_full_import_at ? ` — last full import ${formatPHT(importStatus.last_full_import_at)}` : ''}
-              {/* The detail backlog, stated rather than left to be discovered.
-                  An order here with no line items is not broken — its summary
-                  came from Zoho's list and its detail has not been fetched
-                  yet. Opening the order pulls it on demand; so does another
-                  run of the import. */}
-              {importStatus.awaiting_detail > 0 && (
-                <>
-                  <br />
-                  {importStatus.awaiting_detail.toLocaleString()} still awaiting full detail (line items + Zoho
-                  history) — {importStatus.per_run_limit?.toLocaleString?.() || importStatus.per_run_limit} per run,
-                  or pulled on demand when the order is opened.
-                </>
+              {!importJob && (importStatus.imported_orders > 0 || importStatus.last_full_import_at) && (
+                <p className="text-[11px] text-ink-secondary text-right">
+                  {(importStatus.imported_orders || 0).toLocaleString()} order(s) imported from Zoho
+                  {importStatus.zoho_log_entries
+                    ? `, ${importStatus.zoho_log_entries.toLocaleString()} Zoho log entries on file`
+                    : ''}
+                  {importStatus.last_full_import_at ? ` — last full import ${formatPHT(importStatus.last_full_import_at)}` : ''}
+                  {/* The detail backlog, stated rather than left to be discovered.
+                      An order here with no line items is not broken — its summary
+                      came from Zoho's list and its detail has not been fetched
+                      yet. Opening the order pulls it on demand; so does another
+                      run of the import. */}
+                  {importStatus.awaiting_detail > 0 && (
+                    <>
+                      <br />
+                      {importStatus.awaiting_detail.toLocaleString()} still awaiting full detail (line items + Zoho
+                      history) — {importStatus.per_run_limit?.toLocaleString?.() || importStatus.per_run_limit} per run,
+                      or pulled on demand when the order is opened.
+                    </>
+                  )}
+                </p>
               )}
-            </p>
+            </>
           )}
         </div>
       </div>

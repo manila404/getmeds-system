@@ -21,6 +21,8 @@ const DashboardPage = () => {
     case 'management':
     case 'admin':
       return <Navigate to="/management" replace />;
+    case 'team_lead':
+      return <Navigate to="/team-lead" replace />;
     default:
       return <Navigate to="/orders" replace />;
   }

@@ -41,6 +41,19 @@ const REQUIRED_STATUSES = [
 ];
 
 /**
+ * The roles this build writes to users.role and order_events.actor_role.
+ * Kept in the same order as schema.pg.sql and src/constants/roles.js so the
+ * three can be eyeballed against each other, same convention as
+ * REQUIRED_STATUSES above.
+ *
+ * Sep 21, 2026: 'team_lead' added — a view-only role scoped to the MedReps
+ * assigned to it (users.team_lead_id), not to a division. Both CHECK
+ * constraints this list feeds are widened by reconcileUserRoleCheck /
+ * reconcileOrderEventsActorRole below, on a database created before this.
+ */
+const REQUIRED_ROLES = ['medrep', 'finance', 'dispatch', 'management', 'admin', 'team_lead'];
+
+/**
  * The file types payment_proofs.file_type may hold. Kept in the same order
  * as schema.pg.sql and schema.sql so the three can be eyeballed against each
  * other, same convention as REQUIRED_STATUSES above.
@@ -84,6 +97,82 @@ async function applyFile(client, file, { required = false } = {}) {
 
 /** Double-quote a Postgres identifier safely. */
 const quoteIdent = (s) => `"${String(s).replace(/"/g, '""')}"`;
+
+/**
+ * Find the CHECK constraint on `table` that constrains EXACTLY `column`, by
+ * matching `conkey` against the column's own attnum rather than text-
+ * searching the constraint definition — see statusCheckConstraint's own
+ * comment below for why a text match is unsafe (it once matched two
+ * constraints at once and nearly dropped the wrong one).
+ *
+ * Sep 21, 2026: generalized out of statusCheckConstraint/
+ * fileTypeCheckConstraint, which are this exact same ~20 lines with a
+ * different table/column baked in — needed a third and fourth time for
+ * users.role and order_events.actor_role, so this is the one shared version
+ * from here on.
+ */
+async function checkConstraintOnColumn(client, table, column) {
+  const { rows } = await client.query(
+    `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+       FROM pg_constraint c
+       JOIN pg_class     t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE t.relname = $1
+        AND n.nspname = current_schema()
+        AND c.contype = 'c'
+        AND c.conkey = ARRAY[
+              (SELECT a.attnum FROM pg_attribute a
+                WHERE a.attrelid = t.oid AND a.attname = $2 AND NOT a.attisdropped)
+            ]::smallint[]`,
+    [table, column]
+  );
+  if (!rows.length) return null;
+  if (rows.length > 1) {
+    throw new Error(
+      `${table} has ${rows.length} CHECK constraints on ${column} alone: ` +
+        rows.map((r) => r.conname).join(', ') +
+        '. Resolve by hand — this script will not guess which to replace.'
+    );
+  }
+  const values = new Set();
+  for (const m of rows[0].def.matchAll(/'([a-z_]+)'::text/g)) values.add(m[1]);
+  return { name: rows[0].conname, def: rows[0].def, values };
+}
+
+/**
+ * Widen a `CHECK (column IN (...))` (or `CHECK (column IS NULL OR column IN
+ * (...))`) constraint to include every value in `required`, preserving any
+ * extra value the constraint already allows — existing rows may still hold
+ * it, same reasoning reconcileStatusCheck gives for `extra`. No-ops if the
+ * constraint already allows everything in `required`.
+ */
+async function widenCheckConstraint(client, table, column, required) {
+  const current = await checkConstraintOnColumn(client, table, column);
+  if (!current) {
+    console.log(`  – ${table}.${column} has no CHECK constraint; schema.pg.sql should have created one`);
+    return;
+  }
+  const missing = required.filter((v) => !current.values.has(v));
+  if (!missing.length) {
+    console.log(`  ✔ ${table}.${column} CHECK is current`);
+    return;
+  }
+  console.log(`  ↻ widening ${table}.${column} CHECK — adding: ${missing.join(', ')}`);
+  const allowed = [...new Set([...required, ...current.values])];
+  const list = allowed.map((v) => `'${v}'`).join(', ');
+  const nullable = current.def.includes('IS NULL OR');
+  const clause = nullable ? `${column} IS NULL OR ${column} IN (${list})` : `${column} IN (${list})`;
+  await client.query('BEGIN');
+  try {
+    await client.query(`ALTER TABLE ${table} DROP CONSTRAINT ${quoteIdent(current.name)}`);
+    await client.query(`ALTER TABLE ${table} ADD CONSTRAINT ${quoteIdent(current.name)} CHECK (${clause})`);
+    await client.query('COMMIT');
+    console.log(`  ✔ ${table}.${column} CHECK updated`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  }
+}
 
 /**
  * Find the CHECK constraint on `orders` that constrains EXACTLY the `status`
@@ -561,6 +650,28 @@ async function reconcileUserOrderScope(client) {
 }
 
 /**
+ * Sep 21, 2026: `users.role` widened to accept 'team_lead' — a view-only role
+ * scoped to whichever MedReps have team_lead_id pointing back at them (see
+ * reconcileTeamLead below and services/teamScopeService.js). Uses the same
+ * drop-and-re-add approach reconcileStatusCheck uses for orders.status;
+ * Postgres cannot add a single value to an existing CHECK.
+ */
+async function reconcileUserRoleCheck(client) {
+  await widenCheckConstraint(client, 'users', 'role', REQUIRED_ROLES);
+}
+
+/**
+ * Sep 21, 2026: `users.team_lead_id` — which Team Lead this MedRep reports
+ * to, if any. Nullable, one per MedRep, no CHECK tying it to role on either
+ * end (same as division/sub_division — validated in application code, see
+ * admin.controller.js's update()).
+ */
+async function reconcileTeamLead(client) {
+  await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS team_lead_id INTEGER REFERENCES users(id)');
+  console.log('  ✔ users.team_lead_id present');
+}
+
+/**
  * Sep 11, 2026: `users.salesperson` stops being a generated column.
  *
  * It was GENERATED ALWAYS AS (division || ' | ' || display_name). See
@@ -856,16 +967,20 @@ async function reconcileOrderEventsActorRole(client) {
     `SELECT column_name FROM information_schema.columns
       WHERE table_schema = current_schema() AND table_name = 'order_events' AND column_name = 'actor_role'`
   );
-  if (rows.length) {
-    console.log('  ✔ order_events.actor_role already present');
+  if (!rows.length) {
+    console.log('  ↻ order_events.actor_role is missing — adding (existing rows stay NULL — no reliable way to know a past role now)');
+    const list = REQUIRED_ROLES.map((r) => `'${r}'`).join(', ');
+    await client.query(
+      `ALTER TABLE order_events ADD COLUMN actor_role TEXT
+         CHECK (actor_role IS NULL OR actor_role IN (${list}))`
+    );
+    console.log('  ✔ order_events.actor_role added');
     return;
   }
-  console.log('  ↻ order_events.actor_role is missing — adding (existing rows stay NULL — no reliable way to know a past role now)');
-  await client.query(
-    `ALTER TABLE order_events ADD COLUMN actor_role TEXT
-       CHECK (actor_role IS NULL OR actor_role IN ('medrep','finance','dispatch','management','admin'))`
-  );
-  console.log('  ✔ order_events.actor_role added');
+  console.log('  ✔ order_events.actor_role already present');
+  // Sep 21, 2026: 'team_lead' — widen the same way reconcileUserRoleCheck
+  // does, for a database where this column already existed before that role.
+  await widenCheckConstraint(client, 'order_events', 'actor_role', REQUIRED_ROLES);
 }
 
 /**
@@ -947,6 +1062,8 @@ async function main() {
     await reconcileUserApproval(client);
     await reconcileZohoStatusColumns(client);
     await reconcileUserOrderScope(client);
+    await reconcileUserRoleCheck(client);
+    await reconcileTeamLead(client);
     await reconcileUserSalespersonColumn(client);
     await reconcileCustomerCreateColumns(client);
     await reconcileUserSalespersons(client);

@@ -162,13 +162,29 @@ function App() {
           />
           
           {/* Management Routes */}
-          <Route 
-            path="/management" 
+          <Route
+            path="/management"
             element={
               <ProtectedRoute allowedRoles={['management', 'admin']}>
                 <ManagementDashboardPage />
               </ProtectedRoute>
-            } 
+            }
+          />
+          {/* Sep 21, 2026: Team Lead's own dashboard — the same component as
+              /management above. That page is already almost entirely
+              view-only (the only writes on it are the two Zoho-sync
+              buttons, which the component itself hides for this role); the
+              backend scopes /api/management/summary and /orders to this
+              account's assigned MedReps instead of a division whenever the
+              caller is 'team_lead'. See management.controller.js /
+              services/teamScopeService.js. */}
+          <Route
+            path="/team-lead"
+            element={
+              <ProtectedRoute allowedRoles={['team_lead', 'management', 'admin']}>
+                <ManagementDashboardPage />
+              </ProtectedRoute>
+            }
           />
           {/* Sep 7, 2026: MedRep-submitted orders wait here for Management
               to approve/reject before syncing to Zoho — see

@@ -3,9 +3,9 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { isTestModeEnabled } = require('../middleware/testMode');
 const zoho = require('../integrations/zoho');
+const { ROLES: VALID_ROLES } = require('../constants/roles');
 
 const SECRET = process.env.JWT_SECRET || 'getmeds_secret_change_in_production';
-const VALID_ROLES = ['medrep', 'finance', 'dispatch', 'management', 'admin'];
 
 // Protected system accounts that must never be deleted by test mode cleanup
 const PROTECTED_EMAILS = [

@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK(role IN ('medrep','finance','dispatch','management','admin')),
+  role TEXT NOT NULL CHECK(role IN ('medrep','finance','dispatch','management','admin','team_lead')),
   is_active INTEGER DEFAULT 1,
   is_test_account INTEGER DEFAULT 0,
   -- ── Sep 9, 2026: admin approval for self-service sign-ups ──────────────────
@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT,
   division TEXT,
   sub_division TEXT,
+  -- Sep 21, 2026: a MedRep's Team Lead, if they have one. Set on the MedRep's
+  -- own row -- one Team Lead per MedRep -- and read by teamScopeService to
+  -- decide what a 'team_lead'-role account may see: every order whose
+  -- medrep_id points at one of the users with this column pointing back at
+  -- them. No CHECK ties this to role='team_lead' on the far end or
+  -- role='medrep' on this end, same as division/sub_division above -- both
+  -- are validated in application code, not the database.
+  team_lead_id INTEGER REFERENCES users(id),
   -- The name Zoho knows this person by, chosen by an admin from Zoho's own
   -- Salesperson list. NOT derived from anything here.
   --
@@ -566,7 +574,7 @@ CREATE TABLE IF NOT EXISTS order_events (
   -- actor_name is a snapshot copy rather than a join to users.name.
   -- auditService.js's logEvent fills this in automatically from actor_id
   -- when a caller doesn't pass one explicitly, so no call site has to.
-  actor_role TEXT CHECK(actor_role IS NULL OR actor_role IN ('medrep','finance','dispatch','management','admin')),
+  actor_role TEXT CHECK(actor_role IS NULL OR actor_role IN ('medrep','finance','dispatch','management','admin','team_lead')),
   notes TEXT,
   metadata TEXT,
   created_at TEXT DEFAULT iso_now()

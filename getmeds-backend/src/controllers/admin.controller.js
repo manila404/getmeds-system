@@ -20,13 +20,18 @@ const getAllUsers = async (req, res, next) => {
     // Sep 9, 2026: approval_status comes back too, and pending accounts sort
     // FIRST. A list that buries three people waiting for approval among eighty
     // alphabetised names is a queue nobody works.
+    // Sep 21, 2026: team_lead_id + the Team Lead's own name (tl.name) — so
+    // UsersPage's inline "Team Lead" dropdown can show the current
+    // assignment without a second round trip per row.
     const users = await db
       .prepare(
-        `SELECT id, name, email, role, is_active, created_at,
-                approval_status, approved_at, approved_by,
-                display_name, division, sub_division, salesperson
-           FROM users
-          ORDER BY (approval_status = 'pending') DESC, name`
+        `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at,
+                u.approval_status, u.approved_at, u.approved_by,
+                u.display_name, u.division, u.sub_division, u.salesperson,
+                u.team_lead_id, tl.name AS team_lead_name
+           FROM users u
+           LEFT JOIN users tl ON tl.id = u.team_lead_id
+          ORDER BY (u.approval_status = 'pending') DESC, u.name`
       )
       .all();
     // Sep 11, 2026: every Zoho Salesperson on each account, primary first.
@@ -143,10 +148,9 @@ const create = async (req, res, next) => {
     if (!displayName || !email || !password || !role) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'name, email, password, role required' } });
     }
-    const valid_roles = ['medrep', 'finance', 'dispatch', 'management', 'admin'];
     const normalizedRole = role.toLowerCase();
-    if (!valid_roles.includes(normalizedRole)) {
-      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `role must be one of: ${valid_roles.join(', ')}` } });
+    if (!isValidRole(normalizedRole)) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: `role must be one of: ${ROLES.join(', ')}` } });
     }
 
     // Deliberately loose: one @, no spaces, a dot in the domain. Only catches
@@ -425,6 +429,31 @@ const update = async (req, res, next) => {
       });
     }
 
+    // Sep 21, 2026: which Team Lead this MedRep reports to, if any — the
+    // actual "assign this MedRep to a team" action (see schema.pg.sql's
+    // users.team_lead_id and services/teamScopeService.js). `null` unassigns.
+    // Checked here, before anything is written, same reasoning as the
+    // Salesperson check below: a bad id must not leave the role/active flag
+    // changed and this not.
+    let teamLeadId = undefined;
+    if (req.body.team_lead_id !== undefined) {
+      if (req.body.team_lead_id === null) {
+        teamLeadId = null;
+      } else {
+        const candidateId = parseInt(req.body.team_lead_id, 10);
+        const candidate = Number.isInteger(candidateId)
+          ? await db.prepare("SELECT id FROM users WHERE id = ? AND role = 'team_lead'").get(candidateId)
+          : null;
+        if (!candidate) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_TEAM_LEAD', message: 'team_lead_id must be the id of an existing Team Lead account.' }
+          });
+        }
+        teamLeadId = candidate.id;
+      }
+    }
+
     // Sep 11, 2026: the Salespersons an admin picked from Zoho's list.
     //
     // Not derived from division and display name any more — see the column
@@ -474,6 +503,7 @@ const update = async (req, res, next) => {
 
     if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
     if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
+    if (teamLeadId !== undefined) await db.prepare('UPDATE users SET team_lead_id = ? WHERE id = ?').run(teamLeadId, user.id);
     if (canonical) {
       await salespersonService.setForUser(user.id, canonical, {
         primary: salespersonPlan.primary,
@@ -481,7 +511,7 @@ const update = async (req, res, next) => {
       });
     }
 
-    const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at, salesperson FROM users WHERE id = ?').get(user.id);
+    const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at, salesperson, team_lead_id FROM users WHERE id = ?').get(user.id);
     const salespersons = await salespersonService.listForUser(user.id);
     res.json({ success: true, data: { user: { ...updated, salespersons } } });
   } catch (err) {

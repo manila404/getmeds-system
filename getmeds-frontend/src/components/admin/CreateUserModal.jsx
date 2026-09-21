@@ -6,6 +6,7 @@ import LoadingSpinner from '../ui/LoadingSpinner';
 import { Eye, EyeOff, RefreshCw, Copy, CheckCircle2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { DIVISIONS, SUB_DIVISIONS_BY_DIVISION } from '../../constants/divisions';
+import { ROLES } from '../../constants/roles';
 
 /**
  * Create account — Sep 11, 2026.
@@ -23,14 +24,6 @@ import { DIVISIONS, SUB_DIVISIONS_BY_DIVISION } from '../../constants/divisions'
  * account uses.
  */
 const MIN_PASSWORD_LENGTH = 8;
-
-const ROLES = [
-  { value: 'medrep', label: 'MedRep' },
-  { value: 'management', label: 'Management' },
-  { value: 'finance', label: 'Finance' },
-  { value: 'dispatch', label: 'Dispatch' },
-  { value: 'admin', label: 'Admin' },
-];
 
 // No 0/O or 1/l/I: this password is read off a screen and typed by someone
 // else, often from a chat message.

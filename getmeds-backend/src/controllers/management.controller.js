@@ -1,5 +1,19 @@
 const db = require('../db/database');
 const { loadScope, scopeSql } = require('../services/orderScopeService');
+// Sep 21, 2026: Team Lead's view of this same dashboard — person-scoped
+// (their assigned MedReps) rather than division-scoped. See
+// services/teamScopeService.js. Both branches feed the exact same
+// scopeClause/scopeParams pair everything below already consumes.
+const { teamScopeSql, teamMedrepIds } = require('../services/teamScopeService');
+
+/** The names on this Team Lead's team, for the dashboard's "what am I seeing" line. */
+async function teamMemberNames(teamLeadUserId) {
+  const ids = await teamMedrepIds(teamLeadUserId);
+  if (!ids.length) return [];
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = await db.prepare(`SELECT name FROM users WHERE id IN (${placeholders}) ORDER BY name`).all(...ids);
+  return rows.map((r) => r.name);
+}
 
 /**
  * Sep 11, 2026: every KPI on this dashboard counts only what the viewer is
@@ -13,8 +27,17 @@ const { loadScope, scopeSql } = require('../services/orderScopeService');
  */
 exports.getSummary = async (req, res, next) => {
   try {
-    const scope = await loadScope(req.user);
-    const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'orders');
+    const isTeamLead = req.user.role === 'team_lead';
+    // Sep 21, 2026: same {sql, params} shape either way — everything below
+    // this point has no idea, and needs no idea, which kind of scope produced
+    // scopeClause/scopeParams. See teamScopeService.js for why a Team Lead's
+    // rule (their assigned MedReps) is a different shape than a manager's
+    // (their divisions) and gets its own function rather than a branch inside
+    // orderScopeService.
+    const scope = isTeamLead ? null : await loadScope(req.user);
+    const { sql: scopeClause, params: scopeParams } = isTeamLead
+      ? await teamScopeSql(req.user.id, 'orders')
+      : scopeSql(scope, 'orders');
 
     // Compose each query's own WHERE with the viewer's scope. Returns the SQL
     // and the params in the right order, because getting those out of step is
@@ -72,6 +95,18 @@ exports.getSummary = async (req, res, next) => {
       .get(...avg.params);
     const avg_processing_time_hours = avgRow.avg_hours ? Math.round(avgRow.avg_hours * 10) / 10 : null;
 
+    // Sep 21, 2026: a Team Lead's "what am I looking at" is their team's
+    // names, not a division list — same purpose as the block below, different
+    // shape of scope.
+    const scopeMeta = isTeamLead
+      ? { mode: 'team', team: await teamMemberNames(req.user.id) }
+      : {
+          mode: scope.mode,
+          divisions: scope.rules.map((r) =>
+            r.sub_division ? `${r.division} / ${r.sub_division}` : r.division
+          )
+        };
+
     res.json({
       success: true,
       data: {
@@ -87,12 +122,7 @@ exports.getSummary = async (req, res, next) => {
         orders_this_week,
         // What these numbers are counting. Without it a scoped manager cannot
         // tell a quiet day from a narrowed view.
-        scope: {
-          mode: scope.mode,
-          divisions: scope.rules.map((r) =>
-            r.sub_division ? `${r.division} / ${r.sub_division}` : r.division
-          )
-        }
+        scope: scopeMeta
       }
     });
   } catch (err) { next(err); }
@@ -182,8 +212,13 @@ exports.getAllOrders = async (req, res, next) => {
     //
     // For a manager restricted to divisions with no rules configured this is
     // `1 = 0`: no orders, deliberately. See services/orderScopeService.js.
-    const scope = await loadScope(req.user);
-    const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
+    //
+    // Sep 21, 2026: a Team Lead gets teamScopeSql instead — same {sql,params}
+    // shape, scoped to their assigned MedReps rather than a division. See
+    // teamScopeService.js.
+    const { sql: scopeClause, params: scopeParams } = req.user.role === 'team_lead'
+      ? await teamScopeSql(req.user.id, 'o')
+      : scopeSql(await loadScope(req.user), 'o');
     if (scopeClause) {
       where.push(scopeClause);
       params.push(...scopeParams);

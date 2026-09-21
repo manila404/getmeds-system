@@ -31,6 +31,9 @@ const { importSalesOrders, ingestSalesOrderLogs, IMPORT_MAX } = require('../serv
 // Sep 11, 2026: division-scoped manager visibility. Read and write paths
 // both consult this — see services/orderScopeService.js.
 const { canAccessOrder } = require('../services/orderScopeService');
+// Sep 21, 2026: Team Lead visibility — a different, person-based shape of
+// scope. See services/teamScopeService.js.
+const teamScopeService = require('../services/teamScopeService');
 const syncJobs = require('../services/syncJobs');
 const { getSyncState } = require('../services/syncState');
 // Sep 9, 2026: the Master Form collects a TIN, and Zoho refuses a Sales Order
@@ -691,7 +694,15 @@ exports.getById = async (req, res, next) => {
     // still works, and /orders/41207 would happily render a division the
     // viewer has no business seeing. Anyone who has ever pasted an order link
     // into a chat would find it.
-    if (!(await canAccessOrder(req.user, order))) {
+    //
+    // Sep 21, 2026: a Team Lead's rule is person-based (their assigned
+    // MedReps), not division-based, so it gets its own check — same reasoning
+    // as requireOrderScope's duplicate of this check in middleware/auth.js.
+    if (req.user.role === 'team_lead') {
+      if (!(await teamScopeService.canAccessOrder(req.user, order))) {
+        return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+      }
+    } else if (!(await canAccessOrder(req.user, order))) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
 

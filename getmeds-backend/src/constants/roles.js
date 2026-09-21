@@ -10,7 +10,7 @@
  * Until that shipped, a role was only ever set at account creation, by someone
  * who already knew the five names.
  */
-const ROLES = ['medrep', 'finance', 'dispatch', 'management', 'admin'];
+const ROLES = ['medrep', 'finance', 'dispatch', 'management', 'admin', 'team_lead'];
 
 /** What each role is called on screen. */
 const ROLE_LABELS = {
@@ -19,6 +19,7 @@ const ROLE_LABELS = {
   dispatch: 'Dispatch',
   management: 'Management',
   admin: 'Admin',
+  team_lead: 'Team Lead',
 };
 
 const isValidRole = (value) => ROLES.includes(String(value || '').trim().toLowerCase());

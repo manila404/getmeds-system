@@ -51,6 +51,7 @@ const roleBadgeColors = {
   finance: 'bg-pharmacy-green/15 text-pharmacy-green-dark border-pharmacy-green/30',
   dispatch: 'bg-getmeds-blue/15 text-getmeds-blue-dark border-getmeds-blue/30',
   medrep: 'bg-getmeds-blue/10 text-getmeds-blue-dark border-getmeds-blue/30',
+  team_lead: 'bg-indigo-100/60 text-indigo-700 border-indigo-200',
 };
 
 const UsersPage = () => {
@@ -269,6 +270,33 @@ const UsersPage = () => {
     }
   };
 
+  /**
+   * Sep 21, 2026: which Team Lead a MedRep reports to — the assignment that
+   * decides what that Team Lead's (view-only) dashboard shows. Applied on
+   * change, unlike the Role select above: unlike a role change, reassigning
+   * a MedRep's Team Lead does not change what the MedRep themselves can do,
+   * so a confirmation step would only slow down a routine reshuffle.
+   */
+  const [savingTeamLead, setSavingTeamLead] = useState(null); // the user id being saved, or null
+
+  const changeTeamLead = async (user, teamLeadId) => {
+    setSavingTeamLead(user.id);
+    try {
+      await client.patch(`/api/admin/users/${user.id}`, {
+        team_lead_id: teamLeadId ? parseInt(teamLeadId, 10) : null
+      });
+      await fetchUsers();
+    } catch (err) {
+      toast.error(
+        err.response?.data?.error?.message ||
+          err.response?.data?.message ||
+          'Could not change the Team Lead.'
+      );
+    } finally {
+      setSavingTeamLead(null);
+    }
+  };
+
   const fetchUsers = async () => {
     setLoading(true);
     setError(null);
@@ -377,6 +405,8 @@ const UsersPage = () => {
           return (getUserDisplayName(u) || '').toLowerCase();
         case 'salesperson':
           return (u.salesperson || '').toLowerCase();
+        case 'team_lead':
+          return (u.team_lead_name || '').toLowerCase();
         case 'status':
           return (u.is_active === 1 || u.is_active === true) ? 0 : 1;
         default:
@@ -391,7 +421,7 @@ const UsersPage = () => {
       // Unassigned sorts LAST in both directions rather than clumping at
       // whichever end empty strings land — "not set yet" is not a value, and
       // it is the thing being looked for.
-      if (sort.key === 'salesperson') {
+      if (sort.key === 'salesperson' || sort.key === 'team_lead') {
         if (!av && bv) return 1;
         if (av && !bv) return -1;
       }
@@ -401,6 +431,12 @@ const UsersPage = () => {
       return (getUserDisplayName(a) || '').localeCompare(getUserDisplayName(b) || '');
     });
   }, [users, sort]);
+
+  /** Every account that can be assigned as someone's Team Lead. */
+  const teamLeads = React.useMemo(
+    () => users.filter((u) => (u.role || '').toLowerCase() === 'team_lead'),
+    [users]
+  );
 
   /** A column heading you can click. */
   const SortableHeader = ({ label, sortKey }) => {
@@ -529,6 +565,7 @@ const UsersPage = () => {
                   </th>
                   <SortableHeader label="Role" sortKey="role" />
                   <SortableHeader label="Zoho Salesperson" sortKey="salesperson" />
+                  <SortableHeader label="Team Lead" sortKey="team_lead" />
                   <SortableHeader label="Status" sortKey="status" />
                   <th scope="col" className="px-6 py-3 text-center text-[13px] font-semibold text-white">
                     Actions
@@ -538,7 +575,7 @@ const UsersPage = () => {
               <tbody className="bg-white divide-y divide-slate-100">
                 {sortedUsers.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-6 py-12 text-center text-ink-secondary">
+                    <td colSpan={9} className="px-6 py-12 text-center text-ink-secondary">
                       No user accounts found in the system.
                     </td>
                   </tr>
@@ -762,6 +799,29 @@ const UsersPage = () => {
                                 </span>
                               )}
                             </button>
+                          )}
+                        </td>
+
+                        {/* Sep 21, 2026: which Team Lead this MedRep reports
+                            to — decides what that Team Lead's (view-only)
+                            dashboard shows. Only meaningful on a medrep row;
+                            every other role shows a dash. */}
+                        <td className="px-6 py-4 whitespace-nowrap text-[13px]">
+                          {roleKey === 'medrep' ? (
+                            <select
+                              value={user.team_lead_id || ''}
+                              disabled={savingTeamLead === user.id}
+                              onChange={(e) => changeTeamLead(user, e.target.value)}
+                              aria-label={`Team Lead for ${getUserDisplayName(user)}`}
+                              className="text-[13px] border border-slate-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-getmeds-blue disabled:opacity-50"
+                            >
+                              <option value="">— None —</option>
+                              {teamLeads.map((tl) => (
+                                <option key={tl.id} value={tl.id}>{getUserDisplayName(tl)}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className="text-ink-secondary">—</span>
                           )}
                         </td>
 

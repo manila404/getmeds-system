@@ -124,11 +124,27 @@ async function requireOrderScope(req, res, next) {
     const { canAccessOrder } = require('../services/orderScopeService');
 
     const order = await db
-      .prepare('SELECT id, division, sub_division FROM orders WHERE id = ?')
+      .prepare('SELECT id, division, sub_division, medrep_id FROM orders WHERE id = ?')
       .get(req.params.id);
     // Let the controller answer 404 in its own words rather than turning a
     // missing order into a permissions message.
     if (!order) return next();
+
+    // Sep 21, 2026: a Team Lead's scope is who raised the order (medrep_id),
+    // not which division it's in — a different shape of rule from
+    // orderScopeService's, so it gets its own check rather than being folded
+    // into canAccessOrder above. See teamScopeService.js.
+    if (req.user.role === 'team_lead') {
+      const teamScope = require('../services/teamScopeService');
+      if (await teamScope.canAccessOrder(req.user, order)) return next();
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'This order was not raised by anyone on your team.'
+        }
+      });
+    }
 
     if (await canAccessOrder(req.user, order)) return next();
 

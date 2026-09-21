@@ -40,6 +40,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
     dispatch: 'Logistics & Dispatch',
     management: 'Operations Management',
     admin: 'System Administrator',
+    team_lead: 'Team Lead (view only)',
   };
 
   // Test Mode: Categorized transactions across ALL roles
@@ -94,6 +95,14 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       ]
     },
     {
+      title: 'Team Lead (view only)',
+      badge: 'Team Lead',
+      badgeClass: 'bg-indigo-100/60 text-indigo-700',
+      links: [
+        { to: '/team-lead', icon: <BarChart3 size={18} />, label: 'My Team', exact: true }
+      ]
+    },
+    {
       title: 'System Administration',
       badge: 'Admin',
       badgeClass: 'bg-slate-900 text-white',
@@ -140,6 +149,15 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/medrep/dashboard', icon: <LayoutDashboard size={19} />, label: 'Dashboard' },
       { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Orders' }
+    );
+  } else if (role === 'team_lead') {
+    // Sep 21, 2026: one link — the same dashboard component /management
+    // uses, scoped server-side to this account's assigned MedReps instead
+    // of a division, and with nothing on it that writes anything. Nothing
+    // else this role reaches: no Approval Queue, Exception Hub, Finance,
+    // Dispatch, Clients, or Inventory — see App.jsx's route table.
+    mainLinks.push(
+      { to: '/team-lead', icon: <LayoutDashboard size={19} />, label: 'My Team' }
     );
   } else if (role === 'finance') {
     // Sep 12, 2026: /finance is no longer a four-status queue — it is Finance's
