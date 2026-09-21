@@ -2,14 +2,14 @@ import React, { useState } from 'react';
 import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw, Pencil, Trash2, Receipt, X, ShieldCheck, Undo2, XCircle } from 'lucide-react';
+import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle, ExternalLink, RefreshCw, Pencil, Trash2, Receipt, X, ShieldCheck, Undo2, XCircle, MessageSquare } from 'lucide-react';
 import client from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPHT } from '../utils/dateUtils';
 // Sep 10, 2026 (2d): the flat event list became a ten-stage pipeline. See
 // components/orders/OrderPipeline.jsx and, on the backend,
 // services/orderTimelineService.js.
-import OrderPipeline from '../components/orders/OrderPipeline';
+import OrderPipeline, { RoleBadge } from '../components/orders/OrderPipeline';
 import { useProducts } from '../hooks/useOrderData';
 import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
@@ -195,6 +195,33 @@ const EVENT_ICONS = {
   DISPATCH_HOLD: '⏸️', DISPATCH_HOLD_LIFTED: '▶️',
   CUSTOMER_LINKED_TO_ZOHO: '🔗', ORDER_RESUMED: '▶️', STOCK_WARNING_ACKNOWLEDGED: '📦⚠️'
 };
+
+/**
+ * Sep 21, 2026: "if the order has remarks from medrep/management, add to
+ * their view so they can check" — Finance's own request, looking at an
+ * order well past the stage where it was held (Tracking Shared, in this
+ * case). A MedRep's resubmit note or Management's hold/reject/send-back
+ * reason already exists on the trail, but only two ways to see it: the
+ * order.exception_reason banner further down, which is deliberately hidden
+ * the moment the order leaves on_hold/exception/draft (see that banner's
+ * own comment), or digging into a specific pipeline stage's collapsed
+ * "N updates" toggle in OrderPipeline. Neither is "check the remarks",
+ * they're "notice the order was held" and "happen to click the right
+ * stage". This pulls every such note into one place, regardless of the
+ * order's current status.
+ *
+ * A fixed, narrow list rather than "any event with a role and a note" —
+ * that would also catch routine bookkeeping notes (e.g. "Sales Order
+ * drafted..." on a STATUS_CHANGE hop attributed to whoever submitted it),
+ * which are not remarks anyone wrote, just automatic narration.
+ */
+const REMARK_EVENT_TYPES = new Set([
+  'RETURNED_TO_FINANCE',    // a MedRep's note resubmitting after a Finance hold
+  'ORDER_RESUBMITTED',      // a MedRep's note resubmitting after a Management hold/exception
+  'MANAGEMENT_REJECTED',    // Management's reason for rejecting a MedRep's order
+  'MANAGEMENT_SENT_BACK',   // Management's "what to fix" note
+  'EXCEPTION_SET',          // Management's hold/exception reason
+]);
 
 const OrderDetailPage = () => {
   const { id } = useParams();
@@ -1536,6 +1563,44 @@ const OrderDetailPage = () => {
           {/* Timeline Tab */}
           {activeTab === 'timeline' && (
             <div>
+              {/* Sep 21, 2026: every remark a MedRep or Management left on
+                  this order's trail — a resubmit note, a hold/reject reason,
+                  a "what to fix" — pulled out of the pipeline's per-stage
+                  collapsed updates so Finance (or anyone) can check them at
+                  a glance, whatever stage the order is at now. See
+                  REMARK_EVENT_TYPES above. */}
+              {(() => {
+                const remarks = events.filter((e) => REMARK_EVENT_TYPES.has(e.event_type) && e.notes);
+                if (!remarks.length) return null;
+                return (
+                  <div className="mb-5 bg-indigo-50/60 border border-indigo-200 rounded-lg p-3">
+                    <p className="text-xs font-semibold text-indigo-900 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      Remarks from MedRep / Management
+                      <span className="font-normal normal-case text-indigo-700">
+                        ({remarks.length})
+                      </span>
+                    </p>
+                    <div className="space-y-2.5">
+                      {remarks.map((r) => (
+                        <div key={r.id} className="text-xs">
+                          <div className="flex items-baseline justify-between gap-3">
+                            <p className="font-semibold text-ink-primary flex items-center flex-wrap">
+                              {r.actor_name || 'System'}
+                              <RoleBadge role={r.actor_role} />
+                            </p>
+                            <p className="text-ink-secondary shrink-0">
+                              {r.created_at ? formatPHT(r.created_at, 'timeline') : ''}
+                            </p>
+                          </div>
+                          <p className="text-ink-secondary mt-0.5">{r.notes}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Sep 10, 2026 (2d): the pipeline replaces a flat list that gave
                   every event equal weight — this order once rendered 20 rows
                   for six real things. The raw list is still one click away, so

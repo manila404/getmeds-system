@@ -67,7 +67,10 @@ const ROLE_BADGE_STYLE = {
   dispatch: 'bg-teal-50 text-teal-800 border-teal-200'
 };
 
-const RoleBadge = ({ role }) => {
+// Sep 21, 2026: exported so OrderDetailPage's Remarks summary (a different
+// list of events than this component draws) can use the exact same badge
+// rather than a second copy of ROLE_BADGE_STYLE.
+export const RoleBadge = ({ role }) => {
   if (!role) return null;
   const cls = ROLE_BADGE_STYLE[role] || 'bg-slate-100 text-slate-600 border-slate-200';
   return (
