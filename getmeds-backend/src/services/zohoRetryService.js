@@ -3,6 +3,7 @@ const zoho = require('../integrations/zoho');
 const { logEvent } = require('./auditService');
 const { notify, getUserIdsByRole } = require('./notificationService');
 const { buildZohoSalesOrderPayload } = require('./zohoPayloadBuilder');
+const { pushUnsyncedAttachments } = require('./zohoAttachmentSync');
 
 /**
  * Zoho sync retry/outbox service.
@@ -102,6 +103,16 @@ async function processOne(row) {
       });
     });
     await txn();
+
+    // Sep 21, 2026: same reasoning as syncOrderToZohoAndFinalize's own call —
+    // this order may have gathered attachments (proof of payment, etc.)
+    // during however long it sat in the retry queue with no zoho_so_id to
+    // push them to. Catch them up now that one finally exists.
+    try {
+      await pushUnsyncedAttachments(row.order_id, zohoResult.salesorder.salesorder_id);
+    } catch (err) {
+      console.warn(`[ZOHO_RETRY] pushUnsyncedAttachments failed for order ${row.order_id}:`, err.message);
+    }
 
     const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(row.order_id);
     if (order && order.medrep_id) {

@@ -5,6 +5,7 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const zoho = require('../integrations/zoho');
 const zohoRetryService = require('../services/zohoRetryService');
+const { pushUnsyncedAttachments } = require('../services/zohoAttachmentSync');
 const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
 // Sep 12, 2026: under this switch a direct order also stops at so_created, for
 // Finance's Confirm order. See services/workflowV2Service.js.
@@ -2336,7 +2337,21 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     return { getmedsOrderId, finalStatus, zohoResult, zohoSyncStatus };
   });
 
-  return await submitTxn();
+  const result = await submitTxn();
+
+  // Sep 21, 2026: the Sales Order just went from not-existing to existing —
+  // catch up every attachment the order already has (proof of payment
+  // attached while it was still a MedRep draft, most commonly) onto it now.
+  // See zohoAttachmentSync.js for why this can't just be "attach on upload".
+  if (result.zohoResult) {
+    try {
+      await pushUnsyncedAttachments(order.id, result.zohoResult.salesorder.salesorder_id);
+    } catch (err) {
+      console.warn(`[ZOHO] pushUnsyncedAttachments failed for order ${order.id}:`, err.message);
+    }
+  }
+
+  return result;
 }
 
 exports.submit = async (req, res, next) => {
