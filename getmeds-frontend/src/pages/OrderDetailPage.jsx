@@ -237,6 +237,15 @@ const OrderDetailPage = () => {
   const [activeTab, setActiveTab] = useState(
     VALID_TABS.includes(requestedTab) ? requestedTab : 'timeline'
   );
+  // Sep 22, 2026: split-invoicing orders — clicking either entity's card in
+  // the Zoho Integration panel jumps to the Audit Timeline and filters it to
+  // just that Sales Order's own events (see orderTimelineService.js's
+  // per-event `entity` tagging). null shows everything, same as before this
+  // existed. The value is the raw invoicing_from string — order.invoicing_from
+  // for the primary, a split row's invoicing_from otherwise — so it matches
+  // timeline.stages[].updates[].entity / perEntity[].entity exactly.
+  const [timelineFocus, setTimelineFocus] = useState(null);
+  const focusTimelineOn = (entity) => { setTimelineFocus(entity); setActiveTab('timeline'); };
   // Aug 31, 2026: lets a MedRep/Admin fix an order's line items in place —
   // added after TestGM-20260831-0001 failed Zoho sync with "Inactive items
   // cannot be added to the sales order" and there was no way to swap the
@@ -518,7 +527,12 @@ const OrderDetailPage = () => {
       // see OrderItemsEditor.jsx's Sep 18 note for why tax is now editable
       // here regardless of whether Zoho has this item's tax on file.
       taxOption: inferTaxOption(it.tax_percent, it.tax_label),
-      price_remark: it.price_remark || ''
+      price_remark: it.price_remark || '',
+      // Sep 22, 2026: carried over from the server — without this, opening
+      // and saving the editor on a split order would silently erase every
+      // line's tag back to "follow the order" the moment someone touched
+      // Save, even if they never went near the new control.
+      invoicing_from: it.invoicing_from || null
     })));
     setIsEditingItems(true);
   };
@@ -585,6 +599,13 @@ const OrderDetailPage = () => {
       setDraftItems((rows) => rows.map((row, i) => (i === index
         ? { ...row, taxOption: value, tax_percent: opt.percent, tax_label: opt.label }
         : row)));
+      return undefined;
+    }
+    // Sep 22, 2026: per-line override of the order's own Invoicing From —
+    // '' clears it back to "follow the order". See services/orderSplitService.js.
+    if (field === 'invoicing_from') {
+      setDraftItems((rows) => rows.map((row, i) => (i === index ? { ...row, invoicing_from: value || null } : row)));
+      return undefined;
     }
     return undefined;
   };
@@ -605,7 +626,10 @@ const OrderDetailPage = () => {
       // known or not, so a product Zoho does tax should not default to none.
       tax_percent: product.tax_percentage ?? 0, tax_label: product.tax_name ?? null,
       taxUnknown: product.tax_percentage == null, taxOption: inferTaxOption(product.tax_percentage, product.tax_name),
-      price_remark: ''
+      price_remark: '',
+      // Sep 22, 2026: null = follows the order's own Invoicing From, every
+      // item's default. See services/orderSplitService.js.
+      invoicing_from: null
     }]);
   };
 
@@ -668,7 +692,10 @@ const OrderDetailPage = () => {
       discount: Number(row.discount) || 0,
       tax_percent: row.tax_percent,
       tax_label: row.tax_label,
-      price_remark: (row.price_remark || '').trim() || null
+      price_remark: (row.price_remark || '').trim() || null,
+      // Sep 22, 2026: a line billed under the OTHER Invoicing From entity —
+      // see services/orderSplitService.js on the backend.
+      invoicing_from: row.invoicing_from || null
     }));
     const changes = diffOrderItems();
     if (!changes.length) { toast('No changes to save.'); return; }
@@ -774,7 +801,10 @@ const OrderDetailPage = () => {
   if (isLoading) return <div className="flex justify-center py-20"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-getmeds-blue" /></div>;
   if (error) return <div className="text-center py-20 text-red-600">Failed to load order. <button onClick={() => navigate(-1)} className="underline">Go back</button></div>;
 
-  const { order, items = [], payment, dispatch, events = [], timeline } = data?.data || {};
+  // Sep 22, 2026: splits — a split-invoicing order's SECOND Sales Order(s).
+  // Empty for every order without one, which is the overwhelming default.
+  // See services/orderSplitService.js on the backend.
+  const { order, items = [], payment, dispatch, splits = [], events = [], timeline } = data?.data || {};
   if (!order) return null;
 
   // Sep 7, 2026 (2): while editing, Management changing Division live
@@ -842,7 +872,7 @@ const OrderDetailPage = () => {
             </button>
           </div>
         </div>
-        {overviewOpen && <OrderOverviewModal order={order} items={items} onClose={() => setOverviewOpen(false)} />}
+        {overviewOpen && <OrderOverviewModal order={order} items={items} splits={splits} onClose={() => setOverviewOpen(false)} />}
         {pendingConfirm && (
           <ConfirmChangesModal
             title={pendingConfirm.title}
@@ -864,50 +894,167 @@ const OrderDetailPage = () => {
             {order.delivery_notes && <p className="text-ink-secondary text-xs mt-0.5">{order.delivery_notes}</p>}
           </div>
           <div>
-            <p className="text-xs font-medium text-ink-secondary uppercase mb-1">Zoho Integration</p>
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              {order.zoho_so_number ? (
-                <>
-                  <span className="bg-pharmacy-green/15 text-pharmacy-green-dark px-2 py-0.5 rounded font-medium">SO: {order.zoho_so_number}</span>
-                  <span className={`px-2 py-0.5 rounded ${order.zoho_sync_status === 'synced' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : 'bg-state-warning-light text-amber-900'}`}>
-                    {order.zoho_sync_status}
-                  </span>
-                  {order.zoho_invoice_number && (
-                    <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">Invoice: {order.zoho_invoice_number}</span>
+            <p className="text-xs font-medium text-ink-secondary uppercase mb-1">
+              Zoho Integration
+              {/* Sep 22, 2026: split-invoicing order — see
+                  services/orderSplitService.js. A non-split order (the
+                  overwhelming default) shows nothing extra here. */}
+              {splits.length > 0 && (
+                <span className="ml-1.5 normal-case font-normal text-getmeds-blue">
+                  · split across {splits.length + 1} Sales Orders
+                </span>
+              )}
+            </p>
+            {/* Sep 22, 2026: clicking either entity's card jumps to the Audit
+                Timeline filtered to just that Sales Order's own events (see
+                timelineFocus above / OrderPipeline.jsx). Only offered once
+                there's a second entity to distinguish from — a non-split
+                order's card stays exactly as it always has, not clickable. */}
+            {splits.length > 0 ? (
+              <div
+                role="button"
+                tabIndex={0}
+                title={`Focus the Audit Timeline on ${order.invoicing_from}`}
+                onClick={() => focusTimelineOn(order.invoicing_from)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); focusTimelineOn(order.invoicing_from); } }}
+                className={`-mx-1.5 px-1.5 py-1 rounded-md cursor-pointer transition-colors ${timelineFocus === order.invoicing_from ? 'bg-getmeds-blue/10 ring-1 ring-getmeds-blue/30' : 'hover:bg-surface'}`}
+              >
+                <p className="text-[11px] text-ink-secondary mb-1.5">{order.invoicing_from} (primary):</p>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  {order.zoho_so_number ? (
+                    <>
+                      <span className="bg-pharmacy-green/15 text-pharmacy-green-dark px-2 py-0.5 rounded font-medium">SO: {order.zoho_so_number}</span>
+                      <span className={`px-2 py-0.5 rounded ${order.zoho_sync_status === 'synced' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : 'bg-state-warning-light text-amber-900'}`}>
+                        {order.zoho_sync_status}
+                      </span>
+                      {order.zoho_so_status && (
+                        <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded capitalize">{order.zoho_so_status}</span>
+                      )}
+                      {order.zoho_invoice_number && (
+                        <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">Invoice: {order.zoho_invoice_number}</span>
+                      )}
+                      {payment?.status && payment.status !== 'pending' && (
+                        <span className={`px-2 py-0.5 rounded capitalize ${payment.status === 'verified' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : 'bg-state-error-light text-red-700'}`}>
+                          Finance: {payment.status}
+                        </span>
+                      )}
+                    </>
+                  ) : <span className="text-ink-secondary">Not yet synced</span>}
+                  {order.zoho_sync_status === 'failed' && (
+                    <button
+                      type="button"
+                      disabled={retryZohoSyncMutation.isPending}
+                      onClick={(e) => { e.stopPropagation(); retryZohoSyncMutation.mutate(); }}
+                      title="Push this order to Zoho again now — automatic background retry is off, so this is the only way to retry a failed sync"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-state-warning text-amber-900 hover:bg-state-warning-light disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${retryZohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
+                      {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
+                    </button>
                   )}
-                </>
-              ) : <span className="text-ink-secondary">Not yet synced</span>}
-              {order.zoho_sync_status === 'failed' && (
-                <button
-                  type="button"
-                  disabled={retryZohoSyncMutation.isPending}
-                  onClick={() => retryZohoSyncMutation.mutate()}
-                  title="Push this order to Zoho again now — automatic background retry is off, so this is the only way to retry a failed sync"
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-state-warning text-amber-900 hover:bg-state-warning-light disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3 h-3 ${retryZohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
-                  {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
-                </button>
-              )}
-              {/* Aug 31, 2026: only 'cancelled' hides this now — 'completed'
-                  used to as well, but that stopped being safe once
-                  syncFromZoho gained an invoice backfill: an order can
-                  legitimately still be sitting at 'completed' (e.g. from
-                  before the premature-auto-complete bug in the dispatch
-                  webhook was fixed) and still need that invoice pulled in. */}
-              {order.zoho_so_id && order.status !== 'cancelled' && (
-                <button
-                  type="button"
-                  disabled={zohoSyncMutation.isPending}
-                  onClick={() => zohoSyncMutation.mutate()}
-                  title="Pull this order's current status from Zoho — catches up the timeline if a webhook was missed"
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3 h-3 ${zohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
-                  {zohoSyncMutation.isPending ? 'Checking Zoho...' : 'Sync from Zoho'}
-                </button>
-              )}
-            </div>
+                  {order.zoho_so_id && order.status !== 'cancelled' && (
+                    <button
+                      type="button"
+                      disabled={zohoSyncMutation.isPending}
+                      onClick={(e) => { e.stopPropagation(); zohoSyncMutation.mutate(); }}
+                      title="Pull this order's current status from Zoho — catches up the timeline if a webhook was missed"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${zohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
+                      {zohoSyncMutation.isPending ? 'Checking Zoho...' : 'Sync from Zoho'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                {order.zoho_so_number ? (
+                  <>
+                    <span className="bg-pharmacy-green/15 text-pharmacy-green-dark px-2 py-0.5 rounded font-medium">SO: {order.zoho_so_number}</span>
+                    <span className={`px-2 py-0.5 rounded ${order.zoho_sync_status === 'synced' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : 'bg-state-warning-light text-amber-900'}`}>
+                      {order.zoho_sync_status}
+                    </span>
+                    {order.zoho_invoice_number && (
+                      <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">Invoice: {order.zoho_invoice_number}</span>
+                    )}
+                  </>
+                ) : <span className="text-ink-secondary">Not yet synced</span>}
+                {order.zoho_sync_status === 'failed' && (
+                  <button
+                    type="button"
+                    disabled={retryZohoSyncMutation.isPending}
+                    onClick={() => retryZohoSyncMutation.mutate()}
+                    title="Push this order to Zoho again now — automatic background retry is off, so this is the only way to retry a failed sync"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-state-warning text-amber-900 hover:bg-state-warning-light disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${retryZohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
+                    {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
+                  </button>
+                )}
+                {/* Aug 31, 2026: only 'cancelled' hides this now — 'completed'
+                    used to as well, but that stopped being safe once
+                    syncFromZoho gained an invoice backfill: an order can
+                    legitimately still be sitting at 'completed' (e.g. from
+                    before the premature-auto-complete bug in the dispatch
+                    webhook was fixed) and still need that invoice pulled in. */}
+                {order.zoho_so_id && order.status !== 'cancelled' && (
+                  <button
+                    type="button"
+                    disabled={zohoSyncMutation.isPending}
+                    onClick={() => zohoSyncMutation.mutate()}
+                    title="Pull this order's current status from Zoho — catches up the timeline if a webhook was missed"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${zohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
+                    {zohoSyncMutation.isPending ? 'Checking Zoho...' : 'Sync from Zoho'}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Sep 22, 2026: one card per split entity — read-only for now
+                (no Sync/Retry buttons yet, see the backend's own scope
+                notes). Finance verifies each independently from the
+                Payment tab; this is just visibility into where each Sales
+                Order stands. */}
+            {splits.map((s) => (
+              <div
+                key={s.id}
+                role="button"
+                tabIndex={0}
+                title={`Focus the Audit Timeline on ${s.invoicing_from}`}
+                onClick={() => focusTimelineOn(s.invoicing_from)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); focusTimelineOn(s.invoicing_from); } }}
+                className={`mt-2 pt-2 -mx-1.5 px-1.5 pb-1 border-t border-dashed border-slate-200 rounded-md cursor-pointer transition-colors ${timelineFocus === s.invoicing_from ? 'bg-getmeds-blue/10 ring-1 ring-getmeds-blue/30' : 'hover:bg-surface'}`}
+              >
+                <p className="text-[11px] text-ink-secondary mb-1">{s.invoicing_from}:</p>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  {s.zoho_so_number ? (
+                    <>
+                      <span className="bg-pharmacy-green/15 text-pharmacy-green-dark px-2 py-0.5 rounded font-medium">SO: {s.zoho_so_number}</span>
+                      <span className={`px-2 py-0.5 rounded ${s.zoho_sync_status === 'synced' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : s.zoho_sync_status === 'failed' ? 'bg-state-error-light text-red-700' : 'bg-state-warning-light text-amber-900'}`}>
+                        {s.zoho_sync_status}
+                      </span>
+                      {s.zoho_so_status && (
+                        <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded capitalize">{s.zoho_so_status}</span>
+                      )}
+                      {s.zoho_invoice_number && (
+                        <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">Invoice: {s.zoho_invoice_number}</span>
+                      )}
+                      {s.payment_status && s.payment_status !== 'pending' && (
+                        <span className={`px-2 py-0.5 rounded capitalize ${s.payment_status === 'verified' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : 'bg-state-error-light text-red-700'}`}>
+                          Finance: {s.payment_status}
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-ink-secondary">
+                      Not yet synced{s.zoho_sync_error ? ` — ${s.zoho_sync_error}` : ''}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
@@ -1388,38 +1535,74 @@ const OrderDetailPage = () => {
               )}
 
               {!isEditingItems ? (
-                <table className="min-w-full">
-                  <thead>
-                    <tr className="text-left text-xs font-medium text-ink-secondary uppercase border-b border-slate-200">
-                      <th className="pb-3">Product</th>
-                      <th className="pb-3 text-center">Qty</th>
-                      <th className="pb-3 text-right">Unit Price</th>
-                      <th className="pb-3 text-right">Subtotal</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {items.map(item => (
-                      <tr key={item.id}>
-                        <td className="py-3">
-                          <p className="text-sm font-semibold text-ink-primary">{item.product_name}</p>
-                          <p className="text-xs text-ink-secondary">SKU: {item.sku} · Unit: {item.unit}</p>
-                          {item.price_remark && (
-                            <p className="text-xs text-ink-secondary italic mt-0.5">💬 {item.price_remark}</p>
-                          )}
-                        </td>
-                        <td className="py-3 text-center text-sm text-ink-primary">{item.quantity}</td>
-                        <td className="py-3 text-right text-sm text-ink-secondary">₱{(item.unit_price || 0).toFixed(2)}</td>
-                        <td className="py-3 text-right text-sm font-semibold text-ink-primary">₱{(item.subtotal || 0).toFixed(2)}</td>
+                <>
+                  {/* Sep 22, 2026: split-invoicing orders — the total below
+                      spans every Sales Order this order has (see
+                      zohoLineSyncService.js), so a split order gets a
+                      per-entity breakdown alongside it instead of one number
+                      that quietly blends two different Zoho invoices. */}
+                  {splits.length > 0 && (
+                    <div className="mb-3 rounded-md border border-indigo-200 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-900">
+                      Split order — items below are billed across {splits.length + 1} Zoho Sales Orders. See the breakdown under the total.
+                    </div>
+                  )}
+                  <table className="min-w-full">
+                    <thead>
+                      <tr className="text-left text-xs font-medium text-ink-secondary uppercase border-b border-slate-200">
+                        <th className="pb-3">Product</th>
+                        <th className="pb-3 text-center">Qty</th>
+                        <th className="pb-3 text-right">Unit Price</th>
+                        <th className="pb-3 text-right">Subtotal</th>
                       </tr>
-                    ))}
-                  </tbody>
-                  <tfoot className="border-t-2 border-slate-200">
-                    <tr>
-                      <td colSpan="3" className="pt-3 text-sm font-semibold text-ink-primary text-right">Total Amount</td>
-                      <td className="pt-3 text-right text-lg font-bold text-getmeds-blue">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
-                    </tr>
-                  </tfoot>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {items.map(item => (
+                        <tr key={item.id}>
+                          <td className="py-3">
+                            <p className="text-sm font-semibold text-ink-primary">{item.product_name}</p>
+                            <p className="text-xs text-ink-secondary">SKU: {item.sku} · Unit: {item.unit}</p>
+                            {item.invoicing_from && item.invoicing_from !== order.invoicing_from && (
+                              <p className="text-xs font-semibold text-indigo-700 mt-0.5">↳ {item.invoicing_from}</p>
+                            )}
+                            {item.price_remark && (
+                              <p className="text-xs text-ink-secondary italic mt-0.5">💬 {item.price_remark}</p>
+                            )}
+                          </td>
+                          <td className="py-3 text-center text-sm text-ink-primary">{item.quantity}</td>
+                          <td className="py-3 text-right text-sm text-ink-secondary">₱{(item.unit_price || 0).toFixed(2)}</td>
+                          <td className="py-3 text-right text-sm font-semibold text-ink-primary">₱{(item.subtotal || 0).toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="border-t-2 border-slate-200">
+                      {splits.length > 0 && (() => {
+                        const byEntity = new Map();
+                        items.forEach((it) => {
+                          const entity = it.invoicing_from || order.invoicing_from;
+                          byEntity.set(entity, (byEntity.get(entity) || 0) + Number(it.subtotal || 0));
+                        });
+                        return (
+                          <tr>
+                            <td colSpan="3" className="pt-2 pb-1 text-right">
+                              <div className="flex flex-wrap justify-end gap-x-4 gap-y-0.5 text-xs text-ink-secondary">
+                                {Array.from(byEntity.entries()).map(([entity, sum]) => (
+                                  <span key={entity}>
+                                    {entity}: <span className="font-semibold text-ink-primary">₱{sum.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                            <td />
+                          </tr>
+                        );
+                      })()}
+                      <tr>
+                        <td colSpan="3" className="pt-3 text-sm font-semibold text-ink-primary text-right">Total Amount</td>
+                        <td className="pt-3 text-right text-lg font-bold text-getmeds-blue">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </>
               ) : (
                 /* Sep 14, 2026: the same table as raising an order. */
                 <OrderItemsEditor
@@ -1436,6 +1619,7 @@ const OrderDetailPage = () => {
                   onSave={saveDraftItems}
                   saving={updateItemsMutation.isPending}
                   alreadySynced={Boolean(order.zoho_so_id)}
+                  orderInvoicingFrom={order.invoicing_from}
                 />
               )}
             </div>
@@ -1605,7 +1789,7 @@ const OrderDetailPage = () => {
                   every event equal weight — this order once rendered 20 rows
                   for six real things. The raw list is still one click away, so
                   nothing is hidden, it is just no longer the default. */}
-              <OrderPipeline timeline={timeline} />
+              <OrderPipeline timeline={timeline} focusEntity={timelineFocus} onClearFocus={() => setTimelineFocus(null)} />
 
               {events.length > 0 && (
                 <details className="mt-6 border-t border-slate-100 pt-4">

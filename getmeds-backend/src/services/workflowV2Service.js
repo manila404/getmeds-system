@@ -6,6 +6,10 @@ const { notify, getUserIdsByRole } = require('./notificationService');
 const { evaluateCompletion } = require('./orderCompletionService');
 const { claimOrder, releaseClaim, describeClaim } = require('./orderClaimService');
 const { zohoWriteMode } = require('./zohoWriteGuard');
+// Sep 22, 2026: split-invoicing orders — Dispatch presses ONE button and
+// this pushes the same pack/ship action onto every entity's own Sales
+// Order in Zoho too. See services/orderSplitService.js.
+const { pushDispatchActionToSplits } = require('./orderSplitService');
 
 /**
  * Dispatch works in Getmeds — the actions behind the Dispatch buttons (field
@@ -347,6 +351,11 @@ async function markPacked({ orderId, user }) {
       });
     })();
 
+    // Sep 22, 2026: one button, every entity's own Sales Order gets its own
+    // Zoho package — see services/orderSplitService.js. A no-op (empty
+    // result) for every order with no split, which stays the default.
+    await pushDispatchActionToSplits({ orderId: order.id, kind: 'pack', actor, dryRun, date: zohoToday() });
+
     await notifySafely({
       orderId: order.id,
       recipientIds: [order.medrep_user_id].filter(Boolean),
@@ -414,6 +423,11 @@ async function ship({ orderId, user, courier, trackingNumber }) {
         actorId: actor.id, actorName: actor.name, notes: `${carrier}: ${tracking}`
       });
     })();
+
+    // Sep 22, 2026: one physical parcel, one tracking number entered once —
+    // pushed onto every entity's own Sales Order in Zoho too. See
+    // services/orderSplitService.js. A no-op for every order with no split.
+    await pushDispatchActionToSplits({ orderId: order.id, kind: 'ship', actor, dryRun, date: zohoToday(), courier: carrier, trackingNumber: tracking });
 
     // Shipped is half of "done"; if Finance already recorded the payment in
     // Zoho, this closes the order — the same shared rule the webhook uses.

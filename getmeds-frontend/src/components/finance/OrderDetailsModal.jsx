@@ -1,9 +1,242 @@
 import React, { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, Download } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
+import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import { attachmentLabel, HOSPITAL_REQUIRED_TYPES } from '../../constants/attachmentTypes';
+
+// Sep 22, 2026: split-invoicing orders — a line item tagged to the other
+// entity creates a second Zoho Sales Order (order_split_sales_orders), which
+// Finance must verify independently of the primary (two entities, two bank
+// accounts — see orderSplitService.js). This panel is the one place that
+// already loads the order's full detail (including `splits`), so the second
+// Verify action lives here rather than duplicating the fetch elsewhere.
+const SplitVerifyRow = ({ orderId, split, canAct }) => {
+  const qc = useQueryClient();
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState('');
+
+  const mutation = useMutation({
+    mutationFn: ({ approved, reason: r }) =>
+      client
+        .post(`/api/finance/orders/${orderId}/splits/${split.id}/verify`, { approved, reason: r })
+        .then((res) => res.data),
+    onSuccess: (res) => {
+      const zohoConfirm = res?.data?.zohoConfirmed;
+      if (res?.data?.approved && zohoConfirm && zohoConfirm.ok === false) {
+        toast.error(
+          `${split.invoicing_from} verified — but its Sales Order is not confirmed in Zoho yet (${zohoConfirm.error || 'Zoho did not answer'}).`,
+          { duration: 9000 }
+        );
+      } else if (res?.data?.approved) {
+        const awaiting = res?.data?.awaitingOtherEntities || [];
+        toast.success(
+          awaiting.length
+            ? `${split.invoicing_from} verified — still awaiting ${awaiting.join(', ')}.`
+            : `${split.invoicing_from} verified — every entity is now cleared to invoice.`
+        );
+      } else {
+        toast.success(`${split.invoicing_from} put on hold — the whole order is held.`);
+      }
+      setRejecting(false);
+      setReason('');
+      qc.invalidateQueries({ queryKey: ['finance-order-detail', orderId] });
+      qc.invalidateQueries({ queryKey: ['finance-queue'] });
+      qc.invalidateQueries({ queryKey: ['order', String(orderId)] });
+    },
+    onError: (err) =>
+      toast.error(err.response?.data?.error?.message || 'Could not record that'),
+  });
+
+  const isPending = split.payment_status === 'pending';
+  const statusColor =
+    split.payment_status === 'verified'
+      ? 'text-pharmacy-green-dark'
+      : split.payment_status === 'rejected'
+        ? 'text-red-700'
+        : 'text-amber-900';
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-lg px-3 py-2.5 space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[13px] font-semibold text-ink-primary">{split.invoicing_from}</p>
+        <span className={`text-[11px] font-semibold capitalize ${statusColor}`}>{split.payment_status}</span>
+      </div>
+      <dl className="text-[12px] text-ink-secondary space-y-0.5">
+        <div className="flex gap-2">
+          <dt className="w-24 shrink-0">Zoho SO</dt>
+          <dd className="text-ink-primary">{split.zoho_so_number || (split.zoho_sync_error ? `Not synced — ${split.zoho_sync_error}` : '—')}</dd>
+        </div>
+        {split.zoho_invoice_number && (
+          <div className="flex gap-2">
+            <dt className="w-24 shrink-0">Zoho invoice</dt>
+            <dd className="text-ink-primary">{split.zoho_invoice_number}</dd>
+          </div>
+        )}
+      </dl>
+      {isPending && !canAct && (
+        <p className="text-[11px] text-ink-secondary pt-1">Awaiting Finance's verification of this entity.</p>
+      )}
+      {isPending && canAct && (
+        rejecting ? (
+          <div className="space-y-1.5 pt-1">
+            <textarea
+              autoFocus
+              rows={2}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Why is this entity's payment being held?"
+              className="w-full text-xs rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400"
+            />
+            <div className="flex gap-2">
+              <button
+                disabled={!reason.trim() || mutation.isPending}
+                onClick={() => mutation.mutate({ approved: false, reason: reason.trim() })}
+                className="px-2.5 py-1 rounded-md bg-state-error text-white text-[11px] font-semibold disabled:opacity-50"
+              >
+                {mutation.isPending ? 'Holding…' : 'Put on hold'}
+              </button>
+              <button
+                onClick={() => { setRejecting(false); setReason(''); }}
+                className="px-2.5 py-1 rounded-md border border-slate-300 bg-white text-[11px] text-ink-secondary"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-2 pt-1">
+            <button
+              disabled={mutation.isPending}
+              onClick={() => mutation.mutate({ approved: true })}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-pharmacy-green text-white text-[11px] font-semibold hover:opacity-90 disabled:opacity-50"
+            >
+              <ShieldCheck className="w-3 h-3" /> {mutation.isPending ? 'Verifying…' : 'Verify'}
+            </button>
+            <button
+              disabled={mutation.isPending}
+              onClick={() => setRejecting(true)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-state-error/40 text-state-error text-[11px] font-semibold hover:bg-state-error-light disabled:opacity-50"
+            >
+              <XCircle className="w-3 h-3" /> Hold
+            </button>
+          </div>
+        )
+      )}
+    </div>
+  );
+};
+
+// Sep 22, 2026: the primary entity's own card in the "Split Sales Orders"
+// section — same shape as SplitVerifyRow (status pill, Verify/Hold inline),
+// but the primary's verify/reject already had a real implementation before
+// splits existed (verifyAccount, driven by the `onConfirm`/`onReject` props
+// the parent — FinanceQueuePage — passes in), so this reuses those instead
+// of posting to a new endpoint. Previously this card was just a status
+// readout pointing at a "Confirm account" button in the modal's shared
+// footer; that made the primary the odd one out next to a split's fully
+// self-contained card, and the footer had no Hold at all (only the queue
+// row's own separate reject box did). Folding the workflowV2 price/proof
+// checklist in here too, since that's the same judgement Verify always
+// required — just moved next to the entity it's about.
+const PrimaryVerifyCard = ({ order, onConfirm, onReject, confirming, confirmsSalesOrder, canAct, checks, setChecks, checksDone }) => {
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState('');
+  const isPending = !order.primary_finance_verified_at;
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-lg px-3 py-2.5 space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[13px] font-semibold text-ink-primary">{order.invoicing_from} (primary)</p>
+        <span className={`text-[11px] font-semibold ${isPending ? 'text-amber-900' : 'text-pharmacy-green-dark'}`}>
+          {isPending ? 'pending' : 'verified'}
+        </span>
+      </div>
+      {order.zoho_so_number && (
+        <dl className="text-[12px] text-ink-secondary space-y-0.5">
+          <div className="flex gap-2">
+            <dt className="w-24 shrink-0">Zoho SO</dt>
+            <dd className="text-ink-primary">{order.zoho_so_number}</dd>
+          </div>
+        </dl>
+      )}
+      {isPending && !canAct && (
+        <p className="text-[11px] text-ink-secondary pt-1">Awaiting Finance's verification of this entity.</p>
+      )}
+      {isPending && canAct && (
+        rejecting ? (
+          <div className="space-y-1.5 pt-1">
+            <textarea
+              autoFocus
+              rows={2}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Why is this entity's payment being held?"
+              className="w-full text-xs rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400"
+            />
+            <div className="flex gap-2">
+              <button
+                disabled={!reason.trim() || confirming}
+                onClick={() => onReject(order.id, reason.trim())}
+                className="px-2.5 py-1 rounded-md bg-state-error text-white text-[11px] font-semibold disabled:opacity-50"
+              >
+                {confirming ? 'Holding…' : 'Put on hold'}
+              </button>
+              <button
+                onClick={() => { setRejecting(false); setReason(''); }}
+                className="px-2.5 py-1 rounded-md border border-slate-300 bg-white text-[11px] text-ink-secondary"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-1.5 pt-1">
+            {confirmsSalesOrder && (
+              <fieldset className="space-y-1">
+                <label className="flex items-start gap-2 text-[11px] text-ink-primary">
+                  <input
+                    type="checkbox"
+                    checked={checks.prices}
+                    onChange={() => setChecks((c) => ({ ...c, prices: !c.prices }))}
+                    className="mt-0.5"
+                  />
+                  I checked the prices on the Sales Order.
+                </label>
+                <label className="flex items-start gap-2 text-[11px] text-ink-primary">
+                  <input
+                    type="checkbox"
+                    checked={checks.proof}
+                    onChange={() => setChecks((c) => ({ ...c, proof: !c.proof }))}
+                    className="mt-0.5"
+                  />
+                  I checked the proof of payment, or the reason there is none.
+                </label>
+              </fieldset>
+            )}
+            <div className="flex gap-2">
+              <button
+                disabled={confirming || (confirmsSalesOrder && !checksDone)}
+                onClick={() => (confirmsSalesOrder ? onConfirm(order.id, checks) : onConfirm(order.id))}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-pharmacy-green text-white text-[11px] font-semibold hover:opacity-90 disabled:opacity-50"
+              >
+                <ShieldCheck className="w-3 h-3" /> {confirming ? 'Verifying…' : 'Verify'}
+              </button>
+              <button
+                disabled={confirming}
+                onClick={() => setRejecting(true)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-state-error/40 text-state-error text-[11px] font-semibold hover:bg-state-error-light disabled:opacity-50"
+              >
+                <XCircle className="w-3 h-3" /> Hold
+              </button>
+            </div>
+          </div>
+        )
+      )}
+    </div>
+  );
+};
 
 /**
  * The whole order, for the person deciding whether to verify it.
@@ -52,7 +285,7 @@ const Section = ({ title, children }) => (
 // Sep 15, 2026: `footer` — Dispatch opens this same panel as the order's
 // receipt (what to prepare), and puts its own actions there instead of
 // Finance's Confirm. Without `onConfirm` no Confirm button can appear anyway.
-const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2 = false, footer = null }) => {
+const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, workflowV2 = false, footer = null }) => {
   const detail = useQuery({
     queryKey: ['finance-order-detail', orderId],
     queryFn: () => client.get(`/api/orders/${orderId}`).then((r) => r.data),
@@ -67,6 +300,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
 
   const order = detail.data?.data?.order;
   const items = detail.data?.data?.items || [];
+  const splits = detail.data?.data?.splits || [];
   const attachments = files.data?.data?.attachments || [];
 
   // A hospital order is the one case where a missing document actually blocks
@@ -209,6 +443,30 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
                 <Row label="Pls give" value={order.intake_pls_give} />
               </Section>
             </div>
+
+            {splits.length > 0 && (
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wide text-ink-secondary mb-1.5">
+                  Split Sales Orders — verify each entity independently
+                </h3>
+                <div className="grid sm:grid-cols-2 gap-2.5">
+                  <PrimaryVerifyCard
+                    order={order}
+                    onConfirm={onConfirm}
+                    onReject={onReject}
+                    confirming={confirming}
+                    confirmsSalesOrder={confirmsSalesOrder}
+                    canAct={canConfirm}
+                    checks={checks}
+                    setChecks={setChecks}
+                    checksDone={checksDone}
+                  />
+                  {splits.map((s) => (
+                    <SplitVerifyRow key={s.id} orderId={order.id} split={s} canAct={canConfirm} />
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div>
               <h3 className="text-xs font-bold uppercase tracking-wide text-ink-secondary mb-1.5">
@@ -368,9 +626,17 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
 
         <div className="px-5 py-3 border-t border-slate-200 bg-white rounded-b-xl flex items-center justify-between gap-3">
           {/* Says why there is no Confirm button, rather than leaving its
-              absence to be read as the panel being broken. */}
+              absence to be read as the panel being broken.
+              Sep 22, 2026: for a split order, the primary now has its own
+              Verify/Hold inline in the "Split Sales Orders" section above —
+              this footer would otherwise offer the exact same action a
+              second time, with no Hold of its own to match it. */}
           {footer ? (
             <div className="min-w-0">{footer}</div>
+          ) : splits.length > 0 ? (
+            <p className="text-[11px] text-ink-secondary min-w-0">
+              Verify or hold each entity above — this order is split across {splits.length + 1} Sales Orders.
+            </p>
           ) : confirmsSalesOrder ? (
             <fieldset className="min-w-0 space-y-1">
               <legend className="text-[11px] text-ink-secondary mb-1">
@@ -413,7 +679,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, confirming, workflowV2
             >
               Close
             </button>
-            {canConfirm && (
+            {canConfirm && splits.length === 0 && (
               <button
                 onClick={() => (confirmsSalesOrder ? onConfirm(order.id, checks) : onConfirm(order.id))}
                 disabled={confirming || (confirmsSalesOrder && !checksDone)}

@@ -996,6 +996,46 @@ async function reconcileOrderItemsPriceRemark(client) {
 }
 
 /**
+ * Sep 22, 2026: order_items.invoicing_from — a per-line override of the
+ * order's own invoicing_from, the trigger for a split-invoicing order (see
+ * order_split_sales_orders in schema.pg.sql and services/orderSplitService.js).
+ * NULL on every existing row: nothing about an order that predates this
+ * column changes — NULL means "follow the order", exactly what every order
+ * has always done.
+ */
+async function reconcileOrderItemsInvoicingFrom(client) {
+  await client.query(
+    `ALTER TABLE order_items ADD COLUMN IF NOT EXISTS invoicing_from TEXT
+       CHECK (invoicing_from IS NULL OR invoicing_from IN ('2mg Incorporated', 'Getmeds Philippines Inc.'))`
+  );
+  console.log('  ✔ order_items.invoicing_from present');
+}
+
+/**
+ * Sep 22, 2026: zoho_sync_queue.invoicing_from — which Sales Order a queued
+ * retry is for. NULL on every existing row (and every row a non-split order
+ * ever enqueues): the primary, exactly today's behavior. See
+ * zohoRetryService.js's processOne.
+ */
+async function reconcileZohoSyncQueueInvoicingFrom(client) {
+  await client.query(
+    `ALTER TABLE zoho_sync_queue ADD COLUMN IF NOT EXISTS invoicing_from TEXT
+       CHECK (invoicing_from IS NULL OR invoicing_from IN ('2mg Incorporated', 'Getmeds Philippines Inc.'))`
+  );
+  console.log('  ✔ zoho_sync_queue.invoicing_from present');
+}
+
+/**
+ * Sep 22, 2026: orders.primary_finance_verified_at — see finance.controller.js's
+ * verifyAccount and schema.pg.sql's own comment on the column. Only read/
+ * written for a split-invoicing order; NULL and inert for every other one.
+ */
+async function reconcileOrderPrimaryFinanceVerified(client) {
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS primary_finance_verified_at TEXT');
+  console.log('  ✔ orders.primary_finance_verified_at present');
+}
+
+/**
  * Sep 19, 2026: MedRep-requested, Management-approved attachment deletion —
  * see paymentProof.controller.js's requestDelete/decideDelete.
  *
@@ -1075,6 +1115,9 @@ async function main() {
     await reconcileOrderEventsActorRole(client);
     await reconcileOrderItemsPriceRemark(client);
     await reconcileAttachmentDeletion(client);
+    await reconcileOrderItemsInvoicingFrom(client);
+    await reconcileZohoSyncQueueInvoicingFrom(client);
+    await reconcileOrderPrimaryFinanceVerified(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

@@ -45,6 +45,11 @@ router.get('/orders/:id/payment', c.getPayment);
 // allowed where pack/ship/payment still are not.
 router.post('/orders/:id/verify', c.verifyAccount);
 
+// Sep 22, 2026: a split-invoicing order's SECOND entity — its own,
+// independent Verify action. See services/orderSplitService.js and
+// verifySplitAccount's own header comment.
+router.post('/orders/:id/splits/:splitId/verify', c.verifySplitAccount);
+
 // Sep 12, 2026: lift a hold Finance itself applied and put the order back in
 // the queue. The MedRep can already do this by attaching or correcting
 // something; this is for when Finance resolves the account themselves and

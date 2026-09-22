@@ -488,6 +488,16 @@ const DispatchQueuePage = () => {
             {order.tracking_number && <> · Tracking: <span className="font-mono">{order.tracking_number}</span></>}
           </p>
         )}
+        {/* Sep 22, 2026: split-invoicing orders — one tracking number entered
+            here still goes to every Sales Order (workflowV2Service.
+            pushDispatchActionToSplits), so nothing changes about what Dispatch
+            does. This just explains why the receipt then shows two Zoho
+            package/shipment confirmations instead of one. */}
+        {Number(order.split_count) > 0 && (
+          <p className="text-xs font-semibold text-indigo-700 mt-1">
+            Split order — also billed to {order.split_entities}. One tracking number covers both.
+          </p>
+        )}
       </div>
       <div className="text-right shrink-0">
         <p className="text-sm font-bold text-ink-primary">{peso(order.total_amount)}</p>

@@ -114,10 +114,19 @@ function parseWebhookPayload(req) {
 
 /**
  * Finds order in database by zoho_so_id or getmeds_order_id.
+ *
+ * Sep 22, 2026: for a split-invoicing order (see services/orderSplitService.js),
+ * the identifier might name the SECOND Sales Order instead of the primary
+ * one `orders.zoho_so_id` holds. Checked only after the primary lookup
+ * misses — the overwhelming majority of webhooks are for a primary and
+ * never touch this. Returns the order with `_splitMatch` set to that split
+ * row when this is how it matched, `null` otherwise, so a caller can tell
+ * "this event is about the order's SECOND Sales Order" and route
+ * write-backs to order_split_sales_orders instead of the orders row.
  */
 async function findOrder(identifier) {
   if (!identifier) return null;
-  return await db.prepare(`
+  const primary = await db.prepare(`
     SELECT o.*, c.name as customer_name, c.type as customer_type_detail,
            u.id as medrep_user_id, u.name as medrep_name, u.email as medrep_email
     FROM orders o
@@ -125,6 +134,109 @@ async function findOrder(identifier) {
     LEFT JOIN users u ON o.medrep_id = u.id
     WHERE o.zoho_so_id = ? OR o.getmeds_order_id = ? OR o.zoho_so_number = ?
   `).get(String(identifier), String(identifier), String(identifier));
+  if (primary) return { ...primary, _splitMatch: null };
+
+  const splitRow = await db.prepare(
+    `SELECT * FROM order_split_sales_orders WHERE zoho_so_id = ? OR zoho_so_number = ?`
+  ).get(String(identifier), String(identifier));
+  if (!splitRow) return null;
+
+  const order = await db.prepare(`
+    SELECT o.*, c.name as customer_name, c.type as customer_type_detail,
+           u.id as medrep_user_id, u.name as medrep_name, u.email as medrep_email
+    FROM orders o
+    LEFT JOIN customers c ON o.customer_id = c.id
+    LEFT JOIN users u ON o.medrep_id = u.id
+    WHERE o.id = ?
+  `).get(splitRow.order_id);
+  if (!order) return null;
+  return { ...order, _splitMatch: splitRow };
+}
+
+/**
+ * Sep 22, 2026: the split-invoicing counterpart to the huge branch below —
+ * deliberately much smaller. It covers the transitions that matter for a
+ * split's own Sales Order/Invoice/Shipment lifecycle (confirmed, invoice
+ * drafted/sent, payment reported, shipped/packed) by writing to its
+ * order_split_sales_orders row instead of the orders table, and logs each
+ * one to the order's trail so it's visible on the Audit Timeline right
+ * alongside the primary's own events.
+ *
+ * Deliberately simpler than the primary path: no claim/echo de-duplication
+ * (a split confirming twice just re-writes the same status, which is
+ * harmless — every column here is idempotent), and it never touches the
+ * order's own `status` column — that stays governed by the primary path
+ * plus orderCompletionService's split-aware completion rule, which looks
+ * at every split row rather than being driven by any one of them directly.
+ */
+async function handleSplitWebhookEvent(order, splitRow, { rawEvent, salesorder, invoice, payment, shipment, zohoPackage }) {
+  const now = new Date().toISOString();
+  const soStatus = salesorder && typeof salesorder.status === 'string' ? salesorder.status.toLowerCase() : null;
+  const invStatus = invoice && typeof invoice.status === 'string' ? invoice.status.toLowerCase() : null;
+  const entity = splitRow.invoicing_from;
+
+  const isPaymentEvent = rawEvent.includes('payment') || rawEvent.includes('invoice.paid') || invStatus === 'paid';
+  const isInvoiceSent = !isPaymentEvent && (rawEvent.includes('invoice.sent') || rawEvent.includes('invoice.mark_sent') || invStatus === 'sent');
+  const isInvoiceDrafted = !isPaymentEvent && !isInvoiceSent && (rawEvent.includes('invoice.created') || rawEvent.includes('invoice.drafted') || (invoice && (invStatus === 'draft' || invStatus === 'open')));
+  const isSalesOrderConfirmed = rawEvent.includes('salesorder.confirmed') ||
+    ['confirmed', 'open', 'partially_shipped', 'shipped', 'fulfilled', 'partially_fulfilled', 'closed', 'invoiced', 'partially_invoiced'].includes(soStatus);
+  const isSalesOrderDeleted = rawEvent.includes('salesorder.deleted');
+  const isSalesOrderCancelled = !isSalesOrderDeleted && (rawEvent.includes('salesorder.void') || rawEvent.includes('salesorder.cancelled') || soStatus === 'void' || soStatus === 'cancelled' || soStatus === 'voided');
+  const isShipmentEvent = Boolean(shipment) || rawEvent.includes('shipment.created') || rawEvent.includes('shipment_created');
+  const isPackageEvent = !isShipmentEvent && (Boolean(zohoPackage) || rawEvent.includes('package.created') || rawEvent.includes('package_created'));
+
+  const logSplitEvent = (eventType, notes) => logEvent({
+    orderId: order.id, eventType, actorName: 'Zoho Webhook',
+    notes: `[${entity}] ${notes}`,
+    metadata: { invoicingFrom: entity, splitId: splitRow.id }
+  });
+
+  if (isPaymentEvent) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_paid_status = 'paid', updated_at = ? WHERE id = ?`).run(now, splitRow.id);
+    await logSplitEvent('ZOHO_PAYMENT_VERIFIED', 'Payment reported by Zoho for this entity’s Invoice.');
+    return { processed: true, action: 'SPLIT_PAYMENT_RECORDED', invoicingFrom: entity };
+  }
+  if (isInvoiceSent) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_invoiced_status = 'sent', zoho_invoice_id = COALESCE(?, zoho_invoice_id), zoho_invoice_number = COALESCE(?, zoho_invoice_number), updated_at = ? WHERE id = ?`)
+      .run(invoice?.invoice_id || null, invoice?.invoice_number || null, now, splitRow.id);
+    await logSplitEvent('ZOHO_INVOICE_SENT', `Invoice ${invoice?.invoice_number || ''} marked Sent in Zoho.`.trim());
+    return { processed: true, action: 'SPLIT_INVOICE_SENT', invoicingFrom: entity };
+  }
+  if (isInvoiceDrafted) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_invoiced_status = 'draft', zoho_invoice_id = ?, zoho_invoice_number = ?, updated_at = ? WHERE id = ?`)
+      .run(invoice?.invoice_id || null, invoice?.invoice_number || null, now, splitRow.id);
+    await logSplitEvent('ZOHO_INVOICE_DRAFTED', `Invoice ${invoice?.invoice_number || ''} drafted in Zoho.`.trim());
+    return { processed: true, action: 'SPLIT_INVOICE_DRAFTED', invoicingFrom: entity };
+  }
+  if (isSalesOrderDeleted) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_so_status = 'deleted', updated_at = ? WHERE id = ?`).run(now, splitRow.id);
+    await logSplitEvent('ZOHO_SO_DELETED', 'Sales Order deleted in Zoho.');
+    return { processed: true, action: 'SPLIT_SO_DELETED', invoicingFrom: entity };
+  }
+  if (isSalesOrderCancelled) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_so_status = 'cancelled', updated_at = ? WHERE id = ?`).run(now, splitRow.id);
+    await logSplitEvent('ZOHO_SO_CANCELLED', 'Sales Order voided/cancelled in Zoho.');
+    return { processed: true, action: 'SPLIT_SO_CANCELLED', invoicingFrom: entity };
+  }
+  if (isSalesOrderConfirmed) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_so_status = 'confirmed', updated_at = ? WHERE id = ?`).run(now, splitRow.id);
+    await logSplitEvent('ZOHO_SO_CONFIRMED', 'Sales Order confirmed in Zoho.');
+    return { processed: true, action: 'SPLIT_SO_CONFIRMED', invoicingFrom: entity };
+  }
+  if (isShipmentEvent) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_shipped_status = 'shipped', zoho_shipment_id = COALESCE(?, zoho_shipment_id), zoho_shipment_number = COALESCE(?, zoho_shipment_number), updated_at = ? WHERE id = ?`)
+      .run(shipment?.shipment_id || null, shipment?.shipment_number || null, now, splitRow.id);
+    await logSplitEvent('ZOHO_DISPATCHED', 'Shipment recorded in Zoho for this entity’s Sales Order.');
+    return { processed: true, action: 'SPLIT_SHIPPED', invoicingFrom: entity };
+  }
+  if (isPackageEvent) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_package_id = COALESCE(?, zoho_package_id), zoho_package_number = COALESCE(?, zoho_package_number), updated_at = ? WHERE id = ?`)
+      .run(zohoPackage?.package_id || null, zohoPackage?.package_number || null, now, splitRow.id);
+    await logSplitEvent('ZOHO_PACKAGE_CREATED', 'Package created in Zoho for this entity’s Sales Order.');
+    return { processed: true, action: 'SPLIT_PACKAGE_CREATED', invoicingFrom: entity };
+  }
+
+  return { processed: false, message: 'Webhook received for a split Sales Order but matched no known event.', invoicingFrom: entity };
 }
 
 /**
@@ -167,6 +279,26 @@ exports.handleZohoWebhook = async (req, res, next) => {
         identifier
       });
     }
+
+    // Sep 22, 2026: this event is about a split-invoicing order's SECOND
+    // Sales Order (see services/orderSplitService.js), not the primary one
+    // — findOrder() only sets _splitMatch when it had to fall through to
+    // order_split_sales_orders to resolve the identifier. Handled by a
+    // small, separate function rather than threading a slot condition
+    // through every branch below: those branches read `order.zoho_so_id`/
+    // `order.status`/etc. as scalars, which is exactly right for the
+    // primary and exactly wrong for a split. The order's own overall
+    // `status` is never written here — see orderCompletionService's
+    // split-aware completion rule for how the two combine.
+    if (order._splitMatch) {
+      const result = await handleSplitWebhookEvent(order, order._splitMatch, { rawEvent, salesorder, invoice, payment, shipment, zohoPackage });
+      return res.status(200).json({ success: true, ...result });
+    }
+    // Sep 22, 2026: everything below this point is the PRIMARY path,
+    // unmodified — strip the marker so `order` is byte-identical to what
+    // findOrder() has always returned for it (it only ever leaks into
+    // notification payloads/etc. otherwise, which is harmless but pointless).
+    delete order._splitMatch;
 
     const now = new Date().toISOString();
     let actionTaken = 'IGNORED';
@@ -911,7 +1043,65 @@ exports.handleZohoWebhook = async (req, res, next) => {
     // on which merge field got picked when the Workflow Rule was set up.
     // Calling the API with a Sales Order Number instead of the real ID would
     // fail outright, so this sidesteps that misconfiguration entirely.
+    //
+    // Sep 22, 2026: split-invoicing orders — `zohoSoId` (the webhook's own
+    // reported id) is only a safe stand-in for order.zoho_so_id when
+    // order.zoho_so_id is genuinely just not written yet. It stopped being
+    // safe the moment an order could have a SECOND Sales Order: on
+    // TestGM-20260922-0001, this fell back to zohoSoId while the primary's
+    // own zoho_so_id was still null (its sync had failed and not yet been
+    // retried), and zohoSoId turned out to belong to the order's SPLIT
+    // instead — order._splitMatch had not resolved yet either (a race right
+    // after createSplitSalesOrder's own INSERT). The result: the split's
+    // Sales Order got fetched and treated as if it were THIS order's own —
+    // corrupting both its header fields (diffSalesOrderFields below) and,
+    // via syncLineItemsFromZoho, wiping every item that wasn't on that one
+    // Sales Order. Checked here, once, before ever trusting the fallback.
     else if (rawEvent === 'salesorder.edited' && (order.zoho_so_id || zohoSoId)) {
+      // Sep 22, 2026: `zohoSoId` (the webhook's own reported id) is only a
+      // safe stand-in for order.zoho_so_id when order.zoho_so_id is
+      // genuinely just not written yet. It stopped being safe the moment an
+      // order could have a SECOND Sales Order: on TestGM-20260922-0001, this
+      // fell back to zohoSoId while the primary's own zoho_so_id was still
+      // null (its sync had failed and not yet been retried), and zohoSoId
+      // turned out to belong to the order's SPLIT instead —
+      // order._splitMatch had not resolved yet either (a race right after
+      // createSplitSalesOrder's own INSERT). The result: the split's Sales
+      // Order got fetched and treated as if it were THIS order's own —
+      // corrupting both its header fields (diffSalesOrderFields below) and,
+      // via syncLineItemsFromZoho, wiping every item that wasn't on that
+      // one Sales Order. Checked here, once, before ever trusting it.
+      const belongsToOwnSplit = Boolean(
+        zohoSoId && zohoSoId !== order.zoho_so_id &&
+        await db.prepare('SELECT 1 FROM order_split_sales_orders WHERE order_id = ? AND zoho_so_id = ?').get(order.id, zohoSoId)
+      );
+      if (belongsToOwnSplit) {
+        // This event is genuinely about a split's own Sales Order, not the
+        // primary — it will route to the split path correctly on its next
+        // event (findOrder()'s zoho_so_id match no longer races once this
+        // row exists). Log that plainly rather than silently doing nothing.
+        console.warn(`[ZOHO_WEBHOOK] salesorder.edited for ${zohoSoId} belongs to a split of order ${order.id} but was not routed there yet — declining to touch the primary's data.`);
+        await logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_EVENT_RECEIVED',
+          oldStatus: previousStatus,
+          newStatus: previousStatus,
+          actorId: null,
+          actorName: 'Zoho Webhook',
+          notes: `Sales Order ${zohoSoId} was edited in Zoho — it belongs to one of this order's split entities, and will be picked up once its own event routes there.`,
+          metadata: { rawEvent, zohoSoId }
+        });
+        actionTaken = 'SPLIT_EDIT_DEFERRED';
+        return res.status(200).json({
+          success: true,
+          processed: true,
+          action: actionTaken,
+          order_id: order.getmeds_order_id,
+          previous_status: previousStatus,
+          new_status: previousStatus
+        });
+      }
+
       const idToFetch = order.zoho_so_id || zohoSoId;
       let liveSalesOrder = null;
       try {

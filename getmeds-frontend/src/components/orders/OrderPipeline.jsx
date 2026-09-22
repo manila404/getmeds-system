@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Check, Minus, ChevronRight, Clock, XCircle, Info } from 'lucide-react';
+import { Check, Minus, ChevronRight, Clock, XCircle, Info, Filter, X } from 'lucide-react';
 import { formatPHT } from '../../utils/dateUtils';
 import { roleLabel } from '../../constants/roles';
 
@@ -140,7 +140,16 @@ const Updates = ({ updates }) => {
   );
 };
 
-const OrderPipeline = ({ timeline }) => {
+/**
+ * Sep 22, 2026: split-invoicing orders — `focusEntity` narrows the timeline
+ * to one Sales Order's own events, set when its card in the Zoho Integration
+ * panel is clicked (see OrderDetailPage.jsx). Raw invoicing_from string, or
+ * null to show everything (the default, and the only case for a non-split
+ * order). Matched against `perEntity[].entity` / `updates[].entity`, which
+ * orderTimelineService.js only ever populates for a split order — this
+ * component otherwise renders exactly as it did before this existed.
+ */
+const OrderPipeline = ({ timeline, focusEntity = null, onClearFocus }) => {
   const stages = timeline?.stages || [];
   const counts = timeline?.counts || {};
 
@@ -148,8 +157,34 @@ const OrderPipeline = ({ timeline }) => {
     return <p className="text-sm text-ink-secondary text-center py-8">No events recorded yet.</p>;
   }
 
+  // The primary's own perEntity entry is always first (see
+  // orderTimelineService.js) — used to tell "focused on the primary" (whose
+  // own events carry no entity tag at all) apart from "focused on a split".
+  const primaryEntity = stages.find((s) => s.perEntity)?.perEntity?.[0]?.entity || null;
+  const focusIsPrimary = Boolean(focusEntity) && focusEntity === primaryEntity;
+  const matchesFocus = (u) => {
+    if (!focusEntity) return true;
+    return focusIsPrimary ? !u.entity : u.entity === focusEntity;
+  };
+
   return (
     <div>
+      {focusEntity && (
+        <div className="mb-4 flex items-center justify-between gap-2 rounded-md border border-getmeds-blue/30 bg-getmeds-blue/5 px-3 py-2">
+          <p className="text-xs text-getmeds-blue-dark flex items-center gap-1.5">
+            <Filter className="w-3.5 h-3.5 shrink-0" />
+            Focused on <span className="font-semibold">{focusEntity}</span>{focusIsPrimary ? ' (primary)' : ''} — other entities' updates are hidden.
+          </p>
+          <button
+            type="button"
+            onClick={onClearFocus}
+            className="inline-flex items-center gap-1 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark shrink-0"
+          >
+            <X className="w-3.5 h-3.5" /> Clear
+          </button>
+        </div>
+      )}
+
       <div className="flex items-baseline justify-between mb-4">
         <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide">
           Progress
@@ -177,6 +212,7 @@ const OrderPipeline = ({ timeline }) => {
             ? STATE_STYLE.done_from_state
             : STATE_STYLE[s.state] || STATE_STYLE.pending;
           const last = i === stages.length - 1;
+          const visibleUpdates = focusEntity ? (s.updates || []).filter(matchesFocus) : s.updates;
 
           return (
             <div key={`${s.key}-${i}`} className="flex gap-3">
@@ -246,7 +282,35 @@ const OrderPipeline = ({ timeline }) => {
                   <p className="text-xs text-red-800 mt-0.5">{s.note}</p>
                 )}
 
-                <Updates updates={s.updates} />
+                {/* Sep 22, 2026: split-invoicing orders — this stage spans
+                    more than one Sales Order (Confirmed / Finance Verified /
+                    Invoiced / Paid, each with its own entity). Shown
+                    whenever the backend supplies a breakdown, so a split
+                    that's on hold or racing ahead reads as itself, not as
+                    the whole order stuck or done. */}
+                {s.perEntity && (
+                  <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
+                    {s.perEntity.map((p) => (
+                      <span
+                        key={p.entity}
+                        className={`inline-flex items-center gap-1 text-[11px] ${
+                          focusEntity && p.entity === focusEntity ? 'px-1.5 py-0.5 rounded bg-getmeds-blue/10 ring-1 ring-getmeds-blue/30' : ''
+                        }`}
+                      >
+                        {p.done ? (
+                          <Check className="w-3 h-3 text-pharmacy-green shrink-0" strokeWidth={3} />
+                        ) : (
+                          <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                        )}
+                        <span className={p.done ? 'text-ink-primary font-medium' : 'text-ink-secondary'}>
+                          {p.label}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <Updates updates={visibleUpdates} />
               </div>
             </div>
           );

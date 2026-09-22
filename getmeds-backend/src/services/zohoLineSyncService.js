@@ -6,6 +6,22 @@ const { logEvent } = require('./auditService');
 const { notify, getUserIdsByRole } = require('./notificationService');
 
 /**
+ * Sep 22, 2026: split-invoicing orders — this whole file predates that
+ * feature and was built on "one order = one Sales Order = the whole item
+ * list." That stopped being true the moment order_items could carry a
+ * per-line `invoicing_from` override (see orderSplitService.js): a split
+ * order's local items now span TWO Sales Orders, and syncing either one's
+ * lines must only touch that entity's own slice — never the whole table.
+ *
+ * Found the hard way on TestGM-20260922-0001: syncing the primary's Sales
+ * Order deleted the split's item, and syncing the split's Sales Order
+ * deleted the primary's — each sync correctly reflected ONE Sales Order,
+ * but each one WAS treated as if it were the entire order, so line items
+ * ping-ponged in and out of existence depending on whichever Sales Order's
+ * webhook/reconcile pull ran last.
+ */
+
+/**
  * Bring an order's LINE ITEMS and TOTAL into line with its Zoho Sales Order.
  *
  * Sep 14, 2026. When someone edits a Sales Order in Zoho, this app notices —
@@ -90,7 +106,17 @@ function signature(rows) {
 
 const hasNumber = (v) => v !== undefined && v !== null && v !== '' && Number.isFinite(Number(v));
 
-async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zoho' }) {
+/**
+ * `invoicingFrom` — omitted (or null), this syncs the PRIMARY entity's slice
+ * of order_items (exactly this function's whole behavior before splits
+ * existed). A value scopes every read/delete/insert below to that split
+ * entity's own rows instead, and stamps `invoicing_from` on what it inserts
+ * so the tag survives a re-sync. Callers pass this whenever the `salesorder`
+ * they are handing in is a SPLIT's own Sales Order, not the order's primary
+ * one — see webhook.controller.js's handleSplitWebhookEvent and
+ * services/orderSplitService.js.
+ */
+async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zoho', invoicingFrom = null }) {
   if (!given || !salesorder) return 'skipped';
 
   // Re-read the row: callers hold differently-shaped order objects (the
@@ -98,6 +124,17 @@ async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zo
   // compares against the stored total and items, so it needs the real row.
   const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(given.id);
   if (!order || isImportedRef(order.getmeds_order_id)) return 'skipped';
+
+  // A split-scoped sync needs order_items.invoicing_from to know which rows
+  // are "this entity's" — without it (an unmigrated environment) there is no
+  // safe way to scope the delete+insert, so refuse rather than guess.
+  const canScopeByEntity = await hasColumn('order_items', 'invoicing_from');
+  if (invoicingFrom && !canScopeByEntity) {
+    console.warn(`[ZOHO_LINE_SYNC] order ${order.id}: cannot sync ${invoicingFrom}'s items — order_items.invoicing_from is missing (run the migration).`);
+    return 'skipped';
+  }
+  const entityFilterSql = canScopeByEntity ? (invoicingFrom ? 'AND oi.invoicing_from = ?' : 'AND oi.invoicing_from IS NULL') : '';
+  const entityFilterParams = canScopeByEntity && invoicingFrom ? [invoicingFrom] : [];
 
   const lines = Array.isArray(salesorder.line_items) ? salesorder.line_items : [];
   // Never empty an order, and never sync from a partial response.
@@ -144,7 +181,9 @@ async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zo
   if (problems.length) {
     const summary = problems.join('; ');
     // Once per distinct problem, so a webhook that fires repeatedly does not
-    // flood the trail with the same warning.
+    // flood the trail with the same warning. Scoped by entity too — a
+    // problem on the split's items must not be deduped away by an unrelated
+    // one already logged for the primary, or vice versa.
     const already = await db
       .prepare("SELECT 1 FROM order_events WHERE order_id = ? AND event_type = 'ZOHO_SO_ITEMS_NOT_SYNCED' AND notes LIKE ?")
       .get(order.id, `%${summary}%`);
@@ -157,49 +196,62 @@ async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zo
         actorId: null,
         actorName,
         notes:
-          `The Sales Order's items could not be copied from Zoho, so they were left as they were rather than ` +
+          `${invoicingFrom ? `[${invoicingFrom}] ` : ''}The Sales Order's items could not be copied from Zoho, so they were left as they were rather than ` +
           `stored incomplete: ${summary}. If a product is missing, run "Pull from Zoho" on the inventory page, ` +
           'then Sync from Zoho on this order.',
-        metadata: { problems }
+        metadata: { problems, invoicingFrom: invoicingFrom || null }
       });
     }
     return 'refused';
   }
 
+  // Sep 22, 2026: scoped to just this entity's own rows — the other
+  // entity's items (if any) are left completely untouched below.
   const current = await db
     .prepare(
       `SELECT oi.product_id, oi.quantity, oi.unit_price, oi.discount_amount, oi.tax_percent, oi.line_total, p.name
          FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id
-        WHERE oi.order_id = ?`
+        WHERE oi.order_id = ? ${entityFilterSql}`
     )
-    .all(order.id);
+    .all(order.id, ...entityFilterParams);
 
   const zohoTotal = Number(salesorder.total);
   const sameLines = signature(current) === signature(incoming);
-  const sameTotal = Math.abs(Number(order.total_amount || 0) - zohoTotal) < 0.005;
+  // Compared against THIS entity's own current slice, not the order's
+  // blended total — for a split order, order.total_amount spans every
+  // entity and is never equal to any one Sales Order's own total.
+  const currentSliceTotal = current.reduce((s, r) => s + Number(r.line_total || 0), 0);
+  const sameTotal = Math.abs(currentSliceTotal - zohoTotal) < 0.005;
   if (sameLines && sameTotal) return 'unchanged';
 
   const describe = (rows) =>
     rows.map((r) => `${Number(r.quantity)}x ${r.name || 'item'} @ ${money(r.unit_price)}`).join('; ') || 'none';
   const lineSum = incoming.reduce((s, r) => s + r.line_total, 0);
 
+  let orderTotal = Number(order.total_amount || 0);
+
   await db.transaction(async () => {
-    await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(order.id);
+    await db.prepare(`DELETE FROM order_items oi WHERE oi.order_id = ? ${entityFilterSql}`).run(order.id, ...entityFilterParams);
+    const insertColumns = ['order_id', 'product_id', 'quantity', 'unit_price', 'subtotal', 'discount_amount', 'tax_percent', 'tax_label', 'line_total'];
+    if (canScopeByEntity) insertColumns.push('invoicing_from');
     const ins = db.prepare(
-      `INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal,
-                                discount_amount, tax_percent, tax_label, line_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO order_items (${insertColumns.join(', ')}) VALUES (${insertColumns.map(() => '?').join(', ')})`
     );
     for (const r of incoming) {
-      await ins.run(order.id, r.product_id, r.quantity, r.unit_price, r.subtotal,
-        r.discount_amount, r.tax_percent, r.tax_label, r.line_total);
+      const values = [order.id, r.product_id, r.quantity, r.unit_price, r.subtotal, r.discount_amount, r.tax_percent, r.tax_label, r.line_total];
+      if (canScopeByEntity) values.push(invoicingFrom || null);
+      await ins.run(...values);
     }
-    // The total is what Zoho will BILL. The lines are priced by the same
-    // arithmetic Zoho uses, so the two normally agree to the centavo; if an
-    // order-level discount in Zoho makes them differ, the billed figure wins
-    // and the difference is recorded below rather than hidden.
+
+    // Sep 22, 2026: the ORDER's total is the sum across every entity's
+    // items now, not just the slice this call just synced — for a
+    // non-split order every row belongs to the primary, so this is the
+    // same number `zohoTotal` always was. For a split order, no single
+    // Sales Order's total represents the whole GetMeds order any more.
+    const allItems = await db.prepare('SELECT line_total FROM order_items WHERE order_id = ?').all(order.id);
+    orderTotal = allItems.reduce((s, r) => s + Number(r.line_total || 0), 0);
     await db.prepare('UPDATE orders SET total_amount = ?, updated_at = ? WHERE id = ?')
-      .run(zohoTotal, new Date().toISOString(), order.id);
+      .run(orderTotal, new Date().toISOString(), order.id);
     // Guarded: inside this transaction a statement on a missing column would
     // abort everything above — see services/schemaColumns.js.
     if (await hasColumn('orders', 'is_inclusive_tax')) {
@@ -214,14 +266,16 @@ async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zo
       actorId: null,
       actorName,
       notes:
-        `Items updated from Zoho (${salesorder.salesorder_number || order.zoho_so_number || 'Sales Order'}). ` +
+        `Items updated from Zoho (${salesorder.salesorder_number || order.zoho_so_number || 'Sales Order'})` +
+        `${invoicingFrom ? ` for ${invoicingFrom}` : ''}. ` +
         `Was: ${describe(current)}. Now: ${describe(incoming)}. ` +
-        `Total ${money(order.total_amount)} → ${money(zohoTotal)}.`,
+        `Order total ${money(order.total_amount)} → ${money(orderTotal)}.`,
       metadata: {
+        invoicingFrom: invoicingFrom || null,
         before: current.map((r) => ({ product_id: r.product_id, quantity: Number(r.quantity), unit_price: Number(r.unit_price) })),
         after: incoming.map((r) => ({ product_id: r.product_id, quantity: r.quantity, unit_price: r.unit_price, line_total: r.line_total })),
         totalBefore: Number(order.total_amount || 0),
-        totalAfter: zohoTotal,
+        totalAfter: orderTotal,
         lineSum,
         ...(Math.abs(lineSum - zohoTotal) >= 0.01
           ? { note: 'Line totals differ from the Zoho total, most likely an order-level discount in Zoho.' }
@@ -234,9 +288,9 @@ async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zo
   await notify({
     orderId: order.id,
     recipientIds: Array.from(new Set([order.medrep_id, ...financeIds].filter(Boolean))),
-    message: `Order ${order.getmeds_order_id} — items changed in Zoho; total now ${money(zohoTotal)}.`,
+    message: `Order ${order.getmeds_order_id}${invoicingFrom ? ` (${invoicingFrom})` : ''} — items changed in Zoho; total now ${money(orderTotal)}.`,
     eventType: 'ZOHO_SO_ITEMS_SYNCED',
-    orderData: { ...order, total_amount: zohoTotal }
+    orderData: { ...order, total_amount: orderTotal }
   });
 
   return 'synced';

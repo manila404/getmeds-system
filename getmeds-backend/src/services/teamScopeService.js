@@ -3,10 +3,12 @@
 const db = require('../db/database');
 
 /**
- * Which orders a 'team_lead' user is allowed to see. Read-only — this role
- * has no write path anywhere, so unlike orderScopeService there is no
- * `covers`-for-an-action distinction to make; every function here answers
- * "may this person look at this."
+ * Which orders — and, as of Sep 22, 2026, which MedReps — a 'team_lead'
+ * user is allowed to reach. `teamMedrepIds`/`teamScopeSql` are also now the
+ * scoping source orders.controller.js's `resolveOrderMedrep`/`getMedreps`
+ * use to restrict who a team lead may raise an order FOR, not only what
+ * they may look at — same list, same fail-closed rule, one source of truth
+ * for "whose team is this" either way.
  *
  * ── A DIFFERENT SHAPE OF SCOPE, DELIBERATELY SEPARATE ───────────────────────
  *

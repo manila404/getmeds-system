@@ -41,7 +41,7 @@ const taxLabel = (it) => {
   return pct > 0 ? `VAT ${pct}%` : 'No Tax';
 };
 
-const OrderOverviewModal = ({ order, items = [], onClose }) => {
+const OrderOverviewModal = ({ order, items = [], splits = [], onClose }) => {
   // Its own cache key: the Attachments tab caches this endpoint in a
   // different shape, and sharing a key would hand one the other's data.
   const files = useQuery({
@@ -92,7 +92,7 @@ const OrderOverviewModal = ({ order, items = [], onClose }) => {
           <Line label="Sub-division">{order.sub_division}</Line>
           <Line label="Headquarter">{order.headquarter}</Line>
           <Line label="Source">{order.intake_source}</Line>
-          <Line label="Invoicing From">{order.invoicing_from}</Line>
+          <Line label="Invoicing From">{order.invoicing_from}{splits.length > 0 ? ' (split — see below)' : ''}</Line>
           <Line label="Payment Terms">{order.intake_payment_terms}</Line>
           <Line label="Delivery Address" top>{order.delivery_address}</Line>
           {order.delivery_notes && (
@@ -102,6 +102,28 @@ const OrderOverviewModal = ({ order, items = [], onClose }) => {
             </div>
           )}
         </div>
+
+        {splits.length > 0 && (
+          <div>
+            <h4 className="text-xs font-bold uppercase tracking-wider text-ink-secondary mb-2">
+              Split Sales Orders — one order, two Zoho entities
+            </h4>
+            <div className="bg-surface rounded-xl p-4 space-y-2 border border-slate-200">
+              <div className="flex justify-between items-start gap-4">
+                <span className="text-xs text-ink-secondary font-medium shrink-0">{order.invoicing_from} (primary):</span>
+                <span className="text-ink-primary text-right break-words">{order.zoho_so_number || '—'}</span>
+              </div>
+              {splits.map((s) => (
+                <div key={s.id} className="flex justify-between items-start gap-4">
+                  <span className="text-xs text-ink-secondary font-medium shrink-0">{s.invoicing_from}:</span>
+                  <span className="text-ink-primary text-right break-words">
+                    {s.zoho_so_number || (s.zoho_sync_error ? `Not synced — ${s.zoho_sync_error}` : '—')}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {details.length > 0 && (
           <div>
@@ -177,6 +199,9 @@ const OrderOverviewModal = ({ order, items = [], onClose }) => {
                   <tr key={it.id}>
                     <td className="px-3 py-2 font-medium text-ink-primary">
                       {it.product_name} {it.sku && <span className="text-ink-secondary">({it.sku})</span>}
+                      {it.invoicing_from && it.invoicing_from !== order.invoicing_from && (
+                        <span className="block text-[11px] font-semibold text-indigo-700 mt-0.5">↳ {it.invoicing_from}</span>
+                      )}
                       {it.price_remark && (
                         <span className="block text-[11px] font-normal text-ink-secondary italic mt-0.5">💬 {it.price_remark}</span>
                       )}

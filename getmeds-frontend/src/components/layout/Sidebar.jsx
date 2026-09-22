@@ -40,7 +40,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
     dispatch: 'Logistics & Dispatch',
     management: 'Operations Management',
     admin: 'System Administrator',
-    team_lead: 'Team Lead (view only)',
+    team_lead: 'Team Lead',
   };
 
   // Test Mode: Categorized transactions across ALL roles
@@ -95,10 +95,15 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       ]
     },
     {
-      title: 'Team Lead (view only)',
+      title: 'Team Lead',
       badge: 'Team Lead',
       badgeClass: 'bg-indigo-100/60 text-indigo-700',
       links: [
+        // Sep 22, 2026: a team lead can now raise an order too — for
+        // themselves or for one of their own team's MedReps, scoped
+        // server-side (see orders.controller.js's resolveOrderMedrep /
+        // getMedreps). Same route and form as everyone else's.
+        { to: '/orders/new', icon: <PlusCircle size={18} />, label: 'Create New Order', primaryAction: true },
         { to: '/team-lead', icon: <BarChart3 size={18} />, label: 'My Team', exact: true }
       ]
     },
@@ -156,7 +161,12 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
     // of a division, and with nothing on it that writes anything. Nothing
     // else this role reaches: no Approval Queue, Exception Hub, Finance,
     // Dispatch, Clients, or Inventory — see App.jsx's route table.
+    // Sep 22, 2026: "Create New Order" added — a team lead can now raise
+    // one for themselves or for their own team, same form everyone else
+    // uses (see OrderForm.jsx's isRepChoosing). Everything else about this
+    // role's reach is unchanged.
     mainLinks.push(
+      { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
       { to: '/team-lead', icon: <LayoutDashboard size={19} />, label: 'My Team' }
     );
   } else if (role === 'finance') {

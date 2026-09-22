@@ -23,8 +23,17 @@ const db = require('../db/database');
  * orders.controller.js's `create`/`submit` send on the first attempt.
  *
  * Returns null if the order no longer exists.
+ *
+ * Sep 22, 2026: `items` and `invoicingFrom` overrides added for split-
+ * invoicing orders (see services/orderSplitService.js). A split's own retry
+ * needs the SAME "rebuild fresh from the database, never replay a frozen
+ * snapshot" guarantee this file exists for — just scoped to that split's
+ * own subset of order_items and its own entity, instead of the whole
+ * order. Called with neither override, this function is 100% unchanged:
+ * every existing caller (the primary's own retry) keeps building the
+ * whole-order payload exactly as before.
  */
-async function buildZohoSalesOrderPayload(orderId) {
+async function buildZohoSalesOrderPayload(orderId, { items: itemsOverride, invoicingFrom: invoicingFromOverride } = {}) {
   const order = await db.prepare(`
     SELECT o.*, c.name as customer_name, c.type as customer_master_type, c.zoho_contact_id as customer_zoho_contact_id,
            u.salesperson as medrep_salesperson, u.division as medrep_division, u.sub_division as medrep_sub_division
@@ -36,12 +45,20 @@ async function buildZohoSalesOrderPayload(orderId) {
 
   if (!order) return null;
 
-  const items = await db.prepare(`
+  const items = itemsOverride || await db.prepare(`
     SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit
     FROM order_items oi
     LEFT JOIN products p ON oi.product_id = p.id
     WHERE oi.order_id = ?
   `).all(orderId);
+
+  // A split payload's total is that subset's own line totals, not the whole
+  // order's — Zoho computes the Sales Order total from line_items itself
+  // and never reads total_amount (see LiveZohoAdapter._buildSalesOrderBody),
+  // so this only matters for this app's own bookkeeping.
+  const totalAmount = itemsOverride
+    ? items.reduce((sum, it) => sum + (Number(it.line_total) || 0), 0)
+    : order.total_amount;
 
   return {
     getmeds_order_id: order.getmeds_order_id,
@@ -49,12 +66,12 @@ async function buildZohoSalesOrderPayload(orderId) {
     customer_type: order.customer_type,
     customer_master_type: order.customer_master_type,
     zoho_customer_id: order.customer_zoho_contact_id || null,
-    total_amount: order.total_amount,
+    total_amount: totalAmount,
     delivery_address: order.delivery_address,
     items,
     doctor_name: order.intake_doctor,
     order_source: order.intake_source,
-    invoicing_from: order.invoicing_from,
+    invoicing_from: invoicingFromOverride || order.invoicing_from,
     // Sep 2, 2026: the Salesperson of the MedRep who owns the order. Read
     // fresh here like everything else in this function — if the rep's
     // division or display name was corrected after the failed sync, the

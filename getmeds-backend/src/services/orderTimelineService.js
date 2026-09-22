@@ -210,14 +210,62 @@ function sourceOf(event) {
 }
 
 /**
+ * Split-invoicing orders (see services/orderSplitService.js): which entity
+ * this event is actually about, or null for the primary. Every event a
+ * split's own actions log — finance.controller.js's verifySplitAccount,
+ * webhook.controller.js's handleSplitWebhookEvent — stamps
+ * metadata.invoicingFrom with the entity name, on purpose, exactly so this
+ * can tell them apart from the primary's own events of the same TYPE
+ * (FINANCE_VERIFIED, ZOHO_SO_CONFIRMED, ...).
+ */
+function eventEntity(event) {
+  try {
+    return JSON.parse(event.metadata || '{}').invoicingFrom || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * The spine stages a split order's SECOND (and any later) Sales Order can
+ * independently reach — each has its own confirm, verify, invoice and
+ * payment in Zoho (two entities, two bank accounts). Packing/shipping stay
+ * OUT of this list on purpose: Dispatch enters one tracking number and it is
+ * pushed to every entity behind the scenes (see
+ * workflowV2Service.pushDispatchActionToSplits) — that is deliberately kept
+ * as one unified action, not several to track separately.
+ */
+const PER_ENTITY_STAGE_KEYS = new Set(['confirmed', 'verified', 'invoiced', 'paid']);
+
+/** Has this ONE split row reached the given per-entity stage? */
+function splitReachedStage(stageKey, split) {
+  switch (stageKey) {
+    case 'confirmed':
+      return ['confirmed', 'open', 'invoiced', 'partially_invoiced', 'shipped', 'partially_shipped', 'fulfilled', 'closed']
+        .includes(String(split.zoho_so_status || '').toLowerCase());
+    case 'verified':
+      return split.payment_status === 'verified';
+    case 'invoiced':
+      return ['draft', 'sent'].includes(String(split.zoho_invoiced_status || '').toLowerCase());
+    case 'paid':
+      return String(split.zoho_paid_status || '').toLowerCase() === 'paid';
+    default:
+      return false;
+  }
+}
+
+/**
  * Build the pipeline view.
  *
  * @param {object} order  the order row — `getmeds_order_id` decides whether the
  *                        app-only stages apply.
  * @param {Array}  events the order's events, any order; sorted here.
+ * @param {Array}  splits a split-invoicing order's own order_split_sales_orders
+ *                        rows (see services/orderSplitService.js) — empty for
+ *                        every order without one, which changes nothing below.
  * @returns {{stages: Array, counts: object}}
  */
-function buildTimeline(order, events = []) {
+function buildTimeline(order, events = [], splits = []) {
   const imported = String(order?.getmeds_order_id || '').startsWith('ZOHO-');
 
   const sorted = [...events].sort((a, b) => {
@@ -240,14 +288,30 @@ function buildTimeline(order, events = []) {
   const rest = [];
 
   for (const e of sorted) {
-    if (TERMINAL[e.event_type]) {
+    // Sep 22, 2026: same reasoning as the milestone exclusion just below —
+    // a split's own ZOHO_SO_CANCELLED/ZOHO_SO_DELETED (handleSplitWebhookEvent
+    // logs these under the SAME event_type as the primary's) is not the
+    // whole order ending, just one Sales Order. Routed to `rest` instead so
+    // it stays visible as an entity-tagged update rather than putting a
+    // false "Cancelled"/"Deleted in Zoho" terminal stage on an order whose
+    // other entity is still perfectly fine.
+    if (TERMINAL[e.event_type] && !eventEntity(e)) {
       terminals.push(e);
       continue;
     }
     const tier = tierOf(e.event_type);
     if (tier === 'system') continue;
 
-    if (tier !== 'milestone') {
+    // Sep 22, 2026: a milestone-typed event tagged to a split entity (see
+    // eventEntity above) is NOT this order's own primary milestone, even
+    // though it shares the same event_type (FINANCE_VERIFIED,
+    // ZOHO_SO_CONFIRMED, ...) — a split verifying/confirming its own Sales
+    // Order must never make the WHOLE order's "Confirmed"/"Finance
+    // Verified" stage read done while the primary itself is still stuck.
+    // Kept visible as an update under whichever stage was current when it
+    // happened; the per-entity breakdown built below is where it actually
+    // belongs.
+    if (tier !== 'milestone' || eventEntity(e)) {
       rest.push(e);
       continue;
     }
@@ -312,6 +376,50 @@ function buildTimeline(order, events = []) {
     };
   });
 
+  // Split-invoicing orders: Confirmed / Finance Verified / Invoiced / Paid
+  // each have a SECOND (or third...) Sales Order that can be ahead of, or
+  // behind, the primary — one entity on hold must not read as the whole
+  // order being stuck, and one entity racing ahead must not read as the
+  // whole order being done. `perEntity` lists where every Sales Order
+  // actually stands; the stage's own `state` above is downgraded to
+  // 'pending' whenever any entity hasn't reached it yet, even if the
+  // primary itself has — the milestone means "every Sales Order", the same
+  // rule finance.controller.js already applies before letting the order
+  // itself move past Finance.
+  if (splits.length) {
+    for (const stageObj of stages) {
+      if (!PER_ENTITY_STAGE_KEYS.has(stageObj.key) || stageObj.state === 'not_applicable') continue;
+
+      const perEntity = [
+        {
+          // `entity` is the raw invoicing-from value — matches order.invoicing_from
+          // exactly, so the frontend can use it to filter the timeline to one
+          // Sales Order's own events when its card is clicked. `label` is
+          // what's actually shown.
+          entity: order?.invoicing_from || null,
+          label: order?.invoicing_from ? `${order.invoicing_from} (primary)` : 'Primary',
+          done: stageObj.state === 'done',
+          at: stageObj.at,
+          by: stageObj.by
+        },
+        ...splits.map((s) => ({
+          entity: s.invoicing_from,
+          label: s.invoicing_from,
+          done: splitReachedStage(stageObj.key, s),
+          at: null,
+          by: null
+        }))
+      ];
+
+      stageObj.perEntity = perEntity;
+
+      if (stageObj.state === 'done' && !perEntity.every((p) => p.done)) {
+        stageObj.state = 'pending';
+        stageObj.note = 'Every Sales Order must reach this stage — see the breakdown below for which one is behind.';
+      }
+    }
+  }
+
   // Attach each update to the last stage that had already happened when it
   // occurred, so expanding a stage shows what changed AFTER it — the reading
   // that makes "3 updates" between Confirmed and Invoiced mean something.
@@ -330,7 +438,12 @@ function buildTimeline(order, events = []) {
       by: u.actor_name,
       by_role: u.actor_role || null,
       note: u.notes,
-      source: sourceOf(u)
+      source: sourceOf(u),
+      // Sep 22, 2026: split-invoicing orders — null for anything about the
+      // order as a whole (or the primary), the split's own entity name
+      // otherwise. Lets the frontend focus the timeline on one Sales
+      // Order's own events when its card is clicked — see OrderPipeline.jsx.
+      entity: eventEntity(u)
     });
   }
 

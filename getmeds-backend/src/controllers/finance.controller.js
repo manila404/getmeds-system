@@ -14,6 +14,10 @@ const zoho = require('../integrations/zoho');
 const { isWorkflowV2Enabled } = require('../services/workflowFlags');
 const { zohoWriteMode } = require('../services/zohoWriteGuard');
 const { returnToFinanceIfHeld } = require('../services/financeHoldService');
+const { hasColumn } = require('../services/schemaColumns');
+// Sep 22, 2026: split-invoicing orders — a second, independent Verify
+// action per entity. See services/orderSplitService.js.
+const { getSplitsForOrder } = require('../services/orderSplitService');
 
 // Sep 19, 2026: same tiny helper as LiveZohoAdapter.js/MockZohoAdapter.js's
 // own manilaTodayDateString — a fixed +8h offset (no DST in the Philippines),
@@ -109,7 +113,17 @@ const QUEUE_ROW_SELECT = `
          pp.latest_uploaded_at as payment_proof_uploaded_at,
          pp.latest_file_name as payment_proof_file_name,
          pp.latest_content_type as payment_proof_content_type,
-         pp.latest_uploaded_by_name as payment_proof_uploaded_by_name
+         pp.latest_uploaded_by_name as payment_proof_uploaded_by_name,
+         -- Sep 22, 2026: split-invoicing orders — the row-level Confirm/Hold
+         -- buttons below only ever touch the PRIMARY entity's verification.
+         -- Without a hint here, Finance can confirm the primary straight from
+         -- the row and never learn a second entity (order_split_sales_orders)
+         -- is still sitting pending — the order then silently never reaches
+         -- ready_for_draft_invoice, because that transition waits for every
+         -- entity. See orderSplitService.js / finance.controller.js's
+         -- verifySplitAccount, which is the only place that entity gets
+         -- verified (inside the OrderDetailsModal, not this row).
+         sso.split_count, sso.split_pending_count, sso.split_entities
   FROM orders o
   LEFT JOIN customers c ON o.customer_id = c.id
   LEFT JOIN users u ON o.medrep_id = u.id
@@ -148,6 +162,13 @@ const QUEUE_ROW_SELECT = `
      WHERE se.order_id = o.id AND se.event_type = 'STATUS_CHANGE' AND se.new_status = 'so_created'
      ORDER BY se.id DESC LIMIT 1
   ) zs ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS split_count,
+           COUNT(*) FILTER (WHERE s.payment_status = 'pending') AS split_pending_count,
+           STRING_AGG(s.invoicing_from, ', ' ORDER BY s.invoicing_from) AS split_entities
+      FROM order_split_sales_orders s
+     WHERE s.order_id = o.id
+  ) sso ON TRUE
 `;
 
 exports.getQueue = async (req, res, next) => {
@@ -730,8 +751,22 @@ exports.verifyAccount = async (req, res, next) => {
       });
     }
 
-    const target = approved ? 'ready_for_draft_invoice' : 'on_hold';
-    if (!stateMachine.canTransition(order.status, target)) {
+    // Sep 22, 2026: a split-invoicing order (see services/orderSplitService.js)
+    // needs EVERY entity verified — this one and each order_split_sales_orders
+    // row — before the order itself is cleared to invoice. Checked before
+    // deciding the target status: approving this half while a sibling split
+    // is still pending records the decision (primary_finance_verified_at,
+    // the Zoho confirm below, the proof) but does NOT move the order past
+    // ready_for_finance_verified yet — verifySplitAccount does that instead,
+    // the moment it finds every row already verified. An order with no
+    // splits at all (still the overwhelming default) is never held back by
+    // any of this: pendingSplits is always empty for it.
+    const { rows: splits } = await getSplitsForOrder(order.id);
+    const pendingSplits = splits.filter((s) => s.payment_status !== 'verified');
+    const heldForSiblingSplit = approved && pendingSplits.length > 0;
+
+    const target = approved ? (heldForSiblingSplit ? order.status : 'ready_for_draft_invoice') : 'on_hold';
+    if (target !== order.status && !stateMachine.canTransition(order.status, target)) {
       return res.status(409).json({
         success: false,
         error: { code: 'INVALID_TRANSITION', message: `Cannot move from ${order.status} to ${target}` }
@@ -749,12 +784,23 @@ exports.verifyAccount = async (req, res, next) => {
     let verifiedProofs = [];
 
     await db.transaction(async () => {
-      const moved = await setOrderStatus(order.id, order.status, target, now);
-      newStatus = moved.status;
+      if (target !== order.status) {
+        const moved = await setOrderStatus(order.id, order.status, target, now);
+        newStatus = moved.status;
+      }
 
       if (!approved) {
         await db.prepare('UPDATE orders SET exception_reason = ?, updated_at = ? WHERE id = ?')
           .run(String(reason).trim(), now, order.id);
+      }
+
+      // Sep 22, 2026: primary_finance_verified_at — see this column's own
+      // note in schema.pg.sql. Set on approval (even while held for a
+      // sibling split — this IS that half being done), cleared on reject
+      // in case an earlier approval is being reversed.
+      if (await hasColumn('orders', 'primary_finance_verified_at')) {
+        await db.prepare('UPDATE orders SET primary_finance_verified_at = ? WHERE id = ?')
+          .run(approved ? now : null, order.id);
       }
 
       // Sep 4, 2026: the proof of payment is approved BY this decision, in
@@ -787,7 +833,10 @@ exports.verifyAccount = async (req, res, next) => {
         actorId: actor.id,
         actorName: actor.name,
         notes: approved
-          ? `Customer account verified in Zoho Books — cleared to invoice.${proofNote}${reason ? ` ${String(reason).trim()}` : ''}`
+          ? heldForSiblingSplit
+            ? `Customer account verified in Zoho Books.${proofNote} Still awaiting verification of ` +
+              `${pendingSplits.map((s) => s.invoicing_from).join(', ')} before this order is cleared to invoice.`
+            : `Customer account verified in Zoho Books — cleared to invoice.${proofNote}${reason ? ` ${String(reason).trim()}` : ''}`
           : `Rejected by Finance: ${String(reason).trim()}`,
         metadata: {
           approved,
@@ -806,7 +855,9 @@ exports.verifyAccount = async (req, res, next) => {
         orderId: order.id,
         recipientIds: Array.from(new Set([order.medrep_user_id, ...watchers].filter(Boolean))),
         message: approved
-          ? `Order ${order.getmeds_order_id} passed finance verification — ready to invoice.`
+          ? heldForSiblingSplit
+            ? `Order ${order.getmeds_order_id}: ${order.invoicing_from} account verified — still waiting on ${pendingSplits.map((s) => s.invoicing_from).join(', ')} before it's cleared to invoice.`
+            : `Order ${order.getmeds_order_id} passed finance verification — ready to invoice.`
           : `Order ${order.getmeds_order_id} was put on hold by Finance: ${String(reason).trim()}`,
         eventType: approved ? 'FINANCE_VERIFIED' : 'FINANCE_REJECTED',
         orderData: { ...order, status: newStatus }
@@ -937,6 +988,172 @@ exports.verifyAccount = async (req, res, next) => {
         // still to catch up".
         zohoConfirmed: zohoConfirm
       }
+    });
+  } catch (err) { next(err); }
+};
+
+/**
+ * Sep 22, 2026: verifyAccount's counterpart for a split-invoicing order's
+ * SECOND entity — see services/orderSplitService.js. Two separate legal
+ * entities, two separate bank accounts, so the customer pays each invoice
+ * separately and Finance verifies each independently. Confirms THIS split's
+ * own Sales Order in Zoho on approval; the order's own status only advances
+ * past ready_for_finance_verified once every entity — the primary
+ * (orders.primary_finance_verified_at) and every split row — is verified,
+ * whichever one finishes last.
+ *
+ * POST /api/finance/orders/:id/splits/:splitId/verify
+ */
+exports.verifySplitAccount = async (req, res, next) => {
+  try {
+    const { approved, reason } = req.body || {};
+    if (typeof approved !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'approved must be true (verify) or false (reject).' }
+      });
+    }
+    if (!approved && !String(reason || '').trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'A reason is required when rejecting — it is what the next person acts on.' }
+      });
+    }
+
+    const order = await db.prepare(`
+      SELECT o.*, c.name as customer_name, c.zoho_contact_id as customer_zoho_contact_id FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = ?
+    `).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+
+    const split = await db.prepare('SELECT * FROM order_split_sales_orders WHERE id = ? AND order_id = ?').get(req.params.splitId, order.id);
+    if (!split) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Split Sales Order not found on this order' } });
+
+    if (order.status !== 'ready_for_finance_verified') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_AWAITING_VERIFICATION', message: `This order is at "${order.status}", not awaiting finance verification.` }
+      });
+    }
+    if (split.payment_status !== 'pending') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'ALREADY_DECIDED', message: `${split.invoicing_from}'s account was already ${split.payment_status}.` }
+      });
+    }
+
+    const actor = await resolveActor(req.user, 'finance');
+    const now = new Date().toISOString();
+
+    await db.prepare(`
+      UPDATE order_split_sales_orders SET payment_status = ?, payment_verified_by = ?, payment_verified_at = ?, updated_at = ? WHERE id = ?
+    `).run(approved ? 'verified' : 'rejected', actor.id, now, now, split.id);
+
+    await logEvent({
+      orderId: order.id,
+      eventType: approved ? 'FINANCE_VERIFIED' : 'FINANCE_REJECTED',
+      actorId: actor.id,
+      actorName: actor.name,
+      notes: approved
+        ? `[${split.invoicing_from}] Customer account verified in Zoho Books.`
+        : `[${split.invoicing_from}] Rejected by Finance: ${String(reason).trim()}`,
+      metadata: { approved, reason: reason ? String(reason).trim() : null, invoicingFrom: split.invoicing_from, splitId: split.id }
+    });
+
+    // A rejection on EITHER entity holds the whole order — it's one
+    // physical shipment behind both Sales Orders, so there is nothing to
+    // release piecemeal. Same target/notes shape as verifyAccount's own
+    // reject path.
+    if (!approved) {
+      let heldStatus = order.status;
+      await db.transaction(async () => {
+        const moved = await setOrderStatus(order.id, order.status, 'on_hold', now);
+        heldStatus = moved.status;
+        if (moved.changed) {
+          await db.prepare('UPDATE orders SET exception_reason = ?, updated_at = ? WHERE id = ?')
+            .run(`${split.invoicing_from}: ${String(reason).trim()}`, now, order.id);
+        }
+      })();
+
+      // Sep 22, 2026: setOrderStatus refuses silently rather than throwing
+      // (see orderStatusService.js) — a race where the order moved off
+      // ready_for_finance_verified between this handler's own check above
+      // and here must not report "on_hold" when nothing actually changed.
+      if (heldStatus === 'on_hold') {
+        const watchers = await getUserIdsByRole('management');
+        await notify({
+          orderId: order.id,
+          recipientIds: Array.from(new Set([order.medrep_id, ...watchers].filter(Boolean))),
+          message: `Order ${order.getmeds_order_id} was put on hold by Finance — ${split.invoicing_from}: ${String(reason).trim()}`,
+          eventType: 'FINANCE_REJECTED',
+          orderData: order
+        });
+      }
+
+      return res.json({ success: true, data: { status: heldStatus, approved: false } });
+    }
+
+    // Approved: confirm THIS split's own Sales Order in Zoho — same
+    // dry-run/test-customer guard verifyAccount's own confirm uses.
+    let zohoConfirm = null;
+    const guard = split.zoho_so_id ? zohoWriteMode(order.customer_zoho_contact_id) : null;
+    if (guard && guard.mode === 'dry-run') {
+      zohoConfirm = { ok: true, dryRun: true };
+      await db.prepare("UPDATE order_split_sales_orders SET zoho_so_status = 'confirmed', updated_at = ? WHERE id = ?").run(now, split.id);
+    } else if (guard && guard.mode === 'blocked') {
+      zohoConfirm = { ok: false, skipped: true, error: guard.message };
+    } else if (split.zoho_so_id) {
+      try {
+        const result = await zoho.confirmSalesOrder(split.zoho_so_id);
+        zohoConfirm = { ok: true, alreadyConfirmed: Boolean(result?.alreadyConfirmed) };
+        await db.prepare("UPDATE order_split_sales_orders SET zoho_so_status = 'confirmed', updated_at = ? WHERE id = ?").run(now, split.id);
+      } catch (err) {
+        zohoConfirm = { ok: false, error: err.message };
+        await db.prepare("UPDATE order_split_sales_orders SET zoho_sync_status = 'failed', zoho_sync_error = ?, updated_at = ? WHERE id = ?").run(err.message, now, split.id);
+        console.error('[FINANCE_VERIFY_SPLIT] Zoho confirm failed:', err.message);
+      }
+    }
+
+    // Sep 22, 2026: the moment EVERY entity is verified — this split, every
+    // OTHER split, and the primary (orders.primary_finance_verified_at) —
+    // is the moment the order itself is finally cleared to invoice. Could
+    // be this call, could have already happened on the primary's or a
+    // third entity's own verify; whichever runs last is the one that
+    // actually moves the order.
+    const freshOrder = await db.prepare('SELECT status, primary_finance_verified_at FROM orders WHERE id = ?').get(order.id);
+    const { rows: allSplits } = await getSplitsForOrder(order.id);
+    const stillPending = allSplits.filter((s) => s.payment_status !== 'verified');
+    let newStatus = freshOrder.status;
+
+    if (freshOrder.status === 'ready_for_finance_verified' && freshOrder.primary_finance_verified_at && stillPending.length === 0) {
+      const target = 'ready_for_draft_invoice';
+      if (stateMachine.canTransition(freshOrder.status, target)) {
+        const moved = await setOrderStatus(order.id, freshOrder.status, target, now);
+        newStatus = moved.status;
+        await logEvent({
+          orderId: order.id,
+          eventType: 'FINANCE_VERIFIED',
+          oldStatus: 'ready_for_finance_verified',
+          newStatus,
+          actorId: actor.id,
+          actorName: actor.name,
+          notes: `Every entity on this order is now verified (primary + ${allSplits.map((s) => s.invoicing_from).join(', ')}) — cleared to invoice.`
+        });
+        const watchers = await getUserIdsByRole('management');
+        await notify({
+          orderId: order.id,
+          recipientIds: Array.from(new Set([order.medrep_id, ...watchers].filter(Boolean))),
+          message: `Order ${order.getmeds_order_id} passed finance verification on every entity — ready to invoice.`,
+          eventType: 'FINANCE_VERIFIED',
+          orderData: { ...order, status: newStatus }
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: { status: newStatus, approved: true, invoicingFrom: split.invoicing_from, zohoConfirmed: zohoConfirm, awaitingOtherEntities: stillPending.map((s) => s.invoicing_from) }
     });
   } catch (err) { next(err); }
 };

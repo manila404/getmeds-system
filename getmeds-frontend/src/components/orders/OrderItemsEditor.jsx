@@ -3,6 +3,10 @@ import { Trash2, AlertCircle } from 'lucide-react';
 import ProductAutocomplete from './ProductAutocomplete';
 import { TAX_OPTIONS, computeLineAmounts } from '../../utils/orderLines';
 
+// Sep 22, 2026: mirrors OrderForm.jsx's own copy exactly — same two
+// entities, enforced the same way server-side (orders.controller.js).
+const INVOICING_FROM_OPTIONS = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
+
 /**
  * Edit an existing order's lines, in the same table the order form uses.
  *
@@ -46,7 +50,11 @@ const OrderItemsEditor = ({
   // has — changes the banner below so it doesn't claim nothing reaches
   // Zoho when, for this caller, it actually does (orders.controller.js's
   // updateItems pushes the edit to the real Sales Order in that case).
-  alreadySynced
+  alreadySynced,
+  // Sep 22, 2026: the order's own top-level Invoicing From — needed to
+  // know what "follow the order" means for the per-row override below,
+  // and to label the split banner. See services/orderSplitService.js.
+  orderInvoicingFrom
 }) => {
   const lines = rows.map((r) =>
     computeLineAmounts({ quantity: r.quantity, rate: r.rate, discount: r.discount, taxPercent: r.tax_percent }, inclusive)
@@ -66,6 +74,10 @@ const OrderItemsEditor = ({
   // (they get overwritten the moment Tax is changed, same as the order
   // form), so they're no longer reliable evidence of what Zoho actually has.
   const productById = new Map(products.map((p) => [String(p.id), p]));
+  // Sep 22, 2026: at least one row explicitly billed under the OTHER
+  // entity — see services/orderSplitService.js on the backend. `null` for
+  // every order that doesn't do this, which is unaffected by any of this.
+  const splitEntity = rows.find((r) => r.invoicing_from && r.invoicing_from !== orderInvoicingFrom)?.invoicing_from;
 
   return (
     <div className="space-y-4">
@@ -75,6 +87,15 @@ const OrderItemsEditor = ({
           : 'Editing items here only — nothing is sent to Zoho until the order syncs.'}
         {hasInactive && ' A row in red is no longer an active product in Zoho: remove it and add a replacement before saving.'}
       </div>
+
+      {splitEntity && (
+        <div className="border border-getmeds-blue/30 bg-getmeds-blue/5 rounded-lg p-3 text-xs text-ink-secondary">
+          <span className="font-bold text-getmeds-blue">Split order:</span>{' '}
+          two Zoho Sales Orders — one under{' '}
+          <span className="font-semibold text-ink-primary">{orderInvoicingFrom}</span> and one under{' '}
+          <span className="font-semibold text-ink-primary">{splitEntity}</span>.
+        </div>
+      )}
 
       {/* Same search-and-add box as the order form. */}
       <div className="bg-surface p-4 rounded-xl border border-slate-200/80">
@@ -152,6 +173,24 @@ const OrderItemsEditor = ({
                         title="Visible to Management and Finance"
                         className="mt-1 block w-full text-[11px] text-ink-secondary placeholder:text-ink-secondary/50 border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
                       />
+                      {/* Sep 22, 2026: per-line override of the order's own
+                          Invoicing From — same control and gating as the
+                          order form's own (canEditPrice, Management/admin
+                          only). Set to the other entity and this becomes a
+                          split-invoicing order on save. */}
+                      {canEditPrice && orderInvoicingFrom && (
+                        <select
+                          value={row.invoicing_from || ''}
+                          onChange={(e) => onChange(idx, 'invoicing_from', e.target.value)}
+                          title="Bill this line under a different entity than the order's own Invoicing From — creates a second Zoho Sales Order for it"
+                          className="mt-1 block w-full text-[11px] font-semibold text-ink-secondary border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
+                        >
+                          <option value="">Invoicing From: {orderInvoicingFrom} (follows order)</option>
+                          {INVOICING_FROM_OPTIONS.filter((v) => v !== orderInvoicingFrom).map((v) => (
+                            <option key={v} value={v}>Invoicing From: {v} (split)</option>
+                          ))}
+                        </select>
+                      )}
                     </td>
                     <td className="px-3 py-3 text-center">
                       <input

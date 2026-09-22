@@ -63,14 +63,18 @@ router.get('/', c.getAll);
 // else in this app — approvals, exceptions, the Clients Directory, the Zoho
 // import all accept both — and order creation was the one thing it was shut
 // out of, with no reason behind it beyond nobody having asked yet.
-router.post('/', requireRole('medrep', 'management', 'admin'), c.create);
+// Sep 22, 2026: 'team_lead' added — same shape as a MedRep covering a
+// colleague, but scoped to their OWN team (see teamScopeService.js and
+// resolveOrderMedrep's team_lead branch) instead of picking anyone.
+router.post('/', requireRole('medrep', 'management', 'admin', 'team_lead'), c.create);
 router.get('/:id', c.getById);
 router.get('/:id/events', c.getEvents);
 // Sep 5, 2026: Both medreps and management can submit orders.
 // Sep 9, 2026: 'admin' added alongside create above. Creating an order you
 // then cannot submit is not access to the form, it is a dead end — a draft
 // nobody can move.
-router.post('/:id/submit', requireRole('medrep', 'management', 'admin'), blockMedrepWritesOnImported, c.submit);
+// Sep 22, 2026: 'team_lead' added alongside create above, same reasoning.
+router.post('/:id/submit', requireRole('medrep', 'management', 'admin', 'team_lead'), blockMedrepWritesOnImported, c.submit);
 // Sep 7, 2026: a MedRep's submit() stops at 'pending_management_approval'
 // instead of reaching Zoho — Management approves or rejects it here before
 // it syncs. See orders.controller.js's submit()/approve()/reject(). An

@@ -78,7 +78,18 @@ async function isPaid(orderId, order = null) {
   const payment = await db
     .prepare("SELECT id FROM payments WHERE order_id = ? AND status = 'verified'")
     .get(orderId);
-  if (payment) return true;
+  const primaryPaid = Boolean(payment);
+
+  // Sep 22, 2026: a split-invoicing order (services/orderSplitService.js)
+  // isn't PAID until every entity is — the primary above, and every
+  // order_split_sales_orders row. `splits` is always empty for an order
+  // with no split, so `.every()` over nothing is trivially true and this
+  // changes nothing for the overwhelming default case.
+  const splits = await db.prepare('SELECT payment_status FROM order_split_sales_orders WHERE order_id = ?').all(orderId);
+  const allSplitsPaid = splits.every((s) => s.payment_status === 'verified');
+
+  if (primaryPaid && allSplitsPaid) return true;
+  if (splits.length) return false; // a split exists and isn't fully cleared yet — no Zoho shortcut for this order
 
   const row =
     order || (await db.prepare('SELECT getmeds_order_id, zoho_paid_status FROM orders WHERE id = ?').get(orderId));

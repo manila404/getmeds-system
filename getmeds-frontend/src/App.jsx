@@ -115,10 +115,13 @@ function App() {
               guard is the one that decides whether the page renders at all, so
               opening the backend without it would have looked, from the
               browser, exactly like nothing had changed. */}
+          {/* Sep 22, 2026: 'team_lead' added — same reasoning, see
+              orders.routes.js's create/submit and orders.controller.js's
+              resolveOrderMedrep/getMedreps team_lead branches. */}
           <Route
             path="/orders/new"
             element={
-              <ProtectedRoute allowedRoles={['medrep', 'management', 'admin']}>
+              <ProtectedRoute allowedRoles={['medrep', 'management', 'admin', 'team_lead']}>
                 <NewOrderPage />
               </ProtectedRoute>
             }

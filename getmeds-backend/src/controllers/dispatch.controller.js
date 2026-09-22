@@ -214,11 +214,23 @@ exports.getQueue = async (req, res, next) => {
              d.status as dispatch_status, d.courier, d.tracking_number, d.created_at as dispatch_created_at,
              d.zoho_package_number, d.zoho_shipment_number, d.delivered_at,
              dc.delivery_confirmed_by, dc.delivery_confirmed_at, dc.delivery_confirmed_meta,
-             ${TRACKING_HOLD_COLUMNS}
+             ${TRACKING_HOLD_COLUMNS},
+             -- Sep 22, 2026: split-invoicing orders — Dispatch still enters
+             -- one tracking number (workflowV2Service.pushDispatchActionToSplits
+             -- pushes it to every Sales Order behind the scenes), but a
+             -- read-only hint here explains why two Zoho confirmations follow
+             -- from that one entry. See orderSplitService.js.
+             sso.split_count, sso.split_entities
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
-      LEFT JOIN dispatch_records d ON o.id = d.order_id${CONFIRMATION_JOIN}${TRACKING_HOLD_JOIN}`;
+      LEFT JOIN dispatch_records d ON o.id = d.order_id${CONFIRMATION_JOIN}${TRACKING_HOLD_JOIN}
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS split_count,
+               STRING_AGG(s.invoicing_from, ', ' ORDER BY s.invoicing_from) AS split_entities
+          FROM order_split_sales_orders s
+         WHERE s.order_id = o.id
+      ) sso ON TRUE`;
 
     // Sep 15, 2026: paged (25 by default) and searchable. Unpaged, the
     // read-only list answered with every order at these statuses — 10,108 in

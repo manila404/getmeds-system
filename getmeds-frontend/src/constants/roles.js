@@ -16,7 +16,7 @@ export const ROLES = [
   { value: 'dispatch',   label: 'Dispatch',   can: 'Sees the dispatch queue and records shipments.' },
   { value: 'management', label: 'Management', can: 'Sees every order and approves what MedReps raise.' },
   { value: 'admin',      label: 'Admin',      can: 'Full access, including this Users screen.' },
-  { value: 'team_lead',  label: 'Team Lead',  can: 'Views (only) the orders of whichever MedReps report to them.' },
+  { value: 'team_lead',  label: 'Team Lead',  can: 'Sees the orders of whichever MedReps report to them, and can raise orders for themselves or for their team.' },
 ];
 
 export const roleLabel = (value) =>

@@ -497,7 +497,14 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   const canPickMedrep = !!medrepPicker?.enabled;
   // A MedRep gets the two-way choice; admin and management keep the optional
   // dropdown, because blank means something different for them.
-  const isRepChoosing = canPickMedrep && (user?.role || '').toLowerCase() === 'medrep';
+  // Sep 22, 2026: 'team_lead' gets the same two-way choice a MedRep does —
+  // "myself" (their own account, which per NewOrderPage.jsx's
+  // SalespersonNotice must carry its own Zoho Salesperson) or "another
+  // MedRep", which the backend already scopes to their own team (see
+  // orders.controller.js's getMedreps/resolveOrderMedrep) — so
+  // colleagueAccounts below is naturally just their team, nothing else to
+  // change here.
+  const isRepChoosing = canPickMedrep && ['medrep', 'team_lead'].includes((user?.role || '').toLowerCase());
   const medrepOptions = medrepPicker?.medreps || [];
   // Themselves excluded — "for myself" is the other answer, and offering it
   // here invites picking the one that does not clear the mode.
@@ -855,7 +862,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           // Sep 18, 2026: why this line is priced the way it is — a discount
           // agreed with the customer, a rate override — so Management and
           // Finance see the reason next to the number, not just the number.
-          priceRemark: ''
+          priceRemark: '',
+          // Sep 22, 2026: '' means "follow the order's own Invoicing From" —
+          // every item's default. Set to the other entity to split this
+          // order into two Zoho Sales Orders — see the column below.
+          invoicingFrom: ''
         }
       ]);
       toast.success(`Added ${product.name} to order`);
@@ -1234,7 +1245,12 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           tax_label: i.taxLabel != null ? i.taxLabel : getTaxOption(i.taxOption).label,
           // Sep 18, 2026: why this line is priced this way — Management and
           // Finance see it wherever they review the order's items.
-          price_remark: (i.priceRemark || '').trim() || null
+          price_remark: (i.priceRemark || '').trim() || null,
+          // Sep 22, 2026: a line explicitly set to the OTHER Invoicing From
+          // entity — this is what turns the order into a split-invoicing
+          // one (two Zoho Sales Orders instead of one). Blank/unset means
+          // "follow the order", every item's default.
+          invoicing_from: i.invoicingFrom || null
         })),
         // Sep 14, 2026: the order's tax preference. The server recomputes every
         // line under it, so this is what decides the stored total.
@@ -2178,6 +2194,26 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
               </div>
             )}
 
+            {/* Sep 22, 2026: at least one item explicitly billed under the
+                OTHER entity — this order becomes a split-invoicing one, two
+                Zoho Sales Orders instead of one. See services/orderSplitService.js
+                on the backend. Shown only once it's actually true — an
+                untouched order gets no banner and behaves exactly as
+                before this existed. */}
+            {(() => {
+              const splitEntity = items.find((i) => i.invoicingFrom && i.invoicingFrom !== invoicingFrom)?.invoicingFrom;
+              if (!splitEntity) return null;
+              return (
+                <div className="border border-getmeds-blue/30 bg-getmeds-blue/5 rounded-lg p-3 text-xs text-ink-secondary">
+                  <span className="font-bold text-getmeds-blue">Split order:</span>{' '}
+                  this will create <span className="font-semibold text-ink-primary">two</span> Zoho Sales Orders —
+                  one under <span className="font-semibold text-ink-primary">{invoicingFrom}</span> and one under{' '}
+                  <span className="font-semibold text-ink-primary">{splitEntity}</span>. Dispatch and Finance will
+                  each see and handle both as this one order.
+                </div>
+              );
+            })()}
+
             {/* Cart Line Items Table */}
             {items.length === 0 ? (
               <div className="text-center py-10 border-2 border-dashed border-slate-200 rounded-xl bg-white text-ink-secondary text-sm">
@@ -2225,6 +2261,29 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                               title="Visible to Management and Finance"
                               className="mt-1 block w-full text-[11px] text-ink-secondary placeholder:text-ink-secondary/50 border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
                             />
+                            {/* Sep 22, 2026: per-line override of the order's
+                                own Invoicing From — set this to the OTHER
+                                entity and the order splits into two Zoho
+                                Sales Orders on submit. Originally
+                                Management/admin only, mirroring
+                                Rate/Discount below — opened up to MedReps
+                                too, since a MedRep raising the order is the
+                                one who actually knows a given line belongs
+                                to the other entity, same as they already
+                                pick the order's own Invoicing From. */}
+                            {invoicingFrom && (
+                              <select
+                                value={item.invoicingFrom || ''}
+                                onChange={(e) => handleUpdateItemField(idx, 'invoicingFrom', e.target.value)}
+                                title="Bill this line under a different entity than the order's own Invoicing From — creates a second Zoho Sales Order for it"
+                                className="mt-1 block w-full text-[11px] font-semibold text-ink-secondary border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
+                              >
+                                <option value="">Invoicing From: {invoicingFrom} (follows order)</option>
+                                {INVOICING_FROM_OPTIONS.filter((v) => v !== invoicingFrom).map((v) => (
+                                  <option key={v} value={v}>Invoicing From: {v} (split)</option>
+                                ))}
+                              </select>
+                            )}
                           </td>
                           <td className="px-3 py-3 text-center">
                             <input

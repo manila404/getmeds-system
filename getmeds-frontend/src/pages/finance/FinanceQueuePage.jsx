@@ -891,6 +891,22 @@ const FinanceQueuePage = () => {
                           {order.zoho_invoice_number && <> · Invoice: <span className="font-mono">{order.zoho_invoice_number}</span></>}
                         </p>
                       )}
+                      {/* Sep 22, 2026: split-invoicing orders — this row's own
+                          Confirm/Hold only ever verifies the PRIMARY entity.
+                          A second entity (order_split_sales_orders) needs its
+                          own Verify, which only lives inside "Details & files"
+                          (see components/finance/OrderDetailsModal.jsx). Without
+                          this, the row looks fully actionable and Finance never
+                          learns the order is still short one verification. */}
+                      {Number(order.split_count) > 0 && (
+                        <p className="text-xs font-semibold text-indigo-700 mt-1 flex items-center gap-1">
+                          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                          Split order — also billed to {order.split_entities}.{' '}
+                          {Number(order.split_pending_count) > 0
+                            ? `Open "Details & files" to verify ${Number(order.split_pending_count) > 1 ? 'them' : 'it'} too.`
+                            : 'Other entity already verified.'}
+                        </p>
+                      )}
                       {financeDates(order).map((row, i) => (
                         <p key={i} className="text-xs text-ink-secondary">{row}</p>
                       ))}
@@ -1294,6 +1310,10 @@ const FinanceQueuePage = () => {
           onConfirm={(id, panelChecks) => verifyMutation.mutate({
             id, approved: true, pricesChecked: panelChecks?.prices, proofChecked: panelChecks?.proof
           })}
+          // Sep 22, 2026: split-invoicing orders — the primary's own inline
+          // Hold (inside the "Split Sales Orders" section) reuses this same
+          // mutation, the same as the queue row's own reject box always has.
+          onReject={(id, reason) => verifyMutation.mutate({ id, approved: false, reason })}
           confirming={verifyMutation.isPending}
           workflowV2={workflowV2}
         />

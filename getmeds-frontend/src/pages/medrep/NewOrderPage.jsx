@@ -35,23 +35,28 @@ import { useAuth } from '../../hooks/useAuth';
  * they picked (or one they typed manually) — see OrderForm.jsx's
  * mySalesperson. Showing this banner to Management was checking, and
  * warning about, a value that was never going to be submitted.
+ *
+ * Sep 22, 2026: also shown to 'team_lead'. Unlike Management/admin, a team
+ * lead CAN raise an order under their own account (see NewOrderPage's own
+ * `asksWhoFor` below) — that path needs their account to carry a real
+ * Salesperson exactly the way a MedRep's does, so the same check applies.
  */
 const SalespersonNotice = () => {
   const { user } = useAuth();
   const [status, setStatus] = useState(null);
-  const isMedrep = (user?.role || '').toLowerCase() === 'medrep';
+  const checksOwnSalesperson = ['medrep', 'team_lead'].includes((user?.role || '').toLowerCase());
 
   useEffect(() => {
-    if (!isMedrep) return; // Management/admin: nothing to check, see comment above
+    if (!checksOwnSalesperson) return; // Management/admin: nothing to check, see comment above
     let cancelled = false;
     client
       .get('/api/orders/meta/salesperson', { skipAuthRedirect: true })
       .then(({ data }) => { if (!cancelled) setStatus(data.data); })
       .catch(() => { /* never block the order form on this */ });
     return () => { cancelled = true; };
-  }, [isMedrep]);
+  }, [checksOwnSalesperson]);
 
-  if (!isMedrep || !status) return null;
+  if (!checksOwnSalesperson || !status) return null;
 
   // No mapping at all — an account created before sign-up collected a
   // division (the seeded logins), or one an admin made directly.
@@ -103,7 +108,11 @@ const SalespersonNotice = () => {
 
 const NewOrderPage = () => {
   const { user } = useAuth();
-  const isMedrep = (user?.role || '').toLowerCase() === 'medrep';
+  // Sep 22, 2026: 'team_lead' added — same "who is this for" question, but
+  // "another MedRep" resolves to their own team on the form's picker rather
+  // than anyone (see OrderForm.jsx's isRepChoosing / the backend's
+  // teamScopeService-scoped getMedreps).
+  const asksWhoFor = ['medrep', 'team_lead'].includes((user?.role || '').toLowerCase());
 
   /**
    * Sep 11, 2026: a MedRep answers "who is this order for?" before the form
@@ -122,7 +131,7 @@ const NewOrderPage = () => {
    */
   const [choice, setChoice] = useState(null);
   const [reopen, setReopen] = useState(false);
-  const needsChoice = isMedrep && (choice === null || reopen);
+  const needsChoice = asksWhoFor && (choice === null || reopen);
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -141,12 +150,12 @@ const NewOrderPage = () => {
       {/* Rendered only once the question is answered. Mounting the form behind
           the modal would let it initialise against the wrong owner and then
           need resetting. */}
-      {(!isMedrep || choice) && (
+      {(!asksWhoFor || choice) && (
         <OrderForm
           // 'self' | 'other' | null. The form resolves WHICH colleague, in its
           // own searchable account picker — see MedrepAccountCombo.
           orderForMode={choice}
-          onChangeOrderOwner={isMedrep ? () => setReopen(true) : undefined}
+          onChangeOrderOwner={asksWhoFor ? () => setReopen(true) : undefined}
         />
       )}
     </div>
