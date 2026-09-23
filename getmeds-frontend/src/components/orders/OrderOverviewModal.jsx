@@ -46,7 +46,11 @@ const OrderOverviewModal = ({ order, items = [], splits = [], onClose }) => {
   // different shape, and sharing a key would hand one the other's data.
   const files = useQuery({
     queryKey: ['order-overview-attachments', order.id],
-    queryFn: () => client.get(`/api/orders/${order.id}/attachments`).then((r) => r.data?.data?.attachments || [])
+    queryFn: () => client.get(`/api/orders/${order.id}/attachments`).then((r) => r.data?.data?.attachments || []),
+    // Sep 23, 2026: same reasoning as the other two attachment queries
+    // (PaymentProofPanel.jsx, OrderDetailsModal.jsx) — no staleTime meant
+    // every reopen of this modal refetched from scratch.
+    staleTime: 5 * 60 * 1000,
   });
   const attachments = files.data || [];
   const hasProof = attachments.some((a) => a.file_type === 'payment_proof');

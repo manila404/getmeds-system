@@ -1055,7 +1055,69 @@ class LiveZohoAdapter extends ZohoAdapter {
       err.httpStatus = resp.status;
       throw err;
     }
-    return { code: 0, message: 'Attachment added successfully', document: json.document || json };
+    // Sep 22, 2026: confirmed live — Zoho's real response is
+    // { code, message, documents: [...] } (every attachment now on the
+    // Sales Order, PLURAL array), not a singular `document`. The original
+    // Sep 8 version of this method assumed the latter (`json.document`,
+    // which is always undefined) and nothing broke because nothing had
+    // ever read `.document_id` off it until getSalesOrderAttachment below
+    // needed a real one. Matched by filename rather than "last in the
+    // array" — safer if Zoho ever reorders or two uploads race.
+    const documents = Array.isArray(json.documents) ? json.documents : (json.document ? [json.document] : []);
+    const wantedName = filename || 'attachment';
+    const document = [...documents].reverse().find((d) => d.file_name === wantedName) || documents[documents.length - 1] || null;
+    return { code: 0, message: json.message || 'Attachment added successfully', document, documents };
+  }
+
+  /**
+   * See ZohoAdapter.js's Sep 22, 2026 note on this method. Verified live
+   * against the real org: GET /salesorders/{id}/attachment?document_id=...
+   * returns the raw file, not JSON — the response's own Content-Type and
+   * Content-Disposition headers are Zoho's answer for what it is and what
+   * it was called, so those are trusted over anything stored locally.
+   */
+  async getSalesOrderAttachment(salesorderId, documentId) {
+    if (!salesorderId) throw new Error('getSalesOrderAttachment requires a Zoho Sales Order id');
+    if (!documentId) throw new Error('getSalesOrderAttachment requires a document_id');
+
+    this._assertOrgAllowed();
+    const token = await this.getAccessToken();
+    const params = new URLSearchParams({ organization_id: this.organizationId, document_id: documentId });
+    const url = `${this.baseUrl}/salesorders/${salesorderId}/attachment?${params.toString()}`;
+
+    this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] GET /salesorders/${salesorderId}/attachment (org=${this.organizationId}, document_id=${documentId})`);
+
+    let resp;
+    try {
+      resp = await fetch(url, {
+        headers: { Authorization: `Zoho-oauthtoken ${token}` },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      });
+    } catch (err) {
+      throw describeNetworkError(err, url, 'GET');
+    }
+
+    const contentType = resp.headers.get('content-type') || '';
+    if (!resp.ok || contentType.includes('application/json')) {
+      // An error comes back as JSON even though a success is raw bytes —
+      // same asymmetry as every other Zoho endpoint in this file.
+      const json = await resp.json().catch(() => ({}));
+      const err = new Error(json.message || `Zoho API error (HTTP ${resp.status})`);
+      err.zohoResponse = json;
+      err.httpStatus = resp.status;
+      throw err;
+    }
+
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    // Content-Disposition looks like: attachment; filename="name.ext" —
+    // pulled out rather than trusted from our own stored file_name, since
+    // this is meant to be read FROM Zoho, not merely echo what we already
+    // believed.
+    const disposition = resp.headers.get('content-disposition') || '';
+    const nameMatch = disposition.match(/filename\*?=(?:UTF-8''|")?([^";]+)"?/i);
+    const fileName = nameMatch ? decodeURIComponent(nameMatch[1]) : null;
+
+    return { buffer, contentType: contentType || 'application/octet-stream', fileName };
   }
 
   // ─── Sep 12, 2026: the Dispatch writes (see ZohoAdapter.js) ──────────────

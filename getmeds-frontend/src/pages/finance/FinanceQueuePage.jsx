@@ -1012,7 +1012,8 @@ const FinanceQueuePage = () => {
                         ) : isImage ? (
                           <div className="bg-white">
                             <a href={proof.viewUrl} target="_blank" rel="noopener noreferrer" className="block">
-                              <img src={proof.viewUrl} alt={`Proof of payment for ${order.getmeds_order_id}`} className="max-h-80 w-auto mx-auto" />
+                              {/* Sep 23, 2026 (Priority 2): resized rendition for this inline row preview — see OrderDetailsModal.jsx/PaymentProofPanel.jsx for the same change. */}
+                              <img src={`${proof.viewUrl}&w=1000`} alt={`Proof of payment for ${order.getmeds_order_id}`} className="max-h-80 w-auto mx-auto" />
                             </a>
                             {proof.downloadUrl && (
                               <div className="px-3 py-1.5 border-t border-slate-100 text-right">

@@ -278,7 +278,12 @@ const AttachmentCard = ({
       {isImage ? (
         <a href={attachment.viewUrl} target="_blank" rel="noopener noreferrer" className="block bg-white">
           <img
-            src={attachment.viewUrl}
+            // Sep 23, 2026 (Priority 2): this max-h-96 preview was loading
+            // the full original every time — request a resized rendition
+            // instead (still generous enough for a receipt/screenshot to
+            // stay readable). Opening the link itself still goes to the
+            // full-size original.
+            src={`${attachment.viewUrl}&w=1000`}
             alt={`${isProof ? 'Proof of payment' : 'Attachment'} for ${orderGetmedsId || 'this order'}`}
             className="max-h-96 w-auto mx-auto"
           />
@@ -363,6 +368,15 @@ const PaymentProofPanel = ({ orderId, order }) => {
       const res = await client.get(`/api/orders/${orderId}/attachments`);
       return res.data?.data?.attachments || [];
     },
+    // Sep 23, 2026: this used to have no staleTime, so the global default
+    // (0 — stale immediately) meant every mount refetched, and every
+    // refetch re-minted signed URLs. That was harmless on its own once the
+    // URLs became deterministic (attachmentLinkService.js) — same
+    // attachment, same URL either way — but there's no reason to hit the
+    // network at all just from switching to this tab and back within a
+    // few minutes. The "Refresh link" button (below) still forces a real
+    // refetch on demand.
+    staleTime: 5 * 60 * 1000,
   });
 
   const attachments = data || [];

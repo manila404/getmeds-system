@@ -292,7 +292,11 @@ describe('proof of payment', () => {
 
     const res = await request(app).get(`/api/orders/${orderId}/payment-proof`).set(auth(ownerToken));
     expect(res.status).toBe(200);
-    expect(res.body.data.proof.viewUrl).toMatch(/^https:\/\/storage\.test\//);
+    // Sep 23, 2026: no longer a raw Supabase signed URL — every attachment
+    // now goes through this app's own signed link (attachmentLinkService.js)
+    // so the browser can actually cache repeat views. See
+    // paymentProof.controller.js's urlsFor/viewAttachment.
+    expect(res.body.data.proof.viewUrl).toMatch(/\/api\/attachment-view\?token=/);
 
     // The database holds an object key, never a URL — a leaked row is not a
     // leaked file, and the link cannot outlive its signature.

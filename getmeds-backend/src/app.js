@@ -25,6 +25,10 @@ const managerScopeRoutes = require('./routes/managerScope.routes');
 // Sep 19, 2026: the top-nav search bar (Topbar.jsx) — wired up for the
 // first time, see routes/search.routes.js and controllers/search.controller.js.
 const searchRoutes = require('./routes/search.routes');
+// Sep 22, 2026: streams an attachment straight from Zoho — deliberately
+// mounted below WITHOUT requireAuth, same reasoning as webhookRoutes: its
+// own signed token is the credential. See attachmentView.routes.js.
+const attachmentViewRoutes = require('./routes/attachmentView.routes');
 
 const app = express();
 
@@ -100,6 +104,7 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/attachment-view', attachmentViewRoutes);
 app.use('/api/test', testRoutes);
 app.use('/api/customers', customersRoutes);
 // Aug 28, 2026: shared polling endpoint for the customers/inventory

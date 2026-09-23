@@ -499,8 +499,31 @@ class MockZohoAdapter extends ZohoAdapter {
     };
     salesorder._attachments = salesorder._attachments || [];
     salesorder._attachments.push(document);
+    // Sep 22, 2026: the bytes themselves, kept OUT of the `document` object
+    // above so nothing that logs or returns that object accidentally
+    // serializes a Buffer — a separate map, mirroring how LiveZohoAdapter's
+    // getSalesOrderAttachment reads bytes back that addSalesOrderAttachment
+    // never itself returns.
+    this._attachmentBuffers = this._attachmentBuffers || new Map();
+    this._attachmentBuffers.set(document.document_id, buffer);
     this._log(`[ZOHO_MOCK] Would POST /salesorders/${salesorderId}/attachment: ${document.file_name}`);
-    return { code: 0, message: 'Attachment added successfully [MOCK MODE]', document };
+    // Sep 22, 2026: `documents` (plural) alongside `document`, matching
+    // LiveZohoAdapter's real shape now that it's been corrected — see its
+    // own Sep 22 note. Code written against this mock should see the same
+    // contract the live API actually has.
+    return { code: 0, message: 'Attachment added successfully [MOCK MODE]', document, documents: [...salesorder._attachments] };
+  }
+
+  /** See ZohoAdapter.js's Sep 22, 2026 note. Mirrors LiveZohoAdapter's contract exactly. */
+  async getSalesOrderAttachment(salesorderId, documentId) {
+    const salesorder = this._salesOrders.get(salesorderId);
+    if (!salesorder) throw new Error('The Sales Order ID given seems to be incorrect. [MOCK MODE]');
+    const document = (salesorder._attachments || []).find((d) => d.document_id === documentId);
+    if (!document) throw new Error(`No attachment with document_id ${documentId} on this Sales Order. [MOCK MODE]`);
+    const buffer = this._attachmentBuffers && this._attachmentBuffers.get(documentId);
+    if (!buffer) throw new Error(`Attachment ${documentId} has no stored bytes in this mock session. [MOCK MODE]`);
+    this._log(`[ZOHO_MOCK] Would GET /salesorders/${salesorderId}/attachment?document_id=${documentId}: ${document.file_name}`);
+    return { buffer, contentType: document.file_type || 'application/octet-stream', fileName: document.file_name };
   }
 
   // ─── Sep 12, 2026: the Dispatch writes (see ZohoAdapter.js) ──────────────

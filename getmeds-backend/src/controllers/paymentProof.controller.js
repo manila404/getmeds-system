@@ -7,6 +7,7 @@ const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const zoho = require('../integrations/zoho');
 const { constraintAllows, hasColumn } = require('../services/schemaColumns');
+const attachmentLink = require('../services/attachmentLinkService');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -360,15 +361,21 @@ exports.attach = async (req, res, next) => {
     // whatever was attached before this existed.
     let zohoPushed = false;
     let zohoError = null;
+    let zohoDocumentId = null;
     if (order.zoho_so_id) {
       try {
         const buffer = await proofStorage.downloadFile(storagePath);
-        await zoho.addSalesOrderAttachment(order.zoho_so_id, {
+        const pushResult = await zoho.addSalesOrderAttachment(order.zoho_so_id, {
           buffer,
           filename: fileName || 'attachment',
           contentType: contentType || 'application/octet-stream',
         });
         zohoPushed = true;
+        // Sep 22, 2026: Phase 1 of moving attachments toward "Zoho is the
+        // real copy" — see zoho_document_id's schema comment. Without this,
+        // pushing succeeds but there is no way to ever read the file back
+        // FROM Zoho (getSalesOrderAttachment needs the document_id).
+        zohoDocumentId = pushResult?.document?.document_id || null;
       } catch (zohoErr) {
         zohoError = zohoErr.message;
         console.warn(
@@ -385,6 +392,9 @@ exports.attach = async (req, res, next) => {
     // migrated just means that flag stays unavailable, never fails the upload.
     if (await hasColumn('payment_proofs', 'zoho_pushed')) {
       await db.prepare('UPDATE payment_proofs SET zoho_pushed = ? WHERE id = ?').run(zohoPushed, inserted.lastInsertRowid);
+    }
+    if (zohoDocumentId && (await hasColumn('payment_proofs', 'zoho_document_id'))) {
+      await db.prepare('UPDATE payment_proofs SET zoho_document_id = ? WHERE id = ?').run(zohoDocumentId, inserted.lastInsertRowid);
     }
 
     // Sep 15, 2026: the MedRep who created the order (and whoever raised it)
@@ -424,6 +434,82 @@ exports.attach = async (req, res, next) => {
   }
 };
 
+/**
+ * Sep 22, 2026: Phase 1 of moving attachments toward "Zoho is the real,
+ * permanent copy" (see zoho_document_id's schema comment,
+ * attachmentLinkService.js, routes/attachmentView.routes.js).
+ *
+ * Sep 22, 2026 (2): CRITICAL correction, found by testing this live before
+ * trusting it. Zoho's GET /salesorders/{id}/attachment endpoint does NOT
+ * respect document_id at all — verified against the real org with two
+ * different files on the same Sales Order and a garbage id: every request
+ * returned the SAME thing, the single most-recently-uploaded attachment,
+ * regardless of which document_id was asked for. The `documents[]` array
+ * on a Sales Order is informational only; there is no working way to read
+ * an OLDER attachment back from Zoho once a newer one exists on the same
+ * order. On real data this is not an edge case — 75% of orders with a
+ * synced attachment have more than one (249 of 330), covering 741 of 816
+ * pushed rows.
+ *
+ * So: a row is only ever SERVED from Zoho when it demonstrably IS that
+ * order's current latest pushed attachment (checked in viewAttachment
+ * below, at request time — not here). Every earlier one on the same
+ * order — regardless of its own zoho_document_id — is served from
+ * Supabase instead, because Zoho itself has no way to hand it back to us.
+ *
+ * Sep 23, 2026 (3): every row's viewUrl/downloadUrl now points at this
+ * app's own signed link (attachmentLinkService.js), full stop — the
+ * Supabase-direct-signed-URL branch this function used to have for
+ * non-Zoho-eligible rows is gone. Root cause found investigating a
+ * Supabase egress bill of ~9 GB against ~167 MB of actually-stored bytes
+ * (≈54×): the OLD code re-minted a brand-new, never-repeating Supabase
+ * signed URL on every single list()/get() call, so the browser could
+ * never cache a repeat view of an already-seen file — every open of an
+ * order's attachments, every tab switch back to it, was a fresh full
+ * download. attachmentLinkService's tokens are now DETERMINISTIC within a
+ * 6-hour window (same attachment → same URL → the browser's own HTTP
+ * cache actually works), which is the fix; routing every row through the
+ * same endpoint (rather than only the Zoho-eligible minority) is what
+ * makes it apply to the ~91% of rows that were always going to serve from
+ * Supabase anyway. See viewAttachment below for which backend a given
+ * request actually reads from.
+ */
+async function isLatestPushedOnOrder(row) {
+  if (!row.zoho_document_id) return false;
+  // Ordered by `id`, not `uploaded_at` — uploaded_at is a TEXT column
+  // holding an ISO string (this app's own convention), and a plain
+  // lexicographic sort on it is only correct as long as every row was
+  // ever written in that exact format. `id` is auto-increment and
+  // therefore a guaranteed-monotonic proxy for insertion order regardless
+  // of how any timestamp string happens to be formatted — found the hard
+  // way testing this: a row inserted via a differently-formatted
+  // timestamp sorted as "earlier" than one uploaded hours before it.
+  const latest = await db
+    .prepare(
+      `SELECT id FROM payment_proofs
+        WHERE order_id = ? AND zoho_pushed = true AND deleted_at IS NULL
+        ORDER BY id DESC
+        LIMIT 1`
+    )
+    .get(row.order_id);
+  return Boolean(latest && latest.id === row.id);
+}
+
+function urlsFor(req, row) {
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const origin = `${proto}://${req.get('host')}`;
+  // Deterministic within its window (see attachmentLinkService.js) — the
+  // SAME row requested again inside that window gets the SAME token, and
+  // therefore the SAME URL, which is the entire point: that's what lets
+  // the browser serve a repeat view from its own cache instead of
+  // downloading the file again.
+  const token = attachmentLink.sign(row.id, row.order_id);
+  return {
+    viewUrl: `${origin}/api/attachment-view?token=${token}`,
+    downloadUrl: `${origin}/api/attachment-view?token=${token}&download=1`
+  };
+}
+
 // ─── 3a. List every attachment on an order (new) ────────────────────────────
 
 exports.list = async (req, res, next) => {
@@ -451,22 +537,21 @@ exports.list = async (req, res, next) => {
       .all(order.id);
 
     // Minted per request, short-lived, never stored — same as the old single
-    // `get`. A view URL per row is one Supabase call each; fine at the scale
-    // an order's attachment list actually reaches (a handful of files).
+    // `get`. A view URL per row is one Supabase (or now, sometimes, one
+    // Zoho-link-signing) call each; fine at the scale an order's attachment
+    // list actually reaches (a handful of files).
     //
     // Sep 19, 2026: downloadUrl alongside it — "add download feature for all
-    // users to download attachments". Same object, same short-lived signed
-    // URL mechanism, just minted with Content-Disposition: attachment so a
-    // click saves the file instead of opening it. No role check beyond the
-    // one already on this route (order ownership, via loadOrder above) —
-    // whoever could already view a file can now also save it.
-    const attachments = await Promise.all(
-      rows.map(async (row) => ({
-        ...row,
-        viewUrl: await proofStorage.createViewUrl(row.storage_path),
-        downloadUrl: await proofStorage.createDownloadUrl(row.storage_path, row.file_name)
-      }))
-    );
+    // users to download attachments". Same object, just minted with
+    // Content-Disposition: attachment so a click saves the file instead of
+    // opening it. No role check beyond the one already on this route (order
+    // ownership, via loadOrder above) — whoever could already view a file
+    // can now also save it.
+    // Sep 23, 2026: urlsFor is now a pure, synchronous token-sign — no
+    // Supabase/Zoho call happens at list-time any more (that only happens
+    // when the URL is actually loaded — see viewAttachment). No more
+    // Promise.all needed for it, but the map itself stays simple either way.
+    const attachments = rows.map((row) => ({ ...row, ...urlsFor(req, row) }));
 
     res.json({ success: true, data: { attachments } });
   } catch (err) {
@@ -502,10 +587,7 @@ exports.get = async (req, res, next) => {
 
     if (!proof) return notFound(res, 'No proof of payment attached to this order.');
 
-    const viewUrl = await proofStorage.createViewUrl(proof.storage_path);
-    const downloadUrl = await proofStorage.createDownloadUrl(proof.storage_path, proof.file_name);
-
-    res.json({ success: true, data: { proof: { ...proof, viewUrl, downloadUrl } } });
+    res.json({ success: true, data: { proof: { ...proof, ...urlsFor(req, proof) } } });
   } catch (err) {
     next(err);
   }
@@ -853,3 +935,142 @@ async function markVerifiedWithOrder(orderId, actorId, now) {
 }
 
 exports.markVerifiedWithOrder = markVerifiedWithOrder;
+
+// ─── 7. Stream an attachment's bytes (Sep 22, 2026, Phase 1; broadened Sep 23) ──
+//
+// GET /api/attachment-view?token=...&download=1 — mounted OUTSIDE
+// requireAuth (see routes/attachmentView.routes.js and
+// attachmentLinkService.js's module comment for why: the signed token IS
+// the credential, the same trust model this app already used for a
+// Supabase signed URL, now applied to every attachment instead of only the
+// Zoho-eligible minority — see urlsFor above). Never touches the local
+// storage_path in a way that changes anything, and never deletes anything
+// — this only reads, from whichever backend actually has this row's file.
+exports.viewAttachment = async (req, res, next) => {
+  try {
+    const claim = attachmentLink.verify(req.query.token);
+    if (!claim) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'INVALID_LINK', message: 'This link has expired — reopen the attachment to get a fresh one.' }
+      });
+    }
+
+    const attachment = await db
+      .prepare(
+        `SELECT p.id, p.order_id, p.file_name, p.content_type, p.storage_path, p.zoho_document_id, p.file_size, o.zoho_so_id
+           FROM payment_proofs p
+           JOIN orders o ON o.id = p.order_id
+          WHERE p.id = ? AND p.order_id = ?`
+      )
+      .get(claim.attachmentId, claim.orderId);
+
+    if (!attachment) return notFound(res, 'Attachment not found.');
+
+    const download = req.query.download === '1' || req.query.download === 'true';
+    const name = (attachment.file_name || 'attachment').replace(/["\r\n]/g, '');
+    const contentType = attachment.content_type || 'application/octet-stream';
+
+    // Sep 23, 2026 (Priority 2): a thumbnail/preview context asks for a
+    // resized rendition via ?w=&h= — OrderDetailsModal's 128px grid cell
+    // and PaymentProofPanel's/FinanceQueuePage's inline preview were
+    // loading the full original (up to several MB) into a box a few
+    // hundred pixels wide, every time, no caching of any smaller variant.
+    // Verified live against this project's own Supabase Storage before
+    // relying on it: Image Transformations is enabled — see
+    // paymentProofStorage.js's downloadFile.
+    //
+    // Clamped, not trusted outright: this parameter comes from a public,
+    // unauthenticated route (the signed token only proves WHICH attachment,
+    // not what size is reasonable to ask for). Only meaningful for an
+    // image — a PDF/doc's viewUrl+&w= would otherwise ask Supabase to
+    // "transform" a file type it cannot, for no reason (nothing in the
+    // frontend does this; PaymentProofPanel's own isImage check is what
+    // decides whether a thumbnail is ever requested at all — see there for
+    // why non-images never get an <img> tag in the first place).
+    const clampSize = (v) => {
+      const n = Number.parseInt(v, 10);
+      return Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 20), 2000) : null;
+    };
+    const w = clampSize(req.query.w);
+    const h = clampSize(req.query.h);
+    const isImage = contentType.startsWith('image/');
+
+    // Sep 23, 2026: skip the transform for a file that's already small.
+    // Found live during Priority 2 testing — a 20,274-byte source (an
+    // already-compressed WebP) came back as a 28,138-byte JPEG at
+    // width=1000, LARGER than the original: re-encoding to JPEG at a size
+    // close to the source's own has no headroom to win, and can lose to a
+    // more efficient source format. The whole point of this endpoint is to
+    // cut egress, so it must never trade a small original for a bigger
+    // rendition. 150 KB is comfortably above what either target size
+    // (300x300 grid thumbnail, 1000px-wide preview) produces for a real
+    // photo, so this only ever skips the cases where resizing can't help.
+    const SKIP_TRANSFORM_BELOW_BYTES = 150 * 1024;
+    const alreadySmall = Number.isFinite(attachment.file_size) && attachment.file_size > 0 && attachment.file_size <= SKIP_TRANSFORM_BELOW_BYTES;
+    const transform = (w || h) && isImage && !alreadySmall ? { width: w || undefined, height: h || undefined, resize: 'cover', quality: 75 } : null;
+
+    if (transform) {
+      // Thumbnails always come from Supabase — we still hold the local
+      // copy regardless of Zoho push status (nothing in this app deletes
+      // it; that would be a later phase, not built), and Zoho has no
+      // resize capability of its own to route this to even for an
+      // otherwise Zoho-eligible row.
+      const buffer = await proofStorage.downloadFile(attachment.storage_path, transform);
+      res.setHeader('Content-Type', 'image/jpeg'); // Supabase's transform re-encodes to JPEG regardless of source type
+      res.setHeader('Content-Disposition', `inline; filename="${name}"`);
+      res.setHeader('Cache-Control', `private, max-age=${attachmentLink.LONG_TTL_SECONDS}`);
+      return res.send(buffer);
+    }
+
+    // Sep 22, 2026: re-checked here, not just when the link was minted
+    // (urlsFor above, or whenever this token's window started) — a link
+    // stays valid for attachmentLink's full TTL (6 hours as of Sep 23),
+    // long enough for a newer attachment to land on the same order in
+    // between. Zoho's own GET only ever serves its single latest
+    // attachment (see the correctness note on isLatestPushedOnOrder), so a
+    // row that WAS the latest when the link was minted but isn't any more
+    // must fall back to Supabase here rather than silently hand back a
+    // different file.
+    const zohoEligible = attachment.zoho_document_id && attachment.zoho_so_id &&
+      (await isLatestPushedOnOrder(attachment));
+
+    if (zohoEligible) {
+      try {
+        const result = await zoho.getSalesOrderAttachment(attachment.zoho_so_id, attachment.zoho_document_id);
+        res.setHeader('Content-Type', result.contentType || contentType);
+        res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${result.fileName || name}"`);
+        // Sep 23, 2026: shorter than the Supabase branch below on purpose.
+        // The TOKEN is what makes repeat requests for this attachment
+        // reuse the same URL (see attachmentLinkService.js) — that part is
+        // unconditional. Cache-Control is a separate, independent knob for
+        // how long the BROWSER trusts a cached response before asking
+        // again, and Zoho's answer for a given row can flip from
+        // "eligible" to "not" the moment a newer file supersedes it on the
+        // same order — a long browser-side cache would then keep serving
+        // an increasingly stale answer. Supabase content never changes
+        // once uploaded, so that branch gets the full window instead.
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        return res.send(result.buffer);
+      } catch (zohoErr) {
+        // Best-effort: Zoho being briefly unreachable must not turn into a
+        // broken image when Supabase still has the exact same content.
+        console.warn(`[ATTACHMENT_VIEW] Zoho fetch failed for payment_proofs.id=${attachment.id}, falling back to Supabase:`, zohoErr.message);
+      }
+    }
+
+    const buffer = await proofStorage.downloadFile(attachment.storage_path);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${name}"`);
+    // Sep 23, 2026: the full window, matching the token's own TTL — safe
+    // because a payment_proofs row's file is immutable once uploaded (no
+    // edit-in-place anywhere in this app; a replacement is always a new
+    // row with its own new id and its own new token). This is the change
+    // that actually fixes the egress problem: the vast majority of
+    // attachments serve from here, not from Zoho.
+    res.setHeader('Cache-Control', `private, max-age=${attachmentLink.LONG_TTL_SECONDS}`);
+    res.send(buffer);
+  } catch (err) {
+    next(err);
+  }
+};

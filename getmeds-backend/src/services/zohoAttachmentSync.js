@@ -33,6 +33,13 @@ async function pushUnsyncedAttachments(orderId, zohoSoId) {
 
   const canTrackPushed = await hasColumn('payment_proofs', 'zoho_pushed');
   const canSoftDelete = await hasColumn('payment_proofs', 'deleted_at');
+  // Sep 22, 2026: Phase 1 of "Zoho is the real copy" — see
+  // paymentProof.controller.js's viewAttachment. Without this the catch-up
+  // path (most attachments: uploaded before the Sales Order existed) would
+  // push successfully but never be viewable straight from Zoho, only the
+  // ones attached AFTER the Sales Order already existed (attach()'s own
+  // inline push) would.
+  const canTrackDocumentId = await hasColumn('payment_proofs', 'zoho_document_id');
 
   const conditions = ['order_id = ?'];
   if (canSoftDelete) conditions.push('deleted_at IS NULL');
@@ -47,13 +54,17 @@ async function pushUnsyncedAttachments(orderId, zohoSoId) {
   for (const row of rows) {
     try {
       const buffer = await proofStorage.downloadFile(row.storage_path);
-      await zoho.addSalesOrderAttachment(zohoSoId, {
+      const pushResult = await zoho.addSalesOrderAttachment(zohoSoId, {
         buffer,
         filename: row.file_name || 'attachment',
         contentType: row.content_type || 'application/octet-stream',
       });
       if (canTrackPushed) {
         await db.prepare('UPDATE payment_proofs SET zoho_pushed = ? WHERE id = ?').run(true, row.id);
+      }
+      const documentId = pushResult?.document?.document_id || null;
+      if (documentId && canTrackDocumentId) {
+        await db.prepare('UPDATE payment_proofs SET zoho_document_id = ? WHERE id = ?').run(documentId, row.id);
       }
       pushed += 1;
     } catch (err) {

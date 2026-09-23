@@ -107,11 +107,15 @@
  *   this pushes a copy of each newly-attached file onto the matching Zoho
  *   Sales Order's own "Attach File(s)" section, so staff working directly
  *   in Zoho see the same files without anyone re-uploading them there by
- *   hand. It is strictly additive: there is no method here that lists,
- *   downloads, replaces, or deletes an existing Zoho attachment — only
- *   adds a new one. Soft-gated at the call site
- *   (paymentProof.controller.js): a failed push never undoes or blocks the
- *   local attachment.
+ *   hand. It is strictly additive: there is no method here that replaces
+ *   or deletes an existing Zoho attachment — only adds a new one.
+ *   Soft-gated at the call site (paymentProof.controller.js): a failed push
+ *   never undoes or blocks the local attachment.
+ *
+ *   Sep 22, 2026: `getSalesOrderAttachment` is a FOURTH exception, and the
+ *   first READ among these four — see its own doc comment for why. It does
+ *   not weaken the "additive" rule above: reading a file back changes
+ *   nothing in Zoho. Still no replace, still no delete, anywhere here.
  *
  * Every method here mirrors the real Zoho Books/Inventory REST API's
  * request/response shape (see MockZohoAdapter.js and mock-server/ for the
@@ -359,13 +363,44 @@ class ZohoAdapter {
   /**
    * Add ONE file attachment to an existing Zoho Sales Order. See the Sep 8,
    * 2026 (2) note above for why this narrow, add-only exception exists.
-   * Never lists, downloads, replaces, or deletes an attachment — every
-   * call here can only add a new one.
+   * Never replaces or deletes an attachment — every call here can only add
+   * a new one.
    * @param {string} salesorderId - an existing Zoho Sales Order id
    * @param {{buffer: Buffer, filename: string, contentType?: string}} file
-   * @returns {Promise<{code:number, message:string, document:object}>}
+   * @returns {Promise<{code:number, message:string, document:object, documents:object[]}>}
+   *   `document` is the entry for the file just added (matched by filename
+   *   out of Zoho's own response — see the Sep 22, 2026 note on
+   *   LiveZohoAdapter's implementation for why: the real API returns a
+   *   `documents` ARRAY, not a singular `document`, which the original Sep 8
+   *   version of this method got wrong and never noticed because nothing
+   *   read `.document_id` until getSalesOrderAttachment below needed it).
+   *   `documents` is every attachment currently on the Sales Order.
    */
   async addSalesOrderAttachment(salesorderId, file) {
+    throw new Error('Not implemented');
+  }
+
+  /**
+   * Sep 22, 2026: read ONE existing attachment's bytes back off a Sales
+   * Order — the first read this narrow exception has ever had. Still no
+   * list-all (a Sales Order's own `documents[]`, returned by getSalesOrder,
+   * already covers that — see orderTimelineService's sibling reasoning
+   * elsewhere in this app), still no replace, still no delete.
+   *
+   * Added for Phase 1 of moving attachment storage toward "Zoho is the
+   * real, permanent copy" — this is what lets the app SHOW a file straight
+   * from Zoho instead of (or alongside) the local one, without which that
+   * plan has no way to view what it pushed. Verified live against the real
+   * org before this was written: GET /salesorders/{id}/attachment?
+   * document_id=... returns the exact original bytes, correct
+   * Content-Type, and a Content-Disposition carrying the original filename.
+   *
+   * @param {string} salesorderId
+   * @param {string} documentId - from addSalesOrderAttachment's own
+   *   response, or from a Sales Order's `documents[].document_id`.
+   * @returns {Promise<{buffer: Buffer, contentType: string, fileName: string}>}
+   */
+  async getSalesOrderAttachment(salesorderId, documentId) {
     throw new Error('Not implemented');
   }
 

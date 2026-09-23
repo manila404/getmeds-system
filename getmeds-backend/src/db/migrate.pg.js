@@ -1070,6 +1070,22 @@ async function reconcileAttachmentDeletion(client) {
   console.log('  ✔ payment_proofs deletion-request columns added');
 }
 
+/**
+ * Sep 22, 2026: Phase 1 of moving attachment storage toward "Zoho is the
+ * real, permanent copy" (see paymentProof.controller.js and
+ * services/zohoAttachmentSync.js). `zoho_document_id` is what
+ * getSalesOrderAttachment (ZohoAdapter.js) needs to read a file's bytes
+ * back FROM Zoho — without it there is no way to know which of a Sales
+ * Order's `documents[]` entries is this row. Null for every row uploaded
+ * before this existed and for anything never successfully pushed; those
+ * keep serving from local storage exactly as before, same as every other
+ * additive column in this file.
+ */
+async function reconcileAttachmentZohoDocumentId(client) {
+  await client.query('ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS zoho_document_id TEXT');
+  console.log('  ✔ payment_proofs.zoho_document_id present');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -1115,6 +1131,7 @@ async function main() {
     await reconcileOrderEventsActorRole(client);
     await reconcileOrderItemsPriceRemark(client);
     await reconcileAttachmentDeletion(client);
+    await reconcileAttachmentZohoDocumentId(client);
     await reconcileOrderItemsInvoicingFrom(client);
     await reconcileZohoSyncQueueInvoicingFrom(client);
     await reconcileOrderPrimaryFinanceVerified(client);

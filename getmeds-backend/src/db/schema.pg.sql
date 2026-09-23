@@ -616,6 +616,13 @@ CREATE TABLE IF NOT EXISTS payment_proofs (
   -- Zoho write, so a deletion request on a file already pushed there is
   -- flagged for a human to also remove it in Zoho, rather than guessed at.
   zoho_pushed BOOLEAN NOT NULL DEFAULT false,
+  -- Sep 22, 2026: Zoho's own id for this file once pushed (from
+  -- addSalesOrderAttachment's response, matched against the Sales Order's
+  -- documents[] by filename) — needed to read the bytes back FROM Zoho via
+  -- getSalesOrderAttachment. Null until zoho_pushed is true; a row with
+  -- zoho_pushed=true but this still null predates this column and simply
+  -- keeps serving from local storage. See paymentProof.controller.js.
+  zoho_document_id TEXT,
   -- Sep 19, 2026: a MedRep asks to delete an attachment (wrong file, wrong
   -- order, duplicate), with a note saying why; Management approves or
   -- declines before anything is actually removed. 'approved' sets deleted_at

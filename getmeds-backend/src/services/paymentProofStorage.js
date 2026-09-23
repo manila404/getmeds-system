@@ -207,9 +207,21 @@ async function removeQuietly(storagePath) {
  * paymentProof.controller.js's attach) needs the file body, not a link to
  * it. Zoho's API has no way to fetch a file FROM a signed URL on our
  * behalf — the bytes have to be in the request we send it.
+ *
+ * Sep 23, 2026: `transform` added — paymentProof.controller.js's
+ * viewAttachment uses it to serve a resized rendition for a
+ * thumbnail/preview context (OrderDetailsModal's grid, PaymentProofPanel's
+ * inline preview) instead of the original file. Verified live against this
+ * project's own Supabase Storage before relying on it: Image
+ * Transformations IS enabled here, and `.download(path, { transform })`
+ * returns the resized bytes directly — no separate signed-URL detour
+ * needed (confirmed against a 20,274-byte source: a 300x300 request came
+ * back as a 7,615-byte JPEG). Ignored — silently, by Supabase itself, not
+ * by anything here — for a non-image object; this is only ever called with
+ * a transform for rows already known to be images (see viewAttachment).
  */
-async function downloadFile(storagePath) {
-  const { data, error } = await client().storage.from(BUCKET).download(storagePath);
+async function downloadFile(storagePath, transform) {
+  const { data, error } = await client().storage.from(BUCKET).download(storagePath, transform ? { transform } : undefined);
   if (error) throw error;
   return Buffer.from(await data.arrayBuffer());
 }

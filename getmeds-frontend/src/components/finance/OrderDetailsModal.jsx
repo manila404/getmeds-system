@@ -296,6 +296,14 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
     queryKey: ['finance-order-attachments', orderId],
     queryFn: () => client.get(`/api/orders/${orderId}/attachments`).then((r) => r.data),
     enabled: Boolean(orderId),
+    // Sep 23, 2026: this is the surface Finance AND Dispatch both reopen
+    // routinely for the same order (verify checklist, hold/reopen, "the
+    // order's receipt" — see this component's own doc comment above) — no
+    // staleTime meant every single reopen refetched and re-minted URLs.
+    // The URLs are deterministic now (attachmentLinkService.js) so a
+    // refetch alone was already harmless, but skipping the network call
+    // entirely on a quick reopen is strictly better.
+    staleTime: 5 * 60 * 1000,
   });
 
   const order = detail.data?.data?.order;
@@ -567,7 +575,15 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
                             <img> that reads as a failed upload. */}
                         {isImage ? (
                           <img
-                            src={a.viewUrl}
+                            // Sep 23, 2026 (Priority 2): a 128px-tall grid
+                            // cell was loading the full original (up to
+                            // several MB) every time — this asks
+                            // viewAttachment for a resized rendition
+                            // instead (Supabase Image Transformations,
+                            // verified enabled on this project). The click-
+                            // through <a> above still opens the full-size
+                            // a.viewUrl unchanged.
+                            src={`${a.viewUrl}&w=300&h=300`}
                             alt={a.file_name}
                             className="w-full h-32 object-cover bg-slate-50"
                             loading="lazy"
