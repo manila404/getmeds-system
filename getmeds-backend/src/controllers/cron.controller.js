@@ -20,6 +20,7 @@
 
 const zohoAutoSyncService = require('../services/zohoAutoSyncService');
 const zohoRetryService = require('../services/zohoRetryService');
+const notificationRetentionService = require('../services/notificationRetentionService');
 const { withLock } = require('../services/cronLock');
 
 /**
@@ -67,8 +68,23 @@ function authorize(req, res) {
 exports.autoSync = async (req, res, next) => {
   if (!authorize(req, res)) return;
   try {
+    // Sep 23, 2026: notification retention rides this same tick rather than
+    // getting its own vercel.json cron entry — this project's plan already
+    // uses both cron slots it has (auto-sync, zoho-retry), and unlike Zoho
+    // sync this has no staleness requirement that needs its own schedule.
+    // Own lock and own try/catch: a failure or overlap here must never block
+    // or be blocked by the Zoho sync below, which is the part this endpoint
+    // exists for. See notificationRetentionService.js for what/why.
+    let retention = { ran: false, reason: 'skipped' };
+    try {
+      retention = await withLock('notification_retention', 4 * 60 * 1000, async () => await notificationRetentionService.purgeOnce());
+    } catch (err) {
+      console.error('[CRON] notification retention failed:', err.message);
+      retention = { ran: false, reason: err.message };
+    }
+
     if (!zohoAutoSyncService.isEnabled()) {
-      return res.json({ success: true, data: { ran: false, reason: 'ZOHO_AUTO_SYNC_ENABLED=false' } });
+      return res.json({ success: true, data: { ran: false, reason: 'ZOHO_AUTO_SYNC_ENABLED=false', retention } });
     }
 
     const limit = Math.min(parseInt(req.query.limit, 10) || zohoAutoSyncService.BATCH_SIZE, 50);
@@ -79,9 +95,9 @@ exports.autoSync = async (req, res, next) => {
     );
 
     if (!outcome.ran) {
-      return res.json({ success: true, data: { ran: false, reason: 'another run holds the lock' } });
+      return res.json({ success: true, data: { ran: false, reason: 'another run holds the lock', retention } });
     }
-    return res.json({ success: true, data: { ran: true, ...outcome.result } });
+    return res.json({ success: true, data: { ran: true, ...outcome.result, retention } });
   } catch (err) {
     next(err);
   }
@@ -102,6 +118,28 @@ exports.zohoRetry = async (req, res, next) => {
       return res.json({ success: true, data: { ran: false, reason: 'ZOHO_AUTO_RETRY_ENABLED is not true' } });
     }
     const outcome = await withLock('zoho_retry', 4 * 60 * 1000, async () => await zohoRetryService.processQueue());
+    if (!outcome.ran) {
+      return res.json({ success: true, data: { ran: false, reason: 'another run holds the lock' } });
+    }
+    return res.json({ success: true, data: { ran: true, ...outcome.result } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST/GET /api/cron/notification-retention
+ *
+ * Purges old `notifications` rows — see notificationRetentionService.js for
+ * why this exists and the retention windows. Always on (no env-flag gate,
+ * unlike zoho-retry): this is a plain cleanup with no Zoho traffic or
+ * externally-visible side effect, so there's no failure mode worth an opt-in
+ * switch for.
+ */
+exports.notificationRetention = async (req, res, next) => {
+  if (!authorize(req, res)) return;
+  try {
+    const outcome = await withLock('notification_retention', 4 * 60 * 1000, async () => await notificationRetentionService.purgeOnce());
     if (!outcome.ran) {
       return res.json({ success: true, data: { ran: false, reason: 'another run holds the lock' } });
     }

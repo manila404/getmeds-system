@@ -249,7 +249,19 @@ async function evaluateCompletion(
     metadata: { trigger, paid, shipped, previousStatus: status, doneInZoho }
   });
 
-  const watchers = await getUserIdsByRole('finance', 'management');
+  // Sep 23, 2026: was `getUserIdsByRole('finance', 'management')` — every one
+  // of the ~9,265 completions logged so far (nearly all auto-detected by the
+  // Zoho webhook/reconcile poller, not a human action) fanned out to the
+  // full finance AND management roster individually. That's the single
+  // largest source of notification-table growth by a wide margin (roughly
+  // 94,000 of the table's 258,000 rows), and 94% of all notifications sit
+  // unread forever — this channel isn't actually being read as a per-person
+  // alert. Finance still needs it (their reconciliation depends on knowing
+  // an order closed); management doesn't need an individual ping for every
+  // completion when the order's own status/timeline already shows it on
+  // request. Narrowing to finance cuts this event's fan-out roughly in half
+  // going forward without removing the signal anyone actually acts on.
+  const watchers = await getUserIdsByRole('finance');
   await notify({
     orderId,
     recipientIds: Array.from(new Set([order.medrep_user_id, ...watchers].filter(Boolean))),

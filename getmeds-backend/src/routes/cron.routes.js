@@ -17,6 +17,7 @@ const router = express.Router();
 
 router.all('/auto-sync', cron.autoSync);
 router.all('/zoho-retry', cron.zohoRetry);
+router.all('/notification-retention', cron.notificationRetention);
 router.get('/health', cron.health);
 
 module.exports = router;
