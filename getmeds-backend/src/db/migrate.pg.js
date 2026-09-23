@@ -1036,6 +1036,20 @@ async function reconcileOrderPrimaryFinanceVerified(client) {
 }
 
 /**
+ * Sep 23, 2026: order_events.occurred_at_exact — see schema.pg.sql's comment
+ * on the column for what it means. Defaults TRUE, so every existing row
+ * (every one of them logged before this column existed, all with a genuine
+ * time — Zoho's date-only backfill is the one case that needed FALSE, and it
+ * only started being written the moment this migration lands) keeps reading
+ * as exact, which is correct: nothing about a past row's own time changed by
+ * this column showing up.
+ */
+async function reconcileOrderEventsOccurredAtExact(client) {
+  await client.query('ALTER TABLE order_events ADD COLUMN IF NOT EXISTS occurred_at_exact BOOLEAN NOT NULL DEFAULT TRUE');
+  console.log('  ✔ order_events.occurred_at_exact present');
+}
+
+/**
  * Sep 19, 2026: MedRep-requested, Management-approved attachment deletion —
  * see paymentProof.controller.js's requestDelete/decideDelete.
  *
@@ -1135,6 +1149,7 @@ async function main() {
     await reconcileOrderItemsInvoicingFrom(client);
     await reconcileZohoSyncQueueInvoicingFrom(client);
     await reconcileOrderPrimaryFinanceVerified(client);
+    await reconcileOrderEventsOccurredAtExact(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

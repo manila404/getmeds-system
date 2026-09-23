@@ -46,9 +46,14 @@ const BASE_EVENT_COLUMNS = ['order_id', 'event_type', 'old_status', 'new_status'
  * @param {string} [params.occurredAt] - ISO timestamp of when the event
  *   actually happened. Omit for anything a person does in this app; pass
  *   Zoho's own date when backfilling something that happened there.
+ * @param {boolean} [params.occurredAtExact] - Does `occurredAt` carry a real
+ *   time, or is it a bare Zoho date floored to midnight (see zohoDates.js
+ *   and schema.pg.sql's comment on order_events.occurred_at_exact)? Defaults
+ *   true — correct for every caller except zohoReconcileService.js's
+ *   invoice/package/shipment backfills, which pass false explicitly.
  */
 async function logEvent(
-  { orderId, eventType, oldStatus, newStatus, actorId, actorName, actorRole, notes, metadata, occurredAt }
+  { orderId, eventType, oldStatus, newStatus, actorId, actorName, actorRole, notes, metadata, occurredAt, occurredAtExact }
 ) {
   // 2. Validate required fields
   if (!orderId || !eventType) {
@@ -66,11 +71,19 @@ async function logEvent(
       }
     }
     const canWriteRole = role && (await hasColumn('order_events', 'actor_role'));
+    // occurredAtExact defaults true (omitted entirely means "a real time"),
+    // so this only needs to WRITE the column when a caller passed false —
+    // the column's own DB default already covers every other case, and
+    // skipping the write when there's nothing non-default to say keeps this
+    // column list from growing on every single logEvent call.
+    const canWriteExactness = occurredAtExact === false && (await hasColumn('order_events', 'occurred_at_exact'));
 
     // 3. Build the column list (see BASE_EVENT_COLUMNS' note on why this is
     //    per-call rather than one fixed prepared statement).
     // 4. Use '??' instead of '||' to preserve falsy values like 0 or ""
-    const columns = canWriteRole ? [...BASE_EVENT_COLUMNS, 'actor_role'] : BASE_EVENT_COLUMNS;
+    const columns = [...BASE_EVENT_COLUMNS];
+    if (canWriteRole) columns.push('actor_role');
+    if (canWriteExactness) columns.push('occurred_at_exact');
     const values = [
       orderId,
       eventType,
@@ -86,6 +99,7 @@ async function logEvent(
       occurredAt || new Date().toISOString()
     ];
     if (canWriteRole) values.push(role);
+    if (canWriteExactness) values.push(false);
 
     await db
       .prepare(`INSERT INTO order_events (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`)

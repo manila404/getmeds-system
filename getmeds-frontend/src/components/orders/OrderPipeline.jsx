@@ -123,7 +123,12 @@ const Updates = ({ updates }) => {
                   <SourceBadge source={u.source} />
                 </span>
                 <span className="text-ink-secondary shrink-0">
-                  {u.at ? formatPHT(u.at, 'timeline') : ''}
+                  {/* Sep 23, 2026: at_exact === false means Zoho only gave us
+                      a DATE for this one (an invoice/package/shipment date),
+                      not a time — order_events.occurred_at_exact floors it to
+                      midnight as the closest honest stand-in. Showing that as
+                      a clock time would claim a precision that isn't real. */}
+                  {u.at ? formatPHT(u.at, u.at_exact === false ? 'date' : 'timeline') : ''}
                 </span>
               </div>
               {u.note && <p className="text-ink-secondary mt-0.5">{u.note}</p>}
@@ -243,7 +248,11 @@ const OrderPipeline = ({ timeline, focusEntity = null, onClearFocus }) => {
                     <SourceBadge source={s.source} />
                   </p>
                   <p className="text-xs text-ink-secondary shrink-0">
-                    {s.at ? formatPHT(s.at, 'timeline') : ''}
+                    {/* See the Updates component's same check just above —
+                        a stage dated only from a bare Zoho date (no time)
+                        shows its date alone rather than a fabricated
+                        midnight clock time. */}
+                    {s.at ? formatPHT(s.at, s.at_exact === false ? 'date' : 'timeline') : ''}
                   </p>
                 </div>
 

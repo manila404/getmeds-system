@@ -12,13 +12,13 @@ const { diffSalesOrderFields, summarizeChanges } = require('./zohoEditDiffServic
 // these every event was stamped with the moment of the sync, so an order
 // raised on 31 Jan showed Confirmed / Invoiced / Paid / Packed all at 08:08 on
 // 10 Sep — a log of when this app looked, not of what happened.
-const { firstIso, notBefore } = require('./zohoDates');
+const { firstIsoWithPrecision, notBeforeWithPrecision } = require('./zohoDates');
 const { syncLineItemsFromZoho } = require('./zohoLineSyncService');
 
-/** The later of two ISO timestamps, ignoring nulls. */
-function latestOf(...isos) {
-  const known = isos.filter(Boolean).sort();
-  return known.length ? known[known.length - 1] : null;
+/** The later of two {iso, exact} pairs, ignoring nulls — see zohoDates.js. */
+function latestOfWithPrecision(...values) {
+  const known = values.filter((v) => v?.iso).sort((a, b) => (a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0));
+  return known.length ? known[known.length - 1] : { iso: null, exact: true };
 }
 
 /**
@@ -89,8 +89,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
     // belongs. The trail itself reports what happened.
     const ZOHO_ACTOR = 'Zoho';
     // Nothing that happens TO a Sales Order can predate the Sales Order — see
-    // notBefore in zohoDates for why that matters here.
-    const soCreatedIso = firstIso(
+    // notBeforeWithPrecision in zohoDates for why that matters here.
+    const soCreated = firstIsoWithPrecision(
       prefetchedSalesOrder && prefetchedSalesOrder.created_time,
       prefetchedSalesOrder && prefetchedSalesOrder.date
     );
@@ -281,6 +281,11 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
     const allFieldChanges = diffSalesOrderFields(salesorder, order);
     const fieldChanges = allFieldChanges.filter((c) => !c.baseline);
     if (allFieldChanges.length) {
+      // last_modified_time is EXACTLY when the edit happened — the one
+      // checkpoint here Zoho timestamps precisely (the .date fallback, when
+      // it's what actually wins, is not).
+      const editedAt = firstIsoWithPrecision(salesorder.last_modified_time, salesorder.date);
+
       await db.transaction(async () => {
         const setClause = allFieldChanges.map((c) => `${c.localColumn} = ?`).join(', ');
         const values = allFieldChanges.map((c) => c.newValue);
@@ -296,9 +301,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           actorId: null,
           actorName: ZOHO_ACTOR,
           notes: `Sales Order edited in Zoho — ${summarizeChanges(fieldChanges)}`,
-          // last_modified_time is EXACTLY when the edit happened — the one
-          // checkpoint here Zoho timestamps precisely.
-          occurredAt: firstIso(salesorder.last_modified_time, salesorder.date),
+          occurredAt: editedAt.iso,
+          occurredAtExact: editedAt.exact,
           metadata: { changes: fieldChanges, ...syncMeta }
         });
 
@@ -328,6 +332,10 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
 
     if (isConfirmed && !(await alreadyLogged('ZOHO_SO_CONFIRMED'))) {
       const zohoSoNumber = salesorder.salesorder_number || order.zoho_so_number;
+      // Zoho records no separate "confirmed at" on the Sales Order, so this
+      // is the SO's own created_time — usually exact; the .date fallback,
+      // when it's what actually wins, is not.
+      const confirmedAt = firstIsoWithPrecision(salesorder.created_time, salesorder.date);
 
       await db.transaction(async () => {
         // Sep 1, 2026: 'so_created' added, mirroring the live webhook — a
@@ -354,11 +362,10 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           actorId: null,
           actorName: ZOHO_ACTOR,
           notes: `Sales Order confirmed in Zoho (${zohoSoNumber || order.zoho_so_id})`,
-          // Zoho records no separate "confirmed at" on the Sales Order, so
-          // this is the SO's own date — the closest honest answer. The exact
-          // moment, when it matters, is in the ZOHO_LOG entries copied from
-          // Zoho's Comments & History.
-          occurredAt: firstIso(salesorder.created_time, salesorder.date),
+          // The exact moment, when it matters, is in the ZOHO_LOG entries
+          // copied from Zoho's Comments & History.
+          occurredAt: confirmedAt.iso,
+          occurredAtExact: confirmedAt.exact,
           metadata: { zohoSoId: order.zoho_so_id, zohoSoNumber, ...syncMeta }
         });
 
@@ -374,6 +381,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       action = 'SO_CONFIRMED_BACKFILLED';
     } else if (isCancelled && !(await alreadyLogged('ZOHO_SO_CANCELLED')) && !['completed', 'cancelled', 'deleted'].includes(order.status)) {
       newStatus = 'cancelled';
+      const cancelledAt = firstIsoWithPrecision(salesorder.last_modified_time, salesorder.date);
 
       await db.transaction(async () => {
         const moved = await setOrderStatus(order.id, order.status, newStatus, now);
@@ -387,7 +395,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           actorId: null,
           actorName: ZOHO_ACTOR,
           notes: 'Sales Order cancelled or voided in Zoho',
-          occurredAt: firstIso(salesorder.last_modified_time, salesorder.date),
+          occurredAt: cancelledAt.iso,
+          occurredAtExact: cancelledAt.exact,
           metadata: { source }
         });
 
@@ -502,6 +511,12 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           const target = invoiceIsPaid || invoiceIsSent ? 'ready_for_dispatch' : 'ready_for_invoice_sent';
           const preInvoice = ['so_created', 'ready_for_finance_verified', 'ready_for_draft_invoice', 'tracking_shared', 'ready_for_invoice_sent'];
           const eventType = invoiceIsSent || invoiceIsPaid ? 'ZOHO_INVOICE_SENT' : 'ZOHO_INVOICE_DRAFTED';
+          // The invoice's own date, not the sync's — Zoho never attaches a
+          // time to it, so this is always the least precise checkpoint here.
+          const invoiceDated = notBeforeWithPrecision(
+            firstIsoWithPrecision(latestInvoice.date, salesorder.date),
+            soCreated
+          );
 
           await db.transaction(async () => {
             if (preInvoice.includes(order.status)) {
@@ -534,8 +549,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
                   ? ' Note: this order had not been marked Finance Verified in this app — raising the invoice in Zoho is treated as the approval.'
                   : ''
               }`,
-              // The invoice's own date, not the sync's.
-              occurredAt: notBefore(firstIso(latestInvoice.date, salesorder.date), soCreatedIso),
+              occurredAt: invoiceDated.iso,
+              occurredAtExact: invoiceDated.exact,
               metadata: { zohoInvoiceId, zohoInvoiceNumber, invoiceStatus, ...syncMeta }
             });
 
@@ -569,26 +584,30 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
                 actorName: ZOHO_ACTOR,
                 notes: `Zoho reports invoice ${paidRef} as "${invoiceStatus}".`,
                 // Zoho's Sales Order view carries no payment date, only the
-                // invoice's own — so this is dated to the invoice. It is the
-                // least precise checkpoint here, and saying "the invoice date"
-                // is better than saying "the day we noticed".
-                occurredAt: notBefore(firstIso(latestInvoice.date, salesorder.date), soCreatedIso),
+                // invoice's own — so this is dated to the invoice.
+                occurredAt: invoiceDated.iso,
+                occurredAtExact: invoiceDated.exact,
                 metadata: { invoiceStatus, ...syncMeta }
               });
 
+              // An order completes when it is BOTH shipped and paid, so it
+              // completed on whichever of the two came last — not on the day
+              // this sync noticed both were true.
+              const paidAndShippedAt = notBeforeWithPrecision(
+                latestOfWithPrecision(
+                  firstIsoWithPrecision(latestInvoice.date, salesorder.date),
+                  firstIsoWithPrecision(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date)
+                ),
+                soCreated
+              );
               const completion = await evaluateCompletion({
                 orderId: order.id,
                 currentStatus: newStatus,
                 actorId: null,
                 actorName: ZOHO_ACTOR,
                 trigger: 'payment',
-                // An order completes when it is BOTH shipped and paid, so it
-                // completed on whichever of the two came last — not on the day
-                // this sync noticed both were true.
-                occurredAt: notBefore(latestOf(
-                  firstIso(latestInvoice.date, salesorder.date),
-                  firstIso(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date)
-                ), soCreatedIso)
+                occurredAt: paidAndShippedAt.iso,
+                occurredAtExact: paidAndShippedAt.exact
               });
               if (completion.completed) newStatus = 'completed';
             }
@@ -629,6 +648,10 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
         // packed, shipped or completed keeps the status it has.
         const canAdvanceToPacking = ['ready_for_finance_verified', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch'].includes(order.status);
         newStatus = canAdvanceToPacking ? 'picking_packing' : order.status;
+        const packedAt = notBeforeWithPrecision(
+          firstIsoWithPrecision(latestPackage.date, salesorder.shipment_date, salesorder.date),
+          soCreated
+        );
         await db.transaction(async () => {
           const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
           if (existingDispatch) {
@@ -645,7 +668,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
             orderId: order.id, eventType: 'ZOHO_PACKAGE_CREATED', oldStatus: order.status, newStatus,
             actorId: null, actorName: ZOHO_ACTOR,
             notes: `Package ${latestPackage.package_number || latestPackage.package_id || ''} created in Zoho`,
-            occurredAt: notBefore(firstIso(latestPackage.date, salesorder.shipment_date, salesorder.date), soCreatedIso),
+            occurredAt: packedAt.iso,
+            occurredAtExact: packedAt.exact,
             metadata: { ...syncMeta }
           });
           await notify({
@@ -662,6 +686,10 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       // 'cancelled' still block it, because a shipment appearing on a closed
       // order is a real anomaly rather than a checkpoint to backfill.
       } else if (hasShipped && !(await alreadyLogged('ZOHO_DISPATCHED')) && !['completed', 'cancelled'].includes(order.status)) {
+        const shippedAt = notBeforeWithPrecision(
+          firstIsoWithPrecision(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date, salesorder.date),
+          soCreated
+        );
         await db.transaction(async () => {
           const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
           if (existingDispatch) {
@@ -704,7 +732,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
               // and Lalamove deliveries. Say what is known rather than
               // printing "Tracking: null".
               : `Shipped in Zoho${courier ? ` via ${courier}` : ''} — no tracking number recorded`,
-            occurredAt: notBefore(firstIso(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date, salesorder.date), soCreatedIso),
+            occurredAt: shippedAt.iso,
+            occurredAtExact: shippedAt.exact,
             metadata: { trackingNumber, courier, ...syncMeta }
           });
 
@@ -722,7 +751,8 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
               notes: trackingNumber
                 ? `${courier || 'Courier'}: ${trackingNumber}`
                 : `${courier || 'Courier'} — no tracking number recorded`,
-              occurredAt: notBefore(firstIso(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date, salesorder.date), soCreatedIso),
+              occurredAt: shippedAt.iso,
+              occurredAtExact: shippedAt.exact,
               metadata: { ...syncMeta }
             });
           }
@@ -731,17 +761,22 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
 
           // Shipped — if payment was already recorded, that's both halves of
           // the rule and the order closes out here.
+          // See the payment-side call above — the later of shipped and paid.
+          const shippedAndPaidAt = notBeforeWithPrecision(
+            latestOfWithPrecision(
+              firstIsoWithPrecision(latestInvoice?.date, salesorder.date),
+              firstIsoWithPrecision(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date)
+            ),
+            soCreated
+          );
           const completion = await evaluateCompletion({
             orderId: order.id,
             currentStatus: newStatus,
             actorId: null,
             actorName: ZOHO_ACTOR,
             trigger: 'shipment',
-            // See the payment-side call above — the later of shipped and paid.
-            occurredAt: notBefore(latestOf(
-              firstIso(latestInvoice?.date, salesorder.date),
-              firstIso(latestPackage?.shipment_date, latestPackage?.date, salesorder.shipment_date)
-            ), soCreatedIso)
+            occurredAt: shippedAndPaidAt.iso,
+            occurredAtExact: shippedAndPaidAt.exact
           });
           if (completion.completed) newStatus = 'completed';
 

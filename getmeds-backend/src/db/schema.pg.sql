@@ -657,7 +657,17 @@ CREATE TABLE IF NOT EXISTS order_events (
   actor_role TEXT CHECK(actor_role IS NULL OR actor_role IN ('medrep','finance','dispatch','management','admin','team_lead')),
   notes TEXT,
   metadata TEXT,
-  created_at TEXT DEFAULT iso_now()
+  created_at TEXT DEFAULT iso_now(),
+  -- Sep 23, 2026: does `created_at` carry a real time, or only a date Zoho
+  -- gave us with no clock time attached (zohoDates.js's toIso then floors it
+  -- to midnight in the org's own timezone, the best available stand-in)?
+  -- TRUE for everything: anything logged live (a person's action, a webhook,
+  -- Zoho's created_time/last_modified_time) genuinely has a time. Only
+  -- zohoReconcileService.js's backfill from a bare Zoho `date` field (an
+  -- invoice, package or shipment date — Zoho never timestamps those) sets
+  -- this FALSE, so the timeline can show "Sep 23, 2026" instead of a
+  -- fabricated "12:00 AM" that looks precise and isn't.
+  occurred_at_exact BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 -- Sep 13, 2026: each order's audit thread in Discord, for

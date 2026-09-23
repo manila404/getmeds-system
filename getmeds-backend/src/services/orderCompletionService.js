@@ -165,10 +165,12 @@ function isDoneInZoho(order) {
  * actually changed, so callers don't need to guess whether it's worth
  * calling.
  *
+ * @param {boolean} [occurredAtExact] - Forwarded straight to logEvent — see
+ *   auditService.js's doc comment on the same name.
  * @returns {{completed: boolean, paid: boolean, shipped: boolean, status: string}}
  */
 async function evaluateCompletion(
-  { orderId, currentStatus, actorId = null, actorName = 'System', trigger = null, occurredAt = null }
+  { orderId, currentStatus, actorId = null, actorName = 'System', trigger = null, occurredAt = null, occurredAtExact }
 ) {
   const order = await db
     .prepare(
@@ -222,6 +224,7 @@ async function evaluateCompletion(
         `Order is both shipped and paid, but "${status}" -> "completed" is not an allowed transition, ` +
         'so it has been left as-is. This is a workflow bug — see workflow/stateMachine.js.',
       occurredAt,
+      occurredAtExact,
       metadata: { trigger, paid, shipped }
     });
     return { completed: false, paid, shipped, status };
@@ -242,6 +245,7 @@ async function evaluateCompletion(
     // this app worked that out. Null for a completion driven from this app,
     // where "now" is correct.
     occurredAt,
+    occurredAtExact,
     metadata: { trigger, paid, shipped, previousStatus: status, doneInZoho }
   });
 

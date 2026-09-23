@@ -356,6 +356,13 @@ function buildTimeline(order, events = [], splits = []) {
       // not give us.
       evidence: event ? 'event' : byState ? 'state' : null,
       at: event ? event.created_at : null,
+      // Sep 23, 2026: does `at` carry a real time, or a bare Zoho date
+      // floored to midnight (order_events.occurred_at_exact — see its
+      // comment in schema.pg.sql)? Missing on an order predating this
+      // column reads as true, same reasoning as actor_role's rollout: an
+      // event logged before this existed was never backfilled with a fake
+      // time, so there is nothing here to doubt.
+      at_exact: event ? event.occurred_at_exact !== false : true,
       by: event ? event.actor_name : null,
       // Sep 18, 2026: the actor's role at the time (order_events.actor_role)
       // — "by Veronica" alone reads as a name nobody outside her own team
@@ -420,21 +427,44 @@ function buildTimeline(order, events = [], splits = []) {
     }
   }
 
-  // Attach each update to the last stage that had already happened when it
-  // occurred, so expanding a stage shows what changed AFTER it — the reading
-  // that makes "3 updates" between Confirmed and Invoiced mean something.
+  // Attach each update to the CLOSEST-PRECEDING stage by actual time, so
+  // expanding a stage shows what changed AFTER it — the reading that makes
+  // "3 updates" between Confirmed and Invoiced mean something.
+  //
+  // Sep 23, 2026: this used to walk `done` in SPINE order (Created ->
+  // Management Approved -> ... -> Shipped) and keep overwriting `target`
+  // with whichever stage came LAST in that walk and still had `.at <=
+  // u.created_at` — which is "the latest stage in the PIPELINE", not "the
+  // latest stage in TIME". Those agree for a normal order, where each stage
+  // is reached later than the one before it. They do not agree for a stage
+  // whose own time is a Zoho-backfilled bare DATE (Invoiced/Packed/Shipped —
+  // see occurred_at_exact above): a Sales Order raised at 8:32 AM and
+  // shipped the same day gets ZOHO_DISPATCHED's timestamp floored to that
+  // day's midnight, which SORTS BEFORE 8:32 AM even though Shipped is the
+  // last stage in the pipeline. The old walk still reached Shipped last and
+  // kept it as `target` for every update on the order — the MedRep's proof
+  // upload, every failed sync retry, Finance's verification, all of it —
+  // because "comes last in the walk" beat "comes last in real time". Every
+  // update on the order piled onto one stage instead of the one it actually
+  // happened during. Picking the maximum `.at` that still qualifies, rather
+  // than the SPINE-order-last one, is the fix: it answers "which stage had
+  // most recently happened, in real time, when this update occurred" —
+  // which is what the comment above already claimed this did.
   const done = stages.filter((s) => s.state === 'done');
   const byKey = new Map(stages.map((s) => [s.key, s]));
 
   for (const u of updates) {
-    let target = done[0] || stages[0];
+    let target = null;
     for (const s of done) {
-      if (String(s.at || '') <= String(u.created_at || '')) target = s;
+      if (!s.at || String(s.at) > String(u.created_at || '')) continue;
+      if (!target || String(s.at) > String(target.at)) target = s;
     }
+    if (!target) target = done[0] || stages[0];
     byKey.get(target.key).updates.push({
       id: u.id,
       event_type: u.event_type,
       at: u.created_at,
+      at_exact: u.occurred_at_exact !== false,
       by: u.actor_name,
       by_role: u.actor_role || null,
       note: u.notes,
@@ -455,6 +485,7 @@ function buildTimeline(order, events = [], splits = []) {
       label: TERMINAL[t.event_type],
       state: 'terminal',
       at: t.created_at,
+      at_exact: t.occurred_at_exact !== false,
       by: t.actor_name,
       by_role: t.actor_role || null,
       source: sourceOf(t),

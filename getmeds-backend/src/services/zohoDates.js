@@ -94,6 +94,47 @@ function firstIso(...candidates) {
 }
 
 /**
+ * A bare 'YYYY-MM-DD', with nothing else on the string — Zoho's shape for a
+ * date it never attaches a clock time to (an invoice/package/shipment
+ * `date`), as opposed to a full 'created_time'/'last_modified_time' stamp.
+ */
+function isBareDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
+}
+
+/**
+ * Same as firstIso, but also says whether the candidate that won carries a
+ * real time or is a bare date about to be floored to midnight — the
+ * information order_events.occurred_at_exact exists to record. See its
+ * result type's `exact` — the tests below assume `.iso`.
+ *
+ * @returns {{iso: string|null, exact: boolean}}
+ */
+function firstIsoWithPrecision(...candidates) {
+  for (const c of candidates) {
+    const iso = toIso(c);
+    if (iso) return { iso, exact: !isBareDate(c) };
+  }
+  return { iso: null, exact: true };
+}
+
+/**
+ * notBefore, threaded through a {iso, exact} pair instead of a bare string —
+ * when the floor wins (the derived date was earlier than the Sales Order's
+ * own creation), the exactness that applies is the FLOOR's, not the
+ * candidate's: the value actually being recorded is the floor's own time.
+ *
+ * @param {{iso: string|null, exact: boolean}} value
+ * @param {{iso: string|null, exact: boolean}} floor
+ * @returns {{iso: string|null, exact: boolean}}
+ */
+function notBeforeWithPrecision(value, floor) {
+  if (!value?.iso) return floor || { iso: null, exact: true };
+  if (!floor?.iso) return value;
+  return value.iso < floor.iso ? floor : value;
+}
+
+/**
  * Never earlier than `floor`.
  *
  * Sep 10, 2026. Zoho dates its Sales Order to the second (created_time) but its
@@ -113,4 +154,12 @@ function notBefore(iso, floor) {
   return iso < floor ? floor : iso;
 }
 
-module.exports = { toIso, toIsoWithTime, firstIso, notBefore, ORG_UTC_OFFSET };
+module.exports = {
+  toIso,
+  toIsoWithTime,
+  firstIso,
+  notBefore,
+  firstIsoWithPrecision,
+  notBeforeWithPrecision,
+  ORG_UTC_OFFSET
+};
