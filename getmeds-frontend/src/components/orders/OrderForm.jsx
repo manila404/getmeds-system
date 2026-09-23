@@ -1077,60 +1077,75 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // but deliberately NOT enforced server-side beyond "must be a valid
   // value if present", so this stays a client-side UX guarantee rather
   // than breaking any other caller of POST /api/orders.
-  const isFormValid = Boolean(
-    // "Another MedRep" with nobody chosen would silently fall back to the
-    // rep's own account — right on screen, wrong person in Zoho.
-    (!isRepChoosing || orderForMode !== 'other' || actingMedrepId) &&
-    customerId &&
-    deliveryAddress.trim() &&
-    orderSource &&
-    invoicingFrom &&
-    // Sep 9, 2026: the Master Form's own required set. Same standing as Source
-    // and Invoicing From above — a client-side UX guarantee, deliberately NOT
-    // enforced by POST /api/orders, which would otherwise reject every other
-    // caller of that endpoint including the test suite.
-    paymentTerms.trim() &&
-    expectedShipmentDate &&
-    deliveryNotes.trim() &&
-    // Sep 11, 2026: "Is the customer the doctor?" and Doctor Name are OPTIONAL
-    // on an ordinary order. Most orders are not placed for a named doctor, and
-    // making every rep answer a question that does not apply produces a filled
-    // box rather than a fact.
-    //
-    // Sep 15, 2026: and on a hospital order too. Doctor Name, GL Number, the
-    // receiver type and the four attachments (GL, Prescription, Proof of
-    // Payment, Valid ID) used to be required there, and a MedRep without all
-    // of them in hand could not place the order at all. Confirmed with the
-    // business: still asked for — the checklist and the fields stay on screen
-    // for a hospital customer — but none of them blocks submission. What is
-    // missing can be attached later from the order's Attachments tab, and
-    // Finance's panel still points out any hospital document not attached.
-    items.length > 0 &&
-    items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0) &&
-    // Sep 4, 2026: a proof of payment, or a reason there is none. Never neither,
-    // so Finance always gets either evidence or an explanation rather than a
-    // blank. Like Source and Invoicing From above, this is a client-side UX
-    // guarantee — POST /api/orders still accepts an order without it, because
-    // the proof itself uploads after create.
-    // Sep 5, 2026: "a proof of payment" now means "at least one staged file
-    // tagged payment_proof" — an 'other'-only staged list still needs a
-    // reason, same as an empty one.
-    // Sep 5, 2026 (2): management is exempt from this entirely — the "no
-    // proof, say why" field is not shown to them at all (see isBackOffice
-    // below and the Field it gates), so there is nothing here for them to
-    // fill in and this requirement must not block their submission.
-    // Sep 15, 2026: a hospital order used to be exempt here because it required
-    // a Proof of Payment outright among its four attachments. Now that those
-    // are optional, it follows the same rule as every other order: a proof,
-    // or the reason there is none.
-    (isBackOffice || hasStagedProof ||
-      (Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim()))))
-    // Sep 5, 2026 (4): management picking a MedRep here used to be
-    // required (see the Sep 5 removal note on resolveOrderMedrep on the
-    // backend) — it's optional again now that Division/Salesperson can be
-    // typed manually instead, so there is no client-side requirement left
-    // to enforce here.
-  );
+  //
+  // Sep 23, 2026: was a single Boolean(...) ANDing every condition together —
+  // correct for gating Submit, but told a MedRep only "something's missing",
+  // never WHICH field. Rebuilt as a list of exactly what's still missing, in
+  // the order the fields appear on the page, so the submit-blocked message
+  // below can name them instead of reciting a hand-written (and by then
+  // already stale) sentence. Every condition here is unchanged from before —
+  // this only changes HOW each one is recorded, not what it checks.
+  const missingFields = [];
+  // "Another MedRep" with nobody chosen would silently fall back to the
+  // rep's own account — right on screen, wrong person in Zoho.
+  if (isRepChoosing && orderForMode === 'other' && !actingMedrepId) missingFields.push('MedRep (who this order is for)');
+  if (!customerId) missingFields.push('Customer');
+  if (!deliveryAddress.trim()) missingFields.push('Delivery Address');
+  // Sep 9, 2026: the Master Form's own required set. Same standing as Source
+  // and Invoicing From below — a client-side UX guarantee, deliberately NOT
+  // enforced by POST /api/orders, which would otherwise reject every other
+  // caller of that endpoint including the test suite.
+  if (!paymentTerms.trim()) missingFields.push('Payment Terms');
+  if (!orderSource) missingFields.push('Source');
+  if (!invoicingFrom) missingFields.push('Invoicing From');
+  // Sep 23, 2026: Delivery Method — previously the only shipping-relevant
+  // field on this form with no asterisk and no check, so an order could be
+  // submitted with no indication of how it would actually be delivered.
+  if (!deliveryMethod.trim()) missingFields.push('Delivery Method');
+  if (!deliveryNotes.trim()) missingFields.push('Customer Remarks');
+  if (!expectedShipmentDate) missingFields.push('Expected Shipment Date');
+  // Sep 11, 2026: "Is the customer the doctor?" and Doctor Name are OPTIONAL
+  // on an ordinary order. Most orders are not placed for a named doctor, and
+  // making every rep answer a question that does not apply produces a filled
+  // box rather than a fact.
+  //
+  // Sep 15, 2026: and on a hospital order too. Doctor Name, GL Number, the
+  // receiver type and the four attachments (GL, Prescription, Proof of
+  // Payment, Valid ID) used to be required there, and a MedRep without all
+  // of them in hand could not place the order at all. Confirmed with the
+  // business: still asked for — the checklist and the fields stay on screen
+  // for a hospital customer — but none of them blocks submission. What is
+  // missing can be attached later from the order's Attachments tab, and
+  // Finance's panel still points out any hospital document not attached.
+  if (items.length === 0) missingFields.push('At least one order item');
+  else if (!items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0)) missingFields.push('Valid quantity & price on every item');
+  // Sep 4, 2026: a proof of payment, or a reason there is none. Never neither,
+  // so Finance always gets either evidence or an explanation rather than a
+  // blank. Like Source and Invoicing From above, this is a client-side UX
+  // guarantee — POST /api/orders still accepts an order without it, because
+  // the proof itself uploads after create.
+  // Sep 5, 2026: "a proof of payment" now means "at least one staged file
+  // tagged payment_proof" — an 'other'-only staged list still needs a
+  // reason, same as an empty one.
+  // Sep 5, 2026 (2): management is exempt from this entirely — the "no
+  // proof, say why" field is not shown to them at all (see isBackOffice
+  // below and the Field it gates), so there is nothing here for them to
+  // fill in and this requirement must not block their submission.
+  // Sep 15, 2026: a hospital order used to be exempt here because it required
+  // a Proof of Payment outright among its four attachments. Now that those
+  // are optional, it follows the same rule as every other order: a proof,
+  // or the reason there is none.
+  if (!isBackOffice && !hasStagedProof &&
+      !(Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim())))) {
+    missingFields.push('Proof of Payment (or a reason if none)');
+  }
+  // Sep 5, 2026 (4): management picking a MedRep here used to be
+  // required (see the Sep 5 removal note on resolveOrderMedrep on the
+  // backend) — it's optional again now that Division/Salesperson can be
+  // typed manually instead, so there is no client-side requirement left
+  // to enforce here.
+
+  const isFormValid = missingFields.length === 0;
 
   // Step 3: [TEST MODE: Auto-Fill] Logic
   //
@@ -2081,7 +2096,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                 </select>
               </Field>
 
-              <Field label="Delivery Method" help="Type to see suggestions, or enter your own.">
+              <Field label="Delivery Method" required help="Type to see suggestions, or enter your own.">
                 <SuggestField
                   value={deliveryMethod}
                   onChange={setDeliveryMethod}
@@ -2608,8 +2623,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
           <div className="p-6 sm:p-8 bg-surface/40 flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="text-xs text-ink-secondary">
               {!isFormValid ? (
-                <span className="text-state-warning font-medium flex items-center gap-1.5">
-                  <AlertCircle size={14} /> Mandatory fields required (Customer, Source, Invoicing From, 1+ Items, Address) to unlock submission.
+                <span className="text-state-warning font-medium flex items-start gap-1.5">
+                  <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                  <span>Missing: {missingFields.join(', ')}</span>
                 </span>
               ) : (
                 <span className="text-pharmacy-green-dark font-medium flex items-center gap-1.5">
