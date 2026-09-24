@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, PackageCheck, Truck, ExternalLink, Receipt, MapPin, Search, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CheckCircle, RefreshCw, PackageCheck, Truck, ExternalLink, Receipt, MapPin, Search, ChevronLeft, ChevronRight } from 'lucide-react';
 import client from '../../api/client';
 import DeliveryConfirmModal from '../../components/dispatch/DeliveryConfirmModal';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
@@ -653,78 +653,17 @@ const DispatchQueuePage = () => {
   //      auto-completes.
   // Each of those Zoho-side actions calls back to this app's webhook and
   // updates the order automatically — this view just shows where things stand.
-  const stageInfo = (order) => {
-    if (order.status === 'dispatched') {
-      return {
-        label: 'Dispatched from Zoho',
-        hint: 'Shipment created in Zoho — tracking details pending. This order completes automatically once Zoho has a tracking number.',
-        icon: Truck,
-        className: 'bg-getmeds-blue/10 text-getmeds-blue-dark border-getmeds-blue/30'
-      };
-    }
-    if (order.status === 'picking_packing') {
-      return {
-        label: 'Package created in Zoho',
-        hint: 'Items picked & packed. Waiting for Pharmacy to create a Shipment (courier + tracking) in Zoho Inventory.',
-        icon: PackageCheck,
-        className: 'bg-indigo-50 text-indigo-700 border-indigo-300'
-      };
-    }
-    return {
-      label: 'Ready for dispatch',
-      hint: 'Waiting for Pharmacy to create a Package in Zoho Inventory (picking & packing).',
-      icon: Clock,
-      className: 'bg-state-warning-light text-amber-950 border-state-warning'
-    };
-  };
-
+  // Sep 24, 2026: the "Awaiting Dispatch Action in Zoho" list that used to sit
+  // under the two panels — every order waiting on a Package or Shipment, 5,000+
+  // rows, mostly Zoho-imported history, with its own search box, origin and
+  // owner filters, a pager and a footnote — was removed at the product owner's
+  // request to clean up the page. What's left is the two panels above, which
+  // are the actionable part: new draft Sales Orders, and orders Finance has
+  // confirmed and Dispatch now has to deliver.
   return (
     <div className="space-y-6">
       {header}
       {recentAndDialog}
-
-      <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
-        <div className="px-4 py-3 border-b border-slate-200 bg-surface flex items-center gap-2">
-          <Clock className="w-4 h-4 text-state-warning" />
-          <h2 className="text-sm font-semibold text-ink-primary">Awaiting Dispatch Action in Zoho ({total.toLocaleString()})</h2>
-        </div>
-        {toolbar}
-
-        {isLoading ? spinner : orders.length === 0 ? (
-          <div className="text-center py-12 text-ink-secondary">
-            <CheckCircle className="w-10 h-10 mx-auto mb-2 text-pharmacy-green" />
-            <p className="text-sm">{search ? `No order matches "${search}"` : 'No orders currently waiting on dispatch'}</p>
-          </div>
-        ) : (
-          <ul className="divide-y divide-slate-100">
-            {orders.map(order => {
-              const stage = stageInfo(order);
-              const Icon = stage.icon;
-              return (
-                <li key={order.id} className="p-4">
-                  {orderSummary(order)}
-                  <div className="mt-2">{deliveryActions(order)}</div>
-                  <div className={`mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${stage.className}`}>
-                    <Icon className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                    <div>
-                      <p className="font-semibold">{stage.label}</p>
-                      <p className="opacity-90 mt-0.5">{stage.hint}</p>
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-        {pager}
-      </div>
-
-      <div className="flex items-start gap-2 text-xs text-ink-secondary bg-surface border border-slate-200 rounded-lg p-3">
-        <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-        <p>Act on these orders in Zoho Inventory — create the Package once items are picked & packed, then create
-          the Shipment with courier and tracking number. This page is a mirror of what Zoho reports — nothing
-          here changes an order's status directly.</p>
-      </div>
     </div>
   );
 };
