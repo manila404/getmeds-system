@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff, ChevronDown, ShieldCheck } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff, ChevronDown, ShieldCheck, Clock } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 import { FINANCE_STAGES } from '../../constants/financeStages';
 
@@ -222,7 +222,18 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         // they sync to Zoho — see orders.controller.js's submit().
         { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
         { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
-        { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
+        { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' },
+        // Sep 24, 2026: "identify stalled Sales Orders and follow up directly
+        // with the MedReps who created them". Management only: Admin already
+        // has this stage in its Finance group below, and would see it twice.
+        // It is the same page and the same server filter Finance uses (the
+        // 'upstream' stage), so the two can never disagree about what counts.
+        ...(role === 'management' ? [{
+          to: '/finance?stage=upstream',
+          stage: 'upstream',
+          icon: <Clock size={19} />,
+          label: (FINANCE_STAGES.find((g) => g.key === 'upstream') || {}).navLabel || 'Not yet with Finance'
+        }] : [])
       ]
     });
 
@@ -265,10 +276,15 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   // Is the page you're on inside this link? Exact for the two routes that
   // other links live underneath ('/management' → '/management/approvals'),
   // prefix for the rest.
+  // A link with a `stage` points at a filtered view of a shared page, so it is
+  // active only when that stage is the one showing (NavLink's own isActive
+  // ignores the query string and would light it up on every /finance view).
   const isLinkActive = (l) =>
-    l.to === '/management' || l.to === '/orders'
-      ? location.pathname === l.to
-      : location.pathname.startsWith(l.to);
+    l.stage
+      ? location.pathname === '/finance' && searchParams.get('stage') === l.stage
+      : l.to === '/management' || l.to === '/orders'
+        ? location.pathname === l.to
+        : location.pathname.startsWith(l.to);
   // Hand-toggled state wins; otherwise Operations starts open and any other
   // group opens when it holds the page you're on.
   const groupIsOpen = (g) => openGroups[g.key] ?? (g.key === 'operations' || g.links.some(isLinkActive));
@@ -498,7 +514,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                               end={link.to === '/orders' || link.to === '/management'}
                               className={({ isActive }) =>
                                 `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
-                                  isActive
+                                  (link.stage ? isLinkActive(link) : isActive)
                                     ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-4 border-getmeds-blue'
                                     : 'text-ink-primary hover:bg-surface'
                                 }`
