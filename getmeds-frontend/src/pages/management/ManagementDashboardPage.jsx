@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  CalendarDays, Wallet, Truck, PackageCheck, AlertTriangle, Timer, RefreshCw, Eye,
+  CalendarDays, Wallet, Truck, PackageCheck, AlertTriangle, Timer, RefreshCw,
   Search, Download, ChevronLeft, ChevronRight, X, Hourglass
 } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -386,7 +386,7 @@ const ManagementDashboardPage = () => {
       </div>
 
       {/* ── Orders + side panel ──────────────────────────────────────────── */}
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px] items-start">
+      <div className="grid gap-6 min-[1700px]:grid-cols-[minmax(0,1fr)_320px] items-start">
         <div className="space-y-4 min-w-0">
           {/* Orders by status — quick filters for the table below. */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
@@ -529,7 +529,7 @@ const ManagementDashboardPage = () => {
                     <tr>
                       <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Order ID</th>
                       <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Customer</th>
-                      <th className="hidden min-[1800px]:table-cell px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Salesperson</th>
+                      <th className="hidden min-[1900px]:table-cell px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Salesperson</th>
                       {/* Sep 10, 2026: Salesperson is what ZOHO recorded; Assigned
                           To is who owns it HERE. Both are shown because they answer
                           different questions — the second is the one Order
@@ -538,24 +538,28 @@ const ManagementDashboardPage = () => {
                       <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Status</th>
                       <th className="px-4 py-3 text-right text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Total</th>
                       <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Date</th>
-                      <th className="px-4 py-3" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
                     {orders.map((order) => (
                       <tr key={order.id} className="hover:bg-surface transition-colors">
-                        <td className="px-4 py-3 text-sm font-mono font-semibold text-getmeds-blue whitespace-nowrap">{order.getmeds_order_id}</td>
-                        <td className="px-4 py-3 text-sm font-medium text-ink-primary max-w-[14rem] truncate" title={order.customer_name}>{order.customer_name}</td>
-                        <td className="hidden min-[1800px]:table-cell px-4 py-3 text-sm text-ink-secondary whitespace-nowrap">{salespersonOf(order)}</td>
+                        {/* Sep 24, 2026: the Order ID is the link to the order.
+                            It replaced a separate "View" column, which crowded
+                            the right edge of the table. */}
+                        <td className="px-4 py-3 text-sm font-mono font-semibold whitespace-nowrap">
+                          <Link
+                            to={`/orders/${order.id}`}
+                            className="text-getmeds-blue hover:text-getmeds-blue-dark hover:underline focus:outline-none focus-visible:underline"
+                          >
+                            {order.getmeds_order_id}
+                          </Link>
+                        </td>
+                        <td className="px-4 py-3 text-sm font-medium text-ink-primary max-w-[10rem] min-[1500px]:max-w-[14rem] truncate" title={order.customer_name}>{order.customer_name}</td>
+                        <td className="hidden min-[1900px]:table-cell px-4 py-3 text-sm text-ink-secondary whitespace-nowrap">{salespersonOf(order)}</td>
                         <td className="px-4 py-3 text-sm text-ink-secondary whitespace-nowrap">{assignedTo(order)}</td>
                         <td className="px-4 py-3 whitespace-nowrap"><OrderStatusBadge status={order.status} /></td>
                         <td className="px-4 py-3 text-sm font-semibold text-ink-primary text-right tabular-nums whitespace-nowrap">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
                         <td className="px-4 py-3 text-xs text-ink-secondary whitespace-nowrap">{formatPHT(order.created_at, 'date')}</td>
-                        <td className="px-4 py-3 text-right">
-                          <Link to={`/orders/${order.id}`} className="inline-flex items-center gap-1 text-xs text-getmeds-blue hover:text-getmeds-blue-dark font-semibold">
-                            <Eye className="w-3.5 h-3.5" /> View
-                          </Link>
-                        </td>
                       </tr>
                     ))}
                   </tbody>

@@ -10,6 +10,7 @@ import { formatPHT } from '../utils/dateUtils';
 // components/orders/OrderPipeline.jsx and, on the backend,
 // services/orderTimelineService.js.
 import OrderPipeline, { RoleBadge } from '../components/orders/OrderPipeline';
+import RawEventLogModal from '../components/orders/RawEventLogModal';
 import { useProducts } from '../hooks/useOrderData';
 import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
@@ -245,6 +246,7 @@ const OrderDetailPage = () => {
   // for the primary, a split row's invoicing_from otherwise — so it matches
   // timeline.stages[].updates[].entity / perEntity[].entity exactly.
   const [timelineFocus, setTimelineFocus] = useState(null);
+  const [rawLogOpen, setRawLogOpen] = useState(false);
   const focusTimelineOn = (entity) => { setTimelineFocus(entity); setActiveTab('timeline'); };
   // Aug 31, 2026: lets a MedRep/Admin fix an order's line items in place —
   // added after TestGM-20260831-0001 failed Zoho sync with "Inactive items
@@ -1791,48 +1793,29 @@ const OrderDetailPage = () => {
                   nothing is hidden, it is just no longer the default. */}
               <OrderPipeline timeline={timeline} focusEntity={timelineFocus} onClearFocus={() => setTimelineFocus(null)} />
 
+              {/* Sep 24, 2026: the flat log that used to sit here in full, duplicating
+                  the timeline above, is now one small button — see
+                  RawEventLogModal for why it isn't simply deleted. */}
               {events.length > 0 && (
-                <details className="mt-6 border-t border-slate-100 pt-4">
-                  <summary className="text-xs font-semibold text-ink-secondary cursor-pointer hover:text-ink-primary select-none">
-                    Show the full event log ({events.length} entries)
-                  </summary>
-
-                  <div className="mt-4 space-y-3">
-                    {events.map((event, i) => (
-                      <div key={event.id} className="flex gap-3">
-                        <div className="flex flex-col items-center">
-                          <div className="w-8 h-8 rounded-full bg-getmeds-blue/10 flex items-center justify-center text-sm flex-shrink-0">
-                            {EVENT_ICONS[event.event_type] || '📋'}
-                          </div>
-                          {i < events.length - 1 && <div className="w-0.5 bg-slate-200 flex-1 my-1" />}
-                        </div>
-                        <div className="pb-3 flex-1">
-                          <div className="flex items-start justify-between">
-                            <div>
-                              <p className="text-sm font-semibold text-ink-primary">
-                                {eventTitle(event, order)}
-                                {event.old_status && event.new_status && event.old_status !== event.new_status && (
-                                  <span className="ml-2 text-xs font-normal text-ink-secondary">
-                                    {event.old_status} → <span className="font-semibold text-ink-primary">{event.new_status}</span>
-                                  </span>
-                                )}
-                              </p>
-                              {event.notes && <p className="text-xs text-ink-secondary mt-0.5">{event.notes}</p>}
-                              <p className="text-xs text-ink-secondary mt-0.5">
-                                By: {event.actor_name || 'System'}
-                                {event.actor_role && <span className="font-semibold"> · {roleLabel(event.actor_role)}</span>}
-                              </p>
-                            </div>
-                            <p className="text-xs text-ink-secondary flex-shrink-0 ml-4">
-                              {event.created_at ? formatPHT(event.created_at, 'timeline') : ''}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </details>
+                <div className="mt-6 flex justify-end border-t border-slate-100 pt-3">
+                  <button
+                    type="button"
+                    onClick={() => setRawLogOpen(true)}
+                    className="text-xs font-semibold text-ink-secondary hover:text-ink-primary underline-offset-2 hover:underline"
+                  >
+                    View raw log ({events.length})
+                  </button>
+                </div>
               )}
+              <RawEventLogModal
+                isOpen={rawLogOpen}
+                onClose={() => setRawLogOpen(false)}
+                events={events}
+                order={order}
+                titleFor={(event) => eventTitle(event, order)}
+                iconFor={(event) => EVENT_ICONS[event.event_type] || '📋'}
+                roleLabel={roleLabel}
+              />
             </div>
           )}
         </div>
