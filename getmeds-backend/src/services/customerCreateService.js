@@ -60,7 +60,7 @@ const { buildZohoSalesOrderPayload } = require('./zohoPayloadBuilder');
  * fired for anybody; a customer created without one silently joins them, and
  * four required controls are skipped with nothing on screen to say so.
  */
-const CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd'];
+const CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd', 'patient'];
 
 /**
  * Did Zoho refuse because of something about THIS customer, or because Zoho

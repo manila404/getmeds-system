@@ -25,6 +25,10 @@ router.post('/users', adminController.create);
 // Route to update user: PATCH /api/admin/users/:id
 router.patch('/users/:id', adminController.update);
 
+// Sep 24, 2026: permanent removal, from the User Details modal. Refused when the
+// account has any history — see the handler's own header.
+router.delete('/users/:id', adminController.deleteUser);
+
 // Route to deactivate a user (Soft Delete): PATCH /api/admin/users/:id/deactivate
 router.patch('/users/:id/deactivate', adminController.deactivateUser);
 

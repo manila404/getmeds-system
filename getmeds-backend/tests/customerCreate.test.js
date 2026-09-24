@@ -280,7 +280,7 @@ describe('creating a customer from the order form', () => {
     });
 
     test('each allowed category round-trips', async () => {
-      for (const category of ['doctor', 'hospital', 'distributor', 'pwd']) {
+      for (const category of ['doctor', 'hospital', 'distributor', 'pwd', 'patient']) {
         const body = validCustomer({ category });
         const res = await create(medrepToken, body);
         expect(res.statusCode).toBe(201);

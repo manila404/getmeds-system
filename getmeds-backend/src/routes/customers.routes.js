@@ -48,6 +48,17 @@ router.post('/:id/link', requireAuth, requireRole('admin', 'management'), c.link
 router.get('/:id/zoho-compare', requireAuth, requireRole('admin', 'management'), c.getZohoComparison);
 router.delete('/:id/pending', requireAuth, requireRole('admin', 'management'), c.discardPendingCustomer);
 
+// Sep 24, 2026: the Clients Directory's detail modal — the customer read live
+// from Zoho, plus its documents (up to 10, 10 MB each). See
+// controllers/customerDetails.controller.js.
+const details = require('../controllers/customerDetails.controller');
+const detailsAccess = [requireAuth, requireRole('admin', 'management')];
+router.get('/:id/details', ...detailsAccess, details.getDetails);
+router.post('/:id/documents/upload-url', ...detailsAccess, details.getUploadUrl);
+router.post('/:id/documents', ...detailsAccess, details.attachDocument);
+router.get('/:id/documents/:docId/url', ...detailsAccess, details.getDocumentUrl);
+router.delete('/:id/documents/:docId', ...detailsAccess, details.deleteDocument);
+
 // One grouped local query for the Clients Directory's KPI cards
 // (Total/Credit/Direct/Uncategorized) — see customers.controller.js's
 // getCustomerStats doc comment. Placed ahead of no functional conflict

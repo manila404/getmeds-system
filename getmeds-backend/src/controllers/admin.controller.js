@@ -28,10 +28,14 @@ const getAllUsers = async (req, res, next) => {
         `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at,
                 u.approval_status, u.approved_at, u.approved_by,
                 u.display_name, u.division, u.sub_division, u.salesperson,
+                u.first_name AS stored_first_name, u.last_name AS stored_last_name,
+                u.updated_at, u.username AS stored_username,
                 u.team_lead_id, tl.name AS team_lead_name
            FROM users u
            LEFT JOIN users tl ON tl.id = u.team_lead_id
-          ORDER BY (u.approval_status = 'pending') DESC, u.name`
+          -- Sep 24, 2026: admins first, always (the Users screen keeps them there
+          -- through every sort as well), then anyone waiting on approval.
+          ORDER BY (u.role = 'admin') DESC, (u.approval_status = 'pending') DESC, u.name`
       )
       .all();
     // Sep 11, 2026: every Zoho Salesperson on each account, primary first.
@@ -39,10 +43,15 @@ const getAllUsers = async (req, res, next) => {
     const enriched = users.map(u => ({
       ...u,
       salespersons: salespersonService.salespersonsOf(lists, u),
-      username: u.email ? u.email.split('@')[0] : `user_${u.id}`,
+      // Sep 24, 2026: the chosen username if there is one, else the part of the
+      // email before the @ (what this always showed).
+      username: u.stored_username || (u.email ? u.email.split('@')[0] : `user_${u.id}`),
       role_name: u.role ? (u.role.charAt(0).toUpperCase() + u.role.slice(1)) : 'User',
-      first_name: u.name ? u.name.split(' ')[0] : '',
-      last_name: u.name ? u.name.split(' ').slice(1).join(' ') : ''
+      // Sep 24, 2026: the stored columns win. Splitting `name` on the first
+      // space was only ever a guess, and it guessed wrong for anyone with a
+      // two-word first name, which the details modal now lets an admin fix.
+      first_name: u.stored_first_name ?? (u.name ? u.name.split(' ')[0] : ''),
+      last_name: u.stored_last_name ?? (u.name ? u.name.split(' ').slice(1).join(' ') : '')
     }));
     res.status(200).json({ success: true, data: enriched });
   } catch (err) {
@@ -429,6 +438,73 @@ const update = async (req, res, next) => {
       });
     }
 
+    // Sep 24, 2026: the account's own details, editable from the User Details
+    // modal. Checked with everything else, BEFORE anything is written, so a
+    // taken email cannot leave the role changed and the name not.
+    //
+    // `users.name` is UNIQUE and is what every screen prints, so a rename is
+    // stored as name + display_name + first/last together; writing only the
+    // two columns would leave the list and the profile page disagreeing.
+    let nameChange = null;
+    if (req.body.first_name !== undefined || req.body.last_name !== undefined) {
+      const first = String(req.body.first_name ?? user.first_name ?? '').trim();
+      const last = String(req.body.last_name ?? user.last_name ?? '').trim();
+      if (!first) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'First name is required.' } });
+      }
+      const full = [first, last].filter(Boolean).join(' ');
+      const clash = await db.prepare('SELECT id FROM users WHERE LOWER(name) = LOWER(?) AND id <> ?').get(full, user.id);
+      if (clash) {
+        return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: `Another account is already named "${full}".` } });
+      }
+      nameChange = { first, last, full };
+    }
+
+    let newEmail = null;
+    if (req.body.email !== undefined) {
+      const candidate = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'That does not look like a valid email address' } });
+      }
+      if (candidate !== String(user.email || '').toLowerCase()) {
+        const taken = await db.prepare('SELECT id FROM users WHERE LOWER(email) = ? AND id <> ?').get(candidate, user.id);
+        if (taken) {
+          return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'Email already in use' } });
+        }
+        newEmail = candidate;
+      }
+    }
+
+    // Sep 24, 2026: username. Unique among what people actually SEE, which for an
+    // account without a stored one is its email prefix, so the check compares
+    // against both; the partial unique index is only the backstop for a race.
+    let newUsername = null;
+    if (req.body.username !== undefined) {
+      const candidate = typeof req.body.username === 'string' ? req.body.username.trim() : '';
+      if (!/^[A-Za-z0-9._-]{2,50}$/.test(candidate)) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Username must be 2-50 characters: letters, numbers, dots, dashes or underscores, no spaces.'
+          }
+        });
+      }
+      const current = user.username || (user.email ? user.email.split('@')[0] : '');
+      if (candidate !== current) {
+        const taken = await db
+          .prepare(
+            `SELECT id FROM users
+              WHERE id <> ? AND LOWER(COALESCE(username, split_part(email, '@', 1))) = LOWER(?)`
+          )
+          .get(user.id, candidate);
+        if (taken) {
+          return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'Username already in use' } });
+        }
+        newUsername = candidate;
+      }
+    }
+
     // Sep 21, 2026: which Team Lead this MedRep reports to, if any — the
     // actual "assign this MedRep to a team" action (see schema.pg.sql's
     // users.team_lead_id and services/teamScopeService.js). `null` unassigns.
@@ -504,6 +580,13 @@ const update = async (req, res, next) => {
     if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
     if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
     if (teamLeadId !== undefined) await db.prepare('UPDATE users SET team_lead_id = ? WHERE id = ?').run(teamLeadId, user.id);
+    if (nameChange) {
+      await db
+        .prepare('UPDATE users SET name = ?, display_name = ?, first_name = ?, last_name = ? WHERE id = ?')
+        .run(nameChange.full, nameChange.full, nameChange.first, nameChange.last || null, user.id);
+    }
+    if (newEmail) await db.prepare('UPDATE users SET email = ? WHERE id = ?').run(newEmail, user.id);
+    if (newUsername) await db.prepare('UPDATE users SET username = ? WHERE id = ?').run(newUsername, user.id);
     if (canonical) {
       await salespersonService.setForUser(user.id, canonical, {
         primary: salespersonPlan.primary,
@@ -511,12 +594,79 @@ const update = async (req, res, next) => {
       });
     }
 
-    const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at, salesperson, team_lead_id FROM users WHERE id = ?').get(user.id);
+    const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at, salesperson, team_lead_id, first_name, last_name, username FROM users WHERE id = ?').get(user.id);
     const salespersons = await salespersonService.listForUser(user.id);
     res.json({ success: true, data: { user: { ...updated, salespersons } } });
   } catch (err) {
     if (next) next(err);
     else res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * DELETE /api/admin/users/:id — permanent removal.
+ *
+ * Sep 24, 2026. Only possible for an account with NO history. Twenty-odd tables
+ * point at users(id) — orders, audit events, payments, approvals, dispatch
+ * records — and none of them cascade, on purpose: deleting a person must not
+ * quietly rewrite who raised an order or who verified a payment. So this tries
+ * the delete and lets the database say whether anything still refers to the
+ * account; if it does, nothing is removed and the admin is pointed at
+ * Deactivate, which keeps the record and switches the login off.
+ *
+ * An account made by mistake, or a sign-up that was never used, has no history,
+ * and that is what this is for.
+ *
+ * The person's own notifications are cleared first, in the same transaction.
+ * They are an inbox for someone who no longer exists, and left in place they
+ * would block the delete for nearly every account (the notification fan-out
+ * reaches everyone in a role). If the delete is then refused, the transaction
+ * rolls back and the inbox is untouched.
+ *
+ * Refused outright for: yourself, and any admin (the database trigger refuses
+ * too; this gives a readable answer).
+ */
+const deleteUser = async (req, res, next) => {
+  try {
+    const target = await db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(req.params.id);
+    if (!target) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
+
+    if (target.id === req.user.id) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'CANNOT_DELETE_SELF', message: 'You cannot delete your own account.' }
+      });
+    }
+    if (target.role === 'admin') return refuseAdminChange(res, 'deleted');
+
+    try {
+      const txn = db.transaction(async () => {
+        await db.prepare('DELETE FROM notifications WHERE recipient_id = ?').run(target.id);
+        await db.prepare('DELETE FROM users WHERE id = ?').run(target.id);
+      });
+      await txn();
+    } catch (err) {
+      // 23503 = foreign_key_violation: something on record still points here.
+      if (err && (err.code === '23503' || /foreign key|violates/i.test(err.message || ''))) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'HAS_HISTORY',
+            message:
+              `${target.name} has activity on record (orders, approvals or audit entries), so the account cannot be ` +
+              'permanently deleted without erasing who did what. Deactivate it instead: the login is switched off ' +
+              'and the history stays intact.'
+          }
+        });
+      }
+      throw err;
+    }
+
+    console.log(`[ADMIN] user #${target.id} (${target.email}) permanently deleted by admin #${req.user.id}`);
+    res.json({ success: true, message: `${target.name} was permanently deleted.` });
+  } catch (err) {
+    if (next) return next(err);
+    res.status(500).json({ success: false, error: err.message });
   }
 };
 
@@ -649,6 +799,7 @@ module.exports = {
   rejectUser,
   create,
   update,
+  deleteUser,
   getSalespersons,
   getZohoQueue,
   retryZohoQueue

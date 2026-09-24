@@ -106,6 +106,23 @@ describe('Customers — Clients Directory (pagination, filters, category)', () =
     expect(res.body.error.code).toBe('INVALID_CATEGORY');
   });
 
+  test('Patient is a category: it can be set, filtered on, and is stored', async () => {
+    const target = seededIds[2];
+    const set = await request(app)
+      .patch(`/api/customers/${target}/category`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ category: 'patient' });
+    expect(set.status).toBe(200);
+    expect(set.body.data.customer.category).toBe('patient');
+
+    const list = await request(app)
+      .get('/api/customers?category=patient')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(list.status).toBe(200);
+    expect(list.body.data.customers.some((c) => c.id === target)).toBe(true);
+    expect(list.body.data.customers.every((c) => c.category === 'patient')).toBe(true);
+  });
+
   test('PATCH /api/customers/:id/category with null clears an existing category', async () => {
     const target = seededIds[0];
     const res = await request(app)

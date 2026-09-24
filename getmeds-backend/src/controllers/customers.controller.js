@@ -10,7 +10,7 @@ const customerZohoUpdate = require('../services/customerZohoUpdateService');
 // Purely local classification tag for the Clients Directory (Aug 27, 2026).
 // Kept strictly separate from `type` (credit/direct), which continues to
 // drive payment-workflow routing unchanged — see schema.sql/migrate.js.
-const ALLOWED_CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd'];
+const ALLOWED_CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd', 'patient'];
 const DEFAULT_PAGE_SIZE = 25;
 
 /**

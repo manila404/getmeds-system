@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react';
 import client from '../../api/client';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import ErrorMessage from '../../components/ui/ErrorMessage';
-import ConfirmDialog from '../../components/ui/ConfirmDialog';
 import CreateUserModal from '../../components/admin/CreateUserModal';
-import { Users, UserX, UserPlus, RefreshCw, Shield, Check, UserCheck, Ban, Clock, Briefcase, AlertTriangle, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
-import toast from 'react-hot-toast';
-import { ROLES, roleCan } from '../../constants/roles';
+import UserDetailsModal from '../../components/admin/UserDetailsModal';
+import PaginationFooter from '../../components/finance/PaginationFooter';
+import { Users, UserPlus, RefreshCw, Shield, Check, Ban, Clock, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { roleLabel } from '../../constants/roles';
+import { formatPHT } from '../../utils/dateUtils';
 
 /**
  * Sep 11, 2026: hoisted out of the component.
@@ -54,12 +55,18 @@ const roleBadgeColors = {
   team_lead: 'bg-indigo-100/60 text-indigo-700 border-indigo-200',
 };
 
+const PAGE_SIZE = 15;
+
 const UsersPage = () => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedUser, setSelectedUser] = useState(null);
-  const [isConfirmOpen, setIsConfirmOpen] = useState(false);
+
+  // Sep 24, 2026: the account whose User Details modal is open. An id, not the
+  // row: the list refreshes behind the modal after every save, and the modal
+  // should show the refreshed account, not the one it was opened with. If the
+  // account disappears (deleted) the modal simply has nothing to show.
+  const [detailsUserId, setDetailsUserId] = useState(null);
 
   // Sep 11, 2026: sorting, opt-in.
   //
@@ -69,16 +76,18 @@ const UsersPage = () => {
   // clicking a header once is a one-way door.
   const [sort, setSort] = useState(null);
 
-  const toggleSort = (key) =>
+  const toggleSort = (key) => {
+    setPage(1); // a new order starts at its top
     setSort((current) => {
       if (current?.key !== key) return { key, dir: 'asc' };
       if (current.dir === 'asc') return { key, dir: 'desc' };
       return null;
     });
+  };
   // Sep 11, 2026: sign-up is gone, so this is where every account is made.
   const [isCreateOpen, setIsCreateOpen] = useState(false);
 
-  // Sep 11, 2026: the Zoho Salesperson list, and which row is being edited.
+  // Sep 11, 2026: the Zoho Salesperson list the details modal picks from.
   //
   // A picker rather than a text box, and that is the whole point. A name Zoho
   // does not recognise is not rejected on the first order -- Zoho CREATES the
@@ -86,23 +95,6 @@ const UsersPage = () => {
   // company org that nobody traces back to this screen.
   const [salespersons, setSalespersons] = useState([]);
   const [salespersonError, setSalespersonError] = useState(null);
-  const [editingSalesperson, setEditingSalesperson] = useState(null);
-  const [savingSalesperson, setSavingSalesperson] = useState(false);
-  // Sep 11, 2026: an account can hold several Zoho Salespersons. The editor
-  // works on a draft of the list and saves it in one request, so orders never
-  // go out under a half-edited list.
-  const [draftSalespersons, setDraftSalespersons] = useState([]);
-  const [draftPrimary, setDraftPrimary] = useState(null);
-  // Sep 11, 2026: the picker shows CURRENT salespersons by default.
-  //
-  // Zoho marks a Salesperson inactive when the person leaves, and this org's
-  // list is 101 active to 97 inactive -- so showing everything made the
-  // dropdown twice as long as it needed to be, with half of it former staff
-  // whose names sit right next to the people actually being assigned.
-  //
-  // Kept as a toggle rather than a hard filter because assigning one is still
-  // legitimate: correcting a historical record, or a rep coming back.
-  const [showInactive, setShowInactive] = useState(false);
   const [salespersonCounts, setSalespersonCounts] = useState({ active: 0, inactive: 0 });
   // Sep 11, 2026: when Zoho's Salesperson list was last synced, and what
   // changed in it lately -- a rename in Zoho is carried to every account and
@@ -125,7 +117,7 @@ const UsersPage = () => {
       setSalespersons(res.data?.data?.salespersons || []);
       setSalespersonSync(res.data?.data?.sync || null);
       // A rename may have rewritten Salespersons on accounts in this table.
-      if (refresh) await fetchUsers();
+      if (refresh) await fetchUsers({ silent: true });
       setSalespersonCounts({
         active: res.data?.data?.active_count || 0,
         inactive: res.data?.data?.inactive_count || 0
@@ -133,8 +125,8 @@ const UsersPage = () => {
       setSalespersonError(null);
     } catch (err) {
       // Not fatal: the rest of user management works without it, and the
-      // column below says plainly that the list could not be loaded rather
-      // than rendering an empty picker that looks like Zoho has nobody.
+      // modal says plainly that the list could not be loaded rather than
+      // rendering an empty picker that looks like Zoho has nobody.
       setSalespersonError(
         err.response?.data?.error?.message || 'Could not load the Zoho Salesperson list.'
       );
@@ -155,150 +147,13 @@ const UsersPage = () => {
     }
   };
 
-  /** Every Salesperson on an account, primary first. */
-  const salespersonsOf = (user) =>
-    user.salespersons?.length
-      ? user.salespersons
-      : user.salesperson
-        ? [{ salesperson: user.salesperson, is_primary: true }]
-        : [];
-
   /**
-   * Which salespersons this row may pick from.
-   *
-   * Active ones, plus -- always -- whatever this account already holds.
-   * Without that second half, opening the picker on somebody assigned to a
-   * now-departed salesperson would show their current value missing from the
-   * list, and a stray change would silently drop it.
+   * `silent` refreshes the rows without swapping the table for a spinner. The
+   * details modal calls it after every save, and a table that blanks out behind
+   * an open dialog on each one reads as the page reloading.
    */
-  const optionsFor = (user) => {
-    const mine = new Set(salespersonsOf(user).map((s) => s.salesperson));
-    return salespersons.filter((sp) => showInactive || sp.is_active || mine.has(sp.name));
-  };
-
-  const startEditing = (user) => {
-    const list = salespersonsOf(user);
-    setDraftSalespersons(list.map((s) => s.salesperson));
-    setDraftPrimary((list.find((s) => s.is_primary) || list[0] || {}).salesperson || null);
-    setEditingSalesperson(user.id);
-  };
-
-  const addDraft = (name) => {
-    if (!name || draftSalespersons.includes(name)) return;
-    setDraftSalespersons([...draftSalespersons, name]);
-    if (!draftPrimary) setDraftPrimary(name);
-  };
-
-  const removeDraft = (name) => {
-    const next = draftSalespersons.filter((n) => n !== name);
-    setDraftSalespersons(next);
-    if (draftPrimary === name) setDraftPrimary(next[0] || null);
-  };
-
-  /**
-   * Save the whole Salesperson list for one account.
-   *
-   * The server checks every name against Zoho as well -- this picker is the
-   * convenience, not the guarantee -- and refuses the whole list if one is
-   * unknown.
-   */
-  const saveSalespersons = async (user) => {
-    setSavingSalesperson(true);
-    try {
-      await client.patch(`/api/admin/users/${user.id}`, {
-        salespersons: draftSalespersons,
-        primary_salesperson: draftPrimary
-      });
-      toast.success(
-        draftSalespersons.length
-          ? `${getUserDisplayName(user)} now covers ${draftSalespersons.length} Salesperson${draftSalespersons.length > 1 ? 's' : ''} in Zoho.`
-          : `Cleared the Salespersons for ${getUserDisplayName(user)}.`
-      );
-      setEditingSalesperson(null);
-      await fetchUsers();
-    } catch (err) {
-      toast.error(
-        err.response?.data?.error?.message ||
-          err.response?.data?.message ||
-          'Could not save the Salesperson.'
-      );
-    } finally {
-      setSavingSalesperson(false);
-    }
-  };
-
-  /**
-   * Sep 12, 2026: changing an account's role.
-   *
-   * The server has always accepted this on PATCH /api/admin/users/:id; there
-   * was simply no way to reach it except by creating the account again with a
-   * different role. So a MedRep who moved to Finance kept raising orders they
-   * were no longer supposed to raise, and somebody made them a second account.
-   *
-   * Held in two pieces of state rather than applied on change: a role is not a
-   * preference, it decides what a person can see across the whole system, and
-   * a select that acts the instant it is touched is the wrong control for
-   * that. `pendingRole` is what was chosen; nothing happens until it is
-   * confirmed.
-   */
-  const [pendingRole, setPendingRole] = useState(null); // { user, role }
-  const [savingRole, setSavingRole] = useState(false);
-
-  const applyRoleChange = async () => {
-    if (!pendingRole) return;
-    setSavingRole(true);
-    try {
-      await client.patch(`/api/admin/users/${pendingRole.user.id}`, { role: pendingRole.role });
-      toast.success(
-        `${getUserDisplayName(pendingRole.user)} is now ${
-          (ROLES.find((r) => r.value === pendingRole.role) || {}).label || pendingRole.role
-        }.`
-      );
-      setPendingRole(null);
-      await fetchUsers();
-    } catch (err) {
-      // The server refuses two things this screen cannot know in advance:
-      // demoting the protected admin, and a role it does not recognise. Both
-      // come back with a message worth showing verbatim.
-      toast.error(
-        err.response?.data?.error?.message ||
-          err.response?.data?.message ||
-          'Could not change the role.'
-      );
-    } finally {
-      setSavingRole(false);
-    }
-  };
-
-  /**
-   * Sep 21, 2026: which Team Lead a MedRep reports to — the assignment that
-   * decides what that Team Lead's (view-only) dashboard shows. Applied on
-   * change, unlike the Role select above: unlike a role change, reassigning
-   * a MedRep's Team Lead does not change what the MedRep themselves can do,
-   * so a confirmation step would only slow down a routine reshuffle.
-   */
-  const [savingTeamLead, setSavingTeamLead] = useState(null); // the user id being saved, or null
-
-  const changeTeamLead = async (user, teamLeadId) => {
-    setSavingTeamLead(user.id);
-    try {
-      await client.patch(`/api/admin/users/${user.id}`, {
-        team_lead_id: teamLeadId ? parseInt(teamLeadId, 10) : null
-      });
-      await fetchUsers();
-    } catch (err) {
-      toast.error(
-        err.response?.data?.error?.message ||
-          err.response?.data?.message ||
-          'Could not change the Team Lead.'
-      );
-    } finally {
-      setSavingTeamLead(null);
-    }
-  };
-
-  const fetchUsers = async () => {
-    setLoading(true);
+  const fetchUsers = async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const res = await client.get('/api/admin/users');
@@ -312,81 +167,10 @@ const UsersPage = () => {
         'Failed to retrieve users';
       setError(errorMsg);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
-  // Sep 9, 2026: the sign-up approval queue.
-  //
-  // Sep 11, 2026: self-service sign-up was removed, so no new account arrives
-  // pending — an account created here is approved from the start. These stay
-  // for the sign-ups that were still waiting when it went; the buttons only
-  // appear on a pending or rejected row, so they disappear once those are dealt
-  // with.
-  //
-  // Approving is not gated behind a confirmation dialog — it is the expected,
-  // reversible action (an approved account can still be deactivated), and a
-  // modal on the common path trains people to click through modals.
-  const [busyId, setBusyId] = useState(null);
-
-  const decide = async (user, action) => {
-    setBusyId(user.id);
-    try {
-      const res = await client.post(`/api/admin/users/${user.id}/${action}`);
-      const updated = res.data?.data?.user;
-      setUsers((prev) =>
-        prev.map((u) =>
-          u.id === user.id ? { ...u, approval_status: updated?.approval_status || action + 'd' } : u
-        )
-      );
-      toast.success(
-        action === 'approve'
-          ? `${getUserDisplayName(user)} can now sign in.`
-          : `${getUserDisplayName(user)}'s sign-up was rejected.`
-      );
-    } catch (err) {
-      toast.error(
-        err.response?.data?.error?.message || err.message || `Could not ${action} this account.`
-      );
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  // Open confirmation modal
-  const handleDeactivateClick = (user) => {
-    setSelectedUser(user);
-    setIsConfirmOpen(true);
-  };
-
-  // Confirm and send PATCH request to soft-delete
-  const handleConfirmDeactivate = async () => {
-    if (!selectedUser) return;
-
-    try {
-      await client.patch(`/api/admin/users/${selectedUser.id}/deactivate`);
-      // Update local state without refreshing page
-      setUsers((prevUsers) =>
-        prevUsers.map((u) =>
-          u.id === selectedUser.id ? { ...u, is_active: 0 } : u
-        )
-      );
-      toast.success(
-        `User ${selectedUser.name || selectedUser.username || selectedUser.email} deactivated successfully.`
-      );
-    } catch (err) {
-      const errorMsg =
-        err.response?.data?.message ||
-        err.response?.data?.error?.message ||
-        'Failed to deactivate user';
-      toast.error(errorMsg);
-    } finally {
-      setIsConfirmOpen(false);
-      setSelectedUser(null);
-    }
-  };
-
-  // Helper to format user display name
   /**
    * The rows as displayed.
    *
@@ -395,7 +179,15 @@ const UsersPage = () => {
    * load for no gain at this size.
    */
   const sortedUsers = React.useMemo(() => {
-    if (!sort) return users;
+    // Sep 24, 2026: admins are always at the top, whatever the sort — the
+    // accounts that can do the most stay where they are found first, and stay
+    // on page 1. They are lifted out AFTER sorting, so admins are still in the
+    // chosen order among themselves and so is everyone else.
+    const adminsFirst = (list) => [
+      ...list.filter((u) => (u.role || u.role_name || '').toLowerCase() === 'admin'),
+      ...list.filter((u) => (u.role || u.role_name || '').toLowerCase() !== 'admin'),
+    ];
+    if (!sort) return adminsFirst(users);
 
     const value = (u) => {
       switch (sort.key) {
@@ -403,34 +195,43 @@ const UsersPage = () => {
           return rankOf(u);
         case 'name':
           return (getUserDisplayName(u) || '').toLowerCase();
-        case 'salesperson':
-          return (u.salesperson || '').toLowerCase();
-        case 'team_lead':
-          return (u.team_lead_name || '').toLowerCase();
         case 'status':
           return (u.is_active === 1 || u.is_active === true) ? 0 : 1;
+        case 'modified':
+          // ISO-8601 text sorts chronologically as it is.
+          return u.updated_at || '';
         default:
           return 0;
       }
     };
 
     const dir = sort.dir === 'desc' ? -1 : 1;
-    return [...users].sort((a, b) => {
+    return adminsFirst([...users].sort((a, b) => {
       const av = value(a);
       const bv = value(b);
-      // Unassigned sorts LAST in both directions rather than clumping at
-      // whichever end empty strings land — "not set yet" is not a value, and
-      // it is the thing being looked for.
-      if (sort.key === 'salesperson' || sort.key === 'team_lead') {
-        if (!av && bv) return 1;
-        if (av && !bv) return -1;
-      }
       if (av < bv) return -1 * dir;
       if (av > bv) return 1 * dir;
       // Stable tie-break, so equal roles do not shuffle between renders.
       return (getUserDisplayName(a) || '').localeCompare(getUserDisplayName(b) || '');
-    });
+    }));
   }, [users, sort]);
+
+  // Sep 24, 2026: 15 accounts a page. The list used to render every user at
+  // once, which made the page as long as the company is big.
+  //
+  // In the browser, for the same reason the sort is: the whole list is already
+  // here. Sorting happens BEFORE the slice, so "sort by Role" orders all the
+  // accounts and page 1 is the top of that order, not a re-sort of one page.
+  // The page is clamped rather than reset when the list changes underneath it
+  // (a refresh, a deactivate), so editing a row on page 3 does not throw you
+  // back to page 1.
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(sortedUsers.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const pagedUsers = React.useMemo(
+    () => sortedUsers.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [sortedUsers, currentPage]
+  );
 
   /** Every account that can be assigned as someone's Team Lead. */
   const teamLeads = React.useMemo(
@@ -438,12 +239,14 @@ const UsersPage = () => {
     [users]
   );
 
+  const detailsUser = detailsUserId == null ? null : users.find((u) => u.id === detailsUserId) || null;
+
   /** A column heading you can click. */
   const SortableHeader = ({ label, sortKey }) => {
     const active = sort?.key === sortKey;
     const Icon = !active ? ArrowUpDown : sort.dir === 'asc' ? ArrowUp : ArrowDown;
     return (
-      <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
+      <th scope="col" className="px-4 py-3 text-left text-[13px] font-semibold text-white">
         <button
           type="button"
           onClick={() => toggleSort(sortKey)}
@@ -470,11 +273,6 @@ const UsersPage = () => {
     return `user_${user.id}`;
   };
 
-  // Helper to format role name
-  const getRoleName = (user) => {
-    return user.role_name || user.role || 'User';
-  };
-
   return (
     <div className="space-y-6">
       {/* Page Header */}
@@ -485,7 +283,7 @@ const UsersPage = () => {
             <h1 className="text-2xl font-semibold text-ink-primary">User Management</h1>
           </div>
           <p className="text-sm text-ink-secondary mt-1">
-            Create accounts, assign Zoho Salespersons, and manage who can sign in.
+            Create accounts, assign Zoho Salespersons, and manage who can sign in. Select a row to open the account.
           </p>
           <p className="text-xs text-ink-secondary mt-1">
             Zoho Salesperson list{' '}
@@ -520,7 +318,7 @@ const UsersPage = () => {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchUsers}
+            onClick={() => fetchUsers()}
             disabled={loading}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-slate-200 rounded-md text-sm font-medium text-ink-secondary bg-white hover:bg-surface hover:text-ink-primary shadow-sm transition-colors disabled:opacity-50"
           >
@@ -550,37 +348,33 @@ const UsersPage = () => {
         /* Users Table */
         <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
           <div className="thin-scroll overflow-x-auto">
-            <table className="w-full min-w-[900px] divide-y divide-slate-200">
+            <table className="w-full min-w-[820px] divide-y divide-slate-200">
               <thead className="bg-getmeds-blue">
                 <tr>
-                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
+                  <th scope="col" className="px-4 py-3 text-left text-[13px] font-semibold text-white">
                     ID
                   </th>
                   <SortableHeader label="Name" sortKey="name" />
-                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
+                  <th scope="col" className="px-4 py-3 text-left text-[13px] font-semibold text-white">
                     Username
                   </th>
-                  <th scope="col" className="px-6 py-3 text-left text-[13px] font-semibold text-white">
+                  <th scope="col" className="px-4 py-3 text-left text-[13px] font-semibold text-white">
                     Email
                   </th>
                   <SortableHeader label="Role" sortKey="role" />
-                  <SortableHeader label="Zoho Salesperson" sortKey="salesperson" />
-                  <SortableHeader label="Team Lead" sortKey="team_lead" />
                   <SortableHeader label="Status" sortKey="status" />
-                  <th scope="col" className="px-6 py-3 text-center text-[13px] font-semibold text-white">
-                    Actions
-                  </th>
+                  <SortableHeader label="Date Modified" sortKey="modified" />
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-slate-100">
                 {sortedUsers.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-6 py-12 text-center text-ink-secondary">
+                    <td colSpan={7} className="px-6 py-12 text-center text-ink-secondary">
                       No user accounts found in the system.
                     </td>
                   </tr>
                 ) : (
-                  sortedUsers.map((user) => {
+                  pagedUsers.map((user) => {
                     const isActive = user.is_active === 1 || user.is_active === true;
                     // Sep 9, 2026: undefined approval_status means an account
                     // that predates the column, which the migration backfilled
@@ -590,240 +384,41 @@ const UsersPage = () => {
                     const isRejected = user.approval_status === 'rejected';
                     const roleKey = (user.role || user.role_name || '').toLowerCase();
                     const badgeColor = roleBadgeColors[roleKey] || 'bg-slate-100 text-slate-800 border-slate-200';
+                    const open = () => setDetailsUserId(user.id);
 
                     return (
-                      <tr key={user.id} className="hover:bg-surface transition-colors">
-                        <td className="px-6 py-4 whitespace-nowrap text-[13px] font-mono font-medium text-ink-secondary">
+                      // The whole row opens the account (the name is the
+                      // keyboard-reachable way in). Everything on it is display
+                      // only now: changes are made in the modal.
+                      <tr key={user.id} onClick={open} className="cursor-pointer hover:bg-surface transition-colors">
+                        <td className="px-4 py-4 whitespace-nowrap text-[13px] font-mono font-medium text-ink-secondary">
                           #{user.id}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="text-[13px] font-semibold text-ink-primary">
+                        <td className="px-4 py-4 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); open(); }}
+                            title="Open user details"
+                            className="text-[13px] font-semibold text-ink-primary hover:text-getmeds-blue text-left"
+                          >
                             {getUserDisplayName(user)}
-                          </div>
+                          </button>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-[13px] text-ink-secondary font-mono">
+                        <td className="px-4 py-4 whitespace-nowrap text-[13px] text-ink-secondary font-mono">
                           {getUsername(user)}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-[13px] text-ink-secondary">
+                        <td className="px-4 py-4 whitespace-nowrap text-[13px] text-ink-secondary">
                           {user.email}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          {/* Sep 12, 2026: the role is editable here.
-                              Admin rows are not: the server refuses to demote
-                              one (it is what stops the system being locked out
-                              of its own administration), so offering the
-                              control would only produce a 403. */}
-                          {roleKey === 'admin' ? (
-                            <span
-                              title="Admin accounts cannot be changed to another role — this is what stops the system being locked out of its own administration."
-                              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${badgeColor}`}
-                            >
-                              <Shield className="w-3 h-3 mr-1" />
-                              {getRoleName(user)}
-                            </span>
-                          ) : (
-                            <select
-                              value={roleKey}
-                              disabled={savingRole}
-                              onChange={(e) => {
-                                if (e.target.value === roleKey) return;
-                                setPendingRole({ user, role: e.target.value });
-                              }}
-                              aria-label={`Role for ${getUserDisplayName(user)}`}
-                              className={`text-xs font-semibold rounded-full border pl-2.5 pr-7 py-1 cursor-pointer appearance-none bg-no-repeat focus:outline-none focus:ring-2 focus:ring-getmeds-blue disabled:opacity-50 ${badgeColor}`}
-                              style={{
-                                backgroundImage:
-                                  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%2364748B'%3E%3Cpath d='M4.5 6.5L8 10l3.5-3.5z'/%3E%3C/svg%3E\")",
-                                backgroundPosition: 'right 0.4rem center',
-                                backgroundSize: '1rem',
-                              }}
-                            >
-                              {/* Admin is offered. It is a one-way door — an
-                                  admin cannot later be demoted or deactivated
-                                  from here — but hiding it would leave someone
-                                  hunting for a control that does exist on the
-                                  server. The confirmation says what it costs. */}
-                              {ROLES.map((r) => (
-                                <option key={r.value} value={r.value}>
-                                  {r.label}
-                                </option>
-                              ))}
-                            </select>
-                          )}
+                        <td className="px-4 py-4 whitespace-nowrap">
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${badgeColor}`}>
+                            {roleKey === 'admin' && <Shield className="w-3 h-3 mr-1" />}
+                            {roleLabel(roleKey)}
+                          </span>
                         </td>
-                        {/* Sep 11, 2026: the name Zoho files this account's
-                            orders under. Not derived from anything -- an admin
-                            picks it from Zoho's own list.
-
-                            A MedRep without one cannot place an order at all,
-                            since Salesperson is mandatory on a Sales Order in
-                            this org, so the empty state is a warning rather
-                            than a dash. It sits beside Approve because
-                            approving a new sign-up is the moment somebody
-                            actually knows the answer. */}
-                        <td className="px-6 py-4 text-[13px]">
-                          {editingSalesperson === user.id ? (
-                            <div className="space-y-2 min-w-[16rem]">
-                              {/* Sep 11, 2026: the account's list, as a draft.
-                                  ★ marks the primary -- the one an order uses
-                                  when it does not say otherwise. */}
-                              {draftSalespersons.length ? (
-                                <ul className="space-y-1">
-                                  {draftSalespersons.map((name) => (
-                                    <li key={name} className="flex items-center gap-2">
-                                      <button
-                                        type="button"
-                                        onClick={() => setDraftPrimary(name)}
-                                        title={name === draftPrimary ? 'Primary' : 'Make this the primary'}
-                                        className={`text-sm leading-none ${name === draftPrimary ? 'text-getmeds-blue' : 'text-slate-300 hover:text-getmeds-blue'}`}
-                                      >
-                                        ★
-                                      </button>
-                                      <span className="text-ink-primary">{name}</span>
-                                      <button
-                                        type="button"
-                                        onClick={() => removeDraft(name)}
-                                        aria-label={`Remove ${name}`}
-                                        className="text-xs text-red-600 hover:text-red-800"
-                                      >
-                                        ✕
-                                      </button>
-                                    </li>
-                                  ))}
-                                </ul>
-                              ) : (
-                                <p className="text-xs text-amber-800">No Salesperson -- this account cannot place orders.</p>
-                              )}
-                              <div className="flex flex-wrap items-center gap-2">
-                              <select
-                                autoFocus
-                                value=""
-                                disabled={savingSalesperson}
-                                onChange={(e) => addDraft(e.target.value)}
-                                className="max-w-[15rem] text-[13px] border border-slate-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
-                              >
-                                <option value="">+ Add a Salesperson…</option>
-                                {optionsFor(user)
-                                  .filter((sp) => !draftSalespersons.includes(sp.name))
-                                  .map((sp) => {
-                                    // Two people on one Zoho Salesperson is
-                                    // allowed, so it is shown at the moment of
-                                    // choosing rather than refused.
-                                    const others = (sp.assigned_to || []).filter((a) => a.email !== user.email);
-                                    return (
-                                      <option key={sp.name} value={sp.name}>
-                                        {sp.name}
-                                        {/* Marked rather than hidden when shown:
-                                            picking a departed colleague should be
-                                            a decision, not a misread. */}
-                                        {sp.is_active ? '' : ' (inactive)'}
-                                        {others.length ? ` - also ${others.map((a) => a.name).join(', ')}` : ''}
-                                      </option>
-                                    );
-                                  })}
-                              </select>
-                              {salespersonCounts.inactive > 0 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setShowInactive((v) => !v)}
-                                  className="text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark whitespace-nowrap"
-                                  title={
-                                    showInactive
-                                      ? 'Show only salespersons who are still active in Zoho'
-                                      : 'Also show salespersons Zoho has marked inactive'
-                                  }
-                                >
-                                  {showInactive
-                                    ? `Hide inactive (${salespersonCounts.inactive})`
-                                    : `Show inactive (${salespersonCounts.inactive})`}
-                                </button>
-                              )}
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  disabled={savingSalesperson}
-                                  onClick={() => saveSalespersons(user)}
-                                  className="text-xs font-semibold text-white bg-getmeds-blue hover:bg-getmeds-blue-hover rounded px-2.5 py-1 disabled:opacity-50"
-                                >
-                                  {savingSalesperson ? 'Saving…' : 'Save'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingSalesperson(null)}
-                                  className="text-xs text-ink-secondary hover:text-ink-primary"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => startEditing(user)}
-                              disabled={!!salespersonError}
-                              title={salespersonError || 'Pick the names Zoho knows this person by'}
-                              className="text-left group disabled:cursor-not-allowed"
-                            >
-                              {salespersonsOf(user).length ? (
-                                <span className="flex flex-col gap-1">
-                                  {salespersonsOf(user).map((s) => (
-                                    <span
-                                      key={s.salesperson}
-                                      className="inline-flex items-center gap-1.5 text-ink-primary group-hover:text-getmeds-blue"
-                                    >
-                                      <Briefcase className="w-3.5 h-3.5 text-ink-secondary" />
-                                      {s.salesperson}
-                                      {s.is_primary && salespersonsOf(user).length > 1 && (
-                                        <span className="text-[10px] font-semibold uppercase tracking-wide text-getmeds-blue">
-                                          primary
-                                        </span>
-                                      )}
-                                      {/* Assigned once, since marked inactive in
-                                          Zoho -- worth surfacing, because nothing
-                                          else would ever mention it. */}
-                                      {salespersons.some(
-                                        (sp) => sp.name === s.salesperson && !sp.is_active
-                                      ) && (
-                                        <span className="text-[11px] text-amber-800">(inactive in Zoho)</span>
-                                      )}
-                                    </span>
-                                  ))}
-                                </span>
-                              ) : salespersonError ? (
-                                <span className="text-ink-secondary">-</span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1.5 text-amber-800">
-                                  <AlertTriangle className="w-3.5 h-3.5" />
-                                  {roleKey === 'medrep' ? 'Not set - cannot order' : 'Not set'}
-                                </span>
-                              )}
-                            </button>
-                          )}
-                        </td>
-
-                        {/* Sep 21, 2026: which Team Lead this MedRep reports
-                            to — decides what that Team Lead's (view-only)
-                            dashboard shows. Only meaningful on a medrep row;
-                            every other role shows a dash. */}
-                        <td className="px-6 py-4 whitespace-nowrap text-[13px]">
-                          {roleKey === 'medrep' ? (
-                            <select
-                              value={user.team_lead_id || ''}
-                              disabled={savingTeamLead === user.id}
-                              onChange={(e) => changeTeamLead(user, e.target.value)}
-                              aria-label={`Team Lead for ${getUserDisplayName(user)}`}
-                              className="text-[13px] border border-slate-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-getmeds-blue disabled:opacity-50"
-                            >
-                              <option value="">— None —</option>
-                              {teamLeads.map((tl) => (
-                                <option key={tl.id} value={tl.id}>{getUserDisplayName(tl)}</option>
-                              ))}
-                            </select>
-                          ) : (
-                            <span className="text-ink-secondary">—</span>
-                          )}
-                        </td>
+                        {/* Sep 24, 2026: the Zoho Salesperson and Team Lead
+                            columns are gone from the list. Both are still on
+                            the account, in the User Details modal. */}
 
                         {/* Sep 9, 2026: approval status wins the cell when it
                             is not 'approved'. "Pending" and "Inactive" both
@@ -833,7 +428,7 @@ const UsersPage = () => {
                             "Active" — which it is, and which is exactly the
                             wrong thing to tell an admin about an account
                             waiting on them. */}
-                        <td className="px-6 py-4 whitespace-nowrap">
+                        <td className="px-4 py-4 whitespace-nowrap">
                           {isPending ? (
                             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 border border-amber-300">
                               <Clock className="w-3 h-3" />
@@ -857,57 +452,13 @@ const UsersPage = () => {
                             </span>
                           )}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-[13px] font-medium">
-                          {isPending ? (
-                            <div className="inline-flex items-center gap-2">
-                              <button
-                                type="button"
-                                disabled={busyId === user.id}
-                                onClick={() => decide(user, 'approve')}
-                                className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full text-pharmacy-green-dark bg-pharmacy-green/10 hover:bg-pharmacy-green/20 border border-pharmacy-green/30 transition-colors disabled:opacity-50"
-                              >
-                                <UserCheck className="w-3.5 h-3.5" />
-                                Approve
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busyId === user.id}
-                                onClick={() => decide(user, 'reject')}
-                                className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors disabled:opacity-50"
-                              >
-                                <Ban className="w-3.5 h-3.5" />
-                                Reject
-                              </button>
-                            </div>
-                          ) : isRejected ? (
-                            <button
-                              type="button"
-                              disabled={busyId === user.id}
-                              onClick={() => decide(user, 'approve')}
-                              className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full text-pharmacy-green-dark bg-pharmacy-green/10 hover:bg-pharmacy-green/20 border border-pharmacy-green/30 transition-colors disabled:opacity-50"
-                              title="Reverses the rejection — the account can sign in again."
-                            >
-                              <UserCheck className="w-3.5 h-3.5" />
-                              Approve after all
-                            </button>
-                          ) : isActive ? (
-                            <button
-                              type="button"
-                              onClick={() => handleDeactivateClick(user)}
-                              className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-1"
-                            >
-                              <UserX className="w-3.5 h-3.5" />
-                              Deactivate
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              disabled
-                              className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-medium rounded-full text-gray-400 bg-gray-50 border border-gray-200 cursor-not-allowed opacity-60"
-                            >
-                              Deactivated
-                            </button>
-                          )}
+                        {/* Sep 24, 2026: when the account last changed — any
+                            edit, role or Salesperson change, approval, or a
+                            password change. Accounts that predate the column
+                            show the day they were created. Manila time, like
+                            the rest of the app. */}
+                        <td className="px-4 py-4 whitespace-nowrap text-[13px] text-ink-secondary tabular-nums" title={user.updated_at || ''}>
+                          {user.updated_at ? formatPHT(user.updated_at, 'datetime') : '—'}
                         </td>
                       </tr>
                     );
@@ -916,58 +467,40 @@ const UsersPage = () => {
               </tbody>
             </table>
           </div>
+          <PaginationFooter
+            pagination={{ page: currentPage, pages: pageCount, total: sortedUsers.length }}
+            onPageChange={setPage}
+            itemLabel="users"
+          />
         </div>
       )}
 
       {/* The list refreshes as soon as the account exists, behind the modal,
-          so the new row is there to assign a Salesperson on when it closes. */}
+          so the new row is there to open when it closes. */}
       <CreateUserModal
         isOpen={isCreateOpen}
         onClose={() => setIsCreateOpen(false)}
-        onCreated={() => fetchUsers()}
+        onCreated={() => fetchUsers({ silent: true })}
       />
 
-      {/* Confirmation Dialog */}
-      <ConfirmDialog
-        isOpen={isConfirmOpen}
-        onClose={() => {
-          setIsConfirmOpen(false);
-          setSelectedUser(null);
-        }}
-        onConfirm={handleConfirmDeactivate}
-        title="Confirm User Deactivation"
-        message={
-          selectedUser
-            ? `Are you sure you want to deactivate ${getUserDisplayName(selectedUser)} (${selectedUser.email})? This user will immediately lose access to the system.`
-            : 'Are you sure you want to deactivate this user?'
-        }
-        confirmText="Deactivate User"
-        cancelText="Cancel"
-        variant="danger"
-      />
-
-      {/* Sep 12, 2026: a role change states the consequence before it happens.
-          Not danger-styled — this is a routine administrative act, and colouring
-          every confirmation red teaches people to click through them. */}
-      <ConfirmDialog
-        isOpen={Boolean(pendingRole)}
-        onClose={() => setPendingRole(null)}
-        onConfirm={applyRoleChange}
-        title="Change this account's role?"
-        message={
-          pendingRole
-            ? `${getUserDisplayName(pendingRole.user)} becomes ${
-                (ROLES.find((r) => r.value === pendingRole.role) || {}).label || pendingRole.role
-              }. ${roleCan(pendingRole.role)} They keep their orders and history, but what they can see and do changes as soon as they next sign in.` +
-              (pendingRole.role === 'admin'
-                ? ' This one cannot be undone here: an admin account cannot afterwards be changed to another role or deactivated from this screen.'
-                : '')
-            : ''
-        }
-        confirmText={savingRole ? 'Changing…' : 'Change role'}
-        cancelText="Cancel"
-        variant={pendingRole?.role === 'admin' ? 'danger' : 'primary'}
-      />
+      {/* Sep 24, 2026: everything that used to be inline on the row —
+          approve/reject, role, Salesperson, Team Lead, deactivate — plus edit
+          and delete. `key` gives each account a fresh draft. */}
+      {detailsUser && (
+        <UserDetailsModal
+          key={detailsUser.id}
+          user={detailsUser}
+          onClose={() => setDetailsUserId(null)}
+          onChanged={async (result) => {
+            await fetchUsers({ silent: true });
+            if (result?.deletedId != null) setDetailsUserId(null);
+          }}
+          salespersons={salespersons}
+          salespersonCounts={salespersonCounts}
+          salespersonError={salespersonError}
+          teamLeads={teamLeads}
+        />
+      )}
     </div>
   );
 };

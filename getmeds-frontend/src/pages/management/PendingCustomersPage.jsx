@@ -255,7 +255,7 @@ const FORM_FIELDS = [
   { key: 'address', label: 'Address', wide: true },
   { key: 'city', label: 'City' }
 ];
-const CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd'];
+const CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd', 'patient'];
 
 /**
  * Update the Zoho customer from the waiting one, then use it.

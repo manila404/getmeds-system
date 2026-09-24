@@ -1036,6 +1036,70 @@ async function reconcileOrderPrimaryFinanceVerified(client) {
 }
 
 /**
+ * Sep 24, 2026: users.updated_at, and the trigger that keeps it.
+ *
+ * A trigger rather than `updated_at = ...` in each UPDATE because users is
+ * written from many places (admin.controller, auth.controller, the Salesperson
+ * services) and a column each of them has to remember to set is one that some
+ * of them will not. Postgres fires it on every UPDATE, so nothing is missed.
+ *
+ * Existing accounts are backfilled with created_at: the honest answer for a
+ * row whose real last change was never recorded is "no later than it was made"
+ * rather than "just now", which would make every account look freshly edited.
+ * The default is added AFTER the backfill for the same reason -- adding a
+ * column with a volatile default stamps every existing row with the moment of
+ * the migration.
+ *
+ * Idempotent: the column is IF NOT EXISTS, the backfill only touches NULLs,
+ * the function is CREATE OR REPLACE and the trigger is dropped and recreated.
+ */
+async function reconcileUserUpdatedAt(client) {
+  await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TEXT');
+  await client.query('UPDATE users SET updated_at = COALESCE(created_at, iso_now()) WHERE updated_at IS NULL');
+  await client.query('ALTER TABLE users ALTER COLUMN updated_at SET DEFAULT iso_now()');
+  await client.query(`
+    CREATE OR REPLACE FUNCTION touch_user_updated_at() RETURNS trigger AS $touch$
+    BEGIN
+      -- An UPDATE that sets updated_at itself (a backfill, a restore) is left alone.
+      IF NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+        NEW.updated_at := iso_now();
+      END IF;
+      RETURN NEW;
+    END;
+    $touch$ LANGUAGE plpgsql
+  `);
+  await client.query('DROP TRIGGER IF EXISTS trg_users_touch_updated_at ON users');
+  await client.query(
+    `CREATE TRIGGER trg_users_touch_updated_at
+       BEFORE UPDATE ON users
+       FOR EACH ROW EXECUTE FUNCTION touch_user_updated_at()`
+  );
+  console.log('  ✔ users.updated_at present, kept by trigger');
+}
+
+/**
+ * Sep 24, 2026: 'patient' added to the customer categories. The category is a
+ * CHECK-constrained column, so the list has to widen in the database as well as
+ * in the code, or setting it fails with a constraint error.
+ */
+async function reconcileCustomerCategoryCheck(client) {
+  await widenCheckConstraint(client, 'customers', 'category', ['doctor', 'hospital', 'distributor', 'pwd', 'patient']);
+}
+
+/**
+ * Sep 24, 2026: users.username — see schema.pg.sql's comment on the column.
+ * Nullable and not backfilled; the unique index is partial so the many NULLs
+ * do not collide with each other.
+ */
+async function reconcileUserUsername(client) {
+  await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT');
+  await client.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username)) WHERE username IS NOT NULL'
+  );
+  console.log('  ✔ users.username present, unique case-insensitively');
+}
+
+/**
  * Sep 23, 2026: order_events.occurred_at_exact — see schema.pg.sql's comment
  * on the column for what it means. Defaults TRUE, so every existing row
  * (every one of them logged before this column existed, all with a genuine
@@ -1304,6 +1368,9 @@ async function main() {
     await reconcileOrderPrimaryFinanceVerified(client);
     await reconcileOrderEventsOccurredAtExact(client);
     await reconcileOrderEventsPartitioning(client);
+    await reconcileUserUpdatedAt(client);
+    await reconcileUserUsername(client);
+    await reconcileCustomerCategoryCheck(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

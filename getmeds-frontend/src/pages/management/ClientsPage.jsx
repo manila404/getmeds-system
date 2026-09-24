@@ -7,6 +7,7 @@ import {
   updateCustomerTin
 } from '../../api/queries';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
+import ClientDetailsModal from '../../components/clients/ClientDetailsModal';
 import { useSyncJobs } from '../../context/SyncJobsContext';
 import toast from 'react-hot-toast';
 import {
@@ -22,6 +23,7 @@ import {
   Building2,
   Truck,
   Accessibility,
+  User,
   Tag
 } from 'lucide-react';
 
@@ -40,7 +42,8 @@ const CATEGORY_META = {
   doctor: { label: 'Doctor', icon: Stethoscope, className: 'bg-sky-50 text-sky-700 border-sky-200' },
   hospital: { label: 'Hospital', icon: Building2, className: 'bg-purple-50 text-purple-700 border-purple-200' },
   distributor: { label: 'Distributor', icon: Truck, className: 'bg-amber-50 text-amber-800 border-amber-200' },
-  pwd: { label: 'PWD', icon: Accessibility, className: 'bg-rose-50 text-rose-700 border-rose-200' }
+  pwd: { label: 'PWD', icon: Accessibility, className: 'bg-rose-50 text-rose-700 border-rose-200' },
+  patient: { label: 'Patient', icon: User, className: 'bg-emerald-50 text-emerald-700 border-emerald-200' }
 };
 
 /**
@@ -106,6 +109,8 @@ const ClientsPage = () => {
   const [page, setPage] = useState(1);
   const [categoryFilter, setCategoryFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  // Sep 24, 2026: the client whose details modal is open.
+  const [detailsClient, setDetailsClient] = useState(null);
   // Sep 2, 2026: Zoho's own contact status, mirrored locally by the sync.
   // Defaults to 'active' — what this page has always shown — so the only
   // change for anyone not touching the filter is that the inactive ones are
@@ -506,6 +511,7 @@ const ClientsPage = () => {
               <option value="hospital">Hospital</option>
               <option value="distributor">Distributor</option>
               <option value="pwd">PWD</option>
+              <option value="patient">Patient</option>
               <option value="uncategorized">Uncategorized</option>
             </select>
 
@@ -557,11 +563,19 @@ const ClientsPage = () => {
                   const CategoryIcon = meta?.icon || Tag;
 
                   return (
-                    <tr key={cl.id} className="hover:bg-slate-50/80 transition-colors">
+                    // Sep 24, 2026: the row opens the Client Details modal. The
+                    // category picker and TIN box are editable in place, so
+                    // their cells stop the click from also opening it.
+                    <tr key={cl.id} onClick={() => setDetailsClient(cl)} className="cursor-pointer hover:bg-slate-50/80 transition-colors">
                       <td className="py-3 px-4">
-                        <div className={`font-semibold ${cl.is_active === 0 ? 'text-slate-500' : 'text-slate-900'}`}>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setDetailsClient(cl); }}
+                          title="Open client details"
+                          className={`text-left font-semibold hover:text-getmeds-blue ${cl.is_active === 0 ? 'text-slate-500' : 'text-slate-900'}`}
+                        >
                           {cl.name}
-                        </div>
+                        </button>
                         <div className="flex flex-wrap gap-1 mt-0.5">
                           {cl.is_test_customer ? (
                             <span className="text-[10px] font-bold text-amber-700 bg-amber-50 inline-block px-1.5 py-0.5 rounded">
@@ -593,7 +607,7 @@ const ClientsPage = () => {
                           {isCredit ? 'Credit' : 'Direct'}
                         </span>
                       </td>
-                      <td className="py-3 px-4">
+                      <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center gap-1.5">
                           {meta && (
                             <span
@@ -616,6 +630,7 @@ const ClientsPage = () => {
                             <option value="hospital">Hospital</option>
                             <option value="distributor">Distributor</option>
                             <option value="pwd">PWD</option>
+                            <option value="patient">Patient</option>
                           </select>
                         </div>
                       </td>
@@ -626,7 +641,7 @@ const ClientsPage = () => {
                       <td className="py-3 px-4 text-slate-600 max-w-xs truncate" title={cl.address || ''}>
                         {cl.address || <span className="text-slate-400">—</span>}
                       </td>
-                      <td className="py-3 px-4">
+                      <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
                         <TinCell
                           customer={cl}
                           saving={tinMutation.isPending && tinMutation.variables?.id === cl.id}
@@ -686,6 +701,15 @@ const ClientsPage = () => {
           </div>
         )}
       </div>
+
+      {detailsClient && (
+        <ClientDetailsModal
+          key={detailsClient.id}
+          customerId={detailsClient.id}
+          fallbackName={detailsClient.name}
+          onClose={() => setDetailsClient(null)}
+        />
+      )}
     </div>
   );
 };

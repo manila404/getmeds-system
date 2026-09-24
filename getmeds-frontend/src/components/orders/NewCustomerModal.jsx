@@ -76,6 +76,7 @@ const CATEGORIES = [
   { value: 'doctor', label: 'Doctor' },
   { value: 'distributor', label: 'Distributor' },
   { value: 'pwd', label: 'PWD' },
+  { value: 'patient', label: 'Patient' },
   { value: '', label: 'Not sure yet', hint: 'Can be set later from the Clients Directory.' }
 ];
 
