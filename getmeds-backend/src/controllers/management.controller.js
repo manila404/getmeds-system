@@ -168,12 +168,13 @@ exports.getSummary = async (req, res, next) => {
       failed_syncs: null,
       pending_customers: null
     };
-    if (!isTeamLead) {
-      if (req.user.role === 'admin') {
-        action_needed.failed_syncs = (
-          await db.prepare("SELECT COUNT(*) as c FROM zoho_sync_queue WHERE status = 'failed_permanent'").get()
-        ).c;
-      }
+    // Sep 24, 2026: both are Admin's now. Management's sidebar no longer links
+    // to Zoho Sync Health or Pending Customers, so a tile pointing at either
+    // would send them to a page their menu doesn't offer.
+    if (req.user.role === 'admin') {
+      action_needed.failed_syncs = (
+        await db.prepare("SELECT COUNT(*) as c FROM zoho_sync_queue WHERE status = 'failed_permanent'").get()
+      ).c;
       action_needed.pending_customers = (
         await db.prepare("SELECT COUNT(*) as c FROM customers WHERE zoho_sync_status IN ('pending','failed')").get()
       ).c;

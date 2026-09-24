@@ -213,19 +213,28 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       // MedRep / Division / Salesperson controls.
       { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true }
     );
-    navGroups.push(
-      {
-        key: 'operations',
-        title: 'Operations',
-        links: [
-          { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
-          // Sep 7, 2026: MedRep orders wait here for Management approval before
-          // they sync to Zoho — see orders.controller.js's submit().
-          { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
-          { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
-          { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
-        ]
-      },
+    navGroups.push({
+      key: 'operations',
+      title: 'Operations',
+      links: [
+        { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
+        // Sep 7, 2026: MedRep orders wait here for Management approval before
+        // they sync to Zoho — see orders.controller.js's submit().
+        { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
+        { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
+        { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
+      ]
+    });
+
+    // Sep 24, 2026: everything below is Admin's menu. Management's sidebar is
+    // Operations only, by the product owner's decision.
+    //
+    // This hides the LINKS. It does not revoke access: the routes for these
+    // pages (App.jsx) and their APIs still allow 'management' — they were all
+    // in Management's menu before the redesign — so a Management user who
+    // types the URL still gets in. Removing the access itself means changing
+    // those route guards and endpoints, which is a separate, larger change.
+    if (role === 'admin') navGroups.push(
       // The existing Finance Confirmation accordion, in its natural place
       // between running orders and managing records.
       { key: 'finance', special: 'finance' },
@@ -242,12 +251,12 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         key: 'administration',
         title: 'Administration',
         links: [
-          // Admin only. (Was sharing the Users icon with Clients Directory.)
-          ...(role === 'admin' ? [{ to: '/admin/users', icon: <UserCog size={19} />, label: 'User Management' }] : []),
+          // (User Management was sharing the Users icon with Clients Directory.)
+          { to: '/admin/users', icon: <UserCog size={19} />, label: 'User Management' },
           { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
           { to: '/management/manager-scopes', icon: <Shield size={19} />, label: 'Manager Access' },
           // Sep 9, 2026: the Zoho sync retry outbox — see ZohoSyncHealthPage.jsx.
-          ...(role === 'admin' ? [{ to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' }] : [])
+          { to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' }
         ]
       }
     );
