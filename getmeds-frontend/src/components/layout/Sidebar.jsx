@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff, ChevronDown, ShieldCheck } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff, ChevronDown, ShieldCheck } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 import { FINANCE_STAGES } from '../../constants/financeStages';
 
@@ -17,6 +17,10 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   const onFinancePage = location.pathname === '/finance';
   const [financeOpen, setFinanceOpen] = useState(onFinancePage);
   const activeStage = onFinancePage ? searchParams.get('stage') : null;
+
+  // Sep 24, 2026: which nav groups the person has toggled by hand. Anything not
+  // in here follows the default (open if it holds the page you're on).
+  const [openGroups, setOpenGroups] = useState({});
 
   if (!user) return null;
 
@@ -127,6 +131,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   // Standard Mode: Single-role restricted links
   const mainLinks = [];
   const secondaryLinks = [];
+  // Sep 24, 2026: collapsible groups (Management/Admin). Empty for every other
+  // role, whose short menus render exactly as before.
+  const navGroups = [];
 
   /**
    * Sep 12, 2026: "Finance Confirmation" — one nav item per stage.
@@ -189,50 +196,130 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/dispatch/history', icon: <MapPin size={19} />, label: 'Dispatched / Tracking Log' },
       { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' }
     );
-  } else if (role === 'management') {
+  } else if (role === 'management' || role === 'admin') {
+    // Sep 24, 2026: Management and Admin used to get 11-12 flat links plus a
+    // "System Records" footer — 13 items in one scroll, none of them telling
+    // you what kind of thing it was. They're now four collapsible groups by
+    // what the person is doing: running orders, Finance, customers and stock,
+    // and administering the system. Same links, same routes, same role rules
+    // as before — only where they sit changed. (The 'All Orders Log' that
+    // lived under "System Records" now sits with the other order pages.)
+    //
+    // Create New Order stays outside the groups as the one primary action.
     mainLinks.push(
-      { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
       // Sep 5, 2026: management can raise an order on a MedRep's behalf (see
       // OrderForm.jsx's medrep picker + orders.controller.js's
-      // resolveOrderMedrep) — that was built without a way to reach it from
-      // here, so management had the access but no link to it.
-      { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
-      // Sep 7, 2026: MedRep orders wait here for Management approval before
-      // they sync to Zoho — see orders.controller.js's submit().
-      { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
-      { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
-      { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
-      { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' },
-      { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
-      { to: '/management/manager-scopes', icon: <Shield size={19} />, label: 'Manager Access' },
-      { to: '/management/pending-customers', icon: <CloudOff size={19} />, label: 'Pending Customers' }
+      // resolveOrderMedrep). Sep 9, 2026: admin can too — same form, same
+      // MedRep / Division / Salesperson controls.
+      { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true }
     );
-    secondaryLinks.push(
-      { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
-    );
-  } else if (role === 'admin') {
-    mainLinks.push(
-      { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
-      // Sep 9, 2026: admin can raise an order too, on the same form and with
-      // the same MedRep / Division / Salesperson controls management has —
-      // see orders.controller.js's resolveOrderMedrep.
-      { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
-      { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
-      { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
-      { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
-      { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' },
-      { to: '/admin/users', icon: <Users size={19} />, label: 'User Management' },
-      // Sep 9, 2026: the Zoho sync retry outbox — was API-only until now,
-      // see ZohoSyncHealthPage.jsx.
-      { to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' },
-      { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
-      { to: '/management/manager-scopes', icon: <Shield size={19} />, label: 'Manager Access' },
-      { to: '/management/pending-customers', icon: <CloudOff size={19} />, label: 'Pending Customers' }
-    );
-    secondaryLinks.push(
-      { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
+    navGroups.push(
+      {
+        key: 'operations',
+        title: 'Operations',
+        links: [
+          { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
+          // Sep 7, 2026: MedRep orders wait here for Management approval before
+          // they sync to Zoho — see orders.controller.js's submit().
+          { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
+          { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
+          { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
+        ]
+      },
+      // The existing Finance Confirmation accordion, in its natural place
+      // between running orders and managing records.
+      { key: 'finance', special: 'finance' },
+      {
+        key: 'customers',
+        title: 'Customers & Stock',
+        links: [
+          { to: '/management/clients', icon: <Users size={19} />, label: 'Clients Directory' },
+          { to: '/management/pending-customers', icon: <CloudOff size={19} />, label: 'Pending Customers' },
+          { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' }
+        ]
+      },
+      {
+        key: 'administration',
+        title: 'Administration',
+        links: [
+          // Admin only. (Was sharing the Users icon with Clients Directory.)
+          ...(role === 'admin' ? [{ to: '/admin/users', icon: <UserCog size={19} />, label: 'User Management' }] : []),
+          { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
+          { to: '/management/manager-scopes', icon: <Shield size={19} />, label: 'Manager Access' },
+          // Sep 9, 2026: the Zoho sync retry outbox — see ZohoSyncHealthPage.jsx.
+          ...(role === 'admin' ? [{ to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' }] : [])
+        ]
+      }
     );
   }
+
+  // Is the page you're on inside this link? Exact for the two routes that
+  // other links live underneath ('/management' → '/management/approvals'),
+  // prefix for the rest.
+  const isLinkActive = (l) =>
+    l.to === '/management' || l.to === '/orders'
+      ? location.pathname === l.to
+      : location.pathname.startsWith(l.to);
+  // Hand-toggled state wins; otherwise Operations starts open and any other
+  // group opens when it holds the page you're on.
+  const groupIsOpen = (g) => openGroups[g.key] ?? (g.key === 'operations' || g.links.some(isLinkActive));
+
+  /* Sep 12, 2026: the stages as navigation.
+     Collapsed by default unless you are already on the page — six always-open
+     items would crowd out everything else in the sidebar for the roles that
+     also do other work. */
+  const financeBlock =
+    financeStageLinks.length > 0 && canSeeFinance ? (
+      <div className={hideWhenCollapsed}>
+        <button
+          type="button"
+          onClick={() => setFinanceOpen((v) => !v)}
+          aria-expanded={financeOpen}
+          className={
+            navGroups.length
+              ? 'w-full flex items-center px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider text-ink-secondary hover:text-ink-primary transition-colors'
+              : 'w-full flex items-center px-3 py-2.5 rounded-lg text-sm font-medium text-ink-primary hover:bg-surface transition-all'
+          }
+        >
+          {!navGroups.length && <span className="mr-2.5"><ShieldCheck size={19} /></span>}
+          <span className="truncate flex-1 text-left">{navGroups.length ? 'Finance' : 'Finance Confirmation'}</span>
+          {/* Says there is work behind a group that is shut. */}
+          {!financeOpen && activeStage && (
+            <span className="mr-1.5 w-1.5 h-1.5 rounded-full bg-getmeds-blue shrink-0" />
+          )}
+          <ChevronDown
+            size={navGroups.length ? 14 : 16}
+            className={`shrink-0 transition-transform ${financeOpen ? 'rotate-180' : ''}`}
+          />
+        </button>
+
+        {financeOpen && (
+          <ul className="mt-0.5 space-y-0.5 pl-4">
+            {financeStageLinks.map((link) => {
+              // NavLink's own isActive ignores the query string, so every stage
+              // would light up at once on /finance.
+              const isActive = activeStage === link.stage;
+              return (
+                <li key={link.stage}>
+                  <NavLink
+                    to={link.to}
+                    title={link.label}
+                    onClick={handleLinkClick}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] transition-all border-l-2 ${
+                      isActive
+                        ? 'bg-getmeds-blue/10 text-ink-primary font-semibold border-getmeds-blue'
+                        : 'text-ink-secondary hover:bg-surface hover:text-ink-primary border-transparent'
+                    }`}
+                  >
+                    <span className="truncate">{link.label}</span>
+                  </NavLink>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    ) : null;
 
   return (
     <>
@@ -338,9 +425,11 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
               /* STANDARD MODE: Role-restricted links */
               <>
                 <div>
-                  <div className={`px-3 pb-2 text-xs font-medium text-ink-primary ${hideWhenCollapsed}`}>
-                    Navigation Menu
-                  </div>
+                  {navGroups.length === 0 && (
+                    <div className={`px-3 pb-2 text-xs font-medium text-ink-primary ${hideWhenCollapsed}`}>
+                      Navigation Menu
+                    </div>
+                  )}
                   <ul className="space-y-1">
                     {mainLinks.map((link) => (
                       <li key={link.to}>
@@ -367,57 +456,58 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                   </ul>
                 </div>
 
-                {/* Sep 12, 2026: the stages as navigation.
-                    Collapsed by default unless you are already on the page —
-                    six always-open items would crowd out everything else in
-                    the sidebar for the roles that also do other work. */}
-                {financeStageLinks.length > 0 && canSeeFinance && (
-                  <div className={hideWhenCollapsed}>
-                    <button
-                      type="button"
-                      onClick={() => setFinanceOpen((v) => !v)}
-                      aria-expanded={financeOpen}
-                      className="w-full flex items-center px-3 py-2.5 rounded-lg text-sm font-medium text-ink-primary hover:bg-surface transition-all"
-                    >
-                      <span className="mr-2.5"><ShieldCheck size={19} /></span>
-                      <span className="truncate flex-1 text-left">Finance Confirmation</span>
-                      {/* Says there is work behind a group that is shut. */}
-                      {!financeOpen && activeStage && (
-                        <span className="mr-1.5 w-1.5 h-1.5 rounded-full bg-getmeds-blue shrink-0" />
-                      )}
-                      <ChevronDown
-                        size={16}
-                        className={`shrink-0 transition-transform ${financeOpen ? 'rotate-180' : ''}`}
-                      />
-                    </button>
-
-                    {financeOpen && (
-                      <ul className="mt-0.5 space-y-0.5 pl-4">
-                        {financeStageLinks.map((link) => {
-                          // NavLink's own isActive ignores the query string, so
-                          // every stage would light up at once on /finance.
-                          const isActive = activeStage === link.stage;
-                          return (
-                            <li key={link.stage}>
-                              <NavLink
-                                to={link.to}
-                                title={link.label}
-                                onClick={handleLinkClick}
-                                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] transition-all border-l-2 ${
+                {/* Sep 24, 2026: Management/Admin's collapsible groups. The
+                    Finance accordion (below, unchanged) sits in this run as
+                    one of them. */}
+                {navGroups.map((g) =>
+                  g.special === 'finance' ? (
+                    <React.Fragment key="finance">{financeBlock}</React.Fragment>
+                  ) : (
+                    <div key={g.key}>
+                      <button
+                        type="button"
+                        onClick={() => setOpenGroups((s) => ({ ...s, [g.key]: !groupIsOpen(g) }))}
+                        aria-expanded={groupIsOpen(g)}
+                        className={`w-full flex items-center px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider text-ink-secondary hover:text-ink-primary transition-colors ${hideWhenCollapsed}`}
+                      >
+                        <span className="flex-1 text-left">{g.title}</span>
+                        {/* A shut group still says the page you're on is inside it. */}
+                        {!groupIsOpen(g) && g.links.some(isLinkActive) && (
+                          <span className="mr-1.5 w-1.5 h-1.5 rounded-full bg-getmeds-blue shrink-0" />
+                        )}
+                        <ChevronDown size={14} className={`shrink-0 transition-transform ${groupIsOpen(g) ? 'rotate-180' : ''}`} />
+                      </button>
+                      {/* In the collapsed desktop rail there are no headers, so
+                          the icons show regardless of open/shut. */}
+                      <ul className={`mt-0.5 space-y-0.5 ${groupIsOpen(g) ? '' : isCollapsed ? 'hidden lg:block' : 'hidden'}`}>
+                        {g.links.map((link) => (
+                          <li key={link.to}>
+                            <NavLink
+                              to={link.to}
+                              title={link.label}
+                              onClick={handleLinkClick}
+                              end={link.to === '/orders' || link.to === '/management'}
+                              className={({ isActive }) =>
+                                `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
                                   isActive
-                                    ? 'bg-getmeds-blue/10 text-ink-primary font-semibold border-getmeds-blue'
-                                    : 'text-ink-secondary hover:bg-surface hover:text-ink-primary border-transparent'
-                                }`}
-                              >
-                                <span className="truncate">{link.label}</span>
-                              </NavLink>
-                            </li>
-                          );
-                        })}
+                                    ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-4 border-getmeds-blue'
+                                    : 'text-ink-primary hover:bg-surface'
+                                }`
+                              }
+                            >
+                              <span className={`mr-3 ${isCollapsed ? 'lg:mr-0' : ''}`}>{link.icon}</span>
+                              <span className={`truncate ${hideWhenCollapsed}`}>{link.label}</span>
+                            </NavLink>
+                          </li>
+                        ))}
                       </ul>
-                    )}
-                  </div>
+                    </div>
+                  )
                 )}
+
+                {/* Sep 12, 2026: the stages as navigation, for the roles that
+                    aren't grouped (Finance). */}
+                {navGroups.length === 0 && financeBlock}
 
                 {secondaryLinks.length > 0 && (
                   <div className="pt-2 border-t border-slate-100">

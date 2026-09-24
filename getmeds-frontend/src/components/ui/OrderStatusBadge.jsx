@@ -71,4 +71,9 @@ const OrderStatusBadge = ({ status }) => {
   );
 };
 
+// Sep 24, 2026: exported so a filter pill can wear the same colours as the
+// status it filters to — the management dashboard used to keep its own,
+// shorter copy of this map, which silently fell back to grey for every status
+// the copy didn't list.
+export { statusStyles };
 export default OrderStatusBadge;

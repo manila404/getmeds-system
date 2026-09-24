@@ -25,9 +25,45 @@ async function teamMemberNames(teamLeadUserId) {
  * Numbers a person cannot drill into are not a smaller leak than rows — they
  * are the same leak, harder to notice.
  */
+/**
+ * Sep 24, 2026: the status groups behind each dashboard KPI, defined ONCE and
+ * returned to the browser (`status_groups`) so a card's count and the table
+ * it click-throughs to can never drift apart — the count and the filter are
+ * literally the same list.
+ *
+ * pending_payment used to include 'ready_for_dispatch', which
+ * ready_dispatch also counts, so one order showed up in two cards and the
+ * cards could not be added up. Each status now belongs to exactly one card.
+ */
+const STATUS_GROUPS = {
+  pending_payment: ['ready_for_draft_invoice', 'ready_for_invoice_sent'],
+  ready_dispatch: ['ready_for_dispatch', 'picking_packing'],
+  in_transit: ['dispatched', 'tracking_shared'],
+  completed: ['completed'],
+  // 'deleted' counted alongside 'cancelled' (Sep 1, 2026) so an order whose
+  // Sales Order was removed in Zoho still shows up somewhere on the dashboard.
+  exceptions: ['on_hold', 'exception', 'cancelled', 'deleted']
+};
+const inList = (statuses) => `status IN (${statuses.map((s) => `'${s}'`).join(',')})`;
+
+// Orders imported from Zoho carry Zoho's own (often years-old) creation date
+// but were adopted into this app only recently — see zohoOrderImportService.
+// They are history, not current operations, so the dashboard separates them.
+const IMPORTED = "getmeds_order_id LIKE 'ZOHO-%'";
+const NATIVE = "getmeds_order_id NOT LIKE 'ZOHO-%'";
+const SOURCES = ['native', 'imported', 'all'];
+
+/** Not-finished statuses an order can sit in and go quiet. */
+const STALE_EXCLUDED = ['draft', 'completed', 'cancelled', 'deleted'];
+const STALE_HOURS_DEFAULT = 48;
+
 exports.getSummary = async (req, res, next) => {
   try {
     const isTeamLead = req.user.role === 'team_lead';
+    // 'all' stays the API default so every existing caller and test keeps its
+    // meaning; the dashboard asks for 'native' explicitly.
+    const source = SOURCES.includes(req.query.source) ? req.query.source : 'all';
+    const sourceClause = source === 'native' ? NATIVE : source === 'imported' ? IMPORTED : '';
     // Sep 21, 2026: same {sql, params} shape either way — everything below
     // this point has no idea, and needs no idea, which kind of scope produced
     // scopeClause/scopeParams. See teamScopeService.js for why a Team Lead's
@@ -45,6 +81,7 @@ exports.getSummary = async (req, res, next) => {
     const scoped = (where = '', params = []) => {
       const parts = [];
       if (where) parts.push(`(${where})`);
+      if (sourceClause) parts.push(sourceClause);
       if (scopeClause) parts.push(scopeClause);
       const clause = parts.length ? ` WHERE ${parts.join(' AND ')}` : '';
       return { clause, params: [...params, ...(scopeClause ? scopeParams : [])] };
@@ -68,14 +105,11 @@ exports.getSummary = async (req, res, next) => {
     // orders Finance is still carrying — invoiced in Zoho but not yet paid —
     // and they are already in the Finance queue, so leaving them out made
     // this KPI disagree with the queue it is meant to summarise.
-    const pending_payment_count = await countWhere("status IN ('ready_for_draft_invoice','ready_for_invoice_sent','ready_for_dispatch')");
-    const ready_dispatch_count = await countWhere("status IN ('ready_for_dispatch','picking_packing')");
-    const dispatched_count = await countWhere("status IN ('dispatched','tracking_shared')");
-    const completed_count = await countWhere("status = 'completed'");
-    // 'deleted' counted alongside 'cancelled' (Sep 1, 2026) so an order whose
-    // Sales Order was removed in Zoho still shows up somewhere on the
-    // dashboard rather than dropping out of every KPI.
-    const exception_count = await countWhere("status IN ('on_hold','exception','cancelled','deleted')");
+    const pending_payment_count = await countWhere(inList(STATUS_GROUPS.pending_payment));
+    const ready_dispatch_count = await countWhere(inList(STATUS_GROUPS.ready_dispatch));
+    const dispatched_count = await countWhere(inList(STATUS_GROUPS.in_transit));
+    const completed_count = await countWhere(inList(STATUS_GROUPS.completed));
+    const exception_count = await countWhere(inList(STATUS_GROUPS.exceptions));
 
     const today = new Date().toISOString().slice(0, 10);
     const orders_today = await countWhere('DATE(created_at) = ?', [today]);
@@ -83,17 +117,67 @@ exports.getSummary = async (req, res, next) => {
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const orders_this_week = await countWhere('DATE(created_at) >= ?', [weekAgo]);
 
-    // Avg processing time (submitted_at → completed dispatched)
-    const avg = scoped(
-      "status IN ('completed', 'dispatched', 'tracking_shared') AND submitted_at IS NOT NULL"
-    );
-    const avgRow = await db
+    // Sep 24, 2026: processing time, rebuilt. It used to average
+    // (updated_at - submitted_at) over every completed/dispatched order,
+    // which read "25,004.7h" (~2.85 years): 59,400 of the 59,763 orders in
+    // that pool were imported from Zoho, stamped with Zoho's original
+    // creation date (as far back as 2021) but an import-time updated_at.
+    // Two changes:
+    //   1. NATIVE orders only, always — an imported order has no real
+    //      "submitted to done" span in this app, whatever the source toggle
+    //      says. (Toggled to 'imported', this is therefore empty → N/A.)
+    //   2. Reported as a MEDIAN alongside the mean: a few very slow orders
+    //      drag a mean far above what a typical order experiences. On live
+    //      data: mean 22.5h, median 2.9h, 90th percentile 93.2h.
+    // The end point stays updated_at ("last touched"). A completion-EVENT end
+    // point was tried and rejected: the dispatch/complete events on native
+    // orders are largely Zoho-date backfills clamped to the Sales Order's
+    // creation, which collapses every span to ~0h and is less truthful than
+    // the imperfect updated_at. Labelled "Submit → last update" in the UI.
+    const proc = scoped(`${NATIVE} AND status IN ('completed', 'dispatched', 'tracking_shared') AND submitted_at IS NOT NULL`);
+    const procRow = await db
       .prepare(
-        `SELECT AVG((JULIANDAY(updated_at) - JULIANDAY(submitted_at)) * 24) as avg_hours
-           FROM orders${avg.clause}`
+        `SELECT COUNT(*)::int AS n, AVG(hrs) AS avg_hours,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY hrs) AS median_hours
+           FROM (
+             SELECT GREATEST(EXTRACT(EPOCH FROM (orders.updated_at::timestamptz - orders.submitted_at::timestamptz)) / 3600.0, 0) AS hrs
+               FROM orders${proc.clause}
+           ) t`
       )
-      .get(...avg.params);
-    const avg_processing_time_hours = avgRow.avg_hours ? Math.round(avgRow.avg_hours * 10) / 10 : null;
+      .get(...proc.params);
+    const round1 = (v) => (v == null ? null : Math.round(Number(v) * 10) / 10);
+    const avg_processing_time_hours = round1(procRow.avg_hours);
+    const median_processing_time_hours = round1(procRow.median_hours);
+    const processing_sample_size = procRow.n || 0;
+
+    // Sep 24, 2026: "Action Needed" — the counts an admin should see before
+    // anything else, each a click-through to the page/filter that resolves it.
+    // Every count goes through the same scope as the KPIs above.
+    const staleHours = STALE_HOURS_DEFAULT;
+    const staleCutoff = new Date(Date.now() - staleHours * 60 * 60 * 1000).toISOString();
+    const action_needed = {
+      pending_approvals: await countWhere("status = 'pending_management_approval'"),
+      holds: await countWhere("status IN ('on_hold','exception')"),
+      stale_orders: await countWhere(
+        `${NATIVE} AND status NOT IN (${STALE_EXCLUDED.map((s) => `'${s}'`).join(',')}) AND updated_at < ?`,
+        [staleCutoff]
+      ),
+      stale_hours: staleHours,
+      // Not division-scoped data, and their pages are admin/management only —
+      // a Team Lead gets neither.
+      failed_syncs: null,
+      pending_customers: null
+    };
+    if (!isTeamLead) {
+      if (req.user.role === 'admin') {
+        action_needed.failed_syncs = (
+          await db.prepare("SELECT COUNT(*) as c FROM zoho_sync_queue WHERE status = 'failed_permanent'").get()
+        ).c;
+      }
+      action_needed.pending_customers = (
+        await db.prepare("SELECT COUNT(*) as c FROM customers WHERE zoho_sync_status IN ('pending','failed')").get()
+      ).c;
+    }
 
     // Sep 21, 2026: a Team Lead's "what am I looking at" is their team's
     // names, not a division list — same purpose as the block below, different
@@ -118,8 +202,13 @@ exports.getSummary = async (req, res, next) => {
         completed_count,
         exception_count,
         avg_processing_time_hours,
+        median_processing_time_hours,
+        processing_sample_size,
         orders_today,
         orders_this_week,
+        action_needed,
+        status_groups: STATUS_GROUPS,
+        source,
         // What these numbers are counting. Without it a scoped manager cannot
         // tell a quiet day from a narrowed view.
         scope: scopeMeta
@@ -128,9 +217,66 @@ exports.getSummary = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+/**
+ * Sep 24, 2026: the dashboard's Recent Activity feed — the latest decisions and
+ * problems across the orders this viewer can see, newest first.
+ *
+ * A curated list of event types, not "everything": the audit trail holds 30+
+ * kinds of event and most (attachment added, items synced, tracking entered)
+ * are bookkeeping nobody wants scrolling past. These are the ones an admin
+ * would otherwise have to go looking for — approvals and rejections, holds,
+ * exceptions, Zoho sync failures and recoveries, completions.
+ *
+ * Native orders only (an imported order's events are Zoho history, dated to
+ * the day they happened in Zoho — they would flood a "recent" feed), scoped
+ * exactly like the list and KPIs, and bounded to 30 days so the scan stays
+ * cheap however large the audit trail grows.
+ */
+const ACTIVITY_EVENT_TYPES = [
+  'ORDER_SUBMITTED', 'ORDER_RESUBMITTED',
+  'MANAGEMENT_APPROVED', 'MANAGEMENT_REJECTED', 'MANAGEMENT_SENT_BACK',
+  'FINANCE_VERIFIED', 'FINANCE_REJECTED',
+  'EXCEPTION_SET', 'DISPATCH_HOLD', 'TRACKING_ON_HOLD',
+  'ZOHO_SYNC_FAILED_PERMANENT', 'ZOHO_SYNC_RECOVERED',
+  'ORDER_COMPLETED'
+];
+
+exports.getRecentActivity = async (req, res, next) => {
+  try {
+    const requested = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(requested) && requested > 0 ? Math.min(20, requested) : 8;
+
+    const { sql: scopeClause, params: scopeParams } = req.user.role === 'team_lead'
+      ? await teamScopeSql(req.user.id, 'o')
+      : scopeSql(await loadScope(req.user), 'o');
+
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const where = [
+      `e.event_type IN (${ACTIVITY_EVENT_TYPES.map(() => '?').join(',')})`,
+      "o.getmeds_order_id NOT LIKE 'ZOHO-%'",
+      'e.created_at >= ?'
+    ];
+    const params = [...ACTIVITY_EVENT_TYPES, since];
+    if (scopeClause) { where.push(scopeClause); params.push(...scopeParams); }
+
+    const rows = await db.prepare(`
+      SELECT e.id, e.event_type, e.actor_name, e.actor_role, e.created_at, e.notes,
+             o.id AS order_id, o.getmeds_order_id, c.name AS customer_name
+        FROM order_events e
+        JOIN orders o ON o.id = e.order_id
+        LEFT JOIN customers c ON c.id = o.customer_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY e.created_at DESC, e.id DESC
+       LIMIT ?
+    `).all(...params, limit);
+
+    res.json({ success: true, data: { events: rows } });
+  } catch (err) { next(err); }
+};
+
 exports.getAllOrders = async (req, res, next) => {
   try {
-    const { status, customer_type, date_from, date_to, search, medrep_id, unassigned } = req.query;
+    const { status, customer_type, date_from, date_to, search, medrep_id, unassigned, source, stale_hours } = req.query;
 
     // Sep 9, 2026: bounded. The Zoho import means this table is no longer a
     // few hundred rows — the live org has 65,000+ Sales Orders — so an
@@ -154,8 +300,35 @@ exports.getAllOrders = async (req, res, next) => {
 
     let where = [];
     let params = [];
-    if (status) { where.push('o.status = ?'); params.push(status); }
+    // Sep 24, 2026: `status` accepts a comma-separated list. A dashboard KPI
+    // such as "Exceptions" is several statuses, and its click-through has to
+    // filter the table to exactly what the card counted. A single value
+    // behaves exactly as before ('a' → `= 'a'`).
+    if (status) {
+      const statuses = String(status).split(',').map((s) => s.trim()).filter(Boolean);
+      if (statuses.length === 1) { where.push('o.status = ?'); params.push(statuses[0]); }
+      else if (statuses.length > 1) {
+        where.push(`o.status IN (${statuses.map(() => '?').join(',')})`);
+        params.push(...statuses);
+      }
+    }
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
+
+    // Sep 24, 2026: native vs Zoho-imported. Omitted = everything, as before —
+    // the approval queue and other callers rely on that.
+    if (source === 'native') where.push("o.getmeds_order_id NOT LIKE 'ZOHO-%'");
+    else if (source === 'imported') where.push("o.getmeds_order_id LIKE 'ZOHO-%'");
+
+    // Sep 24, 2026: "stuck" orders — the Action Needed strip's click-through.
+    // Same definition getSummary counts: native, not finished, untouched for N
+    // hours. Bounded so a typo can't ask for a negative window.
+    const staleN = parseInt(stale_hours, 10);
+    if (Number.isFinite(staleN) && staleN > 0) {
+      where.push(
+        "o.getmeds_order_id NOT LIKE 'ZOHO-%' AND o.status NOT IN ('draft','completed','cancelled','deleted') AND o.updated_at < ?"
+      );
+      params.push(new Date(Date.now() - staleN * 60 * 60 * 1000).toISOString());
+    }
 
     // Sep 9, 2026: date range, as a plain comparison on created_at rather than
     // DATE(o.created_at) BETWEEN ?. Two reasons, and the second is the real one:

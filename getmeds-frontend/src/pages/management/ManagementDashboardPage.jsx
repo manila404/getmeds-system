@@ -1,36 +1,55 @@
-import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  ShoppingBag, Clock, Truck, CheckCircle, AlertTriangle, RefreshCw, Eye,
-  DownloadCloud, Zap, ChevronLeft, ChevronRight, X
+  CalendarDays, Wallet, Truck, PackageCheck, AlertTriangle, Timer, RefreshCw, Eye,
+  Search, Download, ChevronLeft, ChevronRight, X, Hourglass
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
-import SyncProgressIndicator from '../../components/SyncProgressIndicator';
+import { formatHours } from '../../utils/formatDuration';
 import { useSyncJobs } from '../../context/SyncJobsContext';
 import { fetchZohoImportStatus } from '../../api/queries';
 import StockAnnouncementsBanner from '../../components/stock/StockAnnouncements';
+import OrderStatusBadge, { statusStyles } from '../../components/ui/OrderStatusBadge';
+import Skeleton from '../../components/ui/Skeleton';
+import KpiCard, { KpiCardSkeleton } from '../../components/dashboard/KpiCard';
+import ActionNeededStrip, { ActionNeededSkeleton } from '../../components/dashboard/ActionNeededStrip';
+import ZohoSyncStatus from '../../components/dashboard/ZohoSyncStatus';
+import RecentActivity from '../../components/dashboard/RecentActivity';
 
-const STATUS_COLORS = {
-  draft: 'bg-slate-100 text-slate-700 border border-slate-300',
-  submitted: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
-  validating: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
-  so_pending: 'bg-state-warning-light text-amber-900 border border-state-warning/30',
-  so_created: 'bg-getmeds-blue/10 text-getmeds-blue-dark border border-getmeds-blue/30',
-  waiting_for_payment: 'bg-state-warning-light text-amber-950 border border-state-warning font-semibold',
-  payment_verified: 'bg-pharmacy-green/15 text-pharmacy-green-dark border border-pharmacy-green/30',
-  ready_for_dispatch: 'bg-getmeds-blue/10 text-getmeds-blue-dark border border-getmeds-blue/30',
-  picking_packing: 'bg-indigo-50 text-indigo-700 border border-indigo-200',
-  dispatched: 'bg-getmeds-blue/15 text-getmeds-blue-dark border border-getmeds-blue/40',
-  tracking_shared: 'bg-teal-50 text-teal-800 border border-teal-200',
-  completed: 'bg-pharmacy-green/15 text-pharmacy-green-dark border border-pharmacy-green/40',
-  on_hold: 'bg-state-error-light text-red-800 border border-state-error/30',
-  exception: 'bg-state-error-light text-red-950 border border-state-error font-bold',
-  cancelled: 'bg-state-error-light text-red-700 border border-state-error/30',
-};
+/**
+ * Sep 24, 2026: the Management/Admin dashboard, restructured.
+ *
+ * Top to bottom: what needs attention (Action Needed) → how operations are
+ * doing (clickable KPIs) → the orders themselves, with stock news and recent
+ * activity alongside. Every filter — status, source, dates, rep, search, the
+ * "stuck" view — lives in the URL, so a filtered view can be shared, bookmarked
+ * and survives a refresh (they used to be component state, gone on reload).
+ *
+ * The dashboard defaults to NATIVE orders (raised in this app). The ~61,000
+ * orders adopted from Zoho are history, dated by Zoho — mixed in they swamped
+ * every count and made the processing-time average read 25,004h. They're one
+ * click away under "Imported history" / "All".
+ */
+
+// Sep 9, 2026: the Orders table is paginated because the Zoho import made it
+// unbounded — the live org has 65,000+ Sales Orders, and this page used to
+// render every row the API returned.
+const PAGE_SIZE = 25;
+
+// What "Export CSV" will fetch at most. The API caps a page at 5,000 for the
+// same reason the table is paginated; asking for more silently gets 5,000
+// back, so the number is stated here rather than discovered.
+const EXPORT_MAX = 5000;
+
+const SOURCES = [
+  { key: 'native', label: 'Current operations' },
+  { key: 'imported', label: 'Imported history' },
+  { key: 'all', label: 'All orders' }
+];
 
 /**
  * Sep 9, 2026: this column used to show the MedRep, and the Zoho import is
@@ -55,16 +74,6 @@ const salespersonOf = (order) => {
   return (parts.length > 1 ? parts.slice(1).join('|') : parts[0]).trim() || raw;
 };
 
-// Sep 9, 2026: the Orders table is paginated because the Zoho import made it
-// unbounded — the live org has 65,000+ Sales Orders, and this page used to
-// render every row the API returned.
-const PAGE_SIZE = 25;
-
-// What "Export CSV" will fetch at most. The API caps a page at 5,000 for the
-// same reason the table is paginated; asking for more silently gets 5,000
-// back, so the number is stated here rather than discovered.
-const EXPORT_MAX = 5000;
-
 /**
  * Sep 10, 2026: who owns this order IN THIS SYSTEM, as opposed to what Zoho
  * recorded on it.
@@ -81,79 +90,114 @@ const assignedTo = (order) => {
   return order.medrep_name || '—';
 };
 
+const statusLabel = (s) => String(s || '').replace(/_/g, ' ');
+
 const ManagementDashboardPage = () => {
-  // Sep 21, 2026: this component is now also mounted at /team-lead. That
-  // route is read-only by design — see App.jsx's route comment — so the two
-  // Zoho-sync buttons below (the only things on this page that write
-  // anything, even though it's only local rows) are hidden for this role,
-  // and the heading reads as a team view rather than a global one. Nothing
-  // else on this page changes: the KPI cards, status breakdown, filters, CSV
-  // export and the table's "View" link are all already read/navigate-only,
-  // and the API already returns this account's team instead of a division
-  // once the caller's role is 'team_lead' — see management.controller.js.
+  // Sep 21, 2026: this component is also mounted at /team-lead. That route is
+  // read-only by design — see App.jsx's route comment — so the Zoho sync
+  // controls (the only things on this page that write anything, even though
+  // it's only local rows) are hidden for that role, and the heading reads as a
+  // team view rather than a global one. The API already returns this
+  // account's team instead of a division once the caller's role is 'team_lead'.
   const { user } = useAuth();
-  const isTeamLead = (user?.role || '').toLowerCase() === 'team_lead';
+  const role = (user?.role || '').toLowerCase();
+  const isTeamLead = role === 'team_lead';
+  const isAdmin = role === 'admin';
 
-  const [statusFilter, setStatusFilter] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  // Sep 10, 2026: '' = everyone, a number = that rep, 'unassigned' = still
-  // sitting with the admin who ran the Zoho import.
-  const [medrepFilter, setMedrepFilter] = useState('');
-  const [page, setPage] = useState(1);
+  // ── Filters, held in the URL ────────────────────────────────────────────
+  const [sp, setSp] = useSearchParams();
+  const statusFilter = sp.get('status') || '';
+  const source = SOURCES.some((s) => s.key === sp.get('source')) ? sp.get('source') : 'native';
+  const dateFrom = sp.get('from') || '';
+  const dateTo = sp.get('to') || '';
+  // '' = everyone, a number = that rep, 'unassigned' = still with the admin
+  // who ran the Zoho import.
+  const medrepFilter = sp.get('medrep') || '';
+  const staleHours = parseInt(sp.get('stale'), 10) || 0;
+  const searchQ = sp.get('q') || '';
+  const page = Math.max(1, parseInt(sp.get('page'), 10) || 1);
 
-  // Every filter resets to page 1. Without this, narrowing a filter while on
-  // page 12 leaves you on an empty page that looks like "no results" rather
-  // than "you are past the end of a shorter list".
-  const applyFilter = (fn) => (value) => { fn(value); setPage(1); };
+  // Every filter change resets to page 1 (unless it IS a page change) — narrowing
+  // a filter while on page 12 would otherwise leave you on an empty page that
+  // reads as "no results" rather than "past the end of a shorter list".
+  const update = useCallback((changes, { replace = false } = {}) => {
+    setSp((prev) => {
+      const next = new URLSearchParams(prev);
+      Object.entries(changes).forEach(([k, v]) => {
+        if (v === '' || v == null || v === false) next.delete(k);
+        else next.set(k, String(v));
+      });
+      if (!('page' in changes)) next.delete('page');
+      return next;
+    }, { replace });
+  }, [setSp]);
+
+  // Search is typed locally and written to the URL after a pause, so it doesn't
+  // fire a request (or a history entry) per keystroke.
+  const [searchInput, setSearchInput] = useState(searchQ);
+  useEffect(() => { setSearchInput(searchQ); }, [searchQ]);
+  useEffect(() => {
+    if (searchInput.trim() === searchQ) return undefined;
+    const t = setTimeout(() => update({ q: searchInput.trim() }, { replace: true }), 350);
+    return () => clearTimeout(t);
+  }, [searchInput, searchQ, update]);
+
+  const tableRef = useRef(null);
+  const scrollToTable = () => tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   const orderParams = () => {
     const p = new URLSearchParams();
+    p.set('source', source);
     if (statusFilter) p.set('status', statusFilter);
     if (dateFrom) p.set('date_from', dateFrom);
     if (dateTo) p.set('date_to', dateTo);
     if (medrepFilter === 'unassigned') p.set('unassigned', 'true');
     else if (medrepFilter) p.set('medrep_id', medrepFilter);
+    if (searchQ) p.set('search', searchQ);
+    if (staleHours) p.set('stale_hours', String(staleHours));
     return p;
   };
 
+  // ── Zoho sync ───────────────────────────────────────────────────────────
   // Sep 9, 2026: the Sales Order import. The job itself is tracked above the
   // router (see context/SyncJobsContext.jsx) precisely so that navigating away
   // from this page mid-import does not abandon it — an import of several
-  // hundred orders runs for minutes, which is far longer than anyone will sit
-  // on one screen.
+  // hundred orders runs for minutes, far longer than anyone sits on one screen.
   const { startSync, jobFor, isRunning, isStarting } = useSyncJobs();
   const importJob = jobFor('salesorders');
   const importBusy = isRunning('salesorders') || isStarting;
 
   const { data: importStatusRes } = useQuery({
     queryKey: ['zoho-import-status'],
-    queryFn: fetchZohoImportStatus
+    queryFn: fetchZohoImportStatus,
+    enabled: !isTeamLead
   });
   const importStatus = importStatusRes?.data || {};
 
+  // ── Data ────────────────────────────────────────────────────────────────
   const { data: summaryRes, isLoading: loadingStats, refetch } = useQuery({
-    queryKey: ['management-summary'],
-    queryFn: () => client.get('/api/management/summary').then(r => r.data),
+    queryKey: ['management-summary', source],
+    queryFn: () => client.get(`/api/management/summary?source=${source}`).then((r) => r.data),
     refetchInterval: 60000
   });
   const stats = summaryRes?.data || {};
+  const groups = stats.status_groups || {};
 
   const { data: ordersRes, isLoading: loadingOrders, isFetching: fetchingOrders } = useQuery({
-    queryKey: ['management-orders', statusFilter, dateFrom, dateTo, medrepFilter, page],
+    queryKey: ['management-orders', source, statusFilter, dateFrom, dateTo, medrepFilter, searchQ, staleHours, page],
     queryFn: () => {
       const p = orderParams();
       p.set('page', String(page));
       p.set('limit', String(PAGE_SIZE));
-      return client.get(`/api/management/orders?${p}`).then(r => r.data);
+      return client.get(`/api/management/orders?${p}`).then((r) => r.data);
     },
-    // Sep 9, 2026: keeps the previous page on screen while the next one loads,
-    // instead of blanking the table to a spinner on every page click.
+    // Keeps the previous page on screen while the next one loads, instead of
+    // blanking the table on every page click.
     placeholderData: (prev) => prev
   });
   const orders = ordersRes?.data?.orders || [];
   const pagination = ordersRes?.data?.pagination || { total: 0, page: 1, pages: 1 };
-  const hasFilters = !!(statusFilter || dateFrom || dateTo || medrepFilter);
+  const hasFilters = !!(statusFilter || dateFrom || dateTo || medrepFilter || searchQ || staleHours);
 
   // The reps to filter by. Same endpoint the order form's "create this order
   // for" picker uses — enabled for management and admin, empty for anyone else.
@@ -164,39 +208,63 @@ const ManagementDashboardPage = () => {
   const medrepOptions = medrepsRes?.data?.medreps || [];
 
   const clearFilters = () => {
-    setStatusFilter('');
-    setDateFrom('');
-    setDateTo('');
-    setMedrepFilter('');
-    setPage(1);
+    setSearchInput('');
+    setSp((prev) => {
+      const next = new URLSearchParams();
+      if (prev.get('source')) next.set('source', prev.get('source'));
+      return next;
+    });
   };
 
-  const statCards = [
-    { title: 'Total Orders', value: stats.total_orders || 0, icon: ShoppingBag, color: 'blue', sub: `${stats.orders_today || 0} today` },
-    { title: 'Pending Payment', value: stats.pending_payment_count || 0, icon: Clock, color: 'orange', sub: 'Awaiting Finance' },
-    { title: 'Ready for Dispatch', value: stats.ready_dispatch_count || 0, icon: Truck, color: 'indigo', sub: 'In queue' },
-    { title: 'Completed', value: stats.completed_count || 0, icon: CheckCircle, color: 'green', sub: 'All time' },
-    { title: 'Exceptions / On Hold', value: stats.exception_count || 0, icon: AlertTriangle, color: 'red', sub: 'Need attention' },
-    {
-      title: 'Avg Processing Time',
-      value: stats.avg_processing_time_hours != null ? `${stats.avg_processing_time_hours}h` : 'N/A',
-      icon: Clock, color: 'purple', sub: 'Submit → Complete'
-    },
+  // ── KPI cards → filters ────────────────────────────────────────────────
+  // A card filters the table to the SAME status list it counted (the API sends
+  // it back as status_groups), so the number on the card and the total above
+  // the table can't disagree. Clicking the active card again clears it.
+  const groupKey = (key) => (groups[key] || []).join(',');
+  const isGroupActive = (key) => !!groups[key] && statusFilter === groupKey(key) && !staleHours;
+  const toggleGroup = (key) => {
+    if (!groups[key]) return;
+    update({ status: isGroupActive(key) ? '' : groupKey(key), stale: '' });
+    if (!isGroupActive(key)) scrollToTable();
+  };
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayActive = dateFrom === todayIso && dateTo === todayIso;
+  const toggleToday = () => {
+    update(todayActive ? { from: '', to: '' } : { from: todayIso, to: todayIso });
+    if (!todayActive) scrollToTable();
+  };
+
+  const showStale = () => {
+    // "Stuck" is defined for native orders only (see getSummary), so this also
+    // returns the view to the default source.
+    update({ stale: stats.action_needed?.stale_hours || 48, status: '', source: '' });
+    scrollToTable();
+  };
+
+  const processing = (() => {
+    if (source === 'imported') return { value: '—', sub: 'Not tracked for imported orders', hint: undefined };
+    if (stats.median_processing_time_hours == null) return { value: '—', sub: 'No completed orders yet', hint: undefined };
+    return {
+      value: formatHours(stats.median_processing_time_hours),
+      sub: 'Median · submit → last update',
+      hint:
+        `Median of ${(stats.processing_sample_size || 0).toLocaleString()} orders raised in this app. ` +
+        `Average: ${formatHours(stats.avg_processing_time_hours)} (a few slow orders pull it above the typical case). ` +
+        `Orders imported from Zoho are excluded — their dates come from Zoho, not this app.`
+    };
+  })();
+
+  const kpis = [
+    { key: 'today', title: 'Orders Today', value: (stats.orders_today || 0).toLocaleString(), sub: `${(stats.orders_this_week || 0).toLocaleString()} this week`, icon: CalendarDays, tone: 'blue', active: todayActive, onClick: toggleToday, hint: 'Show orders created today' },
+    { key: 'pending_payment', title: 'Pending Payment', value: (stats.pending_payment_count || 0).toLocaleString(), sub: 'Invoiced, awaiting payment', icon: Wallet, tone: 'warning', active: isGroupActive('pending_payment'), onClick: () => toggleGroup('pending_payment') },
+    { key: 'ready_dispatch', title: 'Ready for Dispatch', value: (stats.ready_dispatch_count || 0).toLocaleString(), sub: 'Packing or awaiting pickup', icon: Truck, tone: 'blue', active: isGroupActive('ready_dispatch'), onClick: () => toggleGroup('ready_dispatch') },
+    { key: 'in_transit', title: 'In Transit', value: (stats.dispatched_count || 0).toLocaleString(), sub: 'Dispatched, not yet completed', icon: PackageCheck, tone: 'success', active: isGroupActive('in_transit'), onClick: () => toggleGroup('in_transit') },
+    { key: 'exceptions', title: 'Exceptions / On Hold', value: (stats.exception_count || 0).toLocaleString(), sub: 'Held, failed or cancelled', icon: AlertTriangle, tone: 'danger', active: isGroupActive('exceptions'), onClick: () => toggleGroup('exceptions') },
+    { key: 'processing', title: 'Processing Time', value: processing.value, sub: processing.sub, icon: Timer, tone: 'neutral', hint: processing.hint }
   ];
 
-  const colorMap = {
-    blue: 'bg-getmeds-blue/15 text-getmeds-blue',
-    orange: 'bg-amber-100 text-amber-800',
-    indigo: 'bg-indigo-100 text-indigo-800',
-    green: 'bg-pharmacy-green/15 text-pharmacy-green',
-    red: 'bg-red-100 text-red-800',
-    purple: 'bg-purple-100 text-purple-800',
-  };
-  const iconColorMap = {
-    blue: 'text-getmeds-blue', orange: 'text-amber-600', indigo: 'text-indigo-600',
-    green: 'text-pharmacy-green', red: 'text-red-600', purple: 'text-purple-600',
-  };
-
+  // ── Export ──────────────────────────────────────────────────────────────
   const [exporting, setExporting] = useState(false);
 
   /**
@@ -221,11 +289,11 @@ const ManagementDashboardPage = () => {
       // Quote every field: customer names contain commas, and an unquoted one
       // silently shifts every later column in that row.
       const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-      const rows = all.map(o => [
+      const rows = all.map((o) => [
         o.getmeds_order_id, o.customer_name, salespersonOf(o), assignedTo(o), o.status,
         o.total_amount, o.payment_status || '', o.created_at
       ]);
-      const csv = [headers, ...rows].map(r => r.map(esc).join(',')).join('\n');
+      const csv = [headers, ...rows].map((r) => r.map(esc).join(',')).join('\n');
 
       const blob = new Blob([csv], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
@@ -245,299 +313,300 @@ const ManagementDashboardPage = () => {
     }
   };
 
-  const statusByStatus = stats.orders_by_status || {};
-  const statusChartData = Object.entries(statusByStatus).map(([s, c]) => ({ status: s, count: c }))
+  const statusPills = Object.entries(stats.orders_by_status || {})
+    .map(([s, c]) => ({ status: s, count: c }))
     .sort((a, b) => b.count - a.count);
+
+  const inputCls = 'px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs text-ink-primary bg-white focus:outline-none focus:ring-2 focus:ring-getmeds-blue/40 focus:border-getmeds-blue';
 
   return (
     <div className="space-y-6">
-      {/* Sep 15, 2026: what Dispatch has said about stock — nothing when quiet. */}
-      <StockAnnouncementsBanner />
-      <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+      {/* ── Header ───────────────────────────────────────────────────────── */}
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-ink-primary">
+          <h1 className="text-2xl font-semibold text-ink-primary tracking-tight">
             {isTeamLead ? 'My Team' : 'Management Dashboard'}
           </h1>
           <p className="text-sm text-ink-secondary mt-1">
             {isTeamLead
-              ? 'Real-time overview of your team\'s orders and KPIs — view only.'
-              : 'Real-time overview of all orders and KPIs.'}
+              ? "Real-time overview of your team's orders and KPIs — view only."
+              : 'Real-time overview of orders and KPIs.'}
           </p>
         </div>
 
-        <div className="flex flex-col items-start md:items-end gap-1.5">
-          <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary">
-              <RefreshCw className="w-4 h-4" /> Refresh
-            </button>
-
-            {/* Sep 21, 2026: the only two controls on this page that write
-                anything — a Team Lead's view is read only, full stop, so
-                these (and the sync status they report on below) don't show
-                for that role. See this component's own top-of-file note. */}
-            {!isTeamLead && (
-              <>
-                <button
-                  onClick={() => startSync('salesorders', 'quick')}
-                  disabled={importBusy}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
-                  title="Fast — only the Sales Orders created or changed in Zoho since the last import (read-only)"
-                >
-                  <Zap size={15} />
-                  Quick Sync Orders
-                </button>
-
-                <button
-                  onClick={() => startSync('salesorders', 'full')}
-                  disabled={importBusy}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-xs cursor-pointer disabled:opacity-50"
-                  title={
-                    `Pulls Sales Orders straight from Zoho — including ones raised in Zoho rather than here — and rebuilds ` +
-                    `each order's trail from Zoho's own history. Read-only: nothing is ever written to Zoho. ` +
-                    `Up to ${importStatus.per_run_limit || 500} per run; run it again to continue a large history.`
-                  }
-                >
-                  <DownloadCloud size={15} />
-                  Retrieve All Sales Orders
-                </button>
-              </>
-            )}
-          </div>
-
-          {!isTeamLead && (
-            <>
-              <SyncProgressIndicator
-                job={importJob}
-                labels={{ full: 'Retrieving Sales Orders from Zoho', quick: 'Quick Sync (Sales Orders)' }}
-              />
-
-              {!importJob && (importStatus.imported_orders > 0 || importStatus.last_full_import_at) && (
-                <p className="text-[11px] text-ink-secondary text-right">
-                  {(importStatus.imported_orders || 0).toLocaleString()} order(s) imported from Zoho
-                  {importStatus.zoho_log_entries
-                    ? `, ${importStatus.zoho_log_entries.toLocaleString()} Zoho log entries on file`
-                    : ''}
-                  {importStatus.last_full_import_at ? ` — last full import ${formatPHT(importStatus.last_full_import_at)}` : ''}
-                  {/* The detail backlog, stated rather than left to be discovered.
-                      An order here with no line items is not broken — its summary
-                      came from Zoho's list and its detail has not been fetched
-                      yet. Opening the order pulls it on demand; so does another
-                      run of the import. */}
-                  {importStatus.awaiting_detail > 0 && (
-                    <>
-                      <br />
-                      {importStatus.awaiting_detail.toLocaleString()} still awaiting full detail (line items + Zoho
-                      history) — {importStatus.per_run_limit?.toLocaleString?.() || importStatus.per_run_limit} per run,
-                      or pulled on demand when the order is opened.
-                    </>
-                  )}
-                </p>
-              )}
-            </>
-          )}
-        </div>
+        {!isTeamLead && (
+          <ZohoSyncStatus
+            importStatus={importStatus}
+            importJob={importJob}
+            importBusy={importBusy}
+            failedSyncs={stats.action_needed?.failed_syncs ?? null}
+            canViewHealth={isAdmin}
+            onSync={(mode) => startSync('salesorders', mode)}
+          />
+        )}
       </div>
 
-      {/* KPI Cards */}
+      {/* ── Needs attention ──────────────────────────────────────────────── */}
       {loadingStats ? (
-        <div className="flex justify-center py-8"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-getmeds-blue" /></div>
+        <ActionNeededSkeleton />
       ) : (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-          {statCards.map((card, i) => {
-            const Icon = card.icon;
-            return (
-              <div key={i} className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-                <div className="inline-flex mb-3">
-                  <Icon className={`w-7 h-7 ${iconColorMap[card.color]}`} />
-                </div>
-                <p className="text-2xl font-bold text-ink-primary">{card.value}</p>
-                <p className="text-xs font-semibold text-ink-primary mt-0.5">{card.title}</p>
-                <p className="text-xs text-ink-secondary mt-0.5">{card.sub}</p>
-              </div>
-            );
-          })}
-        </div>
+        <ActionNeededStrip data={stats.action_needed} isTeamLead={isTeamLead} onShowStale={showStale} />
       )}
 
-      {/* Orders by status breakdown */}
-      {statusChartData.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-          <h2 className="text-sm font-semibold text-ink-primary mb-3">Orders by Status</h2>
-          <div className="flex flex-wrap gap-2">
-            {statusChartData.map(({ status, count }) => (
-              <button
-                key={status}
-                onClick={() => applyFilter(setStatusFilter)(status === statusFilter ? '' : status)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${statusFilter === status ? 'ring-2 ring-getmeds-blue' : ''} ${STATUS_COLORS[status] || 'bg-slate-100 text-slate-700'}`}
-              >
-                <span className="capitalize">{status.replace(/_/g, ' ')}</span>
-                <span className="font-bold">{count}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Orders Table */}
-      <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
-        <div className="px-4 py-3 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          <h2 className="text-sm font-semibold text-ink-primary whitespace-nowrap">
-            All Orders
-            {statusFilter && <span className="ml-1 text-getmeds-blue capitalize">· {statusFilter.replace(/_/g, ' ')}</span>}
-            <span className="ml-2 font-normal text-ink-secondary">
-              {pagination.total.toLocaleString()} total
-            </span>
-          </h2>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Date range. Filters on the order's created date — the same value
-                the Date column shows — so what is filtered and what is read
-                are the same thing. */}
-            {/* Sep 10, 2026: "show me this rep's orders" — the only practical
-                way to CHECK that an Order Ownership assignment actually
-                landed. */}
-            <select
-              value={medrepFilter}
-              onChange={(e) => applyFilter(setMedrepFilter)(e.target.value)}
-              className="px-2 py-1 border border-slate-200 rounded text-xs text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
-              title="Filter by the MedRep an order is assigned to"
+      {/* ── Scope bar: what the numbers below are counting ──────────────── */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div role="tablist" aria-label="Which orders to show" className="inline-flex rounded-xl border border-slate-200 bg-slate-100/70 p-1 self-start">
+          {SOURCES.map((s) => (
+            <button
+              key={s.key}
+              role="tab"
+              aria-selected={source === s.key}
+              onClick={() => update({ source: s.key === 'native' ? '' : s.key, status: '', stale: '' })}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                source === s.key ? 'bg-white text-ink-primary shadow-sm' : 'text-ink-secondary hover:text-ink-primary'
+              }`}
             >
-              <option value="">All MedReps</option>
-              <option value="unassigned">Unassigned (still with the importer)</option>
-              {medrepOptions.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display_name || m.name}
-                </option>
-              ))}
-            </select>
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-200 bg-white rounded-lg text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary self-start sm:self-auto"
+        >
+          <RefreshCw className="w-3.5 h-3.5" /> Refresh
+        </button>
+      </div>
 
-            <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-              From
-              <input
-                type="date"
-                value={dateFrom}
-                max={dateTo || undefined}
-                onChange={(e) => applyFilter(setDateFrom)(e.target.value)}
-                className="px-2 py-1 border border-slate-200 rounded text-xs text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
-              />
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-              To
-              <input
-                type="date"
-                value={dateTo}
-                min={dateFrom || undefined}
-                onChange={(e) => applyFilter(setDateTo)(e.target.value)}
-                className="px-2 py-1 border border-slate-200 rounded text-xs text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
-              />
-            </label>
+      {/* ── KPIs ─────────────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+        {loadingStats
+          ? [0, 1, 2, 3, 4, 5].map((i) => <KpiCardSkeleton key={i} />)
+          : kpis.map(({ key, ...card }) => <KpiCard key={key} {...card} />)}
+      </div>
 
-            {hasFilters && (
-              <button
-                onClick={clearFilters}
-                className="inline-flex items-center gap-1 px-2 py-1 text-xs text-ink-secondary hover:text-ink-primary border border-slate-200 rounded hover:bg-surface"
-              >
-                <X className="w-3 h-3" /> Clear
-              </button>
+      {/* ── Orders + side panel ──────────────────────────────────────────── */}
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px] items-start">
+        <div className="space-y-4 min-w-0">
+          {/* Orders by status — quick filters for the table below. */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-ink-primary">Orders by status</h2>
+              <span className="text-[11px] text-ink-secondary">Click a status to filter the table</span>
+            </div>
+            {loadingStats ? (
+              <div className="flex flex-wrap gap-2">
+                {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-7 w-28 rounded-full" />)}
+              </div>
+            ) : statusPills.length === 0 ? (
+              <p className="text-xs text-ink-secondary">No orders in this view.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {statusPills.map(({ status, count }) => {
+                  const active = statusFilter === status && !staleHours;
+                  return (
+                    <button
+                      key={status}
+                      aria-pressed={active}
+                      onClick={() => update({ status: active ? '' : status, stale: '' })}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-all hover:shadow-sm ${
+                        active ? 'ring-2 ring-getmeds-blue ring-offset-1' : ''
+                      } ${statusStyles[status] || 'bg-slate-100 text-slate-700 border-slate-200'}`}
+                    >
+                      <span className="capitalize">{statusLabel(status)}</span>
+                      <span className="font-bold tabular-nums">{count.toLocaleString()}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Orders table */}
+          <div ref={tableRef} className="bg-white shadow-sm rounded-xl overflow-hidden border border-slate-200 scroll-mt-4">
+            <div className="px-4 py-3 border-b border-slate-200 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm font-semibold text-ink-primary whitespace-nowrap">
+                  Orders
+                  <span className="ml-2 font-normal text-ink-secondary">{pagination.total.toLocaleString()} total</span>
+                </h2>
+
+                {statusFilter && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-getmeds-blue/10 px-2.5 py-0.5 text-[11px] font-semibold text-getmeds-blue-dark">
+                    {statusFilter.includes(',') ? `${statusFilter.split(',').length} statuses` : statusLabel(statusFilter)}
+                    <button aria-label="Clear status filter" onClick={() => update({ status: '' })}><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {staleHours > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-state-warning-light px-2.5 py-0.5 text-[11px] font-semibold text-amber-800">
+                    <Hourglass className="w-3 h-3" /> Stuck over {staleHours}h
+                    <button aria-label="Clear stuck filter" onClick={() => update({ stale: '' })}><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+
+                <div className="ml-auto flex flex-wrap items-center gap-2">
+                  {hasFilters && (
+                    <button onClick={clearFilters} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-ink-secondary hover:text-ink-primary border border-slate-200 rounded-lg hover:bg-surface">
+                      <X className="w-3 h-3" /> Clear filters
+                    </button>
+                  )}
+                  <button
+                    onClick={downloadCSV}
+                    disabled={exporting}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg text-ink-secondary hover:bg-surface disabled:opacity-50"
+                    title="Exports every order matching the current filters, not just this page"
+                  >
+                    <Download className="w-3.5 h-3.5" /> {exporting ? 'Preparing…' : 'Export CSV'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                  <input
+                    type="search"
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                    placeholder="Search order ID, customer or SO number"
+                    className={`${inputCls} pl-8 w-64`}
+                  />
+                </label>
+
+                {/* Sep 10, 2026: "show me this rep's orders" — the only practical
+                    way to CHECK that an Order Ownership assignment landed. */}
+                <select
+                  value={medrepFilter}
+                  onChange={(e) => update({ medrep: e.target.value })}
+                  className={inputCls}
+                  title="Filter by the MedRep an order is assigned to"
+                >
+                  <option value="">All MedReps</option>
+                  <option value="unassigned">Unassigned (still with the importer)</option>
+                  {medrepOptions.map((m) => (
+                    <option key={m.id} value={m.id}>{m.display_name || m.name}</option>
+                  ))}
+                </select>
+
+                {/* Filters on the order's created date — the same value the Date
+                    column shows — so what is filtered and what is read are the
+                    same thing. */}
+                <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+                  From
+                  <input type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => update({ from: e.target.value })} className={inputCls} />
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+                  To
+                  <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => update({ to: e.target.value })} className={inputCls} />
+                </label>
+              </div>
+            </div>
+
+            {loadingOrders ? (
+              <div className="p-4 space-y-2.5">
+                {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-10" />)}
+              </div>
+            ) : orders.length === 0 ? (
+              <div className="text-center py-14 px-4">
+                <p className="text-sm font-semibold text-ink-primary">
+                  {hasFilters ? 'No orders match these filters' : 'No orders here yet'}
+                </p>
+                <p className="text-xs text-ink-secondary mt-1">
+                  {hasFilters
+                    ? 'Try widening the date range or clearing a filter.'
+                    : source === 'imported' ? 'Nothing has been imported from Zoho.' : 'Orders raised in this app will appear here.'}
+                </p>
+                {hasFilters && (
+                  <button onClick={clearFilters} className="mt-3 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-getmeds-blue border border-getmeds-blue/30 rounded-lg hover:bg-getmeds-blue/5">
+                    Clear filters
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 [&_th]:px-3 [&_td]:px-3">
+                  <thead className="bg-surface">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Order ID</th>
+                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Customer</th>
+                      <th className="hidden min-[1800px]:table-cell px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Salesperson</th>
+                      {/* Sep 10, 2026: Salesperson is what ZOHO recorded; Assigned
+                          To is who owns it HERE. Both are shown because they answer
+                          different questions — the second is the one Order
+                          Ownership changes. */}
+                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Assigned To</th>
+                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Status</th>
+                      <th className="px-4 py-3 text-right text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Total</th>
+                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-ink-secondary uppercase tracking-wide">Date</th>
+                      <th className="px-4 py-3" />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {orders.map((order) => (
+                      <tr key={order.id} className="hover:bg-surface transition-colors">
+                        <td className="px-4 py-3 text-sm font-mono font-semibold text-getmeds-blue whitespace-nowrap">{order.getmeds_order_id}</td>
+                        <td className="px-4 py-3 text-sm font-medium text-ink-primary max-w-[14rem] truncate" title={order.customer_name}>{order.customer_name}</td>
+                        <td className="hidden min-[1800px]:table-cell px-4 py-3 text-sm text-ink-secondary whitespace-nowrap">{salespersonOf(order)}</td>
+                        <td className="px-4 py-3 text-sm text-ink-secondary whitespace-nowrap">{assignedTo(order)}</td>
+                        <td className="px-4 py-3 whitespace-nowrap"><OrderStatusBadge status={order.status} /></td>
+                        <td className="px-4 py-3 text-sm font-semibold text-ink-primary text-right tabular-nums whitespace-nowrap">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+                        <td className="px-4 py-3 text-xs text-ink-secondary whitespace-nowrap">{formatPHT(order.created_at, 'date')}</td>
+                        <td className="px-4 py-3 text-right">
+                          <Link to={`/orders/${order.id}`} className="inline-flex items-center gap-1 text-xs text-getmeds-blue hover:text-getmeds-blue-dark font-semibold">
+                            <Eye className="w-3.5 h-3.5" /> View
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
 
-            <button
-              onClick={downloadCSV}
-              disabled={exporting}
-              className="px-2.5 py-1 text-xs border border-slate-200 rounded text-ink-secondary hover:bg-surface disabled:opacity-50"
-              title="Exports every order matching the current filters, not just this page"
-            >
-              {exporting ? 'Preparing…' : '⬇ Export CSV'}
-            </button>
+            {/* Pager. Rendered whenever there is more than one page — and outside
+                the loading branch above, so it does not vanish and re-appear on
+                every page click. */}
+            {pagination.pages > 1 && (
+              <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between gap-3">
+                <p className="text-xs text-ink-secondary">
+                  Showing{' '}
+                  <span className="font-semibold text-ink-primary">
+                    {((pagination.page - 1) * PAGE_SIZE + 1).toLocaleString()}–
+                    {Math.min(pagination.page * PAGE_SIZE, pagination.total).toLocaleString()}
+                  </span>{' '}
+                  of {pagination.total.toLocaleString()}
+                  {fetchingOrders && <span className="ml-2">updating…</span>}
+                </p>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => update({ page: Math.max(1, page - 1) })}
+                    disabled={pagination.page <= 1}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs border border-slate-200 rounded-lg text-ink-secondary hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" /> Previous
+                  </button>
+                  <span className="text-xs text-ink-secondary">
+                    Page <span className="font-semibold text-ink-primary">{pagination.page.toLocaleString()}</span> of {pagination.pages.toLocaleString()}
+                  </span>
+                  <button
+                    onClick={() => update({ page: Math.min(pagination.pages, page + 1) })}
+                    disabled={pagination.page >= pagination.pages}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs border border-slate-200 rounded-lg text-ink-secondary hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
-        {loadingOrders ? (
-          <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-getmeds-blue" /></div>
-        ) : orders.length === 0 ? (
-          <div className="text-center py-12 text-ink-secondary text-sm">
-            {hasFilters ? 'No orders match these filters.' : 'No orders found.'}
-          </div>
-        ) : (
-          <table className="min-w-full divide-y divide-slate-200">
-            <thead className="bg-surface">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Order ID</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Customer</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Salesperson</th>
-                {/* Sep 10, 2026: Salesperson is what ZOHO recorded; Assigned To
-                    is who owns it HERE. Swapping the MedRep column for
-                    Salesperson left management unable to see the second, which
-                    is the one the Order Ownership screen changes. Both are
-                    shown because they answer different questions. */}
-                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Assigned To</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Total</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Date</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-ink-secondary uppercase"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 bg-white">
-              {orders.map(order => (
-                <tr key={order.id} className="hover:bg-surface transition-colors">
-                  <td className="px-4 py-3 text-sm font-mono font-semibold text-getmeds-blue">{order.getmeds_order_id}</td>
-                  <td className="px-4 py-3 text-sm font-medium text-ink-primary">{order.customer_name}</td>
-                  <td className="px-4 py-3 text-sm text-ink-secondary">{salespersonOf(order)}</td>
-                  <td className="px-4 py-3 text-sm text-ink-secondary">{assignedTo(order)}</td>
-                  <td className="px-4 py-3">
-                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${STATUS_COLORS[order.status] || 'bg-slate-100 text-slate-700'}`}>
-                      {order.status?.replace(/_/g, ' ')}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-sm font-semibold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
-                  <td className="px-4 py-3 text-xs text-ink-secondary">{formatPHT(order.created_at, 'date')}</td>
-                  <td className="px-4 py-3 text-right">
-                    <Link to={`/orders/${order.id}`} className="inline-flex items-center gap-1 text-xs text-getmeds-blue hover:text-getmeds-blue-dark font-semibold">
-                      <Eye className="w-3.5 h-3.5" /> View
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
 
-        {/* Pager. Rendered whenever there is more than one page — and outside
-            the loading branch above, so it does not vanish and re-appear on
-            every page click. */}
-        {pagination.pages > 1 && (
-          <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between gap-3">
-            <p className="text-xs text-ink-secondary">
-              Showing{' '}
-              <span className="font-semibold text-ink-primary">
-                {((pagination.page - 1) * PAGE_SIZE + 1).toLocaleString()}–
-                {Math.min(pagination.page * PAGE_SIZE, pagination.total).toLocaleString()}
-              </span>{' '}
-              of {pagination.total.toLocaleString()}
-              {fetchingOrders && <span className="ml-2 text-ink-secondary">updating…</span>}
-            </p>
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={pagination.page <= 1}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs border border-slate-200 rounded text-ink-secondary hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <ChevronLeft className="w-3.5 h-3.5" /> Previous
-              </button>
-              <span className="text-xs text-ink-secondary">
-                Page <span className="font-semibold text-ink-primary">{pagination.page.toLocaleString()}</span>{' '}
-                of {pagination.pages.toLocaleString()}
-              </span>
-              <button
-                onClick={() => setPage((p) => Math.min(pagination.pages, p + 1))}
-                disabled={pagination.page >= pagination.pages}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs border border-slate-200 rounded text-ink-secondary hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Next <ChevronRight className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Side panel: stock news (was the full-width banner on top) + activity. */}
+        <aside className="space-y-4 min-w-0">
+          <StockAnnouncementsBanner variant="panel" />
+          <RecentActivity />
+        </aside>
       </div>
     </div>
   );

@@ -12,5 +12,7 @@ router.use(requireRole('management', 'admin', 'team_lead'));
 
 router.get('/summary', c.getSummary);
 router.get('/orders', c.getAllOrders);
+// Sep 24, 2026: the dashboard's Recent Activity feed — same scoping as the two above.
+router.get('/activity', c.getRecentActivity);
 
 module.exports = router;
