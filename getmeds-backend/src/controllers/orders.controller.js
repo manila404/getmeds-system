@@ -629,12 +629,32 @@ function canActOnOrder(user, order) {
 function canEditOrder(user, order) {
   if (!canActOnOrder(user, order)) return false;
   const role = (user.role || '').toLowerCase();
-  // Sep 22, 2026: 'team_lead' added — safe because requireOrderScope (the
-  // :id param middleware in orders.routes.js) already refused this request
-  // before it ever reached the controller unless `order` belongs to one of
-  // this team lead's own MedReps (see teamScopeService.js). Nothing here
-  // re-checks that; it doesn't need to.
-  return role === 'medrep' || role === 'admin' || role === 'management' || role === 'team_lead';
+  // Sep 22, 2026: 'team_lead' added. Sep 24, 2026: and narrowed. The Sep 22
+  // version returned true for every Team Lead who got past requireOrderScope,
+  // on the reasoning that scope had already limited them to their own team's
+  // orders. That confused two different questions: scope answers "may you SEE
+  // this order" (every order raised by anyone on your team), not "may you
+  // CHANGE it". It let a Team Lead rewrite the details and line items of any
+  // team member's order that hadn't reached Zoho yet — a role built to be
+  // view-only on other people's orders. A Team Lead edits only what is theirs:
+  // an order they raised, or one that is theirs outright. See
+  // isTeamLeadsOwnOrder.
+  if (role === 'team_lead') return isTeamLeadsOwnOrder(user, order);
+  return role === 'medrep' || role === 'admin' || role === 'management';
+}
+
+/**
+ * Sep 24, 2026: is this order the Team Lead's own to act on?
+ *
+ * Two ways it can be: they raised it for a team member (raised_by_id — the
+ * same "who filled it in" field a MedRep raising for a colleague uses), or
+ * they raised it for themselves (medrep_id is them, and raised_by_id stays
+ * NULL because the two don't differ — see canActOnOrder's own note). Anything
+ * else on their team is visible to them and nothing more.
+ */
+function isTeamLeadsOwnOrder(user, order) {
+  if (!user || !order) return false;
+  return order.raised_by_id === user.id || order.medrep_id === user.id;
 }
 
 exports.getAll = async (req, res, next) => {
@@ -937,6 +957,11 @@ exports.syncFromZoho = async (req, res, next) => {
     if (!canActOnOrder(req.user, owner)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
+    // Sep 24, 2026: a Team Lead can SEE their team's orders but only act on
+    // their own — this writes to the order, so it follows the edit rule.
+    if ((req.user.role || '').toLowerCase() === 'team_lead' && !isTeamLeadsOwnOrder(req.user, owner)) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    }
 
     const result = await reconcileOrder({
       orderId: req.params.id,
@@ -1119,6 +1144,11 @@ exports.retryZohoSync = async (req, res, next) => {
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 5, 2026: MedReps can retry only their own orders. Management can retry any.
     if (!canActOnOrder(req.user, order)) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    }
+    // Sep 24, 2026: this one creates a real Sales Order in Zoho, so a Team
+    // Lead gets it only on an order that is theirs (see isTeamLeadsOwnOrder).
+    if ((req.user.role || '').toLowerCase() === 'team_lead' && !isTeamLeadsOwnOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
     if (order.zoho_sync_status !== 'failed') {

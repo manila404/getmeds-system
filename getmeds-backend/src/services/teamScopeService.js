@@ -32,8 +32,21 @@ const db = require('../db/database');
  *
  * ── WHAT "THEIR ORDER" MEANS ─────────────────────────────────────────────────
  *
- * `orders.medrep_id` — the order's actual owner/credited rep — not
- * `raised_by_id` (who filled the form in, if covering for someone else).
+ * `orders.medrep_id` — the order's actual owner/credited rep — of anyone on
+ * the team, PLUS the Team Lead's own orders: ones they raised (raised_by_id)
+ * and ones that are theirs outright (medrep_id is them).
+ *
+ * Sep 24, 2026: the own-orders half is new. Before it, "their order" meant
+ * only a teammate's, which sounds complete until a Team Lead creates an order
+ * for THEMSELVES (medrep_id = the lead, who is not on their own team): the
+ * order fell outside every check here, so the person who had just created it
+ * could not open it, edit it or submit it (403 "not raised by anyone on your
+ * team"). Being able to create an order and not finish it is not a permission
+ * anyone meant to grant.
+ *
+ * SEEING is what this file decides — team-wide, for the team's orders. Being
+ * allowed to CHANGE one is narrower and lives in orders.controller.js's
+ * canEditOrder: only the lead's own.
  */
 
 /** This Team Lead's assigned MedRep user ids. Empty array, never null. */
@@ -52,16 +65,28 @@ async function teamMedrepIds(teamLeadUserId) {
  */
 async function teamScopeSql(teamLeadUserId, alias = 'o') {
   const ids = await teamMedrepIds(teamLeadUserId);
-  // Fails closed: no assigned MedReps means no orders, not all orders.
-  if (!ids.length) return { sql: '1 = 0', params: [] };
+  // Fails closed: no user id at all means no orders, not all orders.
+  if (!teamLeadUserId) return { sql: '1 = 0', params: [] };
+
+  // The lead's own orders are always in scope; a teammate's join them when the
+  // lead has a team. No assigned MedReps still fails closed for everyone
+  // else's orders — this clause matches only orders that are the lead's own.
+  const own = `${alias}.medrep_id = ? OR ${alias}.raised_by_id = ?`;
+  if (!ids.length) return { sql: `(${own})`, params: [teamLeadUserId, teamLeadUserId] };
 
   const placeholders = ids.map(() => '?').join(', ');
-  return { sql: `${alias}.medrep_id IN (${placeholders})`, params: ids };
+  return {
+    sql: `(${alias}.medrep_id IN (${placeholders}) OR ${own})`,
+    params: [...ids, teamLeadUserId, teamLeadUserId]
+  };
 }
 
-/** Does this Team Lead's team cover this one order? */
+/** Does this Team Lead's scope cover this one order? */
 async function canAccessOrder(user, order) {
-  if (!user || !order || !order.medrep_id) return false;
+  if (!user || !order) return false;
+  // Their own — raised by them, or theirs outright.
+  if (order.medrep_id === user.id || order.raised_by_id === user.id) return true;
+  if (!order.medrep_id) return false;
   const ids = await teamMedrepIds(user.id);
   return ids.includes(order.medrep_id);
 }

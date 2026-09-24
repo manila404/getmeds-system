@@ -124,7 +124,9 @@ async function requireOrderScope(req, res, next) {
     const { canAccessOrder } = require('../services/orderScopeService');
 
     const order = await db
-      .prepare('SELECT id, division, sub_division, medrep_id FROM orders WHERE id = ?')
+      // raised_by_id: a Team Lead's scope includes orders they raised (see
+      // teamScopeService.canAccessOrder), which this row has to carry.
+      .prepare('SELECT id, division, sub_division, medrep_id, raised_by_id FROM orders WHERE id = ?')
       .get(req.params.id);
     // Let the controller answer 404 in its own words rather than turning a
     // missing order into a permissions message.
