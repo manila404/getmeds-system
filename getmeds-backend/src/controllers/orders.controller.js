@@ -2388,10 +2388,34 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
   let zohoResult = null;
   let zohoSyncStatus = 'pending';
   let zohoError = null;
-  // Only ever creates the Zoho Sales Order (as a plain Draft — nothing
+  // Sep 25, 2026: an order that ALREADY has a Sales Order in Zoho must not get
+  // another one. It arrives here again when it has been through a hold or a
+  // send-back after its first approval and Management approves it a second
+  // time: approve, then On Hold, then Resume or Resubmit lands it back at
+  // 'pending_management_approval' with its zoho_so_id still set. This function
+  // used to call createSalesOrder regardless, so GM-20260925-0042 collected five
+  // extra Draft Sales Orders in Zoho (SO-67944 to SO-67948), one per approve
+  // click, while the database step below failed each time on a duplicate
+  // dispatch_records row and the order never moved.
+  //
+  // Reusing the recorded one is right, not just safe: edits to an order already
+  // in Zoho are pushed to that Sales Order as they are made (updateItems /
+  // updateDetails), and attachments added since are pushed below.
+  const existingSoId = order.zoho_so_id || null;
+  // Only creates the Zoho Sales Order (as a plain Draft — nothing
   // here confirms it). Confirming, invoicing, and recording payment all
   // happen directly in Zoho by Finance now, never through this app.
-  if (isDryRunMode()) {
+  if (existingSoId) {
+    zohoResult = {
+      salesorder: {
+        salesorder_id: existingSoId,
+        salesorder_number: order.zoho_so_number,
+        status: order.zoho_so_status || 'draft'
+      }
+    };
+    zohoSyncStatus = 'synced';
+    console.log(`[ORDERS] ${getmedsOrderId} already has Zoho Sales Order ${order.zoho_so_number || existingSoId}; reusing it instead of creating another.`);
+  } else if (isDryRunMode()) {
     // ZOHO_DRY_RUN=true — no HTTP call to Zoho is made at all.
     zohoResult = buildDryRunSalesOrder(zohoPayload);
     zohoSyncStatus = 'skipped';
@@ -2456,11 +2480,20 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
       await zohoRetryService.enqueue({ orderId: order.id, payload: zohoPayload, error: zohoError });
     }
 
-    // If direct patient, create payment record for Finance queue
+    // If direct patient, create payment record for Finance queue.
+    //
+    // Sep 25, 2026: DO NOTHING when one exists. payments and dispatch_records
+    // are one-row-per-order (UNIQUE order_id), and an order approved a second
+    // time -- after a hold or a send-back -- already has its row from the first
+    // approval. The plain INSERT threw 'duplicate key value violates unique
+    // constraint "dispatch_records_order_id_key"' and rolled back the whole
+    // approval. Keeping the existing row is also correct: it may have moved on
+    // (a payment verified, a dispatch step started) and must not be reset.
     if (!isCredit) {
       await db.prepare(`
         INSERT INTO payments (order_id, status, created_at)
         VALUES (?, 'pending', datetime('now'))
+        ON CONFLICT (order_id) DO NOTHING
       `).run(order.id);
     }
 
@@ -2469,6 +2502,7 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
       await db.prepare(`
         INSERT INTO dispatch_records (order_id, status, created_at)
         VALUES (?, 'queued', datetime('now'))
+        ON CONFLICT (order_id) DO NOTHING
       `).run(order.id);
     }
 
@@ -2489,7 +2523,11 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     for (const s of statusPath) {
       await logEvent({ orderId: order.id, eventType: 'STATUS_CHANGE', oldStatus: prev, newStatus: s, actorId: pipelineActor.id, actorName: pipelineActor.name,
         notes: s === 'so_created'
-          ? (zohoResult ? `Zoho SO created: ${zohoResult.salesorder.salesorder_number}` : `Zoho sync failed, queued for automatic retry: ${zohoError}`)
+          ? (zohoResult
+              ? (existingSoId
+                  ? `Approved again — its existing Zoho Sales Order ${zohoResult.salesorder.salesorder_number || existingSoId} was kept (no new one created)`
+                  : `Zoho SO created: ${zohoResult.salesorder.salesorder_number}`)
+              : `Zoho sync failed, queued for automatic retry: ${zohoError}`)
           : undefined });
       prev = s;
     }
@@ -2530,7 +2568,10 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
   // for real (the caller already resolved the draft/pending-approval gate
   // before calling this), so no extra condition is needed here beyond
   // splitItems existing at all.
-  if (splitItems) {
+  //
+  // Sep 25, 2026: not again for an order that already had its Sales Order --
+  // its split one was made with it the first time.
+  if (splitItems && !existingSoId) {
     await createSplitSalesOrder({ orderId: order.id, getmedsOrderId, primaryPayload: zohoPayload, splitItems, splitInvoicingFrom });
   }
 
