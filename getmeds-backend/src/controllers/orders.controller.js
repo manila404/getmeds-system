@@ -685,6 +685,22 @@ exports.getAll = async (req, res, next) => {
       params.push(req.user.id);
     }
 
+    // Sep 25, 2026: free-text search across what a person recognises an order
+    // by: its id, the customer, the Zoho Sales Order number, and the RECEIVER
+    // (the name or contact number of whoever the delivery is for). Added for the
+    // Dispatch "My Catered Orders" table, where a caller phones with a name and
+    // no order id. Case-insensitive (db/pg.js turns LIKE into ILIKE), capped at
+    // 100 characters, and %, _ and \ typed by the user are matched literally.
+    const search = String(req.query.search || '').trim().slice(0, 100);
+    if (search) {
+      const like = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
+      where.push(
+        `(o.getmeds_order_id LIKE ? OR c.name LIKE ? OR o.zoho_so_number LIKE ?
+          OR o.intake_receiver LIKE ? OR o.intake_contact_no LIKE ?)`
+      );
+      params.push(like, like, like, like, like);
+    }
+
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
     const orders = await db.prepare(`
@@ -707,8 +723,10 @@ exports.getAll = async (req, res, next) => {
       LIMIT ? OFFSET ?
     `).all(...params, parseInt(limit), offset);
 
+    // Joins customers as well now: the search clause filters on c.name, and a
+    // count over `orders o` alone would fail the moment anyone typed a search.
     const totalRow = await db.prepare(
-      `SELECT COUNT(*) as total FROM orders o ${whereClause}`
+      `SELECT COUNT(*) as total FROM orders o LEFT JOIN customers c ON o.customer_id = c.id ${whereClause}`
     ).get(...params);
 
     res.json({

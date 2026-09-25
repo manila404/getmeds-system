@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { format } from 'date-fns';
-import { Plus, RefreshCw, Eye } from 'lucide-react';
+import { Plus, RefreshCw, Search, X } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
@@ -56,12 +56,27 @@ const MyOrdersPage = () => {
     return null;
   };
 
+  // Sep 25, 2026: search by order id, customer, SO number or receiver. Typed
+  // into one box and sent to the server after a short pause, so it searches
+  // every order and not only the ones already on screen.
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  useEffect(() => {
+    const handle = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(handle);
+  }, [searchInput]);
+
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['my-orders', statusFilter, cateredOnly],
+    queryKey: ['my-orders', statusFilter, cateredOnly, search],
     queryFn: () =>
       client
-        .get('/api/orders', { params: { status: statusFilter || undefined, catered: cateredOnly ? 'mine' : undefined } })
+        .get('/api/orders', {
+          params: { status: statusFilter || undefined, catered: cateredOnly ? 'mine' : undefined, search: search || undefined }
+        })
         .then(r => r.data),
+    // Keeps the last rows on screen while the next search loads, so typing does
+    // not flash the table away.
+    placeholderData: keepPreviousData,
     refetchInterval: 30000
   });
 
@@ -113,6 +128,29 @@ const MyOrdersPage = () => {
         </div>
       )}
 
+      <div className="relative max-w-xl">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-secondary pointer-events-none" />
+        <input
+          id="orders-search"
+          type="search"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder="Search order ID, customer, SO number or receiver…"
+          aria-label="Search orders by order ID, customer, SO number or receiver"
+          className="w-full pl-9 pr-9 py-2 text-sm bg-white border border-slate-200 rounded-lg text-ink-primary placeholder:text-ink-secondary/70 focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
+        />
+        {searchInput && (
+          <button
+            type="button"
+            onClick={() => setSearchInput('')}
+            aria-label="Clear search"
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-ink-secondary hover:text-ink-primary hover:bg-surface"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+
       {/* Filter */}
       <div className="flex gap-2 flex-wrap">
         <button
@@ -130,6 +168,10 @@ const MyOrdersPage = () => {
         <div className="flex justify-center py-16"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-getmeds-blue" /></div>
       ) : error ? (
         <div className="bg-red-50 border border-red-200 rounded-md p-4 text-red-700 text-sm">Failed to load orders.</div>
+      ) : orders.length === 0 && search ? (
+        <div className="text-center py-16 bg-white rounded-lg border border-slate-200 shadow-sm">
+          <p className="text-ink-secondary">No orders match &ldquo;{search}&rdquo;{statusFilter ? ' at this status' : ''}.</p>
+        </div>
       ) : orders.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-lg border border-slate-200 shadow-sm">
           {cateredOnly ? (
@@ -157,17 +199,32 @@ const MyOrdersPage = () => {
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Order ID</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Customer</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Receiver</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Total</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Payment</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Date</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-ink-secondary uppercase">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 bg-white">
               {orders.map(order => (
-                <tr key={order.id} className="hover:bg-surface transition-colors">
-                  <td className="px-4 py-3 text-sm font-mono font-semibold text-getmeds-blue">{order.getmeds_order_id}</td>
+                // Sep 25, 2026: the whole row opens the order, and the id is a
+                // real link (so it can be opened in a new tab, and reached from
+                // the keyboard). The View column that used to do this is gone.
+                <tr
+                  key={order.id}
+                  onClick={() => navigate(`/orders/${order.id}`)}
+                  className="cursor-pointer hover:bg-surface transition-colors"
+                >
+                  <td className="px-4 py-3 text-sm font-mono font-semibold">
+                    <Link
+                      to={`/orders/${order.id}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-getmeds-blue hover:text-getmeds-blue-dark hover:underline"
+                    >
+                      {order.getmeds_order_id}
+                    </Link>
+                  </td>
                   <td className="px-4 py-3 text-sm font-medium text-ink-primary">
                     {order.customer_name}
                     {behalfLabel(order) && (
@@ -180,6 +237,19 @@ const MyOrdersPage = () => {
                       >
                         {behalfLabel(order).text}
                       </span>
+                    )}
+                  </td>
+                  {/* Sep 25, 2026: who the delivery is for (intake_receiver), with
+                      their contact number underneath. An order with no separate
+                      receiver shows a dash rather than an empty cell. */}
+                  <td className="px-4 py-3 text-sm text-ink-primary">
+                    {order.intake_receiver || order.intake_contact_no ? (
+                      <>
+                        {order.intake_receiver && <div>{order.intake_receiver}</div>}
+                        {order.intake_contact_no && <div className="text-xs text-ink-secondary">{order.intake_contact_no}</div>}
+                      </>
+                    ) : (
+                      <span className="text-ink-secondary/60" title="No separate receiver on this order">—</span>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -197,11 +267,6 @@ const MyOrdersPage = () => {
                   </td>
                   <td className="px-4 py-3 text-xs text-ink-secondary">
                     {formatPHT(order.created_at, 'date')}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <Link to={`/orders/${order.id}`} className="inline-flex items-center gap-1 text-xs text-getmeds-blue hover:text-getmeds-blue-dark font-semibold">
-                      <Eye className="w-3.5 h-3.5" /> View
-                    </Link>
                   </td>
                 </tr>
               ))}
