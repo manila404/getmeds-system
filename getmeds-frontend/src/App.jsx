@@ -15,6 +15,7 @@ import FinanceQueuePage from './pages/finance/FinanceQueuePage';
 import PaymentHistoryPage from './pages/finance/PaymentHistoryPage';
 import DispatchQueuePage from './pages/dispatch/DispatchQueuePage';
 import DispatchHistoryPage from './pages/dispatch/DispatchHistoryPage';
+import PharmacyQueuePage from './pages/dispatch/PharmacyQueuePage';
 import ManagementDashboardPage from './pages/management/ManagementDashboardPage';
 import ApprovalQueuePage from './pages/management/ApprovalQueuePage';
 import ExceptionHubPage from './pages/management/ExceptionHubPage';
@@ -155,8 +156,17 @@ function App() {
               </ProtectedRoute>
             } 
           />
-          <Route 
-            path="/dispatch/history" 
+          {/* Sep 25, 2026: prescription verification, ahead of Finance. */}
+          <Route
+            path="/dispatch/pharmacy"
+            element={
+              <ProtectedRoute allowedRoles={['dispatch', 'management', 'admin']}>
+                <PharmacyQueuePage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/dispatch/history"
             element={
               <ProtectedRoute allowedRoles={['dispatch', 'management', 'admin']}>
                 <DispatchHistoryPage />

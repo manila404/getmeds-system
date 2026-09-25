@@ -189,6 +189,31 @@ describe('User Details: edit and delete', () => {
       expect(same.status).toBe(200);
     });
 
+    test('editing an account never touches its password, and it can still sign in afterwards', async () => {
+      const u = await makeUser('keeps-password');
+      const before = await db.prepare('SELECT password_hash FROM users WHERE id = ?').get(u.id);
+
+      const res = await request(app)
+        .patch(`/api/admin/users/${u.id}`)
+        .set(auth(adminToken))
+        .send({
+          first_name: 'Renamed',
+          last_name: `Person ${stamp}`,
+          username: `renamed-${stamp}`,
+          email: `renamed-${stamp}@getmeds.ph`,
+          role: 'dispatch',
+        });
+      expect(res.status).toBe(200);
+
+      const after = await db.prepare('SELECT password_hash FROM users WHERE id = ?').get(u.id);
+      expect(after.password_hash).toBe(before.password_hash);
+
+      // The fixture was created with the seed password; it still works, on the NEW email.
+      const login = await request(app).post('/api/auth/login').send({ email: `renamed-${stamp}@getmeds.ph`, password: SEED_PASSWORD });
+      expect(login.status).toBe(200);
+      expect(login.body.data.user.role).toBe('dispatch');
+    });
+
     test('a non-admin cannot edit accounts', async () => {
       const u = await makeUser('nonadmin');
       const res = await request(app)

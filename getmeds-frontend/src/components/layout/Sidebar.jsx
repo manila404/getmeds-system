@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff, ChevronDown, ShieldCheck, Clock } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff, ChevronDown, ShieldCheck, Clock, Pill } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 import { FINANCE_STAGES } from '../../constants/financeStages';
 
@@ -190,6 +190,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   } else if (role === 'dispatch') {
     mainLinks.push(
       { to: '/dispatch', icon: <Truck size={19} />, label: 'Zoho Dispatch Status' },
+      // Sep 25, 2026: prescription verification, in parallel with Finance.
+      { to: '/dispatch/pharmacy', icon: <Pill size={19} />, label: 'Pharmacy' },
       // Sep 15, 2026: the orders this person caters (the page's other tab is
       // the full log that "All Orders Log" used to be).
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Catered Orders' },

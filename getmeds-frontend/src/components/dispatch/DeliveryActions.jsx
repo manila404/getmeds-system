@@ -340,9 +340,10 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
       {canConfirm && (!confirmed || stale) && (
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || order.rx_blocking}
           onClick={() => onConfirm(order)}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
+          title={order.rx_blocking ? 'The prescription has to be verified by the pharmacist first.' : undefined}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <CheckCircle2 className="w-3.5 h-3.5" />
           {stale ? 'Confirm again' : 'Confirm for delivery'}
@@ -369,9 +370,10 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
       {canAddTracking && (
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || order.rx_blocking}
           onClick={() => onAddTracking(order)}
-          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border bg-white text-xs font-semibold disabled:opacity-50 ${
+          title={order.rx_blocking ? 'The prescription has to be verified by the pharmacist first.' : undefined}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border bg-white text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed ${
             hold ? 'border-amber-400 text-amber-900 hover:bg-amber-50' : 'border-slate-300 text-ink-primary hover:bg-surface'
           }`}
         >

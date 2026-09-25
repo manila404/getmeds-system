@@ -8,6 +8,7 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const notificationService = require('../services/notificationService');
 const { CATERED_SUBQUERY } = require('../services/dispatchCater');
 const { warehouseOf, warehouseSql } = require('../services/dispatchWarehouses');
+const { rxSummaries, rxBadge } = require('../services/prescriptionService');
 
 // ─── Confirmed for delivery (Sep 15, 2026) ─────────────────────────────────
 // Dispatch prints the delivery slip, checks the address, and confirms the
@@ -410,11 +411,26 @@ exports.getRecent = async (req, res, next) => {
        LIMIT ${listLimit}
     `).all([FINANCE_CONFIRMED, ...scopeParams, ...whParams, ...(today ? [today] : [])]);
 
+    // Sep 25, 2026: what is holding an order up, when it carries a prescription.
+    // The board cannot stop a Package or Shipment being made in Zoho itself, so
+    // this is how Dispatch learns the order is not clear to go: see
+    // services/prescriptionService.js. Orders with no prescription get nothing.
+    const rx = await rxSummaries([...drafts, ...confirmed].map((o) => o.id));
+    const withRx = (financeCleared) => (o) => {
+      const state = rx.get(o.id).state;
+      return {
+        ...withConfirmation(o),
+        rx_state: state,
+        rx_badge: rxBadge(state, financeCleared),
+        rx_blocking: state === 'pending' || state === 'rejected'
+      };
+    };
+
     res.json({
       success: true,
       data: {
-        new_draft_sos: drafts.map(withConfirmation),
-        finance_confirmed: confirmed.map(withConfirmation)
+        new_draft_sos: drafts.map(withRx(false)),
+        finance_confirmed: confirmed.map(withRx(true))
       }
     });
   } catch (err) { next(err); }

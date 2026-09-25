@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { FilePlus2, ShieldCheck } from 'lucide-react';
 import client from '../../api/client';
 import DeliveryActions from './DeliveryActions';
+import RxBadge from './RxBadge';
 
 /**
  * Sep 15, 2026: what is coming Dispatch's way, newest first.
@@ -183,6 +184,7 @@ const RecentDispatchPanel = ({
                     {o.zoho_so_number && <>SO <span className="font-mono">{o.zoho_so_number}</span> · </>}
                     {o.medrep_name}
                   </p>
+                  {o.rx_badge && <div className="mt-1"><RxBadge badge={o.rx_badge} /></div>}
                 </Opener>
                 <div className="text-right shrink-0">
                   <p className="text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</p>
@@ -228,6 +230,8 @@ const RecentDispatchPanel = ({
                     </p>
                   </div>
                 </div>
+                {/* Sep 25, 2026: what is holding it up, when it carries a prescription. */}
+                {o.rx_badge && <div><RxBadge badge={o.rx_badge} /></div>}
                 <DeliveryActions order={o} onConfirm={onConfirm} onHold={onHold} onAddTracking={onAddTracking} onCater={onCater} onReleaseCater={onReleaseCater} onHoldOrder={onHoldOrder} onLiftHold={onLiftHold} busy={confirmingId === o.id} />
               </li>
             ))}
