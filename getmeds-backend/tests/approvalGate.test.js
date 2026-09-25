@@ -200,7 +200,9 @@ describe('Accounts still pending from sign-up', () => {
     const res = await request(app).get('/api/admin/users').set('Authorization', `Bearer ${adminToken}`);
 
     expect(res.status).toBe(200);
-    const users = res.body.data;
+    // Sep 25, 2026: admins are listed first, always; pending accounts lead the
+    // rest. So "the top" is the first non-admin.
+    const users = res.body.data.filter((u) => u.role !== 'admin');
     const firstPending = users.findIndex((u) => u.approval_status === 'pending');
     const firstApproved = users.findIndex((u) => u.approval_status === 'approved');
     expect(firstPending).toBe(0);
