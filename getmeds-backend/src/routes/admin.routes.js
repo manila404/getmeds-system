@@ -42,6 +42,27 @@ router.patch('/users/:id/deactivate', adminController.deactivateUser);
 router.post('/users/:id/approve', adminController.approveUser);
 router.post('/users/:id/reject', adminController.rejectUser);
 
+// Sep 26, 2026: the sales team structure (Head > Channel > Manager > Territory), and
+// the preview / explicit apply of Team Leads that follows from it. Descriptive:
+// nothing in the order flow reads it. See services/salesStructureService.js.
+const structure = require('../controllers/salesStructure.controller');
+router.get('/team-structure', structure.get);
+router.post('/team-structure/import', structure.importSheet);
+router.get('/team-structure/team-lead-plan', structure.teamLeadPlan);
+router.post('/team-structure/team-lead-plan/apply', structure.applyTeamLeads);
+router.get('/team-structure/manager-access-plan', structure.managerAccessPlan);
+router.post('/team-structure/manager-access-plan/apply', structure.applyManagerAccess);
+router.post('/team-structure/channels', structure.createChannel);
+router.patch('/team-structure/channels/:id', structure.updateChannel);
+router.post('/team-structure/managers', structure.createManager);
+router.patch('/team-structure/managers/:id', structure.updateManager);
+router.delete('/team-structure/managers/:id', structure.removeManager);
+router.post('/team-structure/approvers', structure.createApprover);
+router.delete('/team-structure/approvers/:id', structure.removeApprover);
+router.post('/team-structure/territories', structure.createTerritory);
+router.patch('/team-structure/territories/:id', structure.updateTerritory);
+router.delete('/team-structure/territories/:id', structure.removeTerritory);
+
 // Zoho sync retry outbox: view queued/failed syncs, or trigger an immediate retry pass
 router.get('/zoho/queue', adminController.getZohoQueue);
 router.post('/zoho/queue/retry', adminController.retryZohoQueue);

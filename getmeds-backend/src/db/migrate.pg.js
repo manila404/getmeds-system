@@ -1078,6 +1078,16 @@ async function reconcileUserUpdatedAt(client) {
 }
 
 /**
+ * Sep 26, 2026: sales_managers.scope_note. The sales_* tables are new tables and
+ * arrive with the schema file; this only matters for a database that already had
+ * sales_managers before the column was added. Idempotent.
+ */
+async function reconcileSalesManagerScopeNote(client) {
+  await client.query('ALTER TABLE sales_managers ADD COLUMN IF NOT EXISTS scope_note TEXT');
+  console.log('  ✔ sales_managers.scope_note present');
+}
+
+/**
  * Sep 24, 2026: 'patient' added to the customer categories. The category is a
  * CHECK-constrained column, so the list has to widen in the database as well as
  * in the code, or setting it fails with a constraint error.
@@ -1371,6 +1381,7 @@ async function main() {
     await reconcileUserUpdatedAt(client);
     await reconcileUserUsername(client);
     await reconcileCustomerCategoryCheck(client);
+    await reconcileSalesManagerScopeNote(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

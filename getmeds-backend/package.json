@@ -9,6 +9,7 @@
     "dev:test": "nodemon server.js --test",
     "migrate": "node src/db/migrate.js",
     "seed": "node src/db/seed.js",
+    "seed:structure": "node src/db/seedSalesStructure.js",
     "setup": "npm run migrate && npm run seed",
     "test": "jest",
     "reset:orders": "node scripts/reset-orders.js",

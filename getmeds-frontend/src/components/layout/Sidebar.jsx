@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, Shield, CloudOff, ChevronDown, ShieldCheck, Clock, Pill } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, ShieldCheck, Clock, Pill } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 import { FINANCE_STAGES } from '../../constants/financeStages';
 
@@ -94,7 +94,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         { to: '/inventory', icon: <Package size={18} />, label: 'Inventory & Stock Sync' },
         { to: '/management/clients', icon: <Users size={18} />, label: 'Clients Directory' },
         { to: '/management/order-ownership', icon: <UserCheck size={18} />, label: 'Order Ownership' },
-        { to: '/management/manager-scopes', icon: <Shield size={18} />, label: 'Manager Access' },
         { to: '/management/pending-customers', icon: <CloudOff size={18} />, label: 'Pending Customers' }
       ]
     },
@@ -267,7 +266,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
           // (User Management was sharing the Users icon with Clients Directory.)
           { to: '/admin/users', icon: <UserCog size={19} />, label: 'User Management' },
           { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
-          { to: '/management/manager-scopes', icon: <Shield size={19} />, label: 'Manager Access' },
           // Sep 9, 2026: the Zoho sync retry outbox — see ZohoSyncHealthPage.jsx.
           { to: '/admin/zoho-sync', icon: <Zap size={19} />, label: 'Zoho Sync Health' }
         ]

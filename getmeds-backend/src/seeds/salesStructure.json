@@ -1,0 +1,778 @@
+{
+ "month": "2026-09",
+ "source": "SEP TARGET SHEET 2026",
+ "channels": [
+  {
+   "name": "RX · B&B",
+   "head": "Javed",
+   "managers": [
+    {
+     "name": "Honey",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "B&B | E. RODRIGUEZ",
+       "alias": null,
+       "person": "B&B | VACANT",
+       "hq": "QC - 1",
+       "target": 500000,
+       "achieved": 75620,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "B&B | EAST AVE",
+       "alias": null,
+       "person": "B&B | MERRY JOYCE",
+       "hq": "QC - 2",
+       "target": 942725,
+       "achieved": 204502,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B&B | NCL",
+       "alias": null,
+       "person": "B&B | VACANT",
+       "hq": "NCL",
+       "target": 500000,
+       "achieved": 43125,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "B&B | TAFT",
+       "alias": null,
+       "person": "B&B | SUMIT",
+       "hq": "MANILA - 1",
+       "target": 664599,
+       "achieved": 139723,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B&B | CEBU",
+       "alias": null,
+       "person": "B&B | VACANT",
+       "hq": "VISAYAS",
+       "target": 500000,
+       "achieved": 75621,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "B&B | DAVAO",
+       "alias": null,
+       "person": "B&B | VACANT",
+       "hq": "DAVAO",
+       "target": 300000,
+       "achieved": 12750,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "B&B | SOUTH LUZON",
+       "alias": null,
+       "person": "B&B | VACANT",
+       "hq": "SOUTH LUZON",
+       "target": 500000,
+       "achieved": 150077,
+       "vacant": true
+      }
+     ]
+    }
+   ],
+   "approvers": [
+    "Veronica"
+   ]
+  },
+  {
+   "name": "RX · STC",
+   "head": "Javed",
+   "managers": [
+    {
+     "name": "Honey",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "STC | NCL",
+       "alias": null,
+       "person": "STC | GIENEL",
+       "hq": "NORTH LUZON - 1",
+       "target": 1328421,
+       "achieved": 100566,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "STC | COMMONWEALTH",
+       "alias": null,
+       "person": "STC | VACANT",
+       "hq": "QC - 3",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "STC | ORTIGAS VACANT",
+       "alias": null,
+       "person": "STC | TMC VACANT",
+       "hq": "MANILA - 3",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "STC | DAVAO",
+       "alias": null,
+       "person": "STC | MERYANIE",
+       "hq": "MINDANAO",
+       "target": 500000,
+       "achieved": 50000,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "STC | KALAW",
+       "alias": null,
+       "person": "STC | JERICHO",
+       "hq": "MANILA - 2",
+       "target": 500000,
+       "achieved": 63033,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "STC | CEBU",
+       "alias": null,
+       "person": "STC | ANTONEETE",
+       "hq": "VISAYAS",
+       "target": 500000,
+       "achieved": 19119,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "STC | LAGUNA",
+       "alias": null,
+       "person": "STC | SEAN",
+       "hq": "SOUTH LUZON",
+       "target": 709216,
+       "achieved": 45200,
+       "vacant": false
+      }
+     ]
+    }
+   ],
+   "approvers": [
+    "Veronica"
+   ]
+  },
+  {
+   "name": "RX · URO",
+   "head": "Javed",
+   "managers": [
+    {
+     "name": "Honey",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "URO | NCL",
+       "alias": null,
+       "person": "URO | VACANT",
+       "hq": "NORTH LUZON - 1",
+       "target": 300000,
+       "achieved": 18000,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "URO | COMMONWEALTH",
+       "alias": null,
+       "person": "URO | VACANT",
+       "hq": "QC - 3",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "URO | ORTIGAS VACANT",
+       "alias": null,
+       "person": "URO | VACANT",
+       "hq": "MANILA - 3",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "URO | KALAW",
+       "alias": null,
+       "person": "URO | VACANT",
+       "hq": "MANILA - 2",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "URO | CEBU",
+       "alias": null,
+       "person": "URO | VACANT",
+       "hq": "VISAYAS",
+       "target": 300000,
+       "achieved": 60000,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "URO | DAVAO",
+       "alias": null,
+       "person": "URO | VACANT",
+       "hq": "MINDANAO",
+       "target": 300000,
+       "achieved": 0,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "URO | SOUTH LUZON",
+       "alias": null,
+       "person": "URO | VACANT",
+       "hq": "SOUTH LUZON",
+       "target": 300000,
+       "achieved": 0,
+       "vacant": true
+      }
+     ]
+    }
+   ],
+   "approvers": [
+    "Veronica"
+   ]
+  },
+  {
+   "name": "RX · B2C",
+   "head": "Javed",
+   "managers": [
+    {
+     "name": "Honey",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "B2C | CJ Gutierrez",
+       "alias": null,
+       "person": "B2C | CJ",
+       "hq": "ON SITE",
+       "target": 500000,
+       "achieved": 11370,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2C | Mary Jane Vinas",
+       "alias": null,
+       "person": "B2C | JANE",
+       "hq": "ON SITE",
+       "target": 500000,
+       "achieved": 26472,
+       "vacant": false
+      }
+     ]
+    }
+   ],
+   "approvers": [
+    "Veronica"
+   ]
+  },
+  {
+   "name": "B2B",
+   "head": "Subir",
+   "managers": [
+    {
+     "name": "Jessa Domino",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "B2B | DHON",
+       "alias": null,
+       "person": "B2B | DHON",
+       "hq": "ON SITE",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2B | FLOREMEL TAN MEDINA",
+       "alias": null,
+       "person": "B2B | FLOREMEL TAN MEDINA",
+       "hq": "ON SITE",
+       "target": 1500000,
+       "achieved": 339937,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2B | FRITZIE ROSANN MIER",
+       "alias": null,
+       "person": "B2B | FRITZIE ROSANN MIER",
+       "hq": "ON SITE",
+       "target": 7000000,
+       "achieved": 246189,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2B | CLAIRE",
+       "alias": null,
+       "person": "B2B | CLAIRE",
+       "hq": "ON SITE",
+       "target": 500000,
+       "achieved": 15000,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2B | LONIE",
+       "alias": null,
+       "person": "B2B | LONIE",
+       "hq": "BAMBANG",
+       "target": 3000000,
+       "achieved": 12120,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2B | PILLOW",
+       "alias": null,
+       "person": "B2B | PILLOW",
+       "hq": "ON SITE",
+       "target": 2500000,
+       "achieved": 371571,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2B | CHARLE",
+       "alias": null,
+       "person": "B2B | CHARLE",
+       "hq": "ON SITE",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2B | MANI MISHRA",
+       "alias": null,
+       "person": "B2B | MANI MISHRA",
+       "hq": "ON SITE",
+       "target": 0,
+       "achieved": 0,
+       "vacant": false
+      }
+     ],
+     "scope_note": "Sees only B2B accounts"
+    }
+   ],
+   "approvers": [
+    "Veronica",
+    "Faith"
+   ]
+  },
+  {
+   "name": "BID",
+   "head": "Subir",
+   "managers": [
+    {
+     "name": "Jimmy",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "BID | HAZEL",
+       "alias": null,
+       "person": "BID | HAZEL",
+       "hq": "ON SITE",
+       "target": 688199,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "BID | ANGEL",
+       "alias": null,
+       "person": "BID | ANGEL",
+       "hq": "ON SITE",
+       "target": 7162485,
+       "achieved": 229587,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "BID | JIMMY",
+       "alias": null,
+       "person": "BID | JIMMY",
+       "hq": "ON SITE",
+       "target": 1930183,
+       "achieved": 0,
+       "vacant": false
+      }
+     ],
+     "scope_note": "Sees only BID accounts"
+    }
+   ],
+   "approvers": [
+    "Veronica"
+   ]
+  },
+  {
+   "name": "CLIDP",
+   "head": "Subir",
+   "managers": [
+    {
+     "name": "Subir",
+     "acts_as_head": true,
+     "territories": [
+      {
+       "zoho_salesperson": "CLIDP | Annie Maglatang",
+       "alias": null,
+       "person": "CLIDP | Annie Maglatang",
+       "hq": "FIELD SALES",
+       "target": 3872718,
+       "achieved": 7050,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "CLIDP | NICKA",
+       "alias": null,
+       "person": "CLIDP | NICKA",
+       "hq": "FIELD SALES",
+       "target": 4331766,
+       "achieved": 0,
+       "vacant": false
+      }
+     ]
+    }
+   ],
+   "approvers": [
+    "Veronica",
+    "Faith"
+   ]
+  },
+  {
+   "name": "TELESALES",
+   "head": "Vanessa",
+   "managers": [
+    {
+     "name": "Vanessa",
+     "acts_as_head": true,
+     "territories": [
+      {
+       "zoho_salesperson": "TeleSales | Micah",
+       "alias": null,
+       "person": "TeleSales | Micah",
+       "hq": "ON SITE",
+       "target": 300000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "TeleSales | Seena",
+       "alias": null,
+       "person": "TeleSales | Seena",
+       "hq": "ON SITE",
+       "target": 300000,
+       "achieved": 29808,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "TeleSales | AILA",
+       "alias": null,
+       "person": "TeleSales | AILA",
+       "hq": "ON SITE",
+       "target": 300000,
+       "achieved": 0,
+       "vacant": false
+      }
+     ]
+    }
+   ],
+   "approvers": [
+    "Veronica"
+   ]
+  },
+  {
+   "name": "HOSP",
+   "head": "Vanessa",
+   "managers": [
+    {
+     "name": "Jimlord",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "HOS | COMMONWEALTH",
+       "alias": null,
+       "person": "HOS | PRINCESS",
+       "hq": "QC - 4",
+       "target": 917877,
+       "achieved": 60843,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | MARIKINA",
+       "alias": null,
+       "person": "HOS | JACOB",
+       "hq": "MARIKINA",
+       "target": 300000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | CAMANAVA",
+       "alias": null,
+       "person": "HOS | DEN JANE",
+       "hq": "CAMANAVA",
+       "target": 500000,
+       "achieved": 131700,
+       "vacant": false
+      }
+     ],
+     "scope_note": "Sees only their own team's accounts"
+    },
+    {
+     "name": "Daniel",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "HOS | PASAY",
+       "alias": null,
+       "person": "HOS | RYAN",
+       "hq": "MANILA - 4",
+       "target": 600000,
+       "achieved": 188929,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | LJ",
+       "alias": null,
+       "person": "HOS | LJ",
+       "hq": "LAS PINAS",
+       "target": 300000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | PALAWAN",
+       "alias": null,
+       "person": "HOS | PATTRICK",
+       "hq": "PALAWAN",
+       "target": 300000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | PARANAQUE",
+       "alias": null,
+       "person": "HOS | ANA",
+       "hq": "PARANAQUE",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": false
+      }
+     ],
+     "scope_note": "Sees only their own team's accounts"
+    },
+    {
+     "name": "Vanessa",
+     "acts_as_head": true,
+     "territories": [
+      {
+       "zoho_salesperson": "HOS | SOUTH CEBU",
+       "alias": null,
+       "person": "HOS | ANDY",
+       "hq": "SOUTH CEBU",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | NORTH CEBU",
+       "alias": null,
+       "person": "HOS | KRIS",
+       "hq": "NORTH CEBU",
+       "target": 500000,
+       "achieved": 54000,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | ILOILO",
+       "alias": null,
+       "person": "HOS | JESSA",
+       "hq": "ILOILO",
+       "target": 500000,
+       "achieved": 35945,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | BAGUIO",
+       "alias": null,
+       "person": "HOS | GABBY",
+       "hq": "BAGIO",
+       "target": 577919,
+       "achieved": 53471,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | TUGUEGARAO",
+       "alias": null,
+       "person": "HOS | NICOLE",
+       "hq": "NORTH LUZON - 2",
+       "target": 300000,
+       "achieved": 6400,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | TACLOBAN",
+       "alias": null,
+       "person": "HOS | TACLOBAN VACANT",
+       "hq": "TACLOBAN",
+       "target": 0,
+       "achieved": 0,
+       "vacant": true
+      }
+     ]
+    },
+    {
+     "name": "Saurav",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "HOS | CDO",
+       "alias": null,
+       "person": "HOS | MEL",
+       "hq": "CDO",
+       "target": 300000,
+       "achieved": 390000,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | ZAMBOANGA",
+       "alias": null,
+       "person": "HOS | VACANT",
+       "hq": "ZAMBOANGA",
+       "target": 300000,
+       "achieved": 34821,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "HOS | DAVAO NORTH",
+       "alias": null,
+       "person": "HOS | RUBY",
+       "hq": "DAVAO NORTH",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | DAVAO SOUTH",
+       "alias": null,
+       "person": "HOS | WELMAR",
+       "hq": "DAVAO SOUTH",
+       "target": 500000,
+       "achieved": 5893,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | GENSAN",
+       "alias": "HOSP | GENSAN",
+       "person": "HOS | GENSAN CITY QUEEN",
+       "hq": "GENERAL SANTOS CITY",
+       "target": 300000,
+       "achieved": 160982,
+       "vacant": false
+      }
+     ],
+     "scope_note": "Sees only their own team's accounts"
+    },
+    {
+     "name": "Julius",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "HOS | PAMPANGA",
+       "alias": null,
+       "person": "HOS | PABAZA VACANT",
+       "hq": "PAMPANGA",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": true
+      },
+      {
+       "zoho_salesperson": "HOS | CABANATUAN",
+       "alias": null,
+       "person": "HOS | PAOLO",
+       "hq": "CENTRAL LUZON",
+       "target": 509235,
+       "achieved": 281582,
+       "vacant": false
+      }
+     ],
+     "scope_note": "Sees only their own team's accounts"
+    },
+    {
+     "name": "Ken",
+     "acts_as_head": false,
+     "territories": [
+      {
+       "zoho_salesperson": "HOS | LAGUNA",
+       "alias": null,
+       "person": "HOS | CLARISSE",
+       "hq": "LAGUNA",
+       "target": 984707,
+       "achieved": 181786,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | BICOL",
+       "alias": null,
+       "person": "HOS | LALIEN",
+       "hq": "BICOL AREA",
+       "target": 500000,
+       "achieved": 68152,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | QUEZON PROVINCE",
+       "alias": null,
+       "person": "HOS | MICHAEL",
+       "hq": "QC - 5",
+       "target": 500000,
+       "achieved": 411096,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "HOS | CAVITE",
+       "alias": null,
+       "person": "HOS | GLENN",
+       "hq": "CAVITE",
+       "target": 300000,
+       "achieved": 18964,
+       "vacant": false
+      }
+     ],
+     "scope_note": "Sees only their own team's accounts"
+    }
+   ],
+   "approvers": [
+    "Veronica"
+   ]
+  },
+  {
+   "name": "MT",
+   "head": "Mhalou",
+   "managers": [
+    {
+     "name": "Mhalou",
+     "acts_as_head": true,
+     "territories": [
+      {
+       "zoho_salesperson": "MT | 1",
+       "alias": "MT - 1",
+       "person": "MT | ARLENE",
+       "hq": "ON SITE",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "MT | 2",
+       "alias": "MT - 2",
+       "person": "MT | JASPER",
+       "hq": "ON SITE",
+       "target": 500000,
+       "achieved": 0,
+       "vacant": false
+      }
+     ]
+    }
+   ],
+   "approvers": []
+  }
+ ]
+}

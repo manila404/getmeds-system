@@ -21,7 +21,6 @@ import ApprovalQueuePage from './pages/management/ApprovalQueuePage';
 import ExceptionHubPage from './pages/management/ExceptionHubPage';
 import ClientsPage from './pages/management/ClientsPage';
 import SalespersonMappingPage from './pages/management/SalespersonMappingPage';
-import ManagerScopePage from './pages/management/ManagerScopePage';
 import PendingCustomersPage from './pages/management/PendingCustomersPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
@@ -245,14 +244,8 @@ function App() {
               </ProtectedRoute>
             }
           />
-          <Route
-            path="/management/manager-scopes"
-            element={
-              <ProtectedRoute allowedRoles={['management', 'admin']}>
-                <ManagerScopePage />
-              </ProtectedRoute>
-            }
-          />
+          {/* Sep 26, 2026: Manager Access moved into User Management > Management (Approval). */}
+          <Route path="/management/manager-scopes" element={<Navigate to="/admin/users" replace />} />
           <Route
             path="/management/clients"
             element={

@@ -4,6 +4,8 @@ import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import ErrorMessage from '../../components/ui/ErrorMessage';
 import CreateUserModal from '../../components/admin/CreateUserModal';
 import UserDetailsModal from '../../components/admin/UserDetailsModal';
+import TeamStructurePanel from '../../components/admin/TeamStructurePanel';
+import AccountsByTeam from '../../components/admin/AccountsByTeam';
 import PaginationFooter from '../../components/finance/PaginationFooter';
 import { Users, UserPlus, RefreshCw, Shield, Check, Ban, Clock, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { roleLabel } from '../../constants/roles';
@@ -86,6 +88,10 @@ const UsersPage = () => {
   };
   // Sep 11, 2026: sign-up is gone, so this is where every account is made.
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  // Sep 26, 2026: 'accounts' (the table) or 'structure' (who leads what).
+  const [tab, setTab] = useState('accounts');
+  // Within Accounts: 'team' (where each person sits) or 'list' (the flat table).
+  const [view, setView] = useState('team');
 
   // Sep 11, 2026: the Zoho Salesperson list the details modal picks from.
   //
@@ -336,6 +342,40 @@ const UsersPage = () => {
         </div>
       </div>
 
+      {/* Sep 26, 2026: two views of the same people. Accounts is the table that
+          was here; Team Structure is who leads what, from the sales sheet. */}
+      <div className="inline-flex rounded-md border border-slate-200 bg-white p-0.5" role="tablist" aria-label="User management views">
+        {[['accounts', 'Accounts'], ['structure', 'Team Structure']].map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            onClick={() => setTab(key)}
+            className={`px-3.5 py-1.5 rounded text-sm font-semibold transition-colors ${tab === key ? 'bg-getmeds-blue text-white' : 'text-ink-secondary hover:bg-surface'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'structure' ? <TeamStructurePanel /> : (<>
+      {/* Sep 26, 2026: the accounts, by team (where each person sits) or as the
+          flat, paged list that was here before. */}
+      <div className="inline-flex rounded-md border border-slate-200 bg-white p-0.5" role="group" aria-label="How to show accounts">
+        {[['team', 'By team'], ['list', 'All accounts']].map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            aria-pressed={view === key}
+            onClick={() => setView(key)}
+            className={`px-3 py-1 rounded text-[13px] font-semibold transition-colors ${view === key ? 'bg-slate-900 text-white' : 'text-ink-secondary hover:bg-surface'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* Error state */}
       {error && <ErrorMessage message={error} />}
 
@@ -344,6 +384,8 @@ const UsersPage = () => {
         <div className="flex justify-center py-20">
           <LoadingSpinner size="lg" />
         </div>
+      ) : view === 'team' ? (
+        <AccountsByTeam users={users} onOpen={setDetailsUserId} onShowList={() => setView('list')} />
       ) : (
         /* Users Table */
         <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
@@ -474,6 +516,7 @@ const UsersPage = () => {
           />
         </div>
       )}
+      </>)}
 
       {/* The list refreshes as soon as the account exists, behind the modal,
           so the new row is there to open when it closes. */}
