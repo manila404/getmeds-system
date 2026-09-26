@@ -1038,6 +1038,21 @@ exports.viewAttachment = async (req, res, next) => {
     if (zohoEligible) {
       try {
         const result = await zoho.getSalesOrderAttachment(attachment.zoho_so_id, attachment.zoho_document_id);
+
+        // Sep 26, 2026: never hand back a file that is not this one. Zoho's GET
+        // ignores document_id and returns ITS newest attachment (see the note on
+        // isLatestPushedOnOrder), and "newest" by our row id is not always newest
+        // in Zoho: pushes can land out of order (a retry, a resubmit). Found on
+        // GM-20260926-0021, where the Valid ID (our newest row) opened the
+        // InstaPay receipt (Zoho's newest). The bytes we got back have to be the
+        // file we hold: same name, or same size. If neither, this is someone
+        // else's file, so serve our own copy from storage instead.
+        const sameName = result.fileName && String(result.fileName).trim().toLowerCase() === String(attachment.file_name || '').trim().toLowerCase();
+        const sameSize = Number.isFinite(attachment.file_size) && attachment.file_size > 0 && result.buffer && result.buffer.length === attachment.file_size;
+        if (!sameName && !sameSize) {
+          throw new Error(`Zoho returned "${result.fileName || 'an unnamed file'}" (${result.buffer ? result.buffer.length : 0} bytes), not "${attachment.file_name}"`);
+        }
+
         res.setHeader('Content-Type', result.contentType || contentType);
         res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${result.fileName || name}"`);
         // Sep 23, 2026: shorter than the Supabase branch below on purpose.

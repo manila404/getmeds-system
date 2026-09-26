@@ -29,7 +29,7 @@ import ManagerAccessTable from './ManagerAccessTable';
  * Manager Access and the account's own Team Lead setting.
  */
 
-const chLabel = (n) => String(n).replace(/^RX · /, 'RX · ').replace('HOSP', 'HOS').replace('TELESALES', 'Telesales');
+const chLabel = (n) => String(n).replace(/^RX · /, '').replace('HOSP', 'HOS').replace('TELESALES', 'Telesales');
 const peso = (n) => { const v = Number(n || 0); return `₱${v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : `${Math.round(v / 1e3)}K`}`; };
 const errorText = (err, fallback) => err?.response?.data?.error?.message || err?.message || fallback;
 const displayName = (u) => [u.first_name, u.last_name].filter(Boolean).join(' ') || u.name;
@@ -45,6 +45,13 @@ const TONE = {
   wait: 'bg-amber-50 text-amber-800 border-amber-200',
   vacant: 'bg-red-50 text-red-700 border-red-200',
   off: 'bg-slate-100 text-slate-600 border-slate-200',
+};
+
+// The order the business lists the channels in. A channel added later goes after these.
+const CHANNEL_ORDER = ['HOS', 'Telesales', 'B&B', 'STC', 'URO', 'B2C', 'B2B', 'CLIDP', 'BID', 'MT'];
+const sortChannels = (list) => {
+  const rank = (x) => { const i = CHANNEL_ORDER.indexOf(chLabel(x.c.name)); return i === -1 ? CHANNEL_ORDER.length : i; };
+  return [...list].sort((p, q) => rank(p) - rank(q));
 };
 
 /** The rows of ONE channel, each carrying what its action button needs. */
@@ -314,7 +321,103 @@ const AccountTable = ({ rows, onOpen, showDetail }) => (
   )
 );
 
-const AccountsByTeam = ({ users, onOpen, onShowList }) => {
+/* ── assign an account to a territory nobody holds ─────────────────────────── */
+
+const heldOf = (u) => (u.salespersons?.length ? u.salespersons.map((s) => s.salesperson) : (u.salesperson ? [u.salesperson] : []));
+
+/**
+ * A territory is held by whichever account carries its Zoho salesperson name. The
+ * sheet's short names ("B2B | DHON") are often not the name Zoho holds ("B2B | DHON
+ * VALLEJOS"), so "assign" points the territory at the MedRep's OWN Zoho salesperson:
+ * it is saved as the territory's Zoho name in the structure. The account is not
+ * touched, so nothing about their orders changes. The candidates are the MedReps
+ * that are not in any channel.
+ */
+const AssignDialog = ({ assigning, candidates, onClose, onDone }) => {
+  const { territory, channel } = assigning;
+  const [userId, setUserId] = useState('');
+  const [name, setName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const picked = candidates.find((u) => String(u.id) === String(userId));
+  const held = picked ? heldOf(picked) : [];
+
+  const pick = (value) => {
+    setUserId(value);
+    const u = candidates.find((x) => String(x.id) === String(value));
+    const list = u ? heldOf(u) : [];
+    setName(list[0] || '');
+  };
+
+  const save = async (e) => {
+    e.preventDefault();
+    if (!picked || !name) return setError('Pick an account that has a Zoho salesperson.');
+    setSaving(true);
+    setError(null);
+    try {
+      await client.patch(`/api/admin/team-structure/territories/${territory.id}`, { zoho_alias: name });
+      toast.success(`${territory.zoho_salesperson} now belongs to ${displayName(picked)}.`);
+      await onDone();
+      onClose();
+    } catch (err) {
+      setError(errorText(err, 'Could not assign.'));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:py-16" role="dialog" aria-modal="true" aria-labelledby="ts-assign-title">
+      <div className="fixed inset-0 bg-slate-900/50" onClick={() => !saving && onClose()} aria-hidden="true" />
+      <form onSubmit={save} className="relative w-full max-w-md rounded-xl bg-white shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+          <div>
+            <h2 id="ts-assign-title" className="text-base font-semibold text-ink-primary">Assign an account to {territory.zoho_salesperson}</h2>
+            <p className="text-xs text-ink-secondary mt-0.5">{chLabel(channel.name)}. Choose from the MedReps that are not in a channel.</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label htmlFor="ts-assign-account" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">MedRep account</label>
+            <select id="ts-assign-account" className={inputCls} value={userId} onChange={(e) => pick(e.target.value)} disabled={saving} autoFocus>
+              <option value="">Pick an account…</option>
+              {candidates.map((u) => (
+                <option key={u.id} value={u.id} disabled={!heldOf(u).length}>
+                  {displayName(u)}{heldOf(u).length ? ` · ${heldOf(u).join(', ')}` : ' · no Zoho salesperson yet'}
+                </option>
+              ))}
+            </select>
+            {candidates.length === 0 && <p className="mt-1.5 text-xs text-amber-800">Every active MedRep is already in a channel.</p>}
+          </div>
+
+          {picked && held.length > 1 && (
+            <div>
+              <label htmlFor="ts-assign-sp" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">Which of their Zoho salespersons</label>
+              <select id="ts-assign-sp" className={inputCls} value={name} onChange={(e) => setName(e.target.value)} disabled={saving}>
+                {held.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+          )}
+
+          {picked && name && (
+            <p className="text-sm text-ink-primary">
+              {territory.zoho_salesperson} will match to <strong>{displayName(picked)}</strong> through their Zoho salesperson <strong>{name}</strong>.
+              {territory.zoho_alias && territory.zoho_alias !== name ? <span className="text-ink-secondary"> It replaces the old name {territory.zoho_alias}.</span> : null}
+            </p>
+          )}
+          <p className="text-xs text-ink-secondary">This changes the team structure only. The account and its Zoho salesperson are not touched.</p>
+          {error && <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+          <button type="button" onClick={onClose} disabled={saving} className="px-3.5 py-2 rounded-md border border-slate-200 text-sm font-medium text-ink-secondary hover:bg-surface">Cancel</button>
+          <button type="submit" disabled={saving || !picked || !name} className="px-4 py-2 rounded-md text-sm font-semibold text-white bg-getmeds-blue hover:bg-getmeds-blue-hover disabled:opacity-60">{saving ? 'Assigning…' : 'Assign'}</button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
   const qc = useQueryClient();
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['team-structure'],
@@ -329,6 +432,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList }) => {
   const [showOthers, setShowOthers] = useState(false);
   const [editor, setEditor] = useState(null);
   const [moving, setMoving] = useState(null); // territory id whose Move menu is open
+  const [assigning, setAssigning] = useState(null); // { territory, channel } awaiting an account
 
   const usersById = useMemo(() => new Map(users.map((u) => [u.id, u])), [users]);
   // A change of manager (approver) also changes what Manager Access is compared against.
@@ -339,7 +443,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList }) => {
 
   const built = useMemo(() => {
     if (!data) return null;
-    const sections = data.heads.flatMap((h) => h.channels.map((c) => ({ h, c, ...channelRows(h, c, usersById) })));
+    const sections = sortChannels( data.heads.flatMap((h) => h.channels.map((c) => ({ h, c, ...channelRows(h, c, usersById) }))));
     const placed = new Set(sections.flatMap((s) => [...s.placed]));
     const others = users
       .filter((u) => !placed.has(u.id))
@@ -388,8 +492,19 @@ const AccountsByTeam = ({ users, onOpen, onShowList }) => {
     }
     if (a.type === 'rep') {
       const targets = s.c.managers.filter((m) => m.id !== a.from.id);
-      if (!targets.length) return null;
-      if (moving !== a.territory.id) return <button type="button" className={linkBtn} onClick={() => setMoving(a.territory.id)}>Move</button>;
+      // A territory nobody holds: pick one of the MedReps that are not in a channel.
+      const assign = !r.name
+        ? <button type="button" className={linkBtn} onClick={() => setAssigning({ territory: a.territory, channel: s.c })}>Assign account</button>
+        : null;
+      if (!targets.length) return assign;
+      if (moving !== a.territory.id) {
+        return (
+          <span className="inline-flex gap-3">
+            {assign}
+            <button type="button" className={linkBtn} onClick={() => setMoving(a.territory.id)}>Move</button>
+          </span>
+        );
+      }
       return (
         <select
           autoFocus
@@ -446,7 +561,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList }) => {
     <div className="space-y-5">
       <p className="text-sm text-ink-secondary max-w-3xl">
         Every account, by department. Sales is arranged by channel, one section each, so each can be set up on its own: who heads it, which manager approves it, which team leads sit
-        under it and who holds each territory. The buttons here change the structure only. What a manager sees and approves is shown beside it under Management (Approval), and changes only when you press "Apply from structure" on that person.
+        under it and who holds each territory. The buttons here change the structure only. What a manager sees and approves is shown beside it under Management (Approval), and changes only when you press Save on that person.
       </p>
 
       <DeptCard
@@ -515,6 +630,16 @@ const AccountsByTeam = ({ users, onOpen, onShowList }) => {
           </DeptCard>
         );
       })}
+
+      {assigning && (
+        <AssignDialog
+          key={assigning.territory.id}
+          assigning={assigning}
+          candidates={unplacedReps.map((r) => r.user).filter((u) => (u.is_active === 1 || u.is_active === true) && u.approval_status !== 'pending' && u.approval_status !== 'rejected')}
+          onClose={() => setAssigning(null)}
+          onDone={async () => { if (onUsersChanged) await onUsersChanged(); await refresh(); }}
+        />
+      )}
 
       {editor && <EditorDialog key={`${editor.mode}-${editor.channel.id}-${editor.manager ? editor.manager.id : ''}`} editor={editor} users={users} onClose={() => setEditor(null)} onSaved={refresh} />}
     </div>

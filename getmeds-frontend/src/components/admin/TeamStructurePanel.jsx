@@ -101,7 +101,7 @@ const OrgChart = ({ heads, summary, onPick }) => {
               {chs.map(({ c, mgrs, y: cy }) => (
                 <g key={`c-${c.id}`}>
                   <rect x={X.ch} y={cy} width={W.ch} height={NH} rx="10" fill="#E0F3FB" stroke="#1D9FDA" strokeWidth="1.3" />
-                  <text x={X.ch + 14} y={cy + 21} fill="#1E293B" fontSize="13.5" fontWeight="600">{c.name}</text>
+                  <text x={X.ch + 14} y={cy + 21} fill="#1E293B" fontSize="13.5" fontWeight="600">{c.name.replace(/^RX · /, '')}</text>
                   <text x={X.ch + 14} y={cy + 38} fill="#56657A" fontSize="11">
                     {c.counts.territories} terr.{c.counts.vacant ? ` · ${c.counts.vacant} vacant` : ''} · {peso(c.counts.target)}
                   </text>
@@ -153,7 +153,7 @@ const ManagerCard = ({ channel, m, filter, focused }) => {
     <article id={`team-mgr-${m.id}`} className={`bg-white rounded-xl border overflow-hidden ${focused ? 'border-getmeds-blue ring-2 ring-getmeds-blue/30' : 'border-slate-200'}`}>
       <header className="px-4 py-3 border-b border-slate-100 space-y-0.5">
         <div className="flex items-baseline justify-between gap-2">
-          <span className="text-[11px] font-bold uppercase tracking-wide text-getmeds-blue">{channel.name}</span>
+          <span className="text-[11px] font-bold uppercase tracking-wide text-getmeds-blue">{channel.name.replace(/^RX · /, '')}</span>
           <span className="text-[11px] text-ink-secondary">{m.acts_as_head ? 'Head, acting as team lead' : 'Team lead'}</span>
         </div>
         <p className="text-[15px] font-semibold text-ink-primary">{m.name}</p>

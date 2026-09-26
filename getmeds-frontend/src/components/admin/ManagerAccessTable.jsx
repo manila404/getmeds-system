@@ -22,6 +22,7 @@ import client from '../../api/client';
  */
 
 const errorText = (err, fallback) => err?.response?.data?.error?.message || err?.message || fallback;
+const chName = (n) => String(n).replace(/^RX · /, '');
 const num = (v) => Number(v || 0).toLocaleString();
 
 const MATCH = {
@@ -165,8 +166,8 @@ const ManagerAccessTable = ({ rows, onOpen }) => {
                   <tr onClick={() => onOpen(r.user.id)} className="cursor-pointer hover:bg-surface">
                     <td className="py-2 pr-3 pl-3.5 text-[13px] font-medium text-ink-primary">{r.name}</td>
                     <td className="py-2 pr-3 text-[12.5px] text-ink-secondary">
-                      {it ? (it.approves_channels.length ? it.approves_channels.join(', ') : <span className="text-slate-400">None</span>) : (plan.isLoading ? '…' : '')}
-                      {it && it.leads_channels.length > 0 && <div className="text-[11px] text-slate-500">Also team lead in {it.leads_channels.join(', ')}</div>}
+                      {it ? (it.approves_channels.length ? it.approves_channels.map(chName).join(', ') : <span className="text-slate-400">None</span>) : (plan.isLoading ? '…' : '')}
+                      {it && it.leads_channels.length > 0 && <div className="text-[11px] text-slate-500">Also team lead in {it.leads_channels.map(chName).join(', ')}</div>}
                     </td>
                     <td className="py-2 pr-3 text-[12.5px] text-ink-primary">
                       {it && (

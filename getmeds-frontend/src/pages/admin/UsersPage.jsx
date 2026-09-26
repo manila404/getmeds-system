@@ -385,7 +385,7 @@ const UsersPage = () => {
           <LoadingSpinner size="lg" />
         </div>
       ) : view === 'team' ? (
-        <AccountsByTeam users={users} onOpen={setDetailsUserId} onShowList={() => setView('list')} />
+        <AccountsByTeam users={users} onOpen={setDetailsUserId} onShowList={() => setView('list')} onUsersChanged={() => fetchUsers({ silent: true })} />
       ) : (
         /* Users Table */
         <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
