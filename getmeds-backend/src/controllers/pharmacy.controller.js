@@ -3,7 +3,8 @@
 /**
  * Pharmacy — prescription verification, ahead of Finance.
  *
- *   GET  /api/dispatch/pharmacy/queue?state=pending|rejected|verified|all
+ *   GET  /api/dispatch/pharmacy/queue?state=pending|rejected|verified|all|all_orders&channel=HOS|Telesales|B%26B|STC|URO|B2C
+ *        all_orders: every native order of those six channels since Sep 12, 2026, prescription or not
  *   POST /api/dispatch/pharmacy/orders/:id/verify   { attachment_id? }
  *   POST /api/dispatch/pharmacy/orders/:id/reject   { reason, attachment_id? }
  *
@@ -34,8 +35,8 @@ const db = require('../db/database');
 const { loadScope, scopeSql } = require('../services/orderScopeService');
 const { importedSql } = require('../services/orderOrigin');
 const { logEvent, resolveActor } = require('../services/auditService');
-const { notify } = require('../services/notificationService');
-const { rxSummaries, RX_FILE_TYPE, PRE_SHIP_STATUSES } = require('../services/prescriptionService');
+const { notify, getUserIdsByRole } = require('../services/notificationService');
+const { rxSummaries, prescriptionRows, summarize, isPharmacyReviewable, RX_FILE_TYPE, PRE_SHIP_STATUSES } = require('../services/prescriptionService');
 const { hasColumn } = require('../services/schemaColumns');
 
 // From "Sales Order created, waiting on Finance" until the parcel is packed.
@@ -43,6 +44,32 @@ const PHARMACY_STATUSES = PRE_SHIP_STATUSES;
 const FINANCE_CONFIRMED = PRE_SHIP_STATUSES.filter((s) => s !== 'ready_for_finance_verified');
 
 const STATES = ['pending', 'rejected', 'verified'];
+
+// The stage an on-hold order was at just before its latest hold. An order held
+// FROM one of the pharmacy stages stays in the pharmacist's queue: a Finance hold
+// must not stop Pharmacy working its own track (see services/prescriptionService.js).
+const HELD_FROM_SQL = `(SELECT e.old_status FROM order_events e
+                          WHERE e.order_id = o.id AND e.new_status = 'on_hold' AND e.old_status <> 'on_hold'
+                          ORDER BY e.id DESC LIMIT 1)`;
+
+// Sep 26, 2026: the six sales channels a pharmacist audits, as the divisions that
+// carry them on an order. Telesales is TeleSales + TeleSales Anesthesia; B2C is
+// B2C + MD Telesales (the sheet renamed MD Telesales to B2C, see
+// services/managerAccessSyncService.js, which holds the same mapping).
+const PHARMACY_CHANNELS = {
+  HOS: ['HOS'],
+  Telesales: ['TeleSales', 'TeleSales Anesthesia'],
+  'B&B': ['B&B'],
+  STC: ['STC'],
+  URO: ['URO'],
+  B2C: ['B2C', 'MD Telesales'],
+};
+const ALL_ORDERS_DIVISIONS = Object.values(PHARMACY_CHANNELS).flat();
+
+// "All orders" starts on Sep 12, 2026 (00:00 in Manila is 16:00 the day before, UTC).
+const ALL_ORDERS_SINCE = '2026-09-11T16:00:00.000Z';
+// Never a live order yet, or already discarded: nothing for a pharmacist to audit.
+const ALL_ORDERS_EXCLUDED_STATUSES = ['draft', 'deleted'];
 const QUEUE_CAP = 500;
 
 const fail = (res, status, code, message) => res.status(status).json({ success: false, error: { code, message } });
@@ -60,41 +87,105 @@ exports.getQueue = async (req, res, next) => {
     const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
     const excludeDeleted = (await hasColumn('payment_proofs', 'deleted_at')) ? ' AND p.deleted_at IS NULL' : '';
 
+    // Channel pill: one of the six, or none. It narrows every tab.
+    const channel = Object.keys(PHARMACY_CHANNELS).find((k) => k.toLowerCase() === String(req.query.channel || '').toLowerCase()) || null;
+    const channelAnd = channel ? ' AND o.division = ANY(?)' : '';
+    const channelParams = channel ? [PHARMACY_CHANNELS[channel]] : [];
+
+    const columns = `o.id, o.getmeds_order_id, o.status, o.division, o.total_amount, o.created_at, o.updated_at,
+                o.zoho_so_number, o.delivery_notes,
+                c.name AS customer_name, u.name AS medrep_name,
+                CASE WHEN o.status = 'on_hold' THEN ${HELD_FROM_SQL} END AS held_from`;
+    const joins = `FROM orders o
+           LEFT JOIN customers c ON c.id = o.customer_id
+           LEFT JOIN users u ON u.id = o.medrep_id`;
+
+    // Orders that carry a prescription, from Management's approval until packed.
     const orders = await db
       .prepare(
-        `SELECT o.id, o.getmeds_order_id, o.status, o.division, o.total_amount, o.created_at, o.updated_at,
-                o.zoho_so_number, o.delivery_notes,
-                c.name AS customer_name, u.name AS medrep_name
-           FROM orders o
-           LEFT JOIN customers c ON c.id = o.customer_id
-           LEFT JOIN users u ON u.id = o.medrep_id
-          WHERE o.status = ANY(?)
+        `SELECT ${columns}
+           ${joins}
+          WHERE (o.status = ANY(?) OR (o.status = 'on_hold' AND ${HELD_FROM_SQL} = ANY(?)))
             AND NOT (${importedSql('o')})
             AND EXISTS (SELECT 1 FROM payment_proofs p
-                         WHERE p.order_id = o.id AND p.file_type = '${RX_FILE_TYPE}'${excludeDeleted})${scopeAnd}
+                         WHERE p.order_id = o.id AND p.file_type = '${RX_FILE_TYPE}'${excludeDeleted})${channelAnd}${scopeAnd}
           ORDER BY o.created_at DESC
           LIMIT ${QUEUE_CAP}`
       )
-      .all([PHARMACY_STATUSES, ...scopeParams]);
+      .all([PHARMACY_STATUSES, PHARMACY_STATUSES, ...channelParams, ...scopeParams]);
 
-    const summaries = await rxSummaries(orders.map((o) => o.id));
-    const rows = orders.map((o) => {
+    // "All orders": every order of the six channels, whether or not a prescription
+    // is attached, so the pharmacist can look at the items and notes and decide if
+    // one is needed. Native GM- orders only, from Sep 12, 2026.
+    const allOrdersSql = `${joins}
+          WHERE o.getmeds_order_id LIKE 'GM-%'
+            AND NOT (${importedSql('o')})
+            AND o.created_at >= ?
+            AND NOT (o.status = ANY(?))
+            AND o.division = ANY(?)${channelAnd}${scopeAnd}`;
+    const allOrdersParams = [ALL_ORDERS_SINCE, ALL_ORDERS_EXCLUDED_STATUSES, ALL_ORDERS_DIVISIONS, ...channelParams, ...scopeParams];
+    const allOrdersCount = Number(
+      (await db.prepare(`SELECT COUNT(*) AS n ${allOrdersSql}`).get(allOrdersParams)).n
+    );
+
+    const wanted = String(req.query.state || 'pending').toLowerCase();
+    const wantAllOrders = wanted === 'all_orders';
+    const listed = wantAllOrders
+      ? await db.prepare(`SELECT ${columns} ${allOrdersSql} ORDER BY o.created_at DESC LIMIT ${QUEUE_CAP}`).all(allOrdersParams)
+      : orders;
+
+    const listedIds = [...new Set([...orders, ...listed].map((o) => o.id))];
+    const summaries = await rxSummaries(listedIds);
+
+    // The MedRep's latest answer to a rejection, so the pharmacist sees what they said.
+    const resubmits = new Map();
+    if (listedIds.length) {
+      const answers = await db
+        .prepare(
+          `SELECT DISTINCT ON (order_id) order_id, actor_name, created_at, metadata
+             FROM order_events
+            WHERE event_type = 'RX_RESUBMITTED' AND order_id = ANY(?)
+            ORDER BY order_id, id DESC`
+        )
+        .all([listedIds]);
+      for (const a of answers) {
+        let note = null;
+        try { note = JSON.parse(a.metadata || '{}').note || null; } catch { note = null; }
+        resubmits.set(a.order_id, { by: a.actor_name, at: a.created_at, note });
+      }
+    }
+
+    const shape = (o) => {
       const s = summaries.get(o.id);
       return {
         ...o,
         finance_cleared: FINANCE_CONFIRMED.includes(o.status),
+        // Decidable between approval and packing, and also while on hold from one of
+        // those stages: a Finance hold does not stop Pharmacy.
+        reviewable: PHARMACY_STATUSES.includes(o.status) || (o.status === 'on_hold' && PHARMACY_STATUSES.includes(o.held_from)),
         rx_state: s.state,
         prescriptions: s.prescriptions,
+        resubmitted: s.state === 'pending' ? resubmits.get(o.id) || null : null,
       };
+    };
+    const rxRows = orders.map(shape);
+
+    const counts = { pending: 0, rejected: 0, verified: 0, all: rxRows.length, all_orders: allOrdersCount };
+    for (const r of rxRows) if (STATES.includes(r.rx_state)) counts[r.rx_state] += 1;
+
+    const shown = wantAllOrders ? listed.map(shape) : wanted === 'all' ? rxRows : rxRows.filter((r) => r.rx_state === wanted);
+
+    res.json({
+      success: true,
+      data: {
+        orders: shown,
+        counts,
+        can_decide: mayDecide(req.user),
+        channels: Object.keys(PHARMACY_CHANNELS),
+        channel,
+        truncated: wantAllOrders && allOrdersCount > listed.length,
+      },
     });
-
-    const counts = { pending: 0, rejected: 0, verified: 0, all: rows.length };
-    for (const r of rows) if (STATES.includes(r.rx_state)) counts[r.rx_state] += 1;
-
-    const wanted = String(req.query.state || 'pending').toLowerCase();
-    const shown = wanted === 'all' ? rows : rows.filter((r) => r.rx_state === wanted);
-
-    res.json({ success: true, data: { orders: shown, counts, can_decide: mayDecide(req.user) } });
   } catch (err) {
     next(err);
   }
@@ -136,7 +227,7 @@ async function decide(req, res, next, verdict) {
 
     const order = await loadOrder(req.params.id);
     if (!order) return fail(res, 404, 'NOT_FOUND', 'Order not found');
-    if (!PHARMACY_STATUSES.includes(order.status)) {
+    if (!(await isPharmacyReviewable(order))) {
       return fail(
         res,
         409,
@@ -201,6 +292,84 @@ async function decide(req, res, next, verdict) {
     next(err);
   }
 }
+
+// ── The MedRep answers a rejection: POST /api/orders/:id/resubmit-prescription ──
+//
+// Sep 26, 2026. Goes to PHARMACY only. It changes no order status, does not touch
+// Finance's confirmation and does not notify Finance: the two tracks are independent.
+//
+// A replacement file uploaded from the Attachments tab already answers a rejection
+// (see prescriptionService.summarize). This is the other way: the same file, with a
+// note ("the quantity is on page 2"), or a replacement plus a note. If the rejected
+// file is still the live one it goes back to 'pending', and the pharmacist sees the
+// note next to it; the reason it was rejected stays on the order's timeline.
+exports.resubmitPrescription = async (req, res, next) => {
+  try {
+    const note = String(req.body?.note || '').trim();
+    if (!note) return fail(res, 400, 'VALIDATION_ERROR', 'Say what has changed, e.g. "Replacement uploaded" or "Quantity is on page 2".');
+    if (note.length > 500) return fail(res, 400, 'VALIDATION_ERROR', 'The note is too long (500 characters at most).');
+
+    const order = await loadOrder(req.params.id);
+    if (!order) return fail(res, 404, 'NOT_FOUND', 'Order not found');
+
+    const role = String(req.user?.role || '').toLowerCase();
+    const mine = order.medrep_id === req.user.id || (order.raised_by_id && order.raised_by_id === req.user.id);
+    if (!(role === 'admin' || role === 'management' || (role === 'medrep' && mine))) {
+      return fail(res, 403, 'FORBIDDEN', 'Only the MedRep on this order, or Management, can re-submit its prescription.');
+    }
+    if (!(await isPharmacyReviewable(order))) {
+      return fail(res, 409, 'NOT_IN_QUEUE', `This order is at "${order.status}", so its prescription is not being reviewed now.`);
+    }
+
+    const rows = await prescriptionRows([order.id]);
+    const { state, prescriptions } = summarize(rows);
+    const rejectedLive = prescriptions.filter((p) => p.status === 'rejected' && !p.superseded).map((p) => p.id);
+    const everRejected = rows.some((r) => r.status === 'rejected');
+    if (state !== 'rejected' && !(state === 'pending' && everRejected)) {
+      return fail(res, 409, 'NOTHING_TO_RESUBMIT', 'Pharmacy has not rejected a prescription on this order, so there is nothing to re-submit.');
+    }
+
+    const actor = await resolveActor(req.user, role === 'medrep' ? 'medrep' : 'management');
+    await db.transaction(async () => {
+      if (rejectedLive.length) {
+        await db
+          .prepare(
+            `UPDATE payment_proofs
+                SET status = 'pending', verified_by = NULL, verified_at = NULL, rejection_reason = NULL
+              WHERE id = ANY(?) AND status = 'rejected'`
+          )
+          .run([rejectedLive]);
+      }
+      await logEvent({
+        orderId: order.id,
+        eventType: 'RX_RESUBMITTED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Prescription re-submitted to Pharmacy by ${actor.name}: ${note}`,
+        metadata: { note, reset: rejectedLive },
+      });
+    })();
+
+    // Pharmacy only.
+    await notify({
+      orderId: order.id,
+      recipientIds: (await getUserIdsByRole('dispatch')).filter((id) => id !== actor.id),
+      message: `Order ${order.getmeds_order_id}: the prescription was re-submitted by ${actor.name} for your review. ${note}`,
+      eventType: 'RX_RESUBMITTED',
+      orderData: order,
+    });
+
+    const s = (await rxSummaries([order.id])).get(order.id);
+    res.json({
+      success: true,
+      data: { id: order.id, rx_state: s.state, prescriptions: s.prescriptions, message: 'Re-submitted: back with Pharmacy for review.' },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
 
 exports.verify = (req, res, next) => decide(req, res, next, 'verified');
 exports.reject = (req, res, next) => decide(req, res, next, 'rejected');

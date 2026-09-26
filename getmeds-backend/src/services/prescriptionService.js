@@ -175,4 +175,54 @@ function requireRxCleared(req, res, next) {
   })().catch(next);
 }
 
-module.exports = { RX_FILE_TYPE, PRE_SHIP_STATUSES, summarize, rxSummaries, rxBadge, requireRxCleared };
+// ── Sep 26, 2026: Pharmacy and Finance are two independent tracks ─────────────
+//
+// A prescription rejected by Pharmacy is answered by the MedRep to PHARMACY
+// (a replacement upload, or "Resubmit prescription" with a note), and that never
+// touches Finance: the order's status is not changed, Finance's confirmation is
+// not reset, Finance is not notified. The mirror image holds too: answering a
+// Finance hold (returnToFinanceIfHeld) never changes a prescription's state.
+
+/** The stage an order was at just before its latest hold, or null. */
+async function heldFromStage(orderId) {
+  const row = await db
+    .prepare(
+      `SELECT old_status FROM order_events
+        WHERE order_id = ? AND new_status = 'on_hold' AND old_status <> 'on_hold'
+        ORDER BY id DESC LIMIT 1`
+    )
+    .get(orderId);
+  return row ? row.old_status : null;
+}
+
+/**
+ * Can the pharmacist decide on this order's prescription? From Management's approval
+ * until packing, and also while the order is on hold from one of those stages: a
+ * Finance hold must not stop Pharmacy working its own track.
+ */
+async function isPharmacyReviewable(order) {
+  if (!order) return false;
+  if (PRE_SHIP_STATUSES.includes(order.status)) return true;
+  if (order.status === 'on_hold') return PRE_SHIP_STATUSES.includes(await heldFromStage(order.id));
+  return false;
+}
+
+/**
+ * What the MedRep needs to see when Pharmacy rejected the prescription:
+ * { state, rejection: { reason, at, file_name } | null, can_resubmit }.
+ */
+async function rxStatusForOrder(order) {
+  const { state, prescriptions } = (await rxSummaries([order.id])).get(order.id);
+  const live = prescriptions.filter((p) => !p.superseded && p.status === 'rejected');
+  const last = live.sort((a, b) => String(b.verified_at || '').localeCompare(String(a.verified_at || '')))[0] || null;
+  return {
+    state,
+    rejection: last ? { reason: last.rejection_reason, at: last.verified_at, file_name: last.file_name } : null,
+    can_resubmit: state === 'rejected' && (await isPharmacyReviewable(order)),
+  };
+}
+
+module.exports = {
+  RX_FILE_TYPE, PRE_SHIP_STATUSES, summarize, rxSummaries, rxBadge, requireRxCleared,
+  heldFromStage, isPharmacyReviewable, rxStatusForOrder, prescriptionRows,
+};

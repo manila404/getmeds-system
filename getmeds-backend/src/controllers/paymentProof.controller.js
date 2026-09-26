@@ -8,6 +8,7 @@ const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const zoho = require('../integrations/zoho');
 const { constraintAllows, hasColumn } = require('../services/schemaColumns');
 const attachmentLink = require('../services/attachmentLinkService');
+const { isPharmacyReviewable } = require('../services/prescriptionService');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -329,9 +330,24 @@ exports.attach = async (req, res, next) => {
      */
     // A dispatch proof is not an answer to a Finance hold — and by the time
     // one can be attached, Finance is done with the order anyway.
-    const returnedToFinance = isDispatchProof ? false : await returnToFinanceIfHeld(order, actor, {
+    // Sep 26, 2026: nor is a PRESCRIPTION. It answers Pharmacy, not Finance, and the two
+    // tracks are independent: a replacement prescription must not send a Finance
+    // hold back to Finance (see services/prescriptionService.js).
+    const isPrescription = fileType === 'prescription';
+    const returnedToFinance = isDispatchProof || isPrescription ? false : await returnToFinanceIfHeld(order, actor, {
       reason: fileType === 'payment_proof' ? 'Proof of payment attached' : 'File attached',
     });
+
+    // A prescription goes to Pharmacy: tell them when it is one they are reviewing.
+    if (isPrescription && (await isPharmacyReviewable(order))) {
+      await notify({
+        orderId: order.id,
+        recipientIds: (await getUserIdsByRole('dispatch')).filter((id) => id !== actor.id),
+        message: `Order ${order.getmeds_order_id} has a prescription awaiting your review.`,
+        eventType: 'RX_UPLOADED',
+        orderData: order,
+      });
+    }
 
     // Tell Finance when the order is on their desk — either because it was
     // already there, or because the upload above just put it back. (The

@@ -11,7 +11,7 @@ import { usePasteImage } from '../../hooks/usePasteImage';
  * Doesn't upload anything itself; the caller does that (with the reason)
  * when the form is submitted.
  */
-const AttachFileField = ({ file, fileType, onFileChange, onTypeChange, disabled, label = 'Attach a file (optional)' }) => {
+const AttachFileField = ({ file, fileType, onFileChange, onTypeChange, disabled, hideType = false, label = 'Attach a file (optional)' }) => {
   const inputRef = useRef(null);
 
   const acceptFile = (f) => {
@@ -55,7 +55,7 @@ const AttachFileField = ({ file, fileType, onFileChange, onTypeChange, disabled,
         </div>
       ) : (
         <div className="flex flex-wrap gap-2 items-center">
-          <select
+          {!hideType && <select
             value={fileType}
             onChange={(e) => onTypeChange(e.target.value)}
             disabled={disabled}
@@ -64,7 +64,7 @@ const AttachFileField = ({ file, fileType, onFileChange, onTypeChange, disabled,
             {ATTACHMENT_TYPES.map((t) => (
               <option key={t.value} value={t.value}>{t.label}</option>
             ))}
-          </select>
+          </select>}
           <input ref={inputRef} type="file" accept={ATTACHMENT_ACCEPT} onChange={pick} className="hidden" disabled={disabled} />
           <button
             type="button"

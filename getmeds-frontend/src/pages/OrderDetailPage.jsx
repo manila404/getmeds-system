@@ -16,7 +16,8 @@ import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 import OrderItemsEditor from '../components/orders/OrderItemsEditor';
 import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
-import ResumeOrderModal from '../components/orders/ResumeOrderModal';
+import ResumeOrderModal, { stageLabel } from '../components/orders/ResumeOrderModal';
+import ResubmitPrescriptionModal from '../components/orders/ResubmitPrescriptionModal';
 import AttachFileField from '../components/orders/AttachFileField';
 import { uploadOrderAttachment } from '../utils/attachmentUpload';
 import { roleLabel } from '../constants/roles';
@@ -119,6 +120,7 @@ const EVENT_LABELS = {
   // Sep 25, 2026: the pharmacist's decision on a prescription.
   RX_VERIFIED: 'PRESCRIPTION VERIFIED',
   RX_REJECTED: 'PRESCRIPTION REJECTED',
+  RX_RESUBMITTED: 'PRESCRIPTION RE-SUBMITTED',
   ZOHO_INVOICE_DRAFTED: 'INVOICE DRAFTED',
   ZOHO_INVOICE_SENT: 'INVOICE SENT',
   ZOHO_PAYMENT_VERIFIED: 'PAYMENT RECEIVED',
@@ -189,7 +191,7 @@ const EVENT_ICONS = {
   ZOHO_SO_STATUS_CHANGED: '📄', ORDER_ITEMS_EDITED: '✏️', ZOHO_SO_DELETED: '🗑️',
   FINANCE_VERIFIED: '🔍', FINANCE_REJECTED: '🛑',
   PAYMENT_PROOF_UPLOADED: '🧾', PAYMENT_PROOF_REJECTED: '🛑',
-  RX_VERIFIED: '💊', RX_REJECTED: '🛑',
+  RX_VERIFIED: '💊', RX_REJECTED: '🛑', RX_RESUBMITTED: '↩',
   ZOHO_LOG: '📜', ORDER_IMPORTED_FROM_ZOHO: '📥', ZOHO_SO_LINKED: '🔗',
   ZOHO_SO_CREATED: '📝', ZOHO_SO_FULFILLED: '🎉', ZOHO_DELIVERED: '🏠',
   ZOHO_PACKAGE_UPDATED: '📦', ZOHO_PACKAGE_DELETED: '🗑️',
@@ -295,6 +297,23 @@ const OrderDetailPage = () => {
 
   // Sep 15, 2026: re-submit an order Finance held, with the reason.
   const [resubmitOpen, setResubmitOpen] = useState(false);
+  // Sep 26, 2026: answer Pharmacy's rejection of the prescription. Pharmacy only:
+  // a replacement (optional) is uploaded first, then the note goes with the resubmit.
+  const [rxResubmitOpen, setRxResubmitOpen] = useState(false);
+  const rxResubmitMutation = useMutation({
+    mutationFn: async ({ note, file }) => {
+      if (file) await uploadOrderAttachment(client, id, file, 'prescription');
+      return client.post(`/api/orders/${id}/resubmit-prescription`, { note }).then(r => r.data);
+    },
+    onSuccess: (res) => {
+      toast.success(res?.data?.message || 'Re-submitted to Pharmacy.');
+      setRxResubmitOpen(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries({ queryKey: ['order-attachments', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || err.message || 'Could not re-submit the prescription', { duration: 8000 })
+  });
+
   // Sep 15, 2026: the whole order on one screen, like the submission review.
   const [overviewOpen, setOverviewOpen] = useState(false);
   // Sep 18, 2026: reason first (moves the order off the hold/exception with
@@ -1447,7 +1466,7 @@ const OrderDetailPage = () => {
                 onClick={() => setResubmitOpen(true)}
                 className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
               >
-                ↩ Re-submit for verification
+                ↩ Re-submit to {order.resume_to ? stageLabel(order.resume_to) : 'Finance'}
               </button>
             )}
             {/* Sep 19, 2026: resubmittable false but still held/exception —
@@ -1474,6 +1493,38 @@ const OrderDetailPage = () => {
               lift the hold.
             </span>
           </div>
+        )}
+        {/* Sep 26, 2026: Pharmacy rejected the prescription. Answered to Pharmacy, on its own:
+            Finance's hold (above) has its own "Re-submit to Finance", and neither touches the other. */}
+        {order.rx?.state === 'rejected' &&
+          (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+          <div className="mt-3 bg-red-50 border border-red-200 rounded p-3 text-xs text-red-950 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p>
+                <span className="font-semibold">💊 Pharmacy rejected the prescription:</span> {order.rx.rejection?.reason || 'No reason given.'}
+              </p>
+              {order.rx.can_resubmit && (
+                <button
+                  type="button"
+                  onClick={() => setRxResubmitOpen(true)}
+                  className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
+                >
+                  ↩ Re-submit prescription to Pharmacy
+                </button>
+              )}
+            </div>
+            <p className="text-red-900/80">
+              Upload a replacement or explain what changed. This goes to Pharmacy only; it does not change anything with Finance.
+            </p>
+          </div>
+        )}
+        {rxResubmitOpen && (
+          <ResubmitPrescriptionModal
+            order={order}
+            onClose={() => setRxResubmitOpen(false)}
+            onSubmit={(body) => rxResubmitMutation.mutate(body)}
+            saving={rxResubmitMutation.isPending}
+          />
         )}
         {resumeOpen && (
           <ResumeOrderModal

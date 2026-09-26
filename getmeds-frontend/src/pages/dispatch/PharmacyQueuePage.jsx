@@ -27,7 +27,11 @@ const TABS = [
   { key: 'pending', label: 'Awaiting review', hint: 'Prescriptions nobody has reviewed yet, including replacements.' },
   { key: 'rejected', label: 'Rejected', hint: 'Sent back to the MedRep. They come back under "Awaiting review" once replaced.' },
   { key: 'verified', label: 'Verified', hint: 'Cleared by the pharmacy, and not yet packed.' },
+  { key: 'all_orders', label: 'All orders', hint: 'Every order of the six channels since Sep 12, 2026, with or without a prescription attached.' },
 ];
+
+// The six channels a pharmacist audits. The server maps each to its divisions.
+const CHANNELS = ['HOS', 'Telesales', 'B&B', 'STC', 'URO', 'B2C'];
 
 const STAGE_LABEL = {
   ready_for_finance_verified: 'Awaiting Finance',
@@ -35,6 +39,7 @@ const STAGE_LABEL = {
   ready_for_invoice_sent: 'Finance confirmed · invoice not sent',
   ready_for_dispatch: 'Finance confirmed · ready for dispatch',
   picking_packing: 'Packed',
+  on_hold: 'On hold',
 };
 
 const peso = (n) => `₱${Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
@@ -152,15 +157,16 @@ const FinancePill = ({ cleared }) =>
 
 const PharmacyQueuePage = () => {
   const [tab, setTab] = useState('pending');
+  const [channel, setChannel] = useState('');
   const [viewingId, setViewingId] = useState(null);
 
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['pharmacy-queue', tab],
-    queryFn: () => client.get('/api/dispatch/pharmacy/queue', { params: { state: tab } }).then((r) => r.data.data),
+    queryKey: ['pharmacy-queue', tab, channel],
+    queryFn: () => client.get('/api/dispatch/pharmacy/queue', { params: { state: tab, ...(channel ? { channel } : {}) } }).then((r) => r.data.data),
     refetchInterval: 30000,
   });
   const orders = data?.orders || [];
-  const counts = data?.counts || { pending: 0, rejected: 0, verified: 0 };
+  const counts = data?.counts || { pending: 0, rejected: 0, verified: 0, all_orders: 0 };
   const canDecide = Boolean(data?.can_decide);
   const viewing = orders.find((o) => o.id === viewingId) || null;
 
@@ -174,7 +180,8 @@ const PharmacyQueuePage = () => {
           </div>
           <p className="text-sm text-ink-secondary mt-1 max-w-3xl">
             Orders that carry a prescription, from the moment Management approves them, so a prescription can be
-            reviewed while Finance checks the payment. An order goes out once both are done.
+            reviewed while Finance checks the payment. An order goes out once both are done. "All orders" also lists the orders of
+            HOS, Telesales, B&B, STC, URO and B2C that have no prescription yet, so you can check whether one is needed.
             {!canDecide && data ? ' You can look here; Dispatch verifies and rejects.' : ''}
           </p>
         </div>
@@ -205,6 +212,23 @@ const PharmacyQueuePage = () => {
         ))}
       </div>
 
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Channel">
+        <span className="text-[11px] font-bold uppercase tracking-wide text-ink-secondary mr-1">Channel</span>
+        {['', ...CHANNELS].map((c) => (
+          <button
+            key={c || 'all'}
+            type="button"
+            aria-pressed={channel === c}
+            onClick={() => setChannel(c)}
+            className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition-colors ${
+              channel === c ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-ink-secondary border-slate-200 hover:bg-surface hover:text-ink-primary'
+            }`}
+          >
+            {c || 'All'}
+          </button>
+        ))}
+      </div>
+
       <div className="bg-white shadow rounded-lg border border-slate-200 overflow-hidden">
         {isLoading ? (
           <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-getmeds-blue" /></div>
@@ -212,7 +236,7 @@ const PharmacyQueuePage = () => {
           <div className="text-center py-12 text-ink-secondary">
             <CheckCircle2 className="w-10 h-10 mx-auto mb-2 text-pharmacy-green" />
             <p className="text-sm">
-              {tab === 'pending' ? 'No prescription is waiting for review.' : tab === 'rejected' ? 'No rejected prescription is waiting on a MedRep.' : 'Nothing verified is waiting to be packed.'}
+              {tab === 'pending' ? 'No prescription is waiting for review.' : tab === 'rejected' ? 'No rejected prescription is waiting on a MedRep.' : tab === 'verified' ? 'Nothing verified is waiting to be packed.' : 'No orders match.'}
             </p>
           </div>
         ) : (
@@ -227,8 +251,8 @@ const PharmacyQueuePage = () => {
                       {o.medrep_name}{o.division ? ` · ${o.division}` : ''}
                     </p>
                     <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                      <FinancePill cleared={o.finance_cleared} />
-                      <span className="text-[11px] text-ink-secondary">{STAGE_LABEL[o.status] || o.status}</span>
+                      {STAGE_LABEL[o.status] && <FinancePill cleared={o.finance_cleared} />}
+                      <span className="text-[11px] text-ink-secondary">{STAGE_LABEL[o.status] || String(o.status).replace(/_/g, ' ')}</span>
                     </div>
                   </div>
                   <div className="text-right shrink-0">
@@ -243,6 +267,14 @@ const PharmacyQueuePage = () => {
                   </div>
                 </div>
 
+                {o.resubmitted && (
+                  <p className="rounded-md bg-blue-50 border border-blue-200 px-3 py-1.5 text-xs text-blue-950">
+                    <span className="font-semibold">↩ Re-submitted{o.resubmitted.by ? ` by ${o.resubmitted.by}` : ''}:</span> {o.resubmitted.note || 'No note.'}
+                  </p>
+                )}
+                {o.prescriptions.length === 0 && (
+                  <p className="rounded-md bg-surface px-3 py-1.5 text-xs text-ink-secondary">No prescription uploaded. Open the files to check the items and notes.</p>
+                )}
                 <ul className="space-y-1">
                   {o.prescriptions.filter((p) => !p.superseded).map((p) => (
                     <li key={p.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-md bg-surface px-3 py-1.5 text-xs">
@@ -263,18 +295,22 @@ const PharmacyQueuePage = () => {
                   ))}
                 </ul>
 
-                <Decision order={o} canDecide={canDecide} />
+                {o.reviewable !== false && <Decision order={o} canDecide={canDecide} />}
               </li>
             ))}
           </ul>
         )}
       </div>
 
+      {data?.truncated && (
+        <p className="text-xs text-ink-secondary">Showing the newest {orders.length} of {counts.all_orders} orders. Pick a channel to narrow the list.</p>
+      )}
+
       {viewing && (
         <OrderDetailsModal
           orderId={viewing.id}
           onClose={() => setViewingId(null)}
-          footer={<Decision order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />}
+          footer={viewing.reviewable !== false ? <Decision order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} /> : null}
         />
       )}
     </div>

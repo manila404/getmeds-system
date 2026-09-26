@@ -90,6 +90,9 @@ router.post('/:id/send-back', requireRole('management', 'admin'), c.sendBack);
 // reason ("Proof of payment uploaded", or typed). Who may, and which holds,
 // is checked in the controller — see resubmit().
 router.post('/:id/resubmit', blockMedrepWritesOnImported, c.resubmit);
+// Sep 26, 2026: the MedRep answers a PHARMACY rejection of the prescription. Goes to
+// Pharmacy only; Finance's track is untouched. Who may is checked in the controller.
+router.post('/:id/resubmit-prescription', blockMedrepWritesOnImported, require('../controllers/pharmacy.controller').resubmitPrescription);
 // Sep 7, 2026 (2): edit order-level fields (delivery/intake info, Division,
 // Sub-division, Salesperson) — the non-items counterpart to PATCH
 // /:id/items below. No requireRole here either — same as that route, the

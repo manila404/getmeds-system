@@ -48,6 +48,7 @@ const { setCustomerTin } = require('../services/customerTinService');
 // name. Zoho has Salesperson as a mandatory Sales Order field here.
 const salespersonService = require('../services/salespersonService');
 const { returnToFinanceIfHeld, isFinanceHold } = require('../services/financeHoldService');
+const { rxStatusForOrder } = require('../services/prescriptionService');
 // Sep 19, 2026: rebuilds a Sales Order payload fresh from the order's
 // current database state — already used to re-send a queued retry with
 // whatever was last corrected (see that file's header note); reused here
@@ -932,7 +933,7 @@ exports.getById = async (req, res, next) => {
     res.json({
       success: true,
       data: {
-        order: { ...order, resubmittable, resume_to: resumeTo, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold },
+        order: { ...order, resubmittable, resume_to: resumeTo, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold, rx: await rxStatusForOrder(order) },
         items,
         payment,
         dispatch,
