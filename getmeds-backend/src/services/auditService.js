@@ -1,6 +1,7 @@
 const db = require('../db/database');
 const { mirrorAuditEvent } = require('./discordAuditService');
 const { hasColumn } = require('./schemaColumns');
+const { isCovered, noteSkipped } = require('./orderEventCoverage');
 
 // 1. Prepare the statement once at module load for better performance
 // Sep 10, 2026: `created_at` is now a parameter rather than 'now'.
@@ -58,6 +59,14 @@ async function logEvent(
   // 2. Validate required fields
   if (!orderId || !eventType) {
     throw new Error('orderId and eventType are required to log an event.');
+  }
+
+  // Sep 26, 2026: an event dated before the oldest partition (Zoho history from 2023)
+  // cannot be stored, and one refused insert used to fail the whole Zoho reconcile.
+  // That history was dropped on purpose, so it is left out rather than raised.
+  if (occurredAt && !(await isCovered(occurredAt))) {
+    noteSkipped(`A ${eventType} event for order ${orderId}`);
+    return;
   }
 
   try {

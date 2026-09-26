@@ -1,4 +1,5 @@
 'use strict';
+const { isCovered, noteSkipped } = require('./orderEventCoverage');
 
 /**
  * Reading Zoho's own Comments & History as the order's trail.
@@ -205,6 +206,11 @@ async function ingestHistory({ orderId, salesorderId, comments, source = 'zoho_h
     // inferred checkpoints it is a real one — "Aman Bishnoi", not "Zoho".
     const actorName = entry.commented_by || 'Zoho';
     const occurredAt = toIsoWithTime(entry.date, entry.time) || new Date().toISOString();
+    // Sep 26, 2026: older than the oldest partition: not kept (see orderEventCoverage.js).
+    if (!(await isCovered(occurredAt))) {
+      noteSkipped(`A Zoho history entry for order ${orderId}`);
+      continue;
+    }
 
     await insert.run(
       orderId,

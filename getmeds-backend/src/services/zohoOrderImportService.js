@@ -16,6 +16,7 @@ const { ingestHistory } = require('./zohoHistoryService');
 // hours out — see adoptFromList.
 const { toIso } = require('./zohoDates');
 const { getSyncState, setSyncState } = require('./syncState');
+const { isCovered, coverageFloor } = require('./orderEventCoverage');
 
 /**
  * Pull EVERY Sales Order that exists in Zoho into this app, and rebuild each
@@ -587,6 +588,10 @@ async function adoptFromList(salesorders, known, actor) {
  * NOT EXISTS guard is what makes this idempotent.
  */
 async function logAdoptionEvents(zohoSoIds, actor) {
+  // Sep 26, 2026: an order created before the oldest partition would be refused, and
+  // one refusal aborts the batch. Those orders are simply not given an "imported" entry.
+  const floor = await coverageFloor();
+  const floorAnd = floor ? ' AND o.created_at >= ?' : '';
   for (let i = 0; i < zohoSoIds.length; i += WRITE_BATCH_SIZE) {
     const batch = zohoSoIds.slice(i, i + WRITE_BATCH_SIZE);
     await db
@@ -601,10 +606,10 @@ async function logAdoptionEvents(zohoSoIds, actor) {
             AND NOT EXISTS (
               SELECT 1 FROM order_events e
                WHERE e.order_id = o.id AND e.event_type = 'ORDER_IMPORTED_FROM_ZOHO'
-            )`
+            )${floorAnd}`
       )
       // Bare `batch` — see the flatten() note in backfillSalespersonsFromList.
-      .run(actor.id, `${actor.name} (Zoho import)`, batch);
+      .run(actor.id, `${actor.name} (Zoho import)`, batch, ...(floor ? [floor] : []));
   }
 }
 
@@ -860,7 +865,8 @@ async function adoptSalesOrder({ salesorder, customer, actor, productCache }) {
         .run(orderId, product.id, qty, rate, subtotal, Number(line.item_total ?? subtotal));
     }
 
-    await db
+    // Sep 26, 2026: same rule for an order created before the oldest partition.
+    if (await isCovered(createdAt)) await db
       .prepare(
         `INSERT INTO order_events (order_id, event_type, old_status, new_status, actor_id, actor_name, notes, metadata, created_at)
          VALUES (?, 'ORDER_IMPORTED_FROM_ZOHO', NULL, 'so_created', ?, ?, ?, ?, ?)`
