@@ -400,7 +400,13 @@ const OrderDetailPage = () => {
       // have no backfill path at all outside the live webhook — see
       // zohoReconcileService.js's reconcileOrder.
       else if (action === 'EDIT_BACKFILLED') toast.success('Zoho edit added to the timeline.');
-      else toast('Already up to date with Zoho.', { icon: 'ℹ️' });
+      else if (!(res?.data?.splits || []).some((x) => x.changes?.length)) toast('Already up to date with Zoho.', { icon: 'ℹ️' });
+      // Sep 26, 2026: a split order's other Sales Order(s) are pulled too.
+      for (const x of res?.data?.splits || []) {
+        if (x.error) toast.error(`${x.invoicing_from}: ${x.error}`, { duration: 8000 });
+        else if (x.changes?.length) toast.success(`${x.invoicing_from}${x.zoho_so_number ? ` (${x.zoho_so_number})` : ''}: updated from Zoho (${x.changes.join(', ')}).`);
+        if (x.items === 'refused') toast('Some items on the second Sales Order could not be copied because a product is missing here. See the timeline.', { icon: '⚠️', duration: 8000 });
+      }
       qc.invalidateQueries({ queryKey: ['order', id] });
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not reach Zoho')
@@ -830,6 +836,13 @@ const OrderDetailPage = () => {
   // Empty for every order without one, which is the overwhelming default.
   // See services/orderSplitService.js on the backend.
   const { order, items = [], payment, dispatch, splits = [], events = [], timeline } = data?.data || {};
+  // Sep 26, 2026: every Sales Order this order is in, e.g. " (SO-67981 and SO-67982)".
+  const soNumbers = order
+    ? (() => {
+        const nums = [order.zoho_so_number, ...splits.map((x) => x.zoho_so_number)].filter(Boolean);
+        return nums.length ? ` (${nums.join(' and ')})` : '';
+      })()
+    : '';
   if (!order) return null;
 
   // Sep 7, 2026 (2): while editing, Management changing Division live
@@ -982,11 +995,11 @@ const OrderDetailPage = () => {
                       type="button"
                       disabled={zohoSyncMutation.isPending}
                       onClick={(e) => { e.stopPropagation(); zohoSyncMutation.mutate(); }}
-                      title="Pull this order's current status from Zoho — catches up the timeline if a webhook was missed"
+                      title="Pull this order's current status from Zoho for every Sales Order it is split across — items, totals, invoices and shipments. Catches up the timeline if a webhook was missed"
                       className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
                     >
                       <RefreshCw className={`w-3 h-3 ${zohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
-                      {zohoSyncMutation.isPending ? 'Checking Zoho...' : 'Sync from Zoho'}
+                      {zohoSyncMutation.isPending ? 'Checking Zoho...' : `Sync from Zoho (all ${splits.length + 1})`}
                     </button>
                   )}
                 </div>
@@ -1065,6 +1078,15 @@ const OrderDetailPage = () => {
                       )}
                       {s.zoho_invoice_number && (
                         <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">Invoice: {s.zoho_invoice_number}</span>
+                      )}
+                      {s.zoho_paid_status === 'paid' && (
+                        <span className="bg-pharmacy-green/15 text-pharmacy-green-dark px-2 py-0.5 rounded">Paid in Zoho</span>
+                      )}
+                      {s.zoho_package_number && !s.zoho_shipment_id && s.zoho_shipped_status !== 'shipped' && (
+                        <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded">Package: {s.zoho_package_number}</span>
+                      )}
+                      {s.zoho_shipped_status === 'shipped' && (
+                        <span className="bg-sky-50 text-sky-800 px-2 py-0.5 rounded font-medium">Shipped{s.zoho_shipment_number ? `: ${s.zoho_shipment_number}` : ''}</span>
                       )}
                       {s.payment_status && s.payment_status !== 'pending' && (
                         <span className={`px-2 py-0.5 rounded capitalize ${s.payment_status === 'verified' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : 'bg-state-error-light text-red-700'}`}>
@@ -1574,8 +1596,8 @@ const OrderDetailPage = () => {
                         pushed there for them. */}
                     {order.zoho_so_id
                       ? isManagementUser
-                        ? `This order is in Zoho${order.zoho_so_number ? ` (${order.zoho_so_number})` : ''} — editing here also updates the real Sales Order.`
-                        : `This order is in Zoho${order.zoho_so_number ? ` (${order.zoho_so_number})` : ''} — edit its items there. Changes made in Zoho are copied here automatically; use Sync from Zoho to pull them now.`
+                        ? `This order is in Zoho${soNumbers} — editing here also updates the real Sales Order.`
+                        : `This order is in Zoho${soNumbers} — edit its items there. Changes made in Zoho are copied here automatically; use Sync from Zoho to pull them now.`
                       : ''}
                   </p>
                   {(!order.zoho_so_id || isManagementUser) && !['completed', 'cancelled', 'deleted'].includes(order.status) && (

@@ -19,6 +19,7 @@ const { evaluateCompletion } = require('../services/orderCompletionService');
 // button, the refresh-on-open below, and the background poller all run one
 // implementation instead of three copies. See zohoReconcileService.js.
 const { reconcileOrder, reconcileOrderFully } = require('../services/zohoReconcileService');
+const { reconcileSplitOrders } = require('../services/zohoSplitReconcileService');
 const { shouldRefreshOnOpen, markRefreshed } = require('../services/zohoAutoSyncService');
 // Sep 10, 2026 (2c): the raw event list turned into a ten-stage pipeline, with
 // everything that is not a stage collapsed underneath the stage it follows.
@@ -994,6 +995,16 @@ exports.syncFromZoho = async (req, res, next) => {
       return res.status(status).json({ success: false, error: { code: result.code, message: result.message } });
     }
 
+    // Sep 26, 2026: a split-invoicing order has a SECOND Sales Order that the
+    // reconcile above never looked at. Pull it too: its items and total, invoice,
+    // package and shipment. No-op (one query) for an order that is not split.
+    const splitResult = await reconcileSplitOrders({
+      orderId: req.params.id,
+      actorName: `${req.user?.name || 'User'} (manual Zoho sync)`,
+      source: 'manual_reconcile'
+    });
+    if (splitResult.changed) result.order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+
     // Sep 9, 2026: also mirror Zoho's OWN history log for this Sales Order.
     //
     // The reconcile above is inference — it compares Zoho's current state
@@ -1017,7 +1028,7 @@ exports.syncFromZoho = async (req, res, next) => {
 
     // Re-read only when the log actually added something — the events array
     // reconcileOrder already returned is otherwise still current.
-    const events = logsAdded
+    const events = logsAdded || splitResult.changed
       ? await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC').all(req.params.id)
       : result.events;
 
@@ -1028,6 +1039,7 @@ exports.syncFromZoho = async (req, res, next) => {
         zoho_status: result.zohoStatus,
         order: result.order,
         events,
+        splits: splitResult.splits,
         zoho_log_entries_added: logsAdded || 0
       }
     });

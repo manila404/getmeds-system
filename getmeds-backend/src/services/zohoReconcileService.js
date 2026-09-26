@@ -845,6 +845,17 @@ async function reconcileOrderFully({ orderId, actorId = null, actorName = 'Auto 
     );
   }
 
+  // Sep 26, 2026: a split-invoicing order's SECOND Sales Order. Everything above
+  // reads orders.zoho_so_id, the primary one only; this brings in the others (items,
+  // total, invoice, package, shipment). One cheap query for an order that has none.
+  let splitResult = null;
+  if (last && last.ok) {
+    splitResult = await require('./zohoSplitReconcileService').reconcileSplitOrders({ orderId, actorName, source });
+    if (splitResult.changed) {
+      last = { ...last, order: await db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId) };
+    }
+  }
+
   // `last` is the pass that ENDED the loop, which on success is the one that
   // found nothing left to do — so reporting its 'NOTHING_NEW' as this call's
   // action would tell every caller that a reconcile which just rebuilt five
@@ -854,7 +865,8 @@ async function reconcileOrderFully({ orderId, actorId = null, actorName = 'Auto 
     ...(last || {}),
     action: actions.length ? actions[actions.length - 1] : 'NOTHING_NEW',
     actions,
-    passes: actions.length
+    passes: actions.length,
+    splits: splitResult ? splitResult.splits : []
   };
 }
 
