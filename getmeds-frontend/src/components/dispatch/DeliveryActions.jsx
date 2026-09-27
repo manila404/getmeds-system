@@ -74,16 +74,10 @@ async function uploadDispatchProof(orderId, file) {
 const escapeHtml = (v) =>
   String(v ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
-function slipHtml({ order, items }) {
+function slipHtml({ order }) {
   const e = escapeHtml;
   const contact = order.intake_contact_no || order.contact_number;
   const date = formatPHT(order.sales_order_date || order.created_at, 'date');
-  const confirmed = order.delivery_confirmed_at && !order.delivery_address_changed
-    ? `Confirmed in the system by ${e(order.delivery_confirmed_by)} on ${e(formatPHT(order.delivery_confirmed_at))}`
-    : '';
-  const rows = items.length
-    ? items.map((it) => `<tr><td class="qty">${e(it.quantity)}</td><td>${e(it.name || 'Item')}</td><td class="sku">${e(it.sku || '')}</td></tr>`).join('')
-    : '<tr><td colspan="3" class="muted">No items recorded.</td></tr>';
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Delivery slip ${e(order.getmeds_order_id)}</title>
 <style>
@@ -98,17 +92,7 @@ function slipHtml({ order, items }) {
   .customer { font-size: 15pt; font-weight: bold; }
   .address { font-size: 14pt; margin: 2mm 0 3mm; white-space: pre-wrap; }
   .line { margin: 1mm 0; }
-  table { width: 100%; border-collapse: collapse; font-size: 11pt; }
-  th, td { text-align: left; padding: 2mm; border-bottom: 1px solid #ccc; }
-  th { font-size: 9pt; text-transform: uppercase; color: #555; }
-  .qty { width: 18mm; font-weight: bold; }
-  .sku { color: #555; font-family: monospace; font-size: 10pt; }
-  .muted { color: #777; }
-  .signs { display: grid; grid-template-columns: 1fr 1fr; gap: 10mm; margin-top: 12mm; }
-  .sign { border-top: 1px solid #111; padding-top: 1.5mm; font-size: 10pt; }
-  .confirmed { font-size: 10pt; color: #1a6b35; margin-top: 4mm; }
 </style></head><body>
-  <h1>GETMEDS — DELIVERY SLIP</h1>
   <div class="meta">
     <span><b>Order</b> ${e(order.getmeds_order_id)}</span>
     ${order.zoho_so_number ? `<span><b>SO</b> ${e(order.zoho_so_number)}</span>` : ''}
@@ -123,17 +107,6 @@ function slipHtml({ order, items }) {
     ${contact ? `<div class="line"><b>Contact no.:</b> ${e(contact)}</div>` : ''}
     ${order.intake_delivery_method ? `<div class="line"><b>Delivery method:</b> ${e(order.intake_delivery_method)}</div>` : ''}
     ${order.delivery_notes ? `<div class="line"><b>Notes:</b> ${e(order.delivery_notes)}</div>` : ''}
-  </div>
-
-  <div class="label">Items</div>
-  <table><thead><tr><th>Qty</th><th>Item</th><th>SKU</th></tr></thead><tbody>${rows}</tbody></table>
-
-  <p class="line" style="margin-top:5mm"><b>MedRep:</b> ${e(order.medrep_name || '—')}</p>
-  ${confirmed ? `<p class="confirmed">${confirmed}</p>` : ''}
-
-  <div class="signs">
-    <div class="sign">Address confirmed by / Date</div>
-    <div class="sign">Received by (name, signature) / Date</div>
   </div>
 </body></html>`;
 }
