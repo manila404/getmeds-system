@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { format } from 'date-fns';
-import { Plus, RefreshCw, Search, X } from 'lucide-react';
+import { Plus, RefreshCw, Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
@@ -23,6 +23,35 @@ const STATUS_COLORS = {
   on_hold: 'bg-state-error-light text-red-800 border border-state-error/30',
   exception: 'bg-state-error-light text-red-950 border border-state-error font-bold',
   cancelled: 'bg-state-error-light text-red-700 border border-state-error/30',
+};
+
+const PAGE_SIZE = 15;
+
+// Sep 28, 2026: "Showing 1–15 of 10,108" with Previous / Next — see the same
+// pattern on the Dispatch queue page (pages/dispatch/DispatchQueuePage.jsx).
+const Pager = ({ pagination, onPage }) => {
+  if (!pagination || pagination.total <= pagination.limit) return null;
+  const { page, pages, total, limit } = pagination;
+  const from = (page - 1) * limit + 1;
+  const to = Math.min(page * limit, total);
+  const btn = 'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed';
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-slate-200 bg-surface">
+      <p className="text-xs text-ink-secondary">
+        Showing <span className="font-semibold text-ink-primary">{from.toLocaleString()}–{to.toLocaleString()}</span> of{' '}
+        <span className="font-semibold text-ink-primary">{total.toLocaleString()}</span>
+      </p>
+      <div className="flex items-center gap-2">
+        <button type="button" className={btn} disabled={page <= 1} onClick={() => onPage(page - 1)}>
+          <ChevronLeft className="w-3.5 h-3.5" /> Previous
+        </button>
+        <span className="text-xs text-ink-secondary tabular-nums">Page {page} of {pages.toLocaleString()}</span>
+        <button type="button" className={btn} disabled={page >= pages} onClick={() => onPage(page + 1)}>
+          Next <ChevronRight className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
 };
 
 const MyOrdersPage = () => {
@@ -66,12 +95,22 @@ const MyOrdersPage = () => {
     return () => clearTimeout(handle);
   }, [searchInput]);
 
+  // Sep 28, 2026: paged at 15 rows, all-time — this used to ask for no page or
+  // limit at all, so the server's default of 20 quietly capped the table to
+  // its newest 20 rows, which on a busy day read as "orders older than
+  // 2 days are missing" rather than a page 1 of many.
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [statusFilter, cateredOnly, search]);
+
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['my-orders', statusFilter, cateredOnly, search],
+    queryKey: ['my-orders', statusFilter, cateredOnly, search, page],
     queryFn: () =>
       client
         .get('/api/orders', {
-          params: { status: statusFilter || undefined, catered: cateredOnly ? 'mine' : undefined, search: search || undefined }
+          params: {
+            status: statusFilter || undefined, catered: cateredOnly ? 'mine' : undefined,
+            search: search || undefined, page, limit: PAGE_SIZE
+          }
         })
         .then(r => r.data),
     // Keeps the last rows on screen while the next search loads, so typing does
@@ -81,6 +120,7 @@ const MyOrdersPage = () => {
   });
 
   const orders = data?.data?.orders || [];
+  const pagination = data?.data?.pagination || null;
 
   const statuses = [
     'draft', 'submitted', 'waiting_for_payment', 'payment_verified',
@@ -272,6 +312,7 @@ const MyOrdersPage = () => {
               ))}
             </tbody>
           </table>
+          <Pager pagination={pagination} onPage={setPage} />
         </div>
       )}
     </div>
