@@ -1,6 +1,6 @@
 import React from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { FilePlus2, ShieldCheck } from 'lucide-react';
+import { FilePlus2, ShieldCheck, CalendarCheck2 } from 'lucide-react';
 import client from '../../api/client';
 import DeliveryActions from './DeliveryActions';
 import RxBadge from './RxBadge';
@@ -102,6 +102,7 @@ const RecentDispatchPanel = ({
   });
   const drafts = data?.new_draft_sos || [];
   const confirmed = data?.finance_confirmed || [];
+  const confirmedToday = data?.confirmed_today || [];
   const loading = <p className="text-sm text-ink-secondary text-center py-8">Loading…</p>;
 
   if (heldView) {
@@ -159,6 +160,7 @@ const RecentDispatchPanel = ({
   }
 
   return (
+    <div className="space-y-4">
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card
         icon={FilePlus2}
@@ -238,6 +240,75 @@ const RecentDispatchPanel = ({
           </ul>
         )}
       </Card>
+    </div>
+
+    {/* Sep 28, 2026: every order Dispatch itself confirmed for delivery today
+        ("Confirm for delivery" on a receipt) — a running log of today's work,
+        full-width below the two lists above. Filtered by the same warehouse
+        pill; always "today" regardless of the Any time / Today toggle. */}
+    <div className="bg-white shadow rounded-lg border border-slate-200 overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-200 bg-surface">
+        <h2 className="text-sm font-semibold text-ink-primary flex items-center gap-2">
+          <CalendarCheck2 className="w-4 h-4 text-getmeds-blue" />
+          Confirmed Today
+          <span className={`min-w-[1.5rem] text-center rounded-full px-1.5 text-xs tabular-nums ${confirmedToday.length ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>
+            {confirmedToday.length}
+          </span>
+        </h2>
+        <p className="text-xs text-ink-secondary mt-0.5">Orders confirmed for delivery today, newest first.</p>
+      </div>
+      {isLoading ? loading : confirmedToday.length === 0 ? (
+        <Empty text="Nothing confirmed for delivery yet today." />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-200">
+            <thead className="bg-surface">
+              <tr>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Order</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Customer</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Receiver / Address</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Confirmed by</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Tracking</th>
+                <th className="px-4 py-2 text-right text-xs font-medium text-ink-secondary uppercase">Total</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {confirmedToday.map((o) => (
+                <tr key={o.id} className="hover:bg-surface">
+                  <td className="px-4 py-2.5 align-top">
+                    <Opener order={o} onOpen={onOpen}>
+                      <p className="text-sm font-mono font-semibold text-getmeds-blue group-hover:underline">{o.getmeds_order_id}</p>
+                      {o.rx_badge && <div className="mt-1"><RxBadge badge={o.rx_badge} /></div>}
+                    </Opener>
+                  </td>
+                  <td className="px-4 py-2.5 align-top text-sm text-ink-primary font-medium">
+                    {o.customer_name}<WarehouseTag order={o} />
+                  </td>
+                  <td className="px-4 py-2.5 align-top text-xs text-ink-secondary max-w-xs">
+                    {o.intake_receiver && <p className="text-ink-primary font-medium">{o.intake_receiver}</p>}
+                    <p className="truncate" title={o.delivery_address || ''}>
+                      {o.delivery_address || <span className="text-red-700 font-semibold">No delivery address</span>}
+                    </p>
+                  </td>
+                  <td className="px-4 py-2.5 align-top text-xs text-ink-secondary">
+                    <p className="text-sm text-ink-primary font-medium">{o.delivery_confirmed_by || '—'}</p>
+                    {o.delivery_confirmed_at && <p>{timeAgo(o.delivery_confirmed_at)}</p>}
+                  </td>
+                  <td className="px-4 py-2.5 align-top text-xs text-ink-secondary">
+                    {o.tracking_number
+                      ? <span className="font-mono text-ink-primary">{o.entered_tracking?.courier ? `${o.entered_tracking.courier} · ` : ''}{o.tracking_number}</span>
+                      : o.tracking_hold
+                        ? <span className="text-amber-800 font-semibold">On hold — {o.tracking_hold.reason || 'no reason given'}</span>
+                        : <span>Awaiting tracking</span>}
+                  </td>
+                  <td className="px-4 py-2.5 align-top text-right text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
     </div>
   );
 };

@@ -102,6 +102,21 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
     expect(queued.delivery_confirmed_by).toBeTruthy();
   });
 
+  test('confirming for delivery puts the order under "Confirmed Today", newest first', async () => {
+    const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+    const before = (await recent()).confirmed_today.map((o) => o.id);
+    expect(before).not.toContain(order.id);
+
+    await confirm(order.id);
+    const data = await recent();
+    const row = data.confirmed_today.find((o) => o.id === order.id);
+    expect(row).toBeTruthy();
+    expect(row.delivery_confirmed_by).toBeTruthy();
+    expect(row.delivery_confirmed_at).toBeTruthy();
+    // Newest confirmation first.
+    expect(data.confirmed_today[0].id).toBe(order.id);
+  });
+
   test('an address edited after the confirmation shows as changed, not as still confirmed', async () => {
     const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
     await confirm(order.id);

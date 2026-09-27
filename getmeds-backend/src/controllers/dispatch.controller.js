@@ -415,7 +415,19 @@ exports.getRecent = async (req, res, next) => {
     // The board cannot stop a Package or Shipment being made in Zoho itself, so
     // this is how Dispatch learns the order is not clear to go: see
     // services/prescriptionService.js. Orders with no prescription get nothing.
-    const rx = await rxSummaries([...drafts, ...confirmed].map((o) => o.id));
+    // Sep 28, 2026: what Dispatch itself confirmed for delivery today — a third
+    // list, so "Confirm for delivery" has somewhere to show up right away
+    // instead of only living on the order's own receipt. Same columns as the
+    // two lists above, keyed off the confirmation (not Finance's or Zoho's
+    // dates), and not capped at 20 — it is already scoped to today.
+    const confirmedToday = await db.prepare(`
+      SELECT ${columns} ${from}
+       WHERE dc.delivery_confirmed_at >= ?${scopeAnd}${whAnd}
+       ORDER BY dc.delivery_confirmed_at DESC
+       LIMIT 500
+    `).all([manilaTodayStartIso(), ...scopeParams, ...whParams]);
+
+    const rx = await rxSummaries([...drafts, ...confirmed, ...confirmedToday].map((o) => o.id));
     const withRx = (financeCleared) => (o) => {
       const state = rx.get(o.id).state;
       return {
@@ -430,7 +442,8 @@ exports.getRecent = async (req, res, next) => {
       success: true,
       data: {
         new_draft_sos: drafts.map(withRx(false)),
-        finance_confirmed: confirmed.map(withRx(true))
+        finance_confirmed: confirmed.map(withRx(true)),
+        confirmed_today: confirmedToday.map(withRx(true))
       }
     });
   } catch (err) { next(err); }
