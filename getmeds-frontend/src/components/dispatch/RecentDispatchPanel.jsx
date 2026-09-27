@@ -232,9 +232,15 @@ const RecentDispatchPanel = ({
                     </p>
                   </div>
                 </div>
-                {/* Sep 25, 2026: what is holding it up, when it carries a prescription. */}
-                {o.rx_badge && <div><RxBadge badge={o.rx_badge} /></div>}
-                <DeliveryActions order={o} onConfirm={onConfirm} onHold={onHold} onAddTracking={onAddTracking} onCater={onCater} onReleaseCater={onReleaseCater} onHoldOrder={onHoldOrder} onLiftHold={onLiftHold} busy={confirmingId === o.id} />
+                {/* Sep 25, 2026: what is holding it up, when it carries a prescription.
+                    Sep 28, 2026: not while Dispatch itself has it on hold — that is
+                    the one thing blocking it, and the only banner this card shows. */}
+                {o.rx_badge && !o.dispatch_hold && <div><RxBadge badge={o.rx_badge} /></div>}
+                <DeliveryActions
+                  order={o} onConfirm={onConfirm} onHold={onHold} onAddTracking={onAddTracking} onCater={onCater}
+                  onReleaseCater={onReleaseCater} onHoldOrder={onHoldOrder} onLiftHold={onLiftHold} busy={confirmingId === o.id}
+                  compact
+                />
               </li>
             ))}
           </ul>
@@ -295,11 +301,18 @@ const RecentDispatchPanel = ({
                     {o.delivery_confirmed_at && <p>{timeAgo(o.delivery_confirmed_at)}</p>}
                   </td>
                   <td className="px-4 py-2.5 align-top text-xs text-ink-secondary">
+                    {/* Sep 28, 2026: whichever tracking number the order actually
+                        has — Zoho's own once it ships, or the one Dispatch typed
+                        in ahead of that (entered_tracking) — same precedence the
+                        card badge uses (DeliveryActions.jsx). Card and table used
+                        to disagree because this only checked Zoho's. */}
                     {o.tracking_number
                       ? <span className="font-mono text-ink-primary">{o.entered_tracking?.courier ? `${o.entered_tracking.courier} · ` : ''}{o.tracking_number}</span>
-                      : o.tracking_hold
-                        ? <span className="text-amber-800 font-semibold">On hold — {o.tracking_hold.reason || 'no reason given'}</span>
-                        : <span>Awaiting tracking</span>}
+                      : o.entered_tracking
+                        ? <span className="font-mono text-ink-primary">{o.entered_tracking.courier} · {o.entered_tracking.tracking_number}</span>
+                        : o.tracking_hold
+                          ? <span className="text-amber-800 font-semibold">On hold — {o.tracking_hold.reason || 'no reason given'}</span>
+                          : <span>Awaiting tracking</span>}
                   </td>
                   <td className="px-4 py-2.5 align-top text-right text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</td>
                 </tr>

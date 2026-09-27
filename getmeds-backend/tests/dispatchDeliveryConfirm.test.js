@@ -95,9 +95,13 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
     expect(events).toHaveLength(1);
     expect(events[0].notes).toMatch(/215 Rizal St, Cebu City/);
 
-    const row = (await recent()).finance_confirmed.find((o) => o.id === order.id);
-    expect(row.delivery_confirmed_at).toBeTruthy();
-    expect(row.delivery_address_changed).toBe(false);
+    // Sep 28, 2026: confirmed and not stale — it has moved on to "Confirmed
+    // Today" (recent().confirmed_today), not still sitting in this list.
+    const data = await recent();
+    expect(data.finance_confirmed.find((o) => o.id === order.id)).toBeUndefined();
+    const today = data.confirmed_today.find((o) => o.id === order.id);
+    expect(today.delivery_confirmed_at).toBeTruthy();
+    expect(today.delivery_address_changed).toBe(false);
     const queued = (await request(app).get('/api/dispatch/queue').set(auth())).body.data.orders.find((o) => o.id === order.id);
     expect(queued.delivery_confirmed_by).toBeTruthy();
   });
@@ -178,7 +182,8 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
       }
 
       expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(order.id)).status).toBe('ready_for_dispatch');
-      const row = (await recent()).finance_confirmed.find((o) => o.id === order.id);
+      // Already confirmed, so it is "Confirmed Today" now, not "Confirmed by Finance".
+      const row = (await recent()).confirmed_today.find((o) => o.id === order.id);
       expect(row.tracking_hold).toEqual(expect.objectContaining({ reason: 'Waiting for waybill', note: 'LBC says tomorrow' }));
       const queued = (await request(app).get('/api/dispatch/queue').set(auth())).body.data.orders.find((o) => o.id === order.id);
       expect(queued.tracking_hold.reason).toBe('Waiting for waybill');
@@ -229,7 +234,8 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
       // Record-only: Dispatch's number does not pose as Zoho's shipment.
       expect(await db.prepare('SELECT 1 FROM dispatch_records WHERE order_id = ?').get(order.id)).toBeUndefined();
 
-      const row = (await recent()).finance_confirmed.find((o) => o.id === order.id);
+      // Confirmed in this same step, so it is "Confirmed Today" now.
+      const row = (await recent()).confirmed_today.find((o) => o.id === order.id);
       expect(row.entered_tracking.tracking_number).toBe('1234 5678 9012');
     });
 

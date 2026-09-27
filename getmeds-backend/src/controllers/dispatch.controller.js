@@ -438,11 +438,20 @@ exports.getRecent = async (req, res, next) => {
       };
     };
 
+    // Sep 28, 2026: once Dispatch confirms delivery, the order moves to the
+    // "Confirmed Today" list (and its own receipt) instead of staying here —
+    // this list is only what still needs that first action, matching its own
+    // subtitle ("Verified and not shipped yet"). An order confirmed once but
+    // whose address then changed still needs a fresh confirmation, so it stays.
+    const financeConfirmed = confirmed
+      .map(withRx(true))
+      .filter((o) => !o.delivery_confirmed_at || o.delivery_address_changed);
+
     res.json({
       success: true,
       data: {
         new_draft_sos: drafts.map(withRx(false)),
-        finance_confirmed: confirmed.map(withRx(true)),
+        finance_confirmed: financeConfirmed,
         confirmed_today: confirmedToday.map(withRx(true))
       }
     });
