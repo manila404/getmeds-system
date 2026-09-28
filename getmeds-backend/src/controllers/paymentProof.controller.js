@@ -1113,3 +1113,100 @@ exports.viewAttachment = async (req, res, next) => {
     next(err);
   }
 };
+
+// ─── 8. Re-tag an attachment's category (Sep 28, 2026) ──────────────────────
+//
+// POST /api/orders/:id/attachments/:attachmentId/retag { file_type }
+//
+// A MedRep sometimes uploads a prescription under Proof of Payment or Valid
+// ID (or the reverse) — the order then reads as having no prescription at
+// all, and the actual file sits one click away, mistagged, with no way to
+// fix it short of asking for a fresh upload. This changes the row's own
+// file_type in place.
+//
+// Dispatch (Pharmacy) and Admin only: this exists for Pharmacy's own "the
+// prescription is right there, just mislabeled" case, not a general
+// relabeling tool anyone can reach.
+//
+// Scoped to the four "which kind of evidence is this" types — never onto or
+// off 'other', 'purchase_order', or the Dispatch-only 'dispatch_proof',
+// which are a different concept and retagging into them would be surprising
+// (dispatch_proof especially: canAttach reserves it to Dispatch uploading
+// their own proof, not relabeling someone else's file into looking like one).
+//
+// A row already decided (verified or rejected) is reset to 'pending' on
+// retag — a "Verified" stamp on what was a payment proof means nothing once
+// the row IS a prescription, and it has to be looked at again as what it now
+// claims to be, by whoever reviews THAT type.
+const RETAGGABLE_TYPES = ['payment_proof', 'prescription', 'id', 'gl'];
+exports.retag = async (req, res, next) => {
+  try {
+    const role = String(req.user?.role || '').toLowerCase();
+    if (!['dispatch', 'admin'].includes(role)) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Only Pharmacy (Dispatch) or an admin can re-tag an attachment.' }
+      });
+    }
+
+    const fileType = String(req.body?.file_type || '').trim().toLowerCase();
+    if (!RETAGGABLE_TYPES.includes(fileType)) {
+      return badRequest(res, `file_type must be one of: ${RETAGGABLE_TYPES.join(', ')}.`);
+    }
+
+    const order = await loadOrder(req.params.id);
+    if (!order) return notFound(res, 'Order not found');
+
+    const excludeDeleted = (await hasColumn('payment_proofs', 'deleted_at')) ? ' AND deleted_at IS NULL' : '';
+    const attachment = await db
+      .prepare(`SELECT * FROM payment_proofs WHERE id = ? AND order_id = ?${excludeDeleted}`)
+      .get(parseInt(req.params.attachmentId, 10), order.id);
+    if (!attachment) return notFound(res, 'Attachment not found on this order.');
+
+    if (!RETAGGABLE_TYPES.includes(attachment.file_type)) {
+      return badRequest(res, `${attachment.file_type} cannot be re-tagged here.`);
+    }
+    if (attachment.file_type === fileType) {
+      return badRequest(res, `Already tagged as ${fileType}.`);
+    }
+
+    const actor = await resolveActor(req.user, 'dispatch');
+    const now = new Date().toISOString();
+    await db
+      .prepare(
+        `UPDATE payment_proofs
+            SET file_type = ?, status = 'pending', verified_by = NULL, verified_at = NULL, rejection_reason = NULL
+          WHERE id = ?`
+      )
+      .run(fileType, attachment.id);
+
+    await logEvent({
+      orderId: order.id,
+      eventType: 'ATTACHMENT_RETAGGED',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: actor.id,
+      actorName: actor.name,
+      notes: `${actor.name} re-tagged "${attachment.file_name || 'a file'}" from ${attachment.file_type} to ${fileType}.`,
+      metadata: { attachmentId: attachment.id, fileName: attachment.file_name, from: attachment.file_type, to: fileType },
+    });
+
+    const excludeDeletedList = (await hasColumn('payment_proofs', 'deleted_at')) ? ' AND deleted_at IS NULL' : '';
+    const rows = await db
+      .prepare(
+        `SELECT p.*, up.name AS uploaded_by_name, vp.name AS verified_by_name
+           FROM payment_proofs p
+           LEFT JOIN users up ON p.uploaded_by = up.id
+           LEFT JOIN users vp ON p.verified_by = vp.id
+          WHERE p.order_id = ?${excludeDeletedList}
+          ORDER BY p.uploaded_at DESC`
+      )
+      .all(order.id);
+    const superseded = supersededIds(rows.filter((r) => r.file_type === RX_FILE_TYPE));
+    const attachments = rows.map((row) => ({ ...row, ...urlsFor(req, row), superseded: superseded.has(row.id) }));
+
+    res.json({ success: true, data: { attachments } });
+  } catch (err) {
+    next(err);
+  }
+};

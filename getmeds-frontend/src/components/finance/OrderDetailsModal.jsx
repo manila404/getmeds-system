@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown, ZoomIn, ZoomOut, RotateCcw, Pill } from 'lucide-react';
 import client from '../../api/client';
+import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
 import { attachmentLabel, HOSPITAL_REQUIRED_TYPES } from '../../constants/attachmentTypes';
 
@@ -43,9 +44,18 @@ const BADGE_TONE = {
  * One attachment card in the grid. `dim` (a superseded prescription) mutes
  * the whole tile — still openable, but visibly not the one to act on.
  */
-const AttachmentTile = ({ a, dim = false, onPreview }) => {
+// Sep 28, 2026: which of the "wrong category" mistakes this one-click fix
+// covers — a prescription a MedRep uploaded under one of these three by
+// mistake. Never 'other', 'purchase_order', or the Dispatch-only
+// 'dispatch_proof' — see paymentProof.controller.js's retag for why.
+const RETAG_CANDIDATE_TYPES = ['payment_proof', 'id', 'gl'];
+
+const AttachmentTile = ({ a, dim = false, onPreview, onRetag, retagging = false }) => {
   const isImage = String(a.content_type || '').startsWith('image/');
   const badge = attachmentStatusBadge(a);
+  const { user } = useAuth();
+  const role = String(user?.role || '').toLowerCase();
+  const canRetag = onRetag && ['dispatch', 'admin'].includes(role) && RETAG_CANDIDATE_TYPES.includes(a.file_type);
   // Sep 28, 2026: an image opens the in-app lightbox (below) instead of a new
   // tab — Pharmacy and Finance can now inspect a prescription or a receipt
   // without leaving this screen. A PDF or scanned document has no image to
@@ -112,6 +122,22 @@ const AttachmentTile = ({ a, dim = false, onPreview }) => {
             Finance/Pharmacy decision now; every other type is evidence, not
             something to approve, and shows nothing here. */}
         {badge && <p className={`text-[11px] mt-1 font-semibold ${BADGE_TONE[badge.tone]}`}>{badge.label}</p>}
+        {/* Sep 28, 2026: "this is actually the prescription" — a MedRep
+            mis-tagged it under Proof of Payment or Valid ID, so the file Pharmacy
+            needs is sitting right here, just mislabeled. One click re-tags it in
+            place instead of asking for a fresh upload (paymentProof.controller.js's
+            retag). Dispatch (Pharmacy) and Admin only. */}
+        {canRetag && (
+          <button
+            type="button"
+            disabled={retagging}
+            onClick={(e) => { e.stopPropagation(); onRetag(a); }}
+            title="This is actually the prescription"
+            className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-getmeds-blue hover:underline disabled:opacity-50"
+          >
+            <Pill className="w-3 h-3" /> {retagging ? 'Re-tagging…' : 'Mark as Prescription'}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -127,6 +153,11 @@ const ZOOM_STEP = 0.5;
  * Zoom in/out (buttons, the scroll wheel, or double-click) and drag to pan
  * once zoomed; Escape, the backdrop, or the X closes it. The download button
  * on the thumbnail behind this is untouched — this is only the click-through.
+ *
+ * Sep 28, 2026 (2): a bounded card, not an edge-to-edge black takeover — the
+ * whole point of opening this from the Order Details modal is comparing the
+ * image against what is still visible behind it (the items table, the
+ * order id), which a full-screen overlay hid completely.
  */
 const Lightbox = ({ attachment, onClose }) => {
   const [zoom, setZoom] = useState(1);
@@ -174,53 +205,60 @@ const Lightbox = ({ attachment, onClose }) => {
 
   return (
     <div
-      className="fixed inset-0 z-[70] bg-black/90 flex flex-col"
+      className="fixed inset-0 z-[70] bg-black/40 flex items-center justify-center p-4"
       onClick={onClose}
       onMouseMove={onMouseMove}
       onMouseUp={stopDrag}
       onMouseLeave={stopDrag}
     >
-      <div className="flex items-center justify-between gap-3 px-4 py-3 text-white" onClick={(e) => e.stopPropagation()}>
-        <div className="min-w-0">
-          <p className="text-sm font-semibold truncate">{attachment.file_name}</p>
-          <p className="text-xs text-white/70">{attachmentLabel(attachment.file_type)}</p>
+      {/* The backdrop closes; the card must not, or every click on the toolbar
+          (or the image itself) would dismiss the thing being inspected. */}
+      <div
+        className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-slate-200 bg-surface shrink-0">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-ink-primary truncate">{attachment.file_name}</p>
+            <p className="text-xs text-ink-secondary">{attachmentLabel(attachment.file_type)}</p>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button type="button" onClick={zoomOut} disabled={zoom <= ZOOM_MIN} title="Zoom out" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary disabled:opacity-40">
+              <ZoomOut className="w-4 h-4" />
+            </button>
+            <span className="text-xs tabular-nums w-10 text-center text-ink-secondary">{Math.round(zoom * 100)}%</span>
+            <button type="button" onClick={zoomIn} disabled={zoom >= ZOOM_MAX} title="Zoom in" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary disabled:opacity-40">
+              <ZoomIn className="w-4 h-4" />
+            </button>
+            <button type="button" onClick={reset} disabled={zoom === 1 && !pos.x && !pos.y} title="Reset" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary disabled:opacity-40">
+              <RotateCcw className="w-4 h-4" />
+            </button>
+            {attachment.downloadUrl && (
+              <a href={attachment.downloadUrl} title="Download" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary">
+                <Download className="w-4 h-4" />
+              </a>
+            )}
+            <span className="w-px h-5 bg-slate-200 mx-0.5" aria-hidden="true" />
+            <button type="button" onClick={onClose} title="Close" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary">
+              <X className="w-4.5 h-4.5" />
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          <button type="button" onClick={zoomOut} disabled={zoom <= ZOOM_MIN} title="Zoom out" className="p-2 rounded-md hover:bg-white/10 disabled:opacity-40">
-            <ZoomOut className="w-4 h-4" />
-          </button>
-          <span className="text-xs tabular-nums w-10 text-center">{Math.round(zoom * 100)}%</span>
-          <button type="button" onClick={zoomIn} disabled={zoom >= ZOOM_MAX} title="Zoom in" className="p-2 rounded-md hover:bg-white/10 disabled:opacity-40">
-            <ZoomIn className="w-4 h-4" />
-          </button>
-          <button type="button" onClick={reset} disabled={zoom === 1 && !pos.x && !pos.y} title="Reset" className="p-2 rounded-md hover:bg-white/10 disabled:opacity-40">
-            <RotateCcw className="w-4 h-4" />
-          </button>
-          {attachment.downloadUrl && (
-            <a href={attachment.downloadUrl} title="Download" className="p-2 rounded-md hover:bg-white/10">
-              <Download className="w-4 h-4" />
-            </a>
-          )}
-          <button type="button" onClick={onClose} title="Close" className="p-2 rounded-md hover:bg-white/10">
-            <X className="w-5 h-5" />
-          </button>
+        <div className="flex-1 min-h-0 overflow-hidden flex items-center justify-center bg-surface" onWheel={onWheel}>
+          <img
+            src={attachment.viewUrl}
+            alt={attachment.file_name}
+            onMouseDown={onMouseDown}
+            onDoubleClick={() => (zoom > 1 ? reset() : zoomIn())}
+            draggable={false}
+            style={{
+              transform: `translate(${pos.x}px, ${pos.y}px) scale(${zoom})`,
+              cursor: zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'zoom-in',
+              transition: dragging ? 'none' : 'transform 0.15s ease-out'
+            }}
+            className="max-w-full max-h-[70vh] object-contain select-none"
+          />
         </div>
-      </div>
-      <div className="flex-1 overflow-hidden flex items-center justify-center" onWheel={onWheel}>
-        <img
-          src={attachment.viewUrl}
-          alt={attachment.file_name}
-          onMouseDown={onMouseDown}
-          onDoubleClick={() => (zoom > 1 ? reset() : zoomIn())}
-          onClick={(e) => e.stopPropagation()}
-          draggable={false}
-          style={{
-            transform: `translate(${pos.x}px, ${pos.y}px) scale(${zoom})`,
-            cursor: zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'zoom-in',
-            transition: dragging ? 'none' : 'transform 0.15s ease-out'
-          }}
-          className="max-w-[92vw] max-h-[80vh] object-contain select-none"
-        />
       </div>
     </div>
   );
@@ -540,6 +578,19 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
   const [showSuperseded, setShowSuperseded] = useState(false);
   const [lightbox, setLightbox] = useState(null);
 
+  // Sep 28, 2026: "this is actually the prescription" — see AttachmentTile's
+  // one-click button and paymentProof.controller.js's retag.
+  const attachmentsQc = useQueryClient();
+  const retagMutation = useMutation({
+    mutationFn: (attachmentId) =>
+      client.post(`/api/orders/${orderId}/attachments/${attachmentId}/retag`, { file_type: 'prescription' }).then((r) => r.data),
+    onSuccess: () => {
+      toast.success('Re-tagged as Prescription — Pharmacy will see it for review.');
+      attachmentsQc.invalidateQueries({ queryKey: ['finance-order-attachments', orderId] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not re-tag that file.'),
+  });
+
   // A hospital order is the one case where a missing document actually blocks
   // something downstream, so it is the only case worth calling out. Elsewhere
   // a missing file is a normal, allowed state — see paymentProof.controller.js
@@ -775,7 +826,15 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
               ) : (
                 <>
                   <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {visibleAttachments.map((a) => <AttachmentTile key={a.id} a={a} onPreview={setLightbox} />)}
+                    {visibleAttachments.map((a) => (
+                      <AttachmentTile
+                        key={a.id}
+                        a={a}
+                        onPreview={setLightbox}
+                        onRetag={(row) => retagMutation.mutate(row.id)}
+                        retagging={retagMutation.isPending && retagMutation.variables === a.id}
+                      />
+                    ))}
                   </div>
 
                   {/* Sep 28, 2026: superseded prescriptions — folded away by

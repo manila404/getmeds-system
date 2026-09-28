@@ -377,6 +377,15 @@ CREATE TABLE IF NOT EXISTS orders (
     'on_payment_terms', 'payment_to_follow', 'paid_no_slip', 'other'
   )),
   no_payment_proof_note TEXT,
+  -- Sep 28, 2026: Pharmacy's own call that this order needs no prescription —
+  -- e.g. a hospital PO or an item that never carries one. NULL means nobody
+  -- has said so; a MedRep uploading a prescription afterwards is still fine
+  -- (services/prescriptionService.js only reads this while there is still no
+  -- prescription row on the order at all). Set by pharmacy.controller.js's
+  -- noRxDecision, never by the order form.
+  rx_not_required_by INTEGER REFERENCES users(id),
+  rx_not_required_at TEXT,
+  rx_not_required_reason TEXT,
   -- Sep 5, 2026 (3): THIS order's Sub-division — editable at order creation
   -- by whoever raises it (medrep or management), unlike Division (which
   -- always comes from the ordering MedRep's account, since it also drives

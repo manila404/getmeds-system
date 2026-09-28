@@ -107,8 +107,12 @@ exports.getQueue = async (req, res, next) => {
            ${joins}
           WHERE (o.status = ANY(?) OR (o.status = 'on_hold' AND ${HELD_FROM_SQL} = ANY(?)))
             AND NOT (${importedSql('o')})
-            AND EXISTS (SELECT 1 FROM payment_proofs p
-                         WHERE p.order_id = o.id AND p.file_type = '${RX_FILE_TYPE}'${excludeDeleted})${channelAnd}${scopeAnd}
+            AND (EXISTS (SELECT 1 FROM payment_proofs p
+                          WHERE p.order_id = o.id AND p.file_type = '${RX_FILE_TYPE}'${excludeDeleted})
+                 -- Sep 28, 2026: Pharmacy said this one needs no prescription
+                 -- (noRxDecision) — it belongs in the queue same as any other
+                 -- decided order, not only in "All orders".
+                 OR o.rx_not_required_at IS NOT NULL)${channelAnd}${scopeAnd}
           ORDER BY o.created_at DESC
           LIMIT ${QUEUE_CAP}`
       )
@@ -166,14 +170,27 @@ exports.getQueue = async (req, res, next) => {
         rx_state: s.state,
         prescriptions: s.prescriptions,
         resubmitted: s.state === 'pending' ? resubmits.get(o.id) || null : null,
+        // Sep 28, 2026: Pharmacy's own "no prescription needed" call — who, when, why.
+        not_required: s.not_required || null,
       };
     };
     const rxRows = orders.map(shape);
 
+    // Sep 28, 2026: 'not_required' is its own state (rxSummaries), but it is
+    // Pharmacy's decision the same as an actual verify, so it counts and
+    // filters as part of the Verified tab rather than needing a fourth tab.
+    const bucketOf = (state) => (state === 'not_required' ? 'verified' : state);
     const counts = { pending: 0, rejected: 0, verified: 0, all: rxRows.length, all_orders: allOrdersCount };
-    for (const r of rxRows) if (STATES.includes(r.rx_state)) counts[r.rx_state] += 1;
+    for (const r of rxRows) {
+      const bucket = bucketOf(r.rx_state);
+      if (STATES.includes(bucket)) counts[bucket] += 1;
+    }
 
-    const shown = wantAllOrders ? listed.map(shape) : wanted === 'all' ? rxRows : rxRows.filter((r) => r.rx_state === wanted);
+    const shown = wantAllOrders
+      ? listed.map(shape)
+      : wanted === 'all'
+        ? rxRows
+        : rxRows.filter((r) => bucketOf(r.rx_state) === wanted);
 
     res.json({
       success: true,
@@ -469,6 +486,104 @@ exports.reReview = async (req, res, next) => {
 
     const s = (await rxSummaries([order.id])).get(order.id);
     res.json({ success: true, data: { id: order.id, rx_state: s.state, prescriptions: s.prescriptions } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── An order with NO prescription at all ────────────────────────────────────
+//
+// Sep 28, 2026. A MedRep who mis-tags the division, or attaches the
+// prescription under the wrong category, leaves an order with zero
+// prescription rows — it shows up in "All orders" as "No prescription
+// uploaded" and otherwise sits there with nothing to press. This is the two
+// actions offered on that card: ask the MedRep for one, or say Pharmacy has
+// looked and it genuinely does not need one (a hospital PO, an item that
+// never carries a prescription).
+//
+// Unlike verify/reject/reReview above, there is no payment_proofs row to
+// flip — 'request' logs and notifies only; 'not_required' sets
+// orders.rx_not_required_* (see prescriptionService.js's rxSummaries, which
+// reads it back as state 'not_required' only while the order still has no
+// file — the moment one is uploaded the ordinary rules take over on their
+// own). Refused once a prescription actually exists on the order: that is
+// verify/reject/reReview's job, not this one's.
+const NO_RX_ACTIONS = ['request', 'not_required'];
+exports.noRxDecision = async (req, res, next) => {
+  try {
+    if (!mayDecide(req.user)) {
+      return fail(res, 403, 'FORBIDDEN', 'Only the pharmacy (Dispatch) can decide this.');
+    }
+    const action = String(req.body?.action || '').trim();
+    if (!NO_RX_ACTIONS.includes(action)) {
+      return fail(res, 400, 'VALIDATION_ERROR', `action must be one of: ${NO_RX_ACTIONS.join(', ')}.`);
+    }
+    const reason = String(req.body?.reason || '').trim();
+    if (action === 'request' && !reason) {
+      return fail(res, 400, 'VALIDATION_ERROR', 'Say what is needed: it is what the MedRep acts on.');
+    }
+    if (reason.length > 500) return fail(res, 400, 'VALIDATION_ERROR', 'The reason is too long (500 characters at most).');
+
+    const order = await loadOrder(req.params.id);
+    if (!order) return fail(res, 404, 'NOT_FOUND', 'Order not found');
+    if (!(await isPharmacyReviewable(order))) {
+      return fail(
+        res,
+        409,
+        'NOT_IN_QUEUE',
+        `Prescriptions are reviewed once the order is approved and until it is packed. This one is at "${order.status}".`
+      );
+    }
+
+    const rows = await prescriptionRows([order.id]);
+    if (rows.length) {
+      return fail(res, 409, 'HAS_PRESCRIPTION', 'This order already has a prescription on file — use Verify or Reject on it instead.');
+    }
+
+    const actor = await resolveActor(req.user, 'dispatch');
+    const now = new Date().toISOString();
+
+    if (action === 'not_required') {
+      await db
+        .prepare('UPDATE orders SET rx_not_required_by = ?, rx_not_required_at = ?, rx_not_required_reason = ? WHERE id = ?')
+        .run(actor.id, now, reason || null, order.id);
+      await logEvent({
+        orderId: order.id,
+        eventType: 'RX_NOT_REQUIRED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Pharmacy marked no prescription needed on this order${reason ? `: ${reason}` : ''}.`,
+        metadata: reason ? { reason } : {},
+      });
+    } else {
+      // 'request' — also clears any earlier "not required" call: Pharmacy is
+      // now saying the opposite, and a stale flag would keep reading as cleared.
+      await db
+        .prepare('UPDATE orders SET rx_not_required_by = NULL, rx_not_required_at = NULL, rx_not_required_reason = NULL WHERE id = ?')
+        .run(order.id);
+      await logEvent({
+        orderId: order.id,
+        eventType: 'RX_REQUESTED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Pharmacy asked for a prescription on this order: ${reason}`,
+        metadata: { reason },
+      });
+      await notify({
+        orderId: order.id,
+        recipientIds: Array.from(new Set([order.medrep_id, order.raised_by_id].filter(Boolean))),
+        message: `Order ${order.getmeds_order_id}: Pharmacy needs a prescription — ${reason}. Please upload one.`,
+        eventType: 'RX_REQUESTED',
+        orderData: order,
+      });
+    }
+
+    const s = (await rxSummaries([order.id])).get(order.id);
+    res.json({ success: true, data: { id: order.id, rx_state: s.state, prescriptions: s.prescriptions, not_required: s.not_required || null } });
   } catch (err) {
     next(err);
   }

@@ -346,6 +346,65 @@ describe('Pharmacy queue, verification and the gate', () => {
     });
   });
 
+  describe('an order with no prescription at all (no-rx-decision)', () => {
+    const noRx = (id, body, token = dispatchToken) =>
+      request(app).post(`/api/dispatch/pharmacy/orders/${id}/no-rx-decision`).set(auth(token)).send(body);
+
+    test('not_required clears the gate and shows under Verified, with no prescription row created', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      const res = await noRx(o.id, { action: 'not_required', reason: 'Hospital PO — no Rx for this item' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.rx_state).toBe('not_required');
+
+      const ids = idsOf(await queue('verified'));
+      expect(ids).toContain(o.id);
+      expect(await db.prepare("SELECT 1 AS x FROM payment_proofs WHERE order_id = ?").get(o.id)).toBeUndefined();
+
+      // The gate no longer blocks it.
+      expect((await confirm(o.id)).status).toBe(200);
+    });
+
+    test('request needs a reason, notifies the MedRep, and changes nothing on the order', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      expect((await noRx(o.id, { action: 'request' })).status).toBe(400);
+
+      const res = await noRx(o.id, { action: 'request', reason: 'Please upload the prescription for this item.' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.rx_state).toBe('none');
+      expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(o.id)).status).toBe('ready_for_draft_invoice');
+
+      const note = await db
+        .prepare('SELECT * FROM notifications WHERE order_id = ? AND recipient_id = ? ORDER BY id DESC LIMIT 1')
+        .get(o.id, medrepId);
+      expect(note.message).toMatch(/prescription/i);
+    });
+
+    test('request reverses an earlier not_required call', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      await noRx(o.id, { action: 'not_required' });
+      expect(idsOf(await queue('verified'))).toContain(o.id);
+
+      await noRx(o.id, { action: 'request', reason: 'Actually this one needs one.' });
+      const row = await db.prepare('SELECT rx_not_required_at FROM orders WHERE id = ?').get(o.id);
+      expect(row.rx_not_required_at).toBeNull();
+      expect(idsOf(await queue('verified'))).not.toContain(o.id);
+    });
+
+    test('refused once the order already has a prescription on file', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      await addRx(o.id);
+      const res = await noRx(o.id, { action: 'not_required' });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('HAS_PRESCRIPTION');
+    });
+
+    test('a MedRep may not decide; a bad action is refused', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      expect((await noRx(o.id, { action: 'not_required' }, medrepToken)).status).toBe(403);
+      expect((await noRx(o.id, { action: 'archive' })).status).toBe(400);
+    });
+  });
+
   describe('the gate', () => {
     test('confirming for delivery is refused while the prescription is pending, and allowed once verified', async () => {
       const o = await orderAt('ready_for_draft_invoice');

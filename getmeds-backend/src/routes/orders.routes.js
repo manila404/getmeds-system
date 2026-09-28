@@ -153,6 +153,12 @@ router.get('/:id/attachments', proof.list);
 // it, and is Management/admin only, same as resume/setException below.
 router.post('/:id/attachments/:attachmentId/request-delete', blockMedrepWritesOnImported, proof.requestDelete);
 router.post('/:id/attachments/:attachmentId/decide-delete', requireRole('management', 'admin'), proof.decideDelete);
+// Sep 28, 2026: Pharmacy fixes a miscategorized upload (a prescription sitting
+// under Proof of Payment or Valid ID) without asking for a re-upload — role
+// check is inside the controller (dispatch or admin, not requireRole's list
+// since it is checked against req.user.role there for the same message shape
+// as canAttach's other refusals). See paymentProof.controller.js's retag.
+router.post('/:id/attachments/:attachmentId/retag', proof.retag);
 
 // Legacy aliases — do not remove without checking FinanceQueuePage.jsx and
 // finance.routes.js's reject route, both of which still call these paths.

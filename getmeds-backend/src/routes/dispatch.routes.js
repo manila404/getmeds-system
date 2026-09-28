@@ -25,6 +25,10 @@ router.post('/pharmacy/orders/:id/reject', pharmacy.reject);
 // Rejected tab used to be a dead end past "View files". See
 // pharmacy.controller.js's reReview for the three outcomes.
 router.post('/pharmacy/orders/:id/re-review', pharmacy.reReview);
+// Sep 28, 2026: an order with zero prescription rows ("No prescription
+// uploaded" on an All-orders card) — ask the MedRep for one, or say Pharmacy
+// has looked and it does not need one. See pharmacy.controller.js's noRxDecision.
+router.post('/pharmacy/orders/:id/no-rx-decision', pharmacy.noRxDecision);
 
 // Sep 15, 2026: new draft Sales Orders and Finance-confirmed orders, the
 // printed delivery slip, and "confirmed for delivery" — which only records who

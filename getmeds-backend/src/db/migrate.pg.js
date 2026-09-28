@@ -1337,6 +1337,17 @@ async function reconcileStockAnnouncementsSeenColumn(client) {
   console.log('  ✔ users.stock_announcements_seen_at present');
 }
 
+/**
+ * Sep 28, 2026: orders.rx_not_required_* — see schema.pg.sql's own comment.
+ * Idempotent for a database that already had `orders` before this existed.
+ */
+async function reconcileRxNotRequiredColumns(client) {
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS rx_not_required_by INTEGER REFERENCES users(id)');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS rx_not_required_at TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS rx_not_required_reason TEXT');
+  console.log('  ✔ orders.rx_not_required_* present');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -1393,6 +1404,7 @@ async function main() {
     await reconcileCustomerCategoryCheck(client);
     await reconcileSalesManagerScopeNote(client);
     await reconcileStockAnnouncementsSeenColumn(client);
+    await reconcileRxNotRequiredColumns(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

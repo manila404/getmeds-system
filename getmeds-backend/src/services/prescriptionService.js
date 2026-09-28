@@ -126,7 +126,34 @@ function summarize(rows) {
   };
 }
 
-/** Map of orderId -> { state, prescriptions } for every id asked about. */
+/**
+ * Orders Pharmacy has said need no prescription at all (a hospital PO, an item
+ * that never carries one — see pharmacy.controller.js's noRxDecision), among
+ * the given ids. Only orders with the column set; the caller only applies
+ * this while the order still has zero prescription rows (below).
+ */
+async function notRequiredMap(ids) {
+  if (!ids.length) return new Map();
+  const rows = await db
+    .prepare(
+      `SELECT o.id, o.rx_not_required_at, o.rx_not_required_reason, u.name AS by_name
+         FROM orders o
+         LEFT JOIN users u ON u.id = o.rx_not_required_by
+        WHERE o.id = ANY(?) AND o.rx_not_required_at IS NOT NULL`
+    )
+    .all([ids]);
+  return new Map(rows.map((r) => [r.id, { at: r.rx_not_required_at, reason: r.rx_not_required_reason, by: r.by_name || null }]));
+}
+
+/**
+ * Map of orderId -> { state, prescriptions, not_required? } for every id
+ * asked about.
+ *
+ * Sep 28, 2026: `state` can also be 'not_required' — zero prescription rows,
+ * and Pharmacy has said none is needed. Only while there is still no file on
+ * the order: the moment a MedRep uploads one, the ordinary pending/rejected/
+ * verified rules take over on their own, with no separate reset needed.
+ */
 async function rxSummaries(orderIds) {
   const rows = await prescriptionRows(orderIds);
   const byOrder = new Map();
@@ -134,8 +161,15 @@ async function rxSummaries(orderIds) {
     if (!byOrder.has(r.order_id)) byOrder.set(r.order_id, []);
     byOrder.get(r.order_id).push(r);
   }
+  const ids = [...new Set((orderIds || []).map(Number))];
+  const notRequired = await notRequiredMap(ids);
+
   const out = new Map();
-  for (const id of new Set((orderIds || []).map(Number))) out.set(id, summarize(byOrder.get(id) || []));
+  for (const id of ids) {
+    const orderRows = byOrder.get(id) || [];
+    const nr = !orderRows.length ? notRequired.get(id) : null;
+    out.set(id, nr ? { state: 'not_required', prescriptions: [], not_required: nr } : summarize(orderRows));
+  }
   return out;
 }
 
@@ -146,6 +180,11 @@ async function rxSummaries(orderIds) {
  */
 function rxBadge(rxState, financeCleared) {
   if (!rxState || rxState === 'none') return null;
+  if (rxState === 'not_required') {
+    return financeCleared
+      ? { tone: 'ok', label: 'Rx Not Required + Finance Confirmed — clear to dispatch' }
+      : { tone: 'wait', label: 'Rx Not Required — Awaiting Finance' };
+  }
   if (rxState === 'rejected') {
     return {
       tone: 'block',

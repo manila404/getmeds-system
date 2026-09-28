@@ -271,6 +271,117 @@ const ReReview = ({ order, canDecide, onDone }) => {
   );
 };
 
+/**
+ * Sep 28, 2026: an order with zero prescription rows — a MedRep mis-tagged
+ * the division, or uploaded the prescription under the wrong attachment
+ * category, and it sits in "All orders" as "No prescription uploaded" with
+ * nothing to press. Two ways to resolve it: ask the MedRep for one, or say
+ * Pharmacy has looked and it genuinely does not need one.
+ */
+const NoRxActions = ({ order, canDecide, onDone }) => {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState(null); // null | 'request' | 'not_required'
+  const [reason, setReason] = useState('');
+  const qc = useQueryClient();
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['pharmacy-queue'] });
+    qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
+  };
+
+  const act = useMutation({
+    mutationFn: (body) => client.post(`/api/dispatch/pharmacy/orders/${order.id}/no-rx-decision`, body).then((r) => r.data),
+    onSuccess: (_res, body) => {
+      toast.success(
+        body.action === 'not_required'
+          ? `${order.getmeds_order_id}: marked as not needing a prescription.`
+          : `${order.getmeds_order_id}: asked the MedRep for a prescription.`
+      );
+      setOpen(false);
+      setMode(null);
+      setReason('');
+      refresh();
+      onDone?.();
+    },
+    onError: (err) => toast.error(errorText(err, 'Could not save that.')),
+  });
+
+  if (!canDecide) return null;
+  const busy = act.isPending;
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
+      >
+        Decide on this
+      </button>
+    );
+  }
+
+  if (mode) {
+    const isRequest = mode === 'request';
+    return (
+      <div className="w-full space-y-2">
+        <label htmlFor={`no-rx-reason-${order.id}`} className={`block text-xs font-semibold ${isRequest ? 'text-red-900' : 'text-ink-primary'}`}>
+          {isRequest ? 'What do you need from the MedRep? They see this.' : 'Why is it not needed? (optional)'}
+        </label>
+        <textarea
+          id={`no-rx-reason-${order.id}`}
+          rows={2}
+          autoFocus
+          value={reason}
+          maxLength={500}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder={isRequest ? 'e.g. Upload the prescription for the item(s) on this order' : 'e.g. Hospital PO, item does not require an Rx'}
+          className={`w-full text-sm rounded-md border px-2 py-1.5 focus:outline-none focus:ring-1 ${isRequest ? 'border-red-300 focus:ring-red-400' : 'border-slate-300 focus:ring-getmeds-blue'}`}
+        />
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={busy || (isRequest && !reason.trim())}
+            onClick={() => act.mutate({ action: mode, reason: reason.trim() })}
+            className={`px-3 py-1.5 rounded-md text-white text-xs font-semibold disabled:opacity-50 ${
+              isRequest ? 'bg-red-600 hover:bg-red-700' : 'bg-pharmacy-green hover:bg-pharmacy-green-dark'
+            }`}
+          >
+            {busy ? 'Saving…' : isRequest ? 'Send request' : 'Confirm — not required'}
+          </button>
+          <button type="button" disabled={busy} onClick={() => setMode(null)} className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs text-ink-secondary">
+            Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setMode('request')}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-red-200 bg-red-50 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+      >
+        <XCircle className="w-3.5 h-3.5" /> Request prescription
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setMode('not_required')}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50"
+      >
+        <CheckCircle2 className="w-3.5 h-3.5" /> Mark not required
+      </button>
+      <button type="button" disabled={busy} onClick={() => setOpen(false)} className="text-xs text-ink-secondary hover:text-ink-primary">
+        Cancel
+      </button>
+    </div>
+  );
+};
+
 const FinancePill = ({ cleared }) =>
   cleared ? (
     <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-900">
@@ -411,7 +522,18 @@ const PharmacyQueuePage = () => {
                       <span className="font-semibold">↩ Re-submitted{o.resubmitted.by ? ` by ${o.resubmitted.by}` : ''}:</span> {o.resubmitted.note || 'No note.'}
                     </p>
                   )}
-                  {o.prescriptions.length === 0 && (
+                  {/* Sep 28, 2026: zero prescription rows — a mis-tagged
+                      division or attachment, or a genuine "does not need one".
+                      "not_required" is Pharmacy's own call (rx_state carries
+                      it); anything else with no file gets the two actions. */}
+                  {o.prescriptions.length === 0 && o.rx_state === 'not_required' && (
+                    <p className="rounded-md bg-emerald-50 border border-emerald-200 px-3 py-1.5 text-xs text-emerald-900">
+                      <span className="font-semibold">No prescription needed</span>
+                      {o.not_required?.by ? ` — confirmed by ${o.not_required.by}` : ''}
+                      {o.not_required?.reason ? `: ${o.not_required.reason}` : ''}
+                    </p>
+                  )}
+                  {o.prescriptions.length === 0 && o.rx_state !== 'not_required' && (
                     <p className="rounded-md bg-surface px-3 py-1.5 text-xs text-ink-secondary">No prescription uploaded. Open the order to check the items and notes.</p>
                   )}
                   {liveRejections.map((p) => (
@@ -426,6 +548,9 @@ const PharmacyQueuePage = () => {
                     <div onClick={(e) => e.stopPropagation()}>
                       <Decision order={o} canDecide={canDecide} />
                       <ReReview order={o} canDecide={canDecide} />
+                      {o.prescriptions.length === 0 && o.rx_state !== 'not_required' && (
+                        <NoRxActions order={o} canDecide={canDecide} />
+                      )}
                     </div>
                   )}
                 </li>
@@ -448,6 +573,9 @@ const PharmacyQueuePage = () => {
               <div className="w-full space-y-2">
                 <Decision order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
                 <ReReview order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
+                {viewing.prescriptions.length === 0 && viewing.rx_state !== 'not_required' && (
+                  <NoRxActions order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
+                )}
               </div>
             ) : null
           }
