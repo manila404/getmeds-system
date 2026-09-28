@@ -353,12 +353,14 @@ exports.getQueue = async (req, res, next) => {
  * GET /api/dispatch/recent — what is coming Dispatch's way.
  *
  * Sep 15, 2026. The queue above starts once an order is Dispatch's to work,
- * so the orders on their way were invisible here. Two lists, newest first:
+ * so the orders on their way were invisible here. Four lists, newest first:
  *   new_draft_sos      in Zoho as a draft Sales Order, waiting on Finance —
  *                      a heads-up only
- *   finance_confirmed  Finance has confirmed them and the parcel has not left
- *                      yet — these can be printed and confirmed for delivery
- * Imported Zoho history is left out, as in the queue.
+ *   finance_confirmed  Finance has confirmed it, still uncatered (or on hold)
+ *   catered_orders     someone in Dispatch has it and it is not on hold
+ *   confirmed_orders   Dispatch has confirmed it for delivery — every
+ *                      dispatcher's, paged (Sep 28, 2026; see its own comment)
+ * Imported Zoho history is left out of the first two, as in the queue.
  */
 exports.getRecent = async (req, res, next) => {
   try {
@@ -415,19 +417,31 @@ exports.getRecent = async (req, res, next) => {
     // The board cannot stop a Package or Shipment being made in Zoho itself, so
     // this is how Dispatch learns the order is not clear to go: see
     // services/prescriptionService.js. Orders with no prescription get nothing.
-    // Sep 28, 2026: what Dispatch itself confirmed for delivery today — a third
-    // list, so "Confirm for delivery" has somewhere to show up right away
-    // instead of only living on the order's own receipt. Same columns as the
-    // two lists above, keyed off the confirmation (not Finance's or Zoho's
-    // dates), and not capped at 20 — it is already scoped to today.
-    const confirmedToday = await db.prepare(`
-      SELECT ${columns} ${from}
-       WHERE dc.delivery_confirmed_at >= ?${scopeAnd}${whAnd}
-       ORDER BY dc.delivery_confirmed_at DESC
-       LIMIT 500
-    `).all([manilaTodayStartIso(), ...scopeParams, ...whParams]);
+    //
+    // Sep 28, 2026: every order Dispatch has confirmed for delivery, across the
+    // whole team, not just today and not just the signed-in person's own —
+    // "Confirmed Today" read as one dispatcher's own log because it silently
+    // combined both filters. `?period=today` still narrows it to today (same
+    // switch the other two lists use), and this one is paged (15 a page,
+    // ?confirmedPage=) since dropping the today-only cutoff means it only
+    // grows from here.
+    const CONFIRMED_PAGE_SIZE = 15;
+    const confirmedPage = Math.max(parseInt(req.query.confirmedPage, 10) || 1, 1);
+    const confirmedOffset = (confirmedPage - 1) * CONFIRMED_PAGE_SIZE;
+    const confirmedOrdersWhere = `dc.delivery_confirmed_at IS NOT NULL${scopeAnd}${whAnd}${today ? ' AND dc.delivery_confirmed_at >= ?' : ''}`;
+    const confirmedOrdersParams = [...scopeParams, ...whParams, ...(today ? [today] : [])];
 
-    const rx = await rxSummaries([...drafts, ...confirmed, ...confirmedToday].map((o) => o.id));
+    const confirmedOrdersRows = await db.prepare(`
+      SELECT ${columns} ${from}
+       WHERE ${confirmedOrdersWhere}
+       ORDER BY dc.delivery_confirmed_at DESC
+       LIMIT ${CONFIRMED_PAGE_SIZE} OFFSET ${confirmedOffset}
+    `).all(confirmedOrdersParams);
+    const confirmedOrdersTotal = Number(
+      (await db.prepare(`SELECT COUNT(*) AS total ${from} WHERE ${confirmedOrdersWhere}`).get(confirmedOrdersParams))?.total || 0
+    );
+
+    const rx = await rxSummaries([...drafts, ...confirmed, ...confirmedOrdersRows].map((o) => o.id));
     const withRx = (financeCleared) => (o) => {
       const state = rx.get(o.id).state;
       return {
@@ -446,10 +460,10 @@ exports.getRecent = async (req, res, next) => {
     //                             further down)
     //   2. Catered Orders         someone has it and it is not on hold — the
     //                             active fulfilment list
-    //   3. Confirmed Today        Dispatch has confirmed it for delivery
+    //   3. Confirmed Orders       Dispatch has confirmed it for delivery
     // An order confirmed once but whose address then changed needs a fresh
     // confirmation, so it is treated as not confirmed for this split (and
-    // still shows up in "Confirmed Today" too, from confirmedToday below).
+    // still shows up in "Confirmed Orders" too, from confirmedOrdersRows below).
     const awaitingConfirmation = confirmed
       .map(withRx(true))
       .filter((o) => !o.delivery_confirmed_at || o.delivery_address_changed);
@@ -462,7 +476,13 @@ exports.getRecent = async (req, res, next) => {
         new_draft_sos: drafts.map(withRx(false)),
         finance_confirmed: financeConfirmed,
         catered_orders: cateredOrders,
-        confirmed_today: confirmedToday.map(withRx(true))
+        confirmed_orders: confirmedOrdersRows.map(withRx(true)),
+        confirmed_orders_pagination: {
+          page: confirmedPage,
+          limit: CONFIRMED_PAGE_SIZE,
+          total: confirmedOrdersTotal,
+          pages: Math.max(1, Math.ceil(confirmedOrdersTotal / CONFIRMED_PAGE_SIZE))
+        }
       }
     });
   } catch (err) { next(err); }

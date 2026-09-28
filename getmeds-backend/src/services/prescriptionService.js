@@ -76,19 +76,32 @@ async function prescriptionRows(orderIds) {
     .all([ids]);
 }
 
-/** Pure: one order's rows -> { state, prescriptions }. */
-function summarize(rows) {
-  if (!rows.length) return { state: 'none', prescriptions: [] };
-
-  // A rejected file is superseded once a prescription was uploaded AFTER it was
-  // rejected -- that is the MedRep answering the rejection. Comparing with the
-  // rejection time (not the file's own upload time) matters for a multi-page
-  // prescription: page B uploaded before page A was rejected is not a
-  // replacement for A, and must not quietly clear it.
+/**
+ * Which of a set of prescription rows are superseded — a rejected file with a
+ * replacement uploaded after Pharmacy rejected it. Comparing with the
+ * rejection time (not the file's own upload time) matters for a multi-page
+ * prescription: page B uploaded before page A was rejected is not a
+ * replacement for A, and must not quietly clear it.
+ *
+ * Sep 28, 2026: pulled out of summarize() so paymentProof.controller.js's
+ * attachments list can mark the same rows the same way — the order detail
+ * screen (Full page / the modal) used to show an old rejected prescription
+ * next to its replacement with no way to tell which was current.
+ */
+function supersededIds(rows) {
   const isSuperseded = (r) =>
     r.status === 'rejected' &&
     Boolean(r.verified_at) &&
     rows.some((x) => x !== r && String(x.uploaded_at || '') > String(r.verified_at));
+  return new Set(rows.filter(isSuperseded).map((r) => r.id));
+}
+
+/** Pure: one order's rows -> { state, prescriptions }. */
+function summarize(rows) {
+  if (!rows.length) return { state: 'none', prescriptions: [] };
+
+  const superseded = supersededIds(rows);
+  const isSuperseded = (r) => superseded.has(r.id);
   const effective = rows.filter((r) => !isSuperseded(r));
 
   let state = 'verified';
@@ -224,5 +237,5 @@ async function rxStatusForOrder(order) {
 
 module.exports = {
   RX_FILE_TYPE, PRE_SHIP_STATUSES, summarize, rxSummaries, rxBadge, requireRxCleared,
-  heldFromStage, isPharmacyReviewable, rxStatusForOrder, prescriptionRows,
+  heldFromStage, isPharmacyReviewable, rxStatusForOrder, prescriptionRows, supersededIds,
 };

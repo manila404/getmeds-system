@@ -1,6 +1,6 @@
-import React from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
@@ -63,6 +63,33 @@ const Card = ({ icon: Icon, title, hint, count, children }) => (
 );
 
 const Empty = ({ text }) => <p className="text-sm text-ink-secondary text-center py-8">{text}</p>;
+
+// Sep 28, 2026: "Showing 1–15 of 42", Previous / Next — same pattern as the
+// Dispatch queue's own pager (pages/dispatch/DispatchQueuePage.jsx).
+const Pager = ({ pagination, onPage }) => {
+  if (!pagination || pagination.total <= pagination.limit) return null;
+  const { page, pages, total, limit } = pagination;
+  const from = (page - 1) * limit + 1;
+  const to = Math.min(page * limit, total);
+  const btn = 'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed';
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-slate-200 bg-surface">
+      <p className="text-xs text-ink-secondary">
+        Showing <span className="font-semibold text-ink-primary">{from.toLocaleString()}–{to.toLocaleString()}</span> of{' '}
+        <span className="font-semibold text-ink-primary">{total.toLocaleString()}</span>
+      </p>
+      <div className="flex items-center gap-2">
+        <button type="button" className={btn} disabled={page <= 1} onClick={() => onPage(page - 1)}>
+          <ChevronLeft className="w-3.5 h-3.5" /> Previous
+        </button>
+        <span className="text-xs text-ink-secondary tabular-nums">Page {page} of {pages.toLocaleString()}</span>
+        <button type="button" className={btn} disabled={page >= pages} onClick={() => onPage(page + 1)}>
+          Next <ChevronRight className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+};
 
 // Clicking an order opens its receipt (see DispatchQueuePage's `viewing`).
 const Opener = ({ order, onOpen, children }) => (
@@ -140,19 +167,27 @@ const RecentDispatchPanel = ({
     enabled: heldView,
     refetchInterval: 30000
   });
+  // Sep 28, 2026: Confirmed Orders (was "Confirmed Today") is its own page —
+  // it no longer stops at today, so it only ever grows. Reset to page 1
+  // whenever a filter changes underneath it, same as every other paged list
+  // on this page (DispatchQueuePage.jsx's own `page`).
+  const [confirmedPage, setConfirmedPage] = useState(1);
+  useEffect(() => { setConfirmedPage(1); }, [warehouse, period]);
   const { data, isLoading } = useQuery({
-    queryKey: ['dispatch-recent', warehouse, period],
+    queryKey: ['dispatch-recent', warehouse, period, confirmedPage],
     enabled: !heldView,
     queryFn: () =>
       client
-        .get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined, period: period || undefined } })
+        .get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined, period: period || undefined, confirmedPage } })
         .then((r) => r.data?.data),
+    placeholderData: keepPreviousData,
     refetchInterval: 30000
   });
   const drafts = data?.new_draft_sos || [];
   const confirmed = data?.finance_confirmed || [];
   const catered = data?.catered_orders || [];
-  const confirmedToday = data?.confirmed_today || [];
+  const confirmedOrders = data?.confirmed_orders || [];
+  const confirmedPagination = data?.confirmed_orders_pagination || null;
   const { user } = useAuth();
   const loading = <p className="text-sm text-ink-secondary text-center py-8">Loading…</p>;
 
@@ -338,9 +373,9 @@ const RecentDispatchPanel = ({
       </Card>
 
       {/* Sep 28, 2026: Stage 2 of the flow (Confirmed by Finance → Catered
-          Orders → Confirmed Today), now the third column of the board instead
-          of a full-width table below it. Same compact-card style as Confirmed
-          by Finance, plus who's catering it and Take over / Release. */}
+          Orders → Confirmed Orders below), now the third column of the board
+          instead of a full-width table below it. Same compact-card style as
+          Confirmed by Finance, plus who's catering it and Take over / Release. */}
       <Card
         icon={PackageCheck}
         title="Catered Orders"
@@ -430,23 +465,31 @@ const RecentDispatchPanel = ({
       </Card>
     </div>
 
-    {/* Sep 28, 2026: every order Dispatch itself confirmed for delivery today
-        ("Confirm for delivery" on a receipt) — a running log of today's work,
-        full-width below the two lists above. Filtered by the same warehouse
-        pill; always "today" regardless of the Any time / Today toggle. */}
+    {/* Sep 28, 2026: every order ANY Dispatch account has confirmed for
+        delivery — "Confirmed Today" read as one dispatcher's own log because
+        it silently combined "only today" with a viewer who happened to always
+        be the one who'd just confirmed it in testing; neither was ever an
+        intentional filter. Now: every confirmation, from every dispatcher,
+        bound to the same Warehouse / Time filters at the top of the page
+        (Time: Today narrows it the same way it narrows the two lists above),
+        and paged since without the today-only cutoff it only grows. */}
     <div className="bg-white shadow rounded-lg border border-slate-200 overflow-hidden">
       <div className="px-4 py-3 border-b border-slate-200 bg-surface">
         <h2 className="text-sm font-semibold text-ink-primary flex items-center gap-2">
           <CalendarCheck2 className="w-4 h-4 text-getmeds-blue" />
-          Confirmed Today
-          <span className={`min-w-[1.5rem] text-center rounded-full px-1.5 text-xs tabular-nums ${confirmedToday.length ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>
-            {confirmedToday.length}
+          Confirmed Orders
+          <span className={`min-w-[1.5rem] text-center rounded-full px-1.5 text-xs tabular-nums ${confirmedPagination?.total ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>
+            {confirmedPagination?.total ?? confirmedOrders.length}
           </span>
         </h2>
-        <p className="text-xs text-ink-secondary mt-0.5">Orders confirmed for delivery today, newest first.</p>
+        <p className="text-xs text-ink-secondary mt-0.5">
+          {today
+            ? 'Confirmed for delivery today, across the whole Dispatch team — newest first.'
+            : 'Confirmed for delivery, across the whole Dispatch team — newest first.'}
+        </p>
       </div>
-      {isLoading ? loading : confirmedToday.length === 0 ? (
-        <Empty text="Nothing confirmed for delivery yet today." />
+      {isLoading ? loading : confirmedOrders.length === 0 ? (
+        <Empty text={today ? 'Nothing confirmed for delivery yet today.' : 'Nothing confirmed for delivery yet.'} />
       ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-200">
@@ -461,7 +504,7 @@ const RecentDispatchPanel = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {confirmedToday.map((o) => (
+              {confirmedOrders.map((o) => (
                 <tr key={o.id} className="hover:bg-surface">
                   <td className="px-4 py-2.5 align-top">
                     <Opener order={o} onOpen={onOpen}>
@@ -504,6 +547,7 @@ const RecentDispatchPanel = ({
           </table>
         </div>
       )}
+      <Pager pagination={confirmedPagination} onPage={setConfirmedPage} />
     </div>
     </div>
   );

@@ -64,6 +64,8 @@ const recent = async () => (await request(app).get('/api/dispatch/recent').set(a
 const verify = (id, token = dispatchToken, body = {}) => request(app).post(`/api/dispatch/pharmacy/orders/${id}/verify`).set(auth(token)).send(body);
 const reject = (id, body, token = dispatchToken) => request(app).post(`/api/dispatch/pharmacy/orders/${id}/reject`).set(auth(token)).send(body);
 const confirm = (id) => request(app).post(`/api/dispatch/orders/${id}/confirm-delivery`).set(auth(dispatchToken)).send({});
+const reReview = (id, body, token = dispatchToken) =>
+  request(app).post(`/api/dispatch/pharmacy/orders/${id}/re-review`).set(auth(token)).send(body);
 
 describe('summarize — the state of an order\'s prescription', () => {
   const row = (o) => ({ id: 1, status: 'pending', uploaded_at: '2026-09-25T01:00:00.000Z', verified_at: null, ...o });
@@ -212,6 +214,26 @@ describe('Pharmacy queue, verification and the gate', () => {
     expect(idsOf(await queue('verified'))).toContain(o.id);
   });
 
+  test("the attachments list marks the old rejected prescription superseded once it's replaced, and not the new one", async () => {
+    const o = await orderAt('ready_for_draft_invoice');
+    await addRx(o.id, { name: 'original.jpg' });
+    await reject(o.id, { reason: 'Blurred dosage' });
+
+    const attachmentsOf = async () => (await request(app).get(`/api/orders/${o.id}/attachments`).set(auth(dispatchToken))).body.data.attachments;
+    const beforeReplacement = await attachmentsOf();
+    expect(beforeReplacement).toHaveLength(1);
+    expect(beforeReplacement[0].superseded).toBe(false);
+
+    await new Promise((r) => setTimeout(r, 5));
+    await addRx(o.id, { name: 'replacement.jpg', uploadedAt: new Date(Date.now() + 60_000).toISOString() });
+
+    const afterReplacement = await attachmentsOf();
+    const byName = Object.fromEntries(afterReplacement.map((a) => [a.file_name, a]));
+    expect(byName['original.jpg'].superseded).toBe(true);
+    expect(byName['replacement.jpg'].superseded).toBe(false);
+    expect(byName['replacement.jpg'].status).toBe('pending');
+  });
+
   test('a single file can be decided on its own', async () => {
     const o = await orderAt('ready_for_finance_verified');
     const a = await addRx(o.id, { name: 'a.jpg' });
@@ -244,6 +266,84 @@ describe('Pharmacy queue, verification and the gate', () => {
     const res = await verify(shipped.id);
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('NOT_IN_QUEUE');
+  });
+
+  describe('re-review — a second look at an already-decided prescription', () => {
+    test('verify overrides the rejection, clears the gate, and shows up in the Verified tab', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      await addRx(o.id);
+      await reject(o.id, { reason: 'Prescription is blurred' });
+      expect(idsOf(await queue('rejected'))).toContain(o.id);
+
+      const res = await reReview(o.id, { action: 'verify' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.rx_state).toBe('verified');
+
+      expect(idsOf(await queue('verified'))).toContain(o.id);
+      expect(idsOf(await queue('rejected'))).not.toContain(o.id);
+
+      const ev = await db.prepare("SELECT * FROM order_events WHERE order_id = ? AND event_type = 'RX_RE_REVIEWED'").get(o.id);
+      expect(ev).toBeTruthy();
+      expect(ev.notes).toMatch(/re-reviewed and Verified/i);
+
+      // Confirming for delivery is no longer blocked.
+      expect((await confirm(o.id)).status).toBe(200);
+    });
+
+    test('reject (with a new reason) keeps it rejected, and the MedRep is told the updated reason', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      await addRx(o.id);
+      await reject(o.id, { reason: 'Prescription is blurred' });
+
+      const res = await reReview(o.id, { action: 'reject', reason: 'Blurred, and also missing the doctor\'s signature' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.rx_state).toBe('rejected');
+      expect(res.body.data.prescriptions[0].rejection_reason).toBe("Blurred, and also missing the doctor's signature");
+      expect(idsOf(await queue('rejected'))).toContain(o.id);
+
+      const note = await db
+        .prepare('SELECT * FROM notifications WHERE order_id = ? AND recipient_id = ? ORDER BY id DESC LIMIT 1')
+        .get(o.id, medrepId);
+      expect(note.message).toMatch(/signature/);
+    });
+
+    test('reset puts it back at Awaiting review, cleared of who decided', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      await addRx(o.id);
+      await reject(o.id, { reason: 'Prescription is blurred' });
+
+      const res = await reReview(o.id, { action: 'reset' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.rx_state).toBe('pending');
+      expect(idsOf(await queue('pending'))).toContain(o.id);
+
+      const row = await db.prepare("SELECT status, verified_by, verified_at, rejection_reason FROM payment_proofs WHERE order_id = ?").get(o.id);
+      expect(row.status).toBe('pending');
+      expect(row.verified_by).toBeNull();
+      expect(row.rejection_reason).toBeNull();
+    });
+
+    test('reject needs a reason; a bad action is refused; a MedRep may not re-review', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      await addRx(o.id);
+      await reject(o.id, { reason: 'Prescription is blurred' });
+
+      expect((await reReview(o.id, { action: 'reject' })).status).toBe(400);
+      expect((await reReview(o.id, { action: 'archive' })).status).toBe(400);
+      expect((await reReview(o.id, { action: 'verify' }, medrepToken)).status).toBe(403);
+    });
+
+    test('nothing to re-review once the rejection has already been answered with a replacement', async () => {
+      const o = await orderAt('ready_for_draft_invoice');
+      await addRx(o.id);
+      await reject(o.id, { reason: 'Prescription is blurred' });
+      await new Promise((r) => setTimeout(r, 5));
+      await addRx(o.id, { name: 'replacement.jpg', uploadedAt: new Date(Date.now() + 60_000).toISOString() });
+
+      const res = await reReview(o.id, { action: 'verify' });
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('NOTHING_TO_REVIEW');
+    });
   });
 
   describe('the gate', () => {

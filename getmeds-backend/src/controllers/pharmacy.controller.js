@@ -373,4 +373,105 @@ exports.resubmitPrescription = async (req, res, next) => {
 
 exports.verify = (req, res, next) => decide(req, res, next, 'verified');
 exports.reject = (req, res, next) => decide(req, res, next, 'rejected');
+
+// ── Pharmacy re-reviews its own rejection ───────────────────────────────────
+//
+// Sep 28, 2026. `decide()` above only ever acts on a 'pending' row, so once
+// Pharmacy rejected a prescription the Rejected tab became a dead end — "View
+// files" and a static red label, no way to act again even on a second look or
+// a rejection made by mistake. This is that second decision: it acts on the
+// order's own LIVE rejected row(s) instead (not one a MedRep has already
+// answered with a replacement — that one is already `superseded`, and is
+// resubmitPrescription's job above, not this one's).
+const RE_REVIEW_ACTIONS = ['verify', 'reject', 'reset'];
+exports.reReview = async (req, res, next) => {
+  try {
+    if (!mayDecide(req.user)) {
+      return fail(res, 403, 'FORBIDDEN', 'Only the pharmacy (Dispatch) can re-review a prescription.');
+    }
+    const action = String(req.body?.action || '').trim();
+    if (!RE_REVIEW_ACTIONS.includes(action)) {
+      return fail(res, 400, 'VALIDATION_ERROR', `action must be one of: ${RE_REVIEW_ACTIONS.join(', ')}.`);
+    }
+    const reason = String(req.body?.reason || '').trim();
+    if (action === 'reject') {
+      if (!reason) return fail(res, 400, 'VALIDATION_ERROR', 'A reason is required: it is what the MedRep acts on.');
+      if (reason.length > 500) return fail(res, 400, 'VALIDATION_ERROR', 'The reason is too long (500 characters at most).');
+    }
+
+    const order = await loadOrder(req.params.id);
+    if (!order) return fail(res, 404, 'NOT_FOUND', 'Order not found');
+    if (!(await isPharmacyReviewable(order))) {
+      return fail(
+        res,
+        409,
+        'NOT_IN_QUEUE',
+        `Prescriptions are reviewed once the order is approved and until it is packed. This one is at "${order.status}".`
+      );
+    }
+
+    // The order's own live rejection — not a row a MedRep has already
+    // answered with a replacement (summarize() already calls that superseded,
+    // and it is history, not something this re-review touches).
+    const rows = await prescriptionRows([order.id]);
+    const { prescriptions } = summarize(rows);
+    const liveRejectedIds = prescriptions.filter((p) => p.status === 'rejected' && !p.superseded).map((p) => p.id);
+    if (!liveRejectedIds.length) {
+      return fail(res, 404, 'NOTHING_TO_REVIEW', 'This order has no open rejection to re-review.');
+    }
+
+    const actor = await resolveActor(req.user, 'dispatch');
+    const now = new Date().toISOString();
+    const newStatus = action === 'verify' ? 'verified' : action === 'reset' ? 'pending' : 'rejected';
+    // A reset means nobody has decided yet, same as a fresh upload — clear who/when.
+    const stampDecision = action !== 'reset';
+
+    await db.transaction(async () => {
+      await db
+        .prepare(
+          `UPDATE payment_proofs
+              SET status = ?, verified_by = ?, verified_at = ?, rejection_reason = ?
+            WHERE id = ANY(?) AND status = 'rejected'`
+        )
+        .run(newStatus, stampDecision ? actor.id : null, stampDecision ? now : null, action === 'reject' ? reason : null, [liveRejectedIds]);
+
+      await logEvent({
+        orderId: order.id,
+        eventType: 'RX_RE_REVIEWED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: actor.id,
+        actorName: actor.name,
+        notes:
+          action === 'verify'
+            ? `Prescription re-reviewed and Verified by ${actor.name}, overriding an earlier rejection.`
+            : action === 'reject'
+              ? `Prescription re-reviewed by ${actor.name} — still rejected, reason updated: ${reason}`
+              : `Prescription re-reviewed by ${actor.name} — reset to Awaiting review for a second look.`,
+        metadata: { attachmentIds: liveRejectedIds, action, ...(action === 'reject' ? { reason } : {}) },
+      });
+
+      // A verify needs nothing from the MedRep — the order simply proceeds.
+      // The other two outcomes are still something for them to know about.
+      if (action !== 'verify') {
+        await notify({
+          orderId: order.id,
+          recipientIds: Array.from(new Set([order.medrep_id, order.raised_by_id].filter(Boolean))),
+          message:
+            action === 'reject'
+              ? `The prescription for order ${order.getmeds_order_id} is still rejected by Pharmacy — updated reason: ${reason}.`
+              : `Order ${order.getmeds_order_id}: Pharmacy is taking another look at the prescription.`,
+          eventType: 'RX_RE_REVIEWED',
+          orderData: order,
+        });
+      }
+    })();
+
+    const s = (await rxSummaries([order.id])).get(order.id);
+    res.json({ success: true, data: { id: order.id, rx_state: s.state, prescriptions: s.prescriptions } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.PHARMACY_STATUSES = PHARMACY_STATUSES;

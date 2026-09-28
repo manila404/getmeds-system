@@ -8,7 +8,7 @@ const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const zoho = require('../integrations/zoho');
 const { constraintAllows, hasColumn } = require('../services/schemaColumns');
 const attachmentLink = require('../services/attachmentLinkService');
-const { isPharmacyReviewable } = require('../services/prescriptionService');
+const { isPharmacyReviewable, RX_FILE_TYPE, supersededIds } = require('../services/prescriptionService');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -567,7 +567,15 @@ exports.list = async (req, res, next) => {
     // Supabase/Zoho call happens at list-time any more (that only happens
     // when the URL is actually loaded — see viewAttachment). No more
     // Promise.all needed for it, but the map itself stays simple either way.
-    const attachments = rows.map((row) => ({ ...row, ...urlsFor(req, row) }));
+    //
+    // Sep 28, 2026: `superseded` on prescription rows — a rejected file with a
+    // replacement uploaded after Pharmacy rejected it. Before this, a
+    // resubmitted prescription sat right next to the old rejected one in the
+    // attachments grid with no way to tell which was current; same rule
+    // rxSummaries already uses (services/prescriptionService.js), so this can
+    // never disagree with what Pharmacy's own queue says the order's state is.
+    const rxSuperseded = supersededIds(rows.filter((r) => r.file_type === RX_FILE_TYPE));
+    const attachments = rows.map((row) => ({ ...row, ...urlsFor(req, row), superseded: rxSuperseded.has(row.id) }));
 
     res.json({ success: true, data: { attachments } });
   } catch (err) {

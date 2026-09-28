@@ -1,10 +1,114 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download } from 'lucide-react';
+import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import { attachmentLabel, HOSPITAL_REQUIRED_TYPES } from '../../constants/attachmentTypes';
+
+/**
+ * Sep 28, 2026: the little status line under a file's name — a proof of
+ * payment already had one; a prescription now gets the same treatment,
+ * because a resubmitted one sitting next to the old rejected copy with
+ * identical "PRESCRIPTION" labels and no status was exactly what made it
+ * unclear to Pharmacy which one to review. `superseded` (from the same rule
+ * rxSummaries uses server-side, prescriptionService.js's supersededIds) wins
+ * over the row's own `status` — an old rejection that has since been replaced
+ * reads as "Replaced", not as an open rejection nobody is going to act on.
+ */
+const attachmentStatusBadge = (a) => {
+  if (a.file_type === 'prescription') {
+    if (a.superseded) {
+      return { label: `Replaced${a.rejection_reason ? ` — was: ${a.rejection_reason}` : ''}`, tone: 'muted' };
+    }
+    if (a.status === 'verified') return { label: 'Verified', tone: 'good' };
+    if (a.status === 'rejected') return { label: `Rejected${a.rejection_reason ? ` — ${a.rejection_reason}` : ''}`, tone: 'bad' };
+    return { label: 'New — awaiting review', tone: 'warn' };
+  }
+  if (a.file_type === 'payment_proof' && a.status) {
+    if (a.status === 'verified') return { label: 'Verified', tone: 'good' };
+    if (a.status === 'rejected') return { label: `Rejected${a.rejection_reason ? ` — ${a.rejection_reason}` : ''}`, tone: 'bad' };
+    return { label: 'Awaiting your check', tone: 'warn' };
+  }
+  return null;
+};
+const BADGE_TONE = {
+  good: 'text-pharmacy-green-dark',
+  bad: 'text-red-700',
+  warn: 'text-amber-900',
+  muted: 'text-ink-secondary'
+};
+
+/**
+ * One attachment card in the grid. `dim` (a superseded prescription) mutes
+ * the whole tile — still openable, but visibly not the one to act on.
+ */
+const AttachmentTile = ({ a, dim = false }) => {
+  const isImage = String(a.content_type || '').startsWith('image/');
+  const badge = attachmentStatusBadge(a);
+  return (
+    <div
+      className={`relative block bg-white border rounded-lg overflow-hidden transition-colors ${
+        dim ? 'border-slate-200 opacity-60' : 'border-slate-200 hover:border-getmeds-blue'
+      }`}
+    >
+      {/* Sep 19, 2026: "add download feature for all users to download
+          attachments" — same signed object, minted with
+          Content-Disposition: attachment so this saves the file instead of
+          opening the view tab the rest of the card still opens. A sibling of
+          the view link below, not nested inside it — an <a> inside an <a>
+          is invalid HTML and browsers handle it inconsistently. */}
+      {a.downloadUrl && (
+        <a
+          href={a.downloadUrl}
+          title={`Download ${a.file_name || 'file'}`}
+          className="absolute top-1.5 right-1.5 z-10 p-1.5 rounded-md bg-white/90 border border-slate-200 text-ink-secondary hover:text-getmeds-blue hover:border-getmeds-blue shadow-sm"
+        >
+          <Download className="w-3.5 h-3.5" />
+        </a>
+      )}
+      <a href={a.viewUrl} target="_blank" rel="noopener noreferrer" className="block">
+        {/* Images preview inline; a PDF or scanned document gets an honest
+            placeholder rather than a broken <img> that reads as a failed
+            upload. */}
+        {isImage ? (
+          <img
+            // Sep 23, 2026 (Priority 2): a 128px-tall grid cell was loading
+            // the full original (up to several MB) every time — this asks
+            // viewAttachment for a resized rendition instead (Supabase Image
+            // Transformations, verified enabled on this project). The
+            // click-through <a> above still opens the full-size a.viewUrl
+            // unchanged.
+            src={`${a.viewUrl}&w=300&h=300`}
+            alt={a.file_name}
+            className="w-full h-32 object-cover bg-slate-50"
+            loading="lazy"
+          />
+        ) : (
+          <div className="w-full h-32 flex items-center justify-center bg-slate-50">
+            <FileText className="w-8 h-8 text-ink-secondary" />
+          </div>
+        )}
+      </a>
+      <div className="px-2.5 py-2">
+        <p className="text-[11px] font-bold uppercase tracking-wide text-getmeds-blue-dark">
+          {attachmentLabel(a.file_type)}
+        </p>
+        <p className="text-[12px] text-ink-primary truncate" title={a.file_name}>
+          {a.file_name}
+        </p>
+        <p className="text-[11px] text-ink-secondary mt-0.5">
+          {a.uploaded_by_name || 'Unknown'}
+          {a.uploaded_at ? ` · ${formatPHT(a.uploaded_at)}` : ''}
+        </p>
+        {/* Sep 28, 2026: proof of payment and prescription both carry a
+            Finance/Pharmacy decision now; every other type is evidence, not
+            something to approve, and shows nothing here. */}
+        {badge && <p className={`text-[11px] mt-1 font-semibold ${BADGE_TONE[badge.tone]}`}>{badge.label}</p>}
+      </div>
+    </div>
+  );
+};
 
 // Sep 22, 2026: split-invoicing orders — a line item tagged to the other
 // entity creates a second Zoho Sales Order (order_split_sales_orders), which
@@ -310,6 +414,14 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
   const items = detail.data?.data?.items || [];
   const splits = detail.data?.data?.splits || [];
   const attachments = files.data?.data?.attachments || [];
+  // Sep 28, 2026: a superseded prescription (an old rejection with a
+  // resubmitted replacement already on file — see supersededIds in
+  // prescriptionService.js) is history, not something Pharmacy still has to
+  // act on. It stays out of the primary grid, behind a toggle, so the file
+  // that's actually current doesn't sit next to it looking equally live.
+  const visibleAttachments = attachments.filter((a) => !a.superseded);
+  const supersededAttachments = attachments.filter((a) => a.superseded);
+  const [showSuperseded, setShowSuperseded] = useState(false);
 
   // A hospital order is the one case where a missing document actually blocks
   // something downstream, so it is the only case worth calling out. Elsewhere
@@ -544,92 +656,33 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
                   No files on this order.
                 </div>
               ) : (
-                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {attachments.map((a) => {
-                    const isImage = String(a.content_type || '').startsWith('image/');
-                    return (
-                      <div
-                        key={a.id}
-                        className="relative block bg-white border border-slate-200 rounded-lg overflow-hidden hover:border-getmeds-blue transition-colors"
+                <>
+                  <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {visibleAttachments.map((a) => <AttachmentTile key={a.id} a={a} />)}
+                  </div>
+
+                  {/* Sep 28, 2026: superseded prescriptions — folded away by
+                      default rather than sitting in the grid above looking as
+                      current as the file that replaced them. */}
+                  {supersededAttachments.length > 0 && (
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={() => setShowSuperseded((v) => !v)}
+                        className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary hover:text-ink-primary"
                       >
-                        {/* Sep 19, 2026: "add download feature for all users
-                            to download attachments" — same signed object,
-                            minted with Content-Disposition: attachment so
-                            this saves the file instead of opening the view
-                            tab the rest of the card still opens. A sibling of
-                            the view link below, not nested inside it — an
-                            <a> inside an <a> is invalid HTML and browsers
-                            handle it inconsistently. */}
-                        {a.downloadUrl && (
-                          <a
-                            href={a.downloadUrl}
-                            title={`Download ${a.file_name || 'file'}`}
-                            className="absolute top-1.5 right-1.5 z-10 p-1.5 rounded-md bg-white/90 border border-slate-200 text-ink-secondary hover:text-getmeds-blue hover:border-getmeds-blue shadow-sm"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                          </a>
-                        )}
-                        <a href={a.viewUrl} target="_blank" rel="noopener noreferrer" className="block">
-                        {/* Images preview inline; a PDF or scanned document
-                            gets an honest placeholder rather than a broken
-                            <img> that reads as a failed upload. */}
-                        {isImage ? (
-                          <img
-                            // Sep 23, 2026 (Priority 2): a 128px-tall grid
-                            // cell was loading the full original (up to
-                            // several MB) every time — this asks
-                            // viewAttachment for a resized rendition
-                            // instead (Supabase Image Transformations,
-                            // verified enabled on this project). The click-
-                            // through <a> above still opens the full-size
-                            // a.viewUrl unchanged.
-                            src={`${a.viewUrl}&w=300&h=300`}
-                            alt={a.file_name}
-                            className="w-full h-32 object-cover bg-slate-50"
-                            loading="lazy"
-                          />
-                        ) : (
-                          <div className="w-full h-32 flex items-center justify-center bg-slate-50">
-                            <FileText className="w-8 h-8 text-ink-secondary" />
-                          </div>
-                        )}
-                        </a>
-                        <div className="px-2.5 py-2">
-                          <p className="text-[11px] font-bold uppercase tracking-wide text-getmeds-blue-dark">
-                            {attachmentLabel(a.file_type)}
-                          </p>
-                          <p className="text-[12px] text-ink-primary truncate" title={a.file_name}>
-                            {a.file_name}
-                          </p>
-                          <p className="text-[11px] text-ink-secondary mt-0.5">
-                            {a.uploaded_by_name || 'Unknown'}
-                            {a.uploaded_at ? ` · ${formatPHT(a.uploaded_at)}` : ''}
-                          </p>
-                          {/* Only the proof of payment carries a Finance
-                              decision; the other types are evidence, not
-                              something to approve. */}
-                          {a.file_type === 'payment_proof' && a.status && (
-                            <p
-                              className={`text-[11px] mt-1 font-semibold ${
-                                a.status === 'verified'
-                                  ? 'text-pharmacy-green-dark'
-                                  : a.status === 'rejected'
-                                    ? 'text-red-700'
-                                    : 'text-amber-900'
-                              }`}
-                            >
-                              {a.status === 'verified'
-                                ? 'Verified'
-                                : a.status === 'rejected'
-                                  ? `Rejected${a.rejection_reason ? ` — ${a.rejection_reason}` : ''}`
-                                  : 'Awaiting your check'}
-                            </p>
-                          )}
+                        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSuperseded ? 'rotate-180' : ''}`} />
+                        {showSuperseded ? 'Hide' : 'Show'} {supersededAttachments.length} previous / replaced attachment
+                        {supersededAttachments.length === 1 ? '' : 's'}
+                      </button>
+                      {showSuperseded && (
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-2">
+                          {supersededAttachments.map((a) => <AttachmentTile key={a.id} a={a} dim />)}
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
 
               <p className="flex items-center gap-1.5 text-[11px] text-ink-secondary mt-2">

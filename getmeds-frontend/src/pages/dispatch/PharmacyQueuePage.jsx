@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Pill, RefreshCw, FileSearch, ShieldCheck, XCircle, CheckCircle2, Clock } from 'lucide-react';
+import { Pill, RefreshCw, FileSearch, ShieldCheck, XCircle, CheckCircle2, Clock, RotateCcw } from 'lucide-react';
 import toast from 'react-hot-toast';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
@@ -140,6 +140,133 @@ const Decision = ({ order, canDecide, onDone }) => {
         <XCircle className="w-3.5 h-3.5" />
         Reject
       </button>
+    </div>
+  );
+};
+
+/**
+ * Sep 28, 2026: a second look at a decision Pharmacy already made. The
+ * Rejected tab used to be a dead end past "View files" — this is the one
+ * action offered there (and in the details view's footer), for the order's
+ * own live rejection (not one a MedRep has already answered with a
+ * replacement — that's Decision's "Verify prescription" above, once it's
+ * back at Awaiting review).
+ */
+const ReReview = ({ order, canDecide, onDone }) => {
+  const [open, setOpen] = useState(false);
+  const [editingReason, setEditingReason] = useState(false);
+  const [reason, setReason] = useState('');
+  const qc = useQueryClient();
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['pharmacy-queue'] });
+    qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
+  };
+
+  const act = useMutation({
+    mutationFn: (body) => client.post(`/api/dispatch/pharmacy/orders/${order.id}/re-review`, body).then((r) => r.data),
+    onSuccess: (_res, body) => {
+      toast.success(
+        {
+          verify: `${order.getmeds_order_id}: re-reviewed and verified.`,
+          reject: `${order.getmeds_order_id}: still rejected — the MedRep was told the updated reason.`,
+          reset: `${order.getmeds_order_id}: moved back to Awaiting review.`,
+        }[body.action]
+      );
+      setOpen(false);
+      setEditingReason(false);
+      setReason('');
+      refresh();
+      onDone?.();
+    },
+    onError: (err) => toast.error(errorText(err, 'Could not update the review.')),
+  });
+
+  const liveRejected = order.prescriptions.find((p) => p.status === 'rejected' && !p.superseded);
+  if (!canDecide || !liveRejected) return null;
+  const busy = act.isPending;
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => { setOpen(true); setReason(liveRejected.rejection_reason || ''); }}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
+      >
+        <RotateCcw className="w-3.5 h-3.5" /> Re-review
+      </button>
+    );
+  }
+
+  if (editingReason) {
+    return (
+      <div className="w-full space-y-2">
+        <label htmlFor={`rx-rereview-reason-${order.id}`} className="block text-xs font-semibold text-red-900">
+          Updated reason — the MedRep sees this.
+        </label>
+        <textarea
+          id={`rx-rereview-reason-${order.id}`}
+          rows={2}
+          autoFocus
+          value={reason}
+          maxLength={500}
+          onChange={(e) => setReason(e.target.value)}
+          className="w-full text-sm rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400"
+        />
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={!reason.trim() || busy}
+            onClick={() => act.mutate({ action: 'reject', reason: reason.trim() })}
+            className="px-3 py-1.5 rounded-md bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-50"
+          >
+            {busy ? 'Saving…' : 'Save — still rejected'}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setEditingReason(false)}
+            className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs text-ink-secondary"
+          >
+            Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full space-y-1.5">
+      <p className="text-xs font-semibold text-ink-primary">Re-review this prescription</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => act.mutate({ action: 'verify' })}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50"
+        >
+          <CheckCircle2 className="w-3.5 h-3.5" /> Verify (override rejection)
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => setEditingReason(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-red-200 bg-red-50 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+        >
+          <XCircle className="w-3.5 h-3.5" /> Edit rejection reason
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => act.mutate({ action: 'reset' })}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+        >
+          <Clock className="w-3.5 h-3.5" /> Back to Awaiting review
+        </button>
+        <button type="button" disabled={busy} onClick={() => setOpen(false)} className="text-xs text-ink-secondary hover:text-ink-primary">
+          Cancel
+        </button>
+      </div>
     </div>
   );
 };
@@ -295,7 +422,12 @@ const PharmacyQueuePage = () => {
                   ))}
                 </ul>
 
-                {o.reviewable !== false && <Decision order={o} canDecide={canDecide} />}
+                {o.reviewable !== false && (
+                  <>
+                    <Decision order={o} canDecide={canDecide} />
+                    <ReReview order={o} canDecide={canDecide} />
+                  </>
+                )}
               </li>
             ))}
           </ul>
@@ -310,7 +442,14 @@ const PharmacyQueuePage = () => {
         <OrderDetailsModal
           orderId={viewing.id}
           onClose={() => setViewingId(null)}
-          footer={viewing.reviewable !== false ? <Decision order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} /> : null}
+          footer={
+            viewing.reviewable !== false ? (
+              <div className="w-full space-y-2">
+                <Decision order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
+                <ReReview order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
+              </div>
+            ) : null
+          }
         />
       )}
     </div>

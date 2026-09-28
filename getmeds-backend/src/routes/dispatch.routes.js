@@ -21,6 +21,10 @@ const pharmacy = require('../controllers/pharmacy.controller');
 router.get('/pharmacy/queue', pharmacy.getQueue);
 router.post('/pharmacy/orders/:id/verify', pharmacy.verify);
 router.post('/pharmacy/orders/:id/reject', pharmacy.reject);
+// Sep 28, 2026: a second look at a decision Pharmacy already made — the
+// Rejected tab used to be a dead end past "View files". See
+// pharmacy.controller.js's reReview for the three outcomes.
+router.post('/pharmacy/orders/:id/re-review', pharmacy.reReview);
 
 // Sep 15, 2026: new draft Sales Orders and Finance-confirmed orders, the
 // printed delivery slip, and "confirmed for delivery" — which only records who

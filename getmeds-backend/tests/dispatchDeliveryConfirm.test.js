@@ -97,12 +97,12 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
     expect(events[0].notes).toMatch(/215 Rizal St, Cebu City/);
 
     // Sep 28, 2026: confirmed and not stale — it has moved on to "Confirmed
-    // Today" (recent().confirmed_today), not still sitting in this list.
+    // Orders" (recent().confirmed_orders), not still sitting in this list.
     const data = await recent();
     expect(data.finance_confirmed.find((o) => o.id === order.id)).toBeUndefined();
-    const today = data.confirmed_today.find((o) => o.id === order.id);
-    expect(today.delivery_confirmed_at).toBeTruthy();
-    expect(today.delivery_address_changed).toBe(false);
+    const confirmedRow = data.confirmed_orders.find((o) => o.id === order.id);
+    expect(confirmedRow.delivery_confirmed_at).toBeTruthy();
+    expect(confirmedRow.delivery_address_changed).toBe(false);
     const queued = (await request(app).get('/api/dispatch/queue').set(auth())).body.data.orders.find((o) => o.id === order.id);
     expect(queued.delivery_confirmed_by).toBeTruthy();
   });
@@ -110,7 +110,7 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
   test('the three stages are mutually exclusive: uncatered, catered, confirmed', async () => {
     const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
     const stageOf = (data) => {
-      if (data.confirmed_today.some((o) => o.id === order.id)) return 'confirmed_today';
+      if (data.confirmed_orders.some((o) => o.id === order.id)) return 'confirmed_orders';
       if (data.catered_orders.some((o) => o.id === order.id)) return 'catered_orders';
       if (data.finance_confirmed.some((o) => o.id === order.id)) return 'finance_confirmed';
       return null;
@@ -125,7 +125,7 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
     expect(row.catered.by).toBeTruthy();
 
     await confirm(order.id);
-    expect(stageOf(await recent())).toBe('confirmed_today');
+    expect(stageOf(await recent())).toBe('confirmed_orders');
   });
 
   test('an order on hold stays under "Confirmed by Finance" even once catered', async () => {
@@ -140,19 +140,70 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
     expect(row.dispatch_hold).toEqual(expect.objectContaining({ reason: 'Item out of stock' }));
   });
 
-  test('confirming for delivery puts the order under "Confirmed Today", newest first', async () => {
+  test('confirming for delivery puts the order under "Confirmed Orders", newest first', async () => {
     const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
-    const before = (await recent()).confirmed_today.map((o) => o.id);
+    const before = (await recent()).confirmed_orders.map((o) => o.id);
     expect(before).not.toContain(order.id);
 
     await confirm(order.id);
     const data = await recent();
-    const row = data.confirmed_today.find((o) => o.id === order.id);
+    const row = data.confirmed_orders.find((o) => o.id === order.id);
     expect(row).toBeTruthy();
     expect(row.delivery_confirmed_by).toBeTruthy();
     expect(row.delivery_confirmed_at).toBeTruthy();
     // Newest confirmation first.
-    expect(data.confirmed_today[0].id).toBe(order.id);
+    expect(data.confirmed_orders[0].id).toBe(order.id);
+  });
+
+  test("a second Dispatch account's confirmations show too, not only the viewer's own", async () => {
+    // Sep 28, 2026: this used to look like "my own confirmations" only because
+    // the query happened to always be asked by whoever confirmed it in these
+    // tests — nothing actually filtered by viewer. Proven here with a genuinely
+    // different account doing the confirming.
+    const seed = await db.prepare('SELECT password_hash FROM users WHERE email = ?').get('medrep@getmeds.ph');
+    const emailB = `confirm-b-${Date.now()}@getmeds.ph`;
+    await db
+      .prepare("INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, 'dispatch')")
+      .run('Second Dispatcher', emailB, seed.password_hash);
+    const dispatchBId = (await db.prepare('SELECT id FROM users WHERE email = ?').get(emailB)).id;
+    const dispatchB = await loginAs(emailB);
+
+    try {
+      const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+      await confirm(order.id, dispatchB);
+
+      // Viewed with the DEFAULT (dispatchA) token, via `recent()`.
+      const row = (await recent()).confirmed_orders.find((o) => o.id === order.id);
+      expect(row).toBeTruthy();
+      expect(row.delivery_confirmed_by).toBe('Second Dispatcher');
+    } finally {
+      await db.prepare('DELETE FROM order_events WHERE actor_id = ?').run(dispatchBId);
+      await db.prepare('DELETE FROM users WHERE id = ?').run(dispatchBId);
+    }
+  });
+
+  test('an order confirmed on an earlier day still shows at "Any time"; "Today" still narrows to today', async () => {
+    const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+    await confirm(order.id);
+    await db
+      .prepare("UPDATE order_events SET created_at = ? WHERE order_id = ? AND event_type = 'DELIVERY_CONFIRMED'")
+      .run(new Date(Date.now() - 26 * 3600 * 1000).toISOString(), order.id);
+
+    const anyTime = await recent();
+    expect(anyTime.confirmed_orders.some((o) => o.id === order.id)).toBe(true);
+
+    const today = (await request(app).get('/api/dispatch/recent').query({ period: 'today' }).set(auth())).body.data;
+    expect(today.confirmed_orders.some((o) => o.id === order.id)).toBe(false);
+  });
+
+  test('confirmed_orders is paged (15 a page); a page past the end is simply empty', async () => {
+    const first = await recent();
+    expect(first.confirmed_orders_pagination).toEqual(expect.objectContaining({ page: 1, limit: 15 }));
+    expect(first.confirmed_orders.length).toBeLessThanOrEqual(15);
+
+    const farPage = (await request(app).get('/api/dispatch/recent').query({ confirmedPage: 999 }).set(auth())).body.data;
+    expect(farPage.confirmed_orders).toEqual([]);
+    expect(farPage.confirmed_orders_pagination.page).toBe(999);
   });
 
   test('an address edited after the confirmation shows as changed, not as still confirmed', async () => {
@@ -216,8 +267,8 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
       }
 
       expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(order.id)).status).toBe('ready_for_dispatch');
-      // Already confirmed, so it is "Confirmed Today" now, not "Confirmed by Finance".
-      const row = (await recent()).confirmed_today.find((o) => o.id === order.id);
+      // Already confirmed, so it is "Confirmed Orders" now, not "Confirmed by Finance".
+      const row = (await recent()).confirmed_orders.find((o) => o.id === order.id);
       expect(row.tracking_hold).toEqual(expect.objectContaining({ reason: 'Waiting for waybill', note: 'LBC says tomorrow' }));
       const queued = (await request(app).get('/api/dispatch/queue').set(auth())).body.data.orders.find((o) => o.id === order.id);
       expect(queued.tracking_hold.reason).toBe('Waiting for waybill');
@@ -268,8 +319,8 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
       // Record-only: Dispatch's number does not pose as Zoho's shipment.
       expect(await db.prepare('SELECT 1 FROM dispatch_records WHERE order_id = ?').get(order.id)).toBeUndefined();
 
-      // Confirmed in this same step, so it is "Confirmed Today" now.
-      const row = (await recent()).confirmed_today.find((o) => o.id === order.id);
+      // Confirmed in this same step, so it is "Confirmed Orders" now.
+      const row = (await recent()).confirmed_orders.find((o) => o.id === order.id);
       expect(row.entered_tracking.tracking_number).toBe('1234 5678 9012');
     });
 
