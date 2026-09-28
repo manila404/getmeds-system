@@ -4,6 +4,7 @@ import Sidebar from './Sidebar';
 import Topbar from './Topbar';
 import { useAuth } from '../../hooks/useAuth';
 import LoadingSpinner from '../ui/LoadingSpinner';
+import AnnouncementsPopup from '../stock/AnnouncementsPopup';
 
 const Layout = () => {
   const { user, isLoading } = useAuth();
@@ -30,6 +31,10 @@ const Layout = () => {
 
   return (
     <div className="flex h-screen bg-surface overflow-hidden">
+      {/* Sep 28, 2026: the one place this fires for every page a MedRep or
+          Management lands on after login — see AnnouncementsPopup.jsx for why
+          it is not "every login" and not a banner sitting on every page. */}
+      <AnnouncementsPopup />
       {/* Dynamic Sidebar (Desktop Static + Mobile Drawer) */}
       <Sidebar
         isOpen={isMobileSidebarOpen}

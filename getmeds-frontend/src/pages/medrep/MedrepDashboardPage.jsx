@@ -76,7 +76,11 @@ const MedrepDashboardPage = () => {
 
   return (
     <div className="space-y-6">
-      {/* Sep 15, 2026: what Dispatch has said about stock — nothing when quiet. */}
+      {/* Sep 15, 2026: what Dispatch has said about stock — nothing when quiet.
+          Sep 28, 2026: a small link to the dedicated /announcements page (and,
+          on login, a popup for anything unseen — AnnouncementsPopup.jsx in
+          Layout.jsx) instead of the list living on the dashboard itself. See
+          StockAnnouncements.jsx. */}
       <StockAnnouncementsBanner />
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">

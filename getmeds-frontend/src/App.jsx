@@ -7,6 +7,7 @@ import Layout from './components/layout/Layout';
 // Pages
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
+import AnnouncementsPage from './pages/AnnouncementsPage';
 import MedrepDashboardPage from './pages/medrep/MedrepDashboardPage';
 import NewOrderPage from './pages/medrep/NewOrderPage';
 import MyOrdersPage from './pages/medrep/MyOrdersPage';
@@ -93,6 +94,21 @@ function App() {
             element={
               <ProtectedRoute>
                 <ProfilePage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Sep 28, 2026: the dedicated home for Dispatch's stock
+              announcements — reached from the sidebar, the dashboard link, or
+              the post-login popup's "View all". Same audience
+              StockAnnouncements has always targeted (AnnouncementsPopup.jsx's
+              AUDIENCE) — Finance/Dispatch/Admin have no surface for these
+              elsewhere, so a route for them would be a page nothing links to. */}
+          <Route
+            path="/announcements"
+            element={
+              <ProtectedRoute allowedRoles={['medrep', 'management']}>
+                <AnnouncementsPage />
               </ProtectedRoute>
             }
           />

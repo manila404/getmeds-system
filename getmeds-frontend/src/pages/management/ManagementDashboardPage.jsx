@@ -606,9 +606,11 @@ const ManagementDashboardPage = () => {
           </div>
         </div>
 
-        {/* Side panel: stock news (was the full-width banner on top) + activity. */}
+        {/* Side panel: a link to /announcements (was the full-width banner on
+            top, then a 3-item preview panel; Sep 28, 2026 moved the list
+            itself to its own page — see StockAnnouncements.jsx) + activity. */}
         <aside className="space-y-4 min-w-0">
-          <StockAnnouncementsBanner variant="panel" />
+          <StockAnnouncementsBanner />
           <RecentActivity />
         </aside>
       </div>

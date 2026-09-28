@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import OrderForm from '../../components/orders/OrderForm';
 import OrderForWhoModal from '../../components/orders/OrderForWhoModal';
 import client from '../../api/client';
@@ -108,6 +109,7 @@ const SalespersonNotice = () => {
 
 const NewOrderPage = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   // Sep 22, 2026: 'team_lead' added — same "who is this for" question, but
   // "another MedRep" resolves to their own team on the form's picker rather
   // than anyone (see OrderForm.jsx's isRepChoosing / the backend's
@@ -141,6 +143,16 @@ const NewOrderPage = () => {
           onChoose={(mode) => {
             setChoice(mode);
             setReopen(false);
+          }}
+          // Sep 28, 2026: there was no way out of this dialog before — an
+          // accidental open (or a change of mind) had to be answered to get
+          // anywhere. Re-asking (after the form is already open, to change
+          // who the order is for) just closes back to the form as it was;
+          // asked for the first time, with no form behind it yet, there is
+          // nowhere to close BACK to, so it leaves the page instead.
+          onCancel={() => {
+            if (choice !== null) setReopen(false);
+            else navigate('/orders');
           }}
         />
       )}

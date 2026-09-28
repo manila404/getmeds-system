@@ -136,12 +136,20 @@ export async function printDeliverySlip(orderId) {
 }
 
 /**
- * Print + Confirm for one order, or the confirmation already recorded — and,
- * once confirmed, putting the tracking number on hold (Sep 15, 2026).
+ * Sep 28, 2026: the eligibility logic behind every button below — who can
+ * cater, hold, confirm, release, add tracking — pulled out on its own so a
+ * caller that wants its own layout (e.g. the icon-only row on the "Confirmed
+ * by Finance" card, RecentDispatchPanel.jsx) reads the exact same rules
+ * DeliveryActions itself renders from, rather than a second copy that could
+ * drift. This does not change any of those rules — same statuses, same role
+ * checks — only where the reading of them lives.
+ *
+ * A plain function, not a hook — RecentDispatchPanel.jsx calls it once per
+ * row inside a `.map()`, which a hook cannot be (Rules of Hooks). It takes
+ * `user` (from the caller's own `useAuth()`) instead of reading it itself.
  */
-const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, busy, compact = false }) => {
+export function deliveryActionFlags(order, user, { onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold } = {}) {
   // Sep 15, 2026: who caters the order — a label, not a lock.
-  const { user } = useAuth();
   const role = String(user?.role || '').toLowerCase();
   const catered = order.catered;
   const cateredByMe = Boolean(catered) && String(catered.by_id) === String(user?.id);
@@ -155,7 +163,7 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
 
   const confirmed = Boolean(order.delivery_confirmed_at);
   const stale = confirmed && order.delivery_address_changed;
-  const canConfirm = CONFIRMABLE_STATUSES.includes(order.status);
+  const canConfirm = Boolean(onConfirm) && CONFIRMABLE_STATUSES.includes(order.status);
   const hold = order.tracking_hold;
   const entered = order.entered_tracking;
   // The tracking number can be added on any order Dispatch has that does not
@@ -169,6 +177,29 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
     ((confirmed && !stale) || order.status === 'dispatched');
   // Add, or update one Dispatch typed in earlier — never over Zoho's own.
   const canAddTracking = Boolean(onAddTracking) && !order.tracking_number && TRACKING_EDITABLE_STATUSES.includes(order.status);
+
+  return {
+    role, catered, cateredByMe, canCater, canRelease, dispatchHold, canHoldOrder, canLiftHold,
+    confirmed, stale, canConfirm, hold, entered, trackingFree, canHold, canAddTracking
+  };
+}
+
+// The hook form, for a component rendering one order of its own (below) —
+// reads `user` itself via useAuth(), which a `.map()` callback cannot do.
+export function useDeliveryActionFlags(order, handlers) {
+  const { user } = useAuth();
+  return deliveryActionFlags(order, user, handlers);
+}
+
+/**
+ * Print + Confirm for one order, or the confirmation already recorded — and,
+ * once confirmed, putting the tracking number on hold (Sep 15, 2026).
+ */
+const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, busy }) => {
+  const {
+    catered, cateredByMe, canCater, canRelease, dispatchHold, canHoldOrder, canLiftHold,
+    confirmed, stale, canConfirm, hold, entered, canAddTracking, canHold
+  } = useDeliveryActionFlags(order, { onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold });
 
   // Sep 15, 2026: the proof photo. Several can be picked at once; they go up
   // one after another, and the toast says what reached Zoho.
@@ -234,134 +265,6 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
     }
     if (failed.length) toast.error(`Not uploaded — ${failed.join('; ')}`, { duration: 10000 });
   };
-
-  /**
-   * Sep 28, 2026: the "Confirmed by Finance" queue card, one step at a time —
-   * GM-20260925-0012 used to show seven stacked rows (a hold banner, the
-   * "clear to dispatch" badge, catering, printing, confirming and tracking
-   * controls, all together) because every state the order could ever be in
-   * rendered at once. This picks the ONE state that matters right now:
-   *
-   *   on hold      only the hold banner and Lift hold — nothing else applies
-   *                until it is lifted
-   *   uncatered    only Cater this order and Hold order
-   *   catered      Print address, Confirm for delivery (or Confirm again, if
-   *                the address changed since), and Hold order
-   *
-   * Once Dispatch confirms delivery the order leaves this list for "Confirmed
-   * Today" (dispatch.controller.js getRecent), so there is no fourth,
-   * post-confirmation state to render here — tracking and the proof photo
-   * live on the order's own receipt (OrderDetailsModal), which still gets the
-   * full, uncompacted version of this component.
-   */
-  if (compact) {
-    if (dispatchHold) {
-      return (
-        <div className="flex flex-wrap items-center gap-2">
-          <span
-            className="inline-flex items-center gap-1 rounded-md border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-950"
-            title={`Since ${formatPHT(dispatchHold.at)}`}
-          >
-            <PauseCircle className="w-3.5 h-3.5" />
-            On hold by Dispatch — {dispatchHold.reason}
-            <span className="font-normal opacity-80">({dispatchHold.by})</span>
-          </span>
-          {canLiftHold && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => onLiftHold(order)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-amber-400 bg-white text-xs font-semibold text-amber-900 hover:bg-amber-50 disabled:opacity-50"
-            >
-              <PlayCircle className="w-3.5 h-3.5" />
-              Lift hold
-            </button>
-          )}
-        </div>
-      );
-    }
-
-    if (!catered) {
-      return (
-        <div className="flex flex-wrap items-center gap-2">
-          {canCater && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => onCater(order)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-getmeds-blue bg-white text-xs font-semibold text-getmeds-blue hover:bg-getmeds-blue/5 disabled:opacity-50"
-            >
-              Cater this order
-            </button>
-          )}
-          {canHoldOrder && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => onHoldOrder(order)}
-              title="Flag it on hold (e.g. an item is out of stock) — it stays here, and the MedRep and Management are told"
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-amber-300 bg-white text-xs font-semibold text-amber-900 hover:bg-amber-50 disabled:opacity-50"
-            >
-              <PauseCircle className="w-3.5 h-3.5" />
-              Hold order
-            </button>
-          )}
-        </div>
-      );
-    }
-
-    // Catered (by anyone), not yet confirmed for delivery.
-    return (
-      <div className="flex flex-wrap items-center gap-2">
-        <span
-          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${
-            cateredByMe ? 'border-getmeds-blue/40 bg-getmeds-blue/10 text-getmeds-blue-dark' : 'border-amber-300 bg-amber-50 text-amber-900'
-          }`}
-          title={`Since ${formatPHT(catered.at)}`}
-        >
-          👤 {cateredByMe ? 'You are catering this' : `Catered by ${catered.by}`}
-        </span>
-        {stale && (
-          <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-800">
-            <AlertTriangle className="w-3.5 h-3.5" />
-            Address changed since {order.delivery_confirmed_by} confirmed it
-          </span>
-        )}
-        <button
-          type="button"
-          onClick={() => printDeliverySlip(order.id)}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface"
-        >
-          <Printer className="w-3.5 h-3.5" />
-          Print address
-        </button>
-        {canConfirm && (
-          <button
-            type="button"
-            disabled={busy || order.rx_blocking}
-            onClick={() => onConfirm(order)}
-            title={order.rx_blocking ? 'The prescription has to be verified by the pharmacist first.' : undefined}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            {stale ? 'Confirm again' : 'Confirm for delivery'}
-          </button>
-        )}
-        {canHoldOrder && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => onHoldOrder(order)}
-            title="Flag it on hold (e.g. an item is out of stock) — it stays here, and the MedRep and Management are told"
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-amber-300 bg-white text-xs font-semibold text-amber-900 hover:bg-amber-50 disabled:opacity-50"
-          >
-            <PauseCircle className="w-3.5 h-3.5" />
-            Hold order
-          </button>
-        )}
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-wrap items-center gap-2">

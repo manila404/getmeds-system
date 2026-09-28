@@ -38,14 +38,41 @@ const OPEN_QUERY = `
     LEFT JOIN products p ON p.id = a.product_id
    WHERE a.resolved_at IS NULL`;
 
-/** GET /api/stock-announcements — the open ones, newest first. Any signed-in user. */
+/**
+ * GET /api/stock-announcements — the open ones, newest first. Any signed-in
+ * user.
+ *
+ * Sep 28, 2026: also says how many are unseen by THIS person — see
+ * markSeen below and schema.pg.sql's users.stock_announcements_seen_at. Drives
+ * the post-login popup and the Announcements link's badge; the list itself is
+ * unchanged (still every open one, for anyone).
+ */
 exports.list = async (req, res, next) => {
   try {
     if (!(await tableExists(TABLE))) {
-      return res.json({ success: true, data: { announcements: [], migration_pending: true } });
+      return res.json({ success: true, data: { announcements: [], unseen_count: 0, migration_pending: true } });
     }
     const rows = await db.prepare(`${OPEN_QUERY} ORDER BY a.created_at DESC, a.id DESC LIMIT 200`).all();
-    res.json({ success: true, data: { announcements: rows } });
+    const row = await db.prepare('SELECT stock_announcements_seen_at FROM users WHERE id = ?').get(req.user.id);
+    const seenAt = row?.stock_announcements_seen_at || null;
+    // Never seen: everything open counts as unseen — a quiet account should
+    // not read as caught up on something it never acknowledged.
+    const unseen_count = seenAt ? rows.filter((a) => a.created_at > seenAt).length : rows.length;
+    res.json({ success: true, data: { announcements: rows, unseen_count } });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/stock-announcements/seen — "I've seen these." Any signed-in user;
+ * this only touches the caller's own marker. Dismissing the popup, or simply
+ * opening the Announcements page, both call this.
+ */
+exports.markSeen = async (req, res, next) => {
+  try {
+    await db
+      .prepare('UPDATE users SET stock_announcements_seen_at = ? WHERE id = ?')
+      .run(new Date().toISOString(), req.user.id);
+    res.json({ success: true, data: { seen: true } });
   } catch (err) { next(err); }
 };
 

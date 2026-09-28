@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { User, Users, ArrowRight } from 'lucide-react';
+import { User, Users, ArrowRight, X } from 'lucide-react';
 
 /**
  * Asked before the order form opens: whose order is this?
@@ -26,19 +26,39 @@ import { User, Users, ArrowRight } from 'lucide-react';
  * invited reading a Zoho Salesperson as an account, and they do not
  * correspond one to one.
  */
-const OrderForWhoModal = ({ currentUser, onChoose }) => {
+const OrderForWhoModal = ({ currentUser, onChoose, onCancel }) => {
   const [mode, setMode] = useState(null);
   const canContinue = mode !== null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg">
-        <div className="px-5 py-4 border-b border-slate-200">
-          <h2 className="text-lg font-bold text-ink-primary">Who is this order for?</h2>
-          <p className="text-xs text-ink-secondary mt-0.5">
-            The order is attributed to this person, and their Zoho Salesperson is the one sent on
-            the Sales Order.
-          </p>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      // Sep 28, 2026: a click outside the card, or Escape, cancels the same
+      // way the button does — the whole gesture is "never mind", not just one
+      // way of expressing it.
+      onClick={onCancel}
+      onKeyDown={(e) => { if (e.key === 'Escape') onCancel?.(); }}
+    >
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-ink-primary">Who is this order for?</h2>
+            <p className="text-xs text-ink-secondary mt-0.5">
+              The order is attributed to this person, and their Zoho Salesperson is the one sent on
+              the Sales Order.
+            </p>
+          </div>
+          {onCancel && (
+            <button
+              type="button"
+              onClick={onCancel}
+              aria-label="Cancel"
+              title="Cancel"
+              className="shrink-0 p-1.5 -mr-1.5 -mt-1 rounded-md text-ink-secondary hover:bg-surface hover:text-ink-primary"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          )}
         </div>
 
         <div className="px-5 py-4 space-y-3">
@@ -83,7 +103,16 @@ const OrderForWhoModal = ({ currentUser, onChoose }) => {
 
         </div>
 
-        <div className="px-5 py-3 border-t border-slate-200 flex justify-end">
+        <div className="px-5 py-3 border-t border-slate-200 flex items-center justify-between">
+          {onCancel ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              className="px-4 py-2 rounded-md text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
+            >
+              Cancel
+            </button>
+          ) : <span />}
           <button
             type="button"
             disabled={!canContinue}

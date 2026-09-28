@@ -133,7 +133,13 @@ CREATE TABLE IF NOT EXISTS users (
   -- accounts already share an email prefix, so a backfill could not be unique).
   -- Unique case-insensitively (idx_users_username_lower, created by
   -- migrate.pg.js's reconcileUserUsername). A label: sign-in is still by email.
-  username TEXT
+  username TEXT,
+  -- Sep 28, 2026: the last time this person acknowledged stock announcements
+  -- (the post-login popup, or the Announcements page) — see
+  -- stockAnnouncements.controller.js's markSeen. NULL means "never", so every
+  -- currently-open announcement counts as unseen for an account that predates
+  -- this column, rather than silently hiding them.
+  stock_announcements_seen_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS customers (

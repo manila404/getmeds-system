@@ -19,8 +19,25 @@ const TONES = {
   block: 'border-red-300 bg-red-50 text-red-900',
 };
 
-const RxBadge = ({ badge }) => {
+/**
+ * Sep 28, 2026: `compact` — a small tag beside the order id instead of a full
+ * banner spelling the whole thing out. The wording still comes from the
+ * server (same `badge`); it just moves to the tag's hover title instead of
+ * being printed on the card, and stays fully spelled out in the row's "⋮"
+ * (RecentDispatchPanel.jsx passes the same `badge.label` there too).
+ */
+const RxBadge = ({ badge, compact = false }) => {
   if (!badge) return null;
+  if (compact) {
+    return (
+      <span
+        className={`ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded-full border shrink-0 align-middle ${TONES[badge.tone] || TONES.wait}`}
+        title={badge.label}
+      >
+        <Pill className="w-3 h-3" />
+      </span>
+    );
+  }
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${TONES[badge.tone] || TONES.wait}`}

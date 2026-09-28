@@ -6,6 +6,8 @@ import client from '../../api/client';
 import DeliveryConfirmModal from '../../components/dispatch/DeliveryConfirmModal';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
+import MoreInfoMenu from '../../components/dispatch/MoreInfoMenu';
+import FilterDropdown from '../../components/dispatch/FilterDropdown';
 import DeliveryActions, { CONFIRMABLE_STATUSES, DISPATCH_PROOF_STATUSES } from '../../components/dispatch/DeliveryActions';
 import HoldTrackingModal from '../../components/dispatch/HoldTrackingModal';
 import HoldOrderModal from '../../components/dispatch/HoldOrderModal';
@@ -335,46 +337,30 @@ const DispatchQueuePage = () => {
     <>
       {/* Sep 15, 2026: Dispatch announces stock to MedReps and Management. */}
       <StockAnnouncementsManager />
-      {/* Sep 15, 2026: the warehouse filter — sorted by the order's Division
-          on the server (services/dispatchWarehouses.js). */}
-      <div className="flex flex-wrap gap-2" role="tablist" aria-label="Warehouse">
-        {DISPATCH_WAREHOUSES.map((w) => {
-          const selected = w.key === warehouse;
-          return (
-            <button
-              key={w.key || 'all'}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              title={w.hint || ''}
-              onClick={() => setWarehouse(w.key)}
-              className={`px-3 py-1.5 rounded-full border text-sm font-semibold ${
-                selected
-                  ? 'border-getmeds-blue bg-getmeds-blue text-white'
-                  : 'border-slate-200 bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'
-              }`}
-            >
-              {w.label}
-            </button>
-          );
-        })}
-        <span className="mx-1 w-px self-stretch bg-slate-200" aria-hidden="true" />
-        {[['', 'Any time'], ['today', 'Today'], ['on_hold', '⏸ On hold']].map(([key, label]) => (
-          <button
-            key={key || 'any'}
-            type="button"
-            aria-pressed={period === key}
-            title={key === 'today' ? "Every draft SO created today and every order Finance confirmed today" : 'The latest 20 in each list'}
-            onClick={() => setPeriod(key)}
-            className={`px-3 py-1.5 rounded-full border text-sm font-semibold ${
-              period === key
-                ? 'border-pharmacy-green bg-pharmacy-green text-white'
-                : 'border-slate-200 bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      {/* Sep 28, 2026: two proper dropdowns instead of up to thirteen pills in
+          a row — same two filters (warehouse sorted by Division on the
+          server, services/dispatchWarehouses.js, and the time range), same
+          values, same onChange; just picked from a panel of options (each
+          with its hint underneath) instead of laid out end to end. The
+          trigger's colour still says at a glance whether a filter is
+          narrowing the page — see FilterDropdown.jsx. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <FilterDropdown
+          label="Warehouse"
+          value={warehouse}
+          onChange={setWarehouse}
+          options={DISPATCH_WAREHOUSES.map((w) => ({ value: w.key, label: w.label, hint: w.hint, tone: w.key ? 'blue' : 'default' }))}
+        />
+        <FilterDropdown
+          label="Time"
+          value={period}
+          onChange={setPeriod}
+          options={[
+            { value: '', label: 'Any time', hint: 'The latest 20 in each list', tone: 'default' },
+            { value: 'today', label: 'Today', hint: 'Every draft SO created today and every order Finance confirmed today', tone: 'green' },
+            { value: 'on_hold', label: '⏸ On hold', tone: 'amber' }
+          ]}
+        />
       </div>
       <RecentDispatchPanel
         warehouse={warehouse}
@@ -452,6 +438,11 @@ const DispatchQueuePage = () => {
 
   const spinner = <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-getmeds-blue" /></div>;
 
+  // Sep 28, 2026: pared down to what decides the next click — the order, who
+  // it is for, and (only where relevant to the current step) courier/tracking
+  // and the split-order note. SO/invoice/package numbers and the MedRep name
+  // moved into the row's "⋮" (MoreInfoMenu) — still there, just not always on
+  // screen. Nothing about what the row does changed, only what it shows.
   const orderSummary = (order) => (
     <div className="flex justify-between items-start gap-4">
       <div
@@ -462,10 +453,7 @@ const DispatchQueuePage = () => {
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setViewing(order); } }}
         className="min-w-0 cursor-pointer group"
       >
-        <p className="text-sm font-mono font-semibold text-getmeds-blue">
-          {order.getmeds_order_id}
-          <span className="ml-2 font-sans text-[11px] font-semibold text-getmeds-blue/80 group-hover:underline">View receipt</span>
-        </p>
+        <p className="text-sm font-mono font-semibold text-getmeds-blue">{order.getmeds_order_id}</p>
         <p className="text-sm text-ink-primary mt-0.5 font-medium truncate">
           {order.customer_name}
           {order.warehouse && (
@@ -474,14 +462,6 @@ const DispatchQueuePage = () => {
             </span>
           )}
         </p>
-        <p className="text-xs text-ink-secondary">{order.medrep_name}</p>
-        {(order.zoho_so_number || order.zoho_invoice_number || order.zoho_package_number) && (
-          <p className="text-xs text-ink-secondary mt-1">
-            {order.zoho_so_number && <>SO <span className="font-mono">{order.zoho_so_number}</span></>}
-            {order.zoho_invoice_number && <> · Invoice <span className="font-mono">{order.zoho_invoice_number}</span></>}
-            {order.zoho_package_number && <> · Package <span className="font-mono">{order.zoho_package_number}</span></>}
-          </p>
-        )}
         {(order.courier || order.tracking_number) && (
           <p className="text-xs text-ink-secondary mt-1">
             {order.courier && <>Courier: <span className="font-medium">{order.courier}</span></>}
@@ -499,9 +479,19 @@ const DispatchQueuePage = () => {
           </p>
         )}
       </div>
-      <div className="text-right shrink-0">
-        <p className="text-sm font-bold text-ink-primary">{peso(order.total_amount)}</p>
-        <p className="text-xs text-ink-secondary font-medium mt-0.5">Waiting {waitingHours(order)}</p>
+      <div className="flex items-start gap-1 shrink-0">
+        <div className="text-right">
+          <p className="text-sm font-bold text-ink-primary">{peso(order.total_amount)}</p>
+          <p className="text-xs text-ink-secondary font-medium mt-0.5">Waiting {waitingHours(order)}</p>
+        </div>
+        <MoreInfoMenu
+          items={[
+            { label: 'MedRep', value: order.medrep_name },
+            { label: 'SO number', value: order.zoho_so_number },
+            { label: 'Invoice', value: order.zoho_invoice_number },
+            { label: 'Package', value: order.zoho_package_number }
+          ]}
+        />
       </div>
     </div>
   );

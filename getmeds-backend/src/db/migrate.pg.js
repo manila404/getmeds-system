@@ -1327,6 +1327,16 @@ async function reconcileAttachmentZohoDocumentId(client) {
   console.log('  ✔ payment_proofs.zoho_document_id present');
 }
 
+/**
+ * Sep 28, 2026: users.stock_announcements_seen_at — see schema.pg.sql's own
+ * comment on the column. Idempotent for a database that already had `users`
+ * before this column existed.
+ */
+async function reconcileStockAnnouncementsSeenColumn(client) {
+  await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS stock_announcements_seen_at TEXT');
+  console.log('  ✔ users.stock_announcements_seen_at present');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -1382,6 +1392,7 @@ async function main() {
     await reconcileUserUsername(client);
     await reconcileCustomerCategoryCheck(client);
     await reconcileSalesManagerScopeNote(client);
+    await reconcileStockAnnouncementsSeenColumn(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`

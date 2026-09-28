@@ -29,12 +29,15 @@ describe('stock announcements', () => {
 
   afterAll(async () => {
     await db.prepare('DELETE FROM stock_announcements WHERE product_id = ?').run(productId);
+    await db.prepare("UPDATE users SET stock_announcements_seen_at = NULL WHERE email = 'medrep@getmeds.ph'").run();
   });
 
   const post = (body, token = dispatchToken) =>
     request(app).post('/api/stock-announcements').set(auth(token)).send(body);
+  const list = async (token = medrepToken) =>
+    (await request(app).get('/api/stock-announcements').set(auth(token))).body.data;
   const open = async (token = medrepToken) =>
-    (await request(app).get('/api/stock-announcements').set(auth(token))).body.data.announcements.filter((a) => a.product_id === productId);
+    (await list(token)).announcements.filter((a) => a.product_id === productId);
 
   test('Dispatch posts one, and a MedRep sees it with the product named', async () => {
     const res = await post({ product_id: productId, kind: 'out_of_stock', message: 'Next delivery Sep 20' });
@@ -66,5 +69,33 @@ describe('stock announcements', () => {
     expect((await post({ product_id: productId, kind: 'gone' })).status).toBe(400);
     expect((await post({ product_id: 99999999, kind: 'out_of_stock' })).status).toBe(404);
     expect((await post({ kind: 'out_of_stock' })).status).toBe(400);
+  });
+
+  describe('unseen_count and marking seen', () => {
+    test('never marked seen: every open announcement counts as unseen', async () => {
+      await post({ product_id: productId, kind: 'out_of_stock' });
+      const before = await list();
+      expect(before.unseen_count).toBe(before.announcements.length);
+      expect(before.unseen_count).toBeGreaterThan(0);
+    });
+
+    test('marking seen drops unseen_count to zero; a new one after that is unseen again', async () => {
+      await post({ product_id: productId, kind: 'low_stock' });
+      const markRes = await request(app).post('/api/stock-announcements/seen').set(auth(medrepToken));
+      expect(markRes.status).toBe(200);
+
+      const caughtUp = await list();
+      expect(caughtUp.unseen_count).toBe(0);
+
+      // A moment matters here — created_at has to sort after the marker.
+      await new Promise((r) => setTimeout(r, 5));
+      await post({ product_id: productId, kind: 'back_in_stock' });
+      const afterNew = await list();
+      expect(afterNew.unseen_count).toBe(1);
+
+      // Someone else's marker is untouched by a MedRep marking their own seen.
+      const managementList = await list(await loginAs('manager@getmeds.ph'));
+      expect(managementList.unseen_count).toBeGreaterThanOrEqual(1);
+    });
   });
 });

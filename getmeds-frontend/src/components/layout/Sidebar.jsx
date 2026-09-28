@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, ShieldCheck, Clock, Pill } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, ShieldCheck, Clock, Pill, Megaphone } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 import { FINANCE_STAGES } from '../../constants/financeStages';
+import { useUnseenAnnouncementsCount } from '../stock/StockAnnouncements';
 
 const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollapse }) => {
   const { user } = useAuth();
@@ -21,6 +22,13 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   // Sep 24, 2026: which nav groups the person has toggled by hand. Anything not
   // in here follows the default (open if it holds the page you're on).
   const [openGroups, setOpenGroups] = useState({});
+
+  // Sep 28, 2026: called before the early return below (Rules of Hooks) —
+  // `enabled` keeps it from even asking for roles that were never this
+  // feature's audience (see AnnouncementsPopup.jsx's own AUDIENCE).
+  const roleForAnnouncements = (user?.role || '').toLowerCase();
+  const seesAnnouncements = ['medrep', 'management'].includes(roleForAnnouncements);
+  const unseenAnnouncements = useUnseenAnnouncementsCount(seesAnnouncements);
 
   if (!user) return null;
 
@@ -130,6 +138,11 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   // Standard Mode: Single-role restricted links
   const mainLinks = [];
   const secondaryLinks = [];
+  // Sep 28, 2026: raising an order is the one thing every role that has this
+  // link does most — it now renders as its own solid button above the rest
+  // of the menu instead of just another row among them (see `primaryLink`
+  // below), and for the roles it applies to it is first, not buried after
+  // "Dashboard". Pulled out of `mainLinks` so it is never drawn twice.
   // Sep 24, 2026: collapsible groups (Management/Admin). Empty for every other
   // role, whose short menus render exactly as before.
   const navGroups = [];
@@ -156,10 +169,15 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   }));
 
   if (role === 'medrep') {
+    // Sep 28, 2026: Create New Order first — it renders as the top CTA button
+    // (see `primaryLink` below), not as a row in this list.
     mainLinks.push(
-      { to: '/medrep/dashboard', icon: <LayoutDashboard size={19} />, label: 'Dashboard' },
       { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
-      { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Orders' }
+      { to: '/medrep/dashboard', icon: <LayoutDashboard size={19} />, label: 'Dashboard' },
+      { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Orders' },
+      // Sep 28, 2026: Dispatch's stock announcements — the badge is how many
+      // this account has not acknowledged yet (StockAnnouncements.jsx).
+      { to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements', badge: unseenAnnouncements }
     );
   } else if (role === 'team_lead') {
     // Sep 21, 2026: one link — the same dashboard component /management
@@ -214,6 +232,12 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       // MedRep / Division / Salesperson controls.
       { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true }
     );
+    // Sep 28, 2026: Management only, matching StockAnnouncements' existing
+    // audience — Admin has no other surface for these either, so this stays
+    // scoped rather than assuming Admin wants it too.
+    if (role === 'management') {
+      mainLinks.push({ to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements', badge: unseenAnnouncements });
+    }
     navGroups.push({
       key: 'operations',
       title: 'Operations',
@@ -272,6 +296,12 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       }
     );
   }
+
+  // Sep 28, 2026: the one primary action (currently always "Create New
+  // Order", for every role that has it) drawn as its own button above the
+  // rest of the menu, not as a row inside `mainLinks`.
+  const primaryLink = mainLinks.find((l) => l.primaryAction);
+  const restOfMainLinks = mainLinks.filter((l) => !l.primaryAction);
 
   // Is the page you're on inside this link? Exact for the two routes that
   // other links live underneath ('/management' → '/management/approvals'),
@@ -449,14 +479,34 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
             ) : (
               /* STANDARD MODE: Role-restricted links */
               <>
+                {/* Sep 28, 2026: the primary action, above everything else in
+                    the menu — a solid button, not a tinted row, since it is
+                    what most people open this sidebar to do. */}
+                {primaryLink && (
+                  <NavLink
+                    to={primaryLink.to}
+                    title={primaryLink.label}
+                    onClick={handleLinkClick}
+                    className={({ isActive }) =>
+                      `flex items-center px-3 py-2.5 rounded-lg text-sm font-semibold shadow-sm transition-all ${centerWhenCollapsed} ${
+                        isActive
+                          ? 'bg-getmeds-blue-dark text-white'
+                          : 'bg-getmeds-blue text-white hover:bg-getmeds-blue-hover'
+                      }`
+                    }
+                  >
+                    <span className={`mr-3 ${isCollapsed ? 'lg:mr-0' : ''}`}>{primaryLink.icon}</span>
+                    <span className={`truncate ${hideWhenCollapsed}`}>{primaryLink.label}</span>
+                  </NavLink>
+                )}
                 <div>
                   {navGroups.length === 0 && (
-                    <div className={`px-3 pb-2 text-xs font-medium text-ink-primary ${hideWhenCollapsed}`}>
+                    <div className={`px-3 pb-2 ${primaryLink ? 'pt-3' : ''} text-xs font-medium text-ink-primary ${hideWhenCollapsed}`}>
                       Navigation Menu
                     </div>
                   )}
                   <ul className="space-y-1">
-                    {mainLinks.map((link) => (
+                    {restOfMainLinks.map((link) => (
                       <li key={link.to}>
                         <NavLink
                           to={link.to}
@@ -467,14 +517,20 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                             `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
                               isActive
                                 ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-4 border-getmeds-blue'
-                                : link.primaryAction
-                                ? 'text-ink-primary bg-getmeds-blue/5 hover:bg-getmeds-blue/10 font-medium'
                                 : 'text-ink-primary hover:bg-surface'
                             }`
                           }
                         >
                           <span className={`mr-3 ${isCollapsed ? 'lg:mr-0' : ''}`}>{link.icon}</span>
-                          <span className={`truncate ${hideWhenCollapsed}`}>{link.label}</span>
+                          <span className={`truncate flex-1 ${hideWhenCollapsed}`}>{link.label}</span>
+                          {/* Sep 28, 2026: unseen announcements — the same
+                              count that drives the post-login popup and the
+                              dashboard link (StockAnnouncements.jsx). */}
+                          {Boolean(link.badge) && (
+                            <span className={`ml-2 min-w-[1.25rem] text-center rounded-full px-1.5 text-[11px] font-bold bg-getmeds-blue text-white ${hideWhenCollapsed}`}>
+                              {link.badge}
+                            </span>
+                          )}
                         </NavLink>
                       </li>
                     ))}

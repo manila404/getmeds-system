@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Megaphone } from 'lucide-react';
+import React from 'react';
+import { Link } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Megaphone, ArrowRight } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 
@@ -17,14 +18,53 @@ export const STOCK_KINDS = {
   stock_update: { label: 'Stock update', icon: '📦', className: 'border-getmeds-blue/30 bg-getmeds-blue/5 text-getmeds-blue-dark' }
 };
 
-/** The open announcements; refreshed every minute. */
-export const useStockAnnouncements = () =>
+// One fetch, shared: every hook below queries this same key, so two
+// components reading different slices of the response (the list, the unseen
+// count) still cost one network request between them, not one each.
+const ANNOUNCEMENTS_KEY = ['stock-announcements'];
+const fetchAnnouncements = () => client.get('/api/stock-announcements').then((r) => r.data?.data || {});
+
+/**
+ * The open announcements; refreshed every minute. Unchanged shape — `.data`
+ * is still the plain array every existing caller already destructures as
+ * `{ data = [] }`.
+ */
+export const useStockAnnouncements = (enabled = true) =>
   useQuery({
-    queryKey: ['stock-announcements'],
-    queryFn: () => client.get('/api/stock-announcements').then((r) => r.data?.data?.announcements || []),
+    queryKey: ANNOUNCEMENTS_KEY,
+    queryFn: fetchAnnouncements,
+    select: (res) => res.announcements || [],
+    enabled,
     refetchInterval: 60000,
     staleTime: 30000
   });
+
+/**
+ * Sep 28, 2026: how many of the open announcements THIS person has not
+ * acknowledged yet (server-computed from users.stock_announcements_seen_at —
+ * see stockAnnouncements.controller.js). Drives the post-login popup and the
+ * Announcements sidebar link's badge.
+ */
+export const useUnseenAnnouncementsCount = (enabled = true) => {
+  const { data } = useQuery({
+    queryKey: ANNOUNCEMENTS_KEY,
+    queryFn: fetchAnnouncements,
+    select: (res) => res.unseen_count || 0,
+    enabled,
+    refetchInterval: 60000,
+    staleTime: 30000
+  });
+  return data || 0;
+};
+
+/** "I've seen these" — clears the unseen count for the caller's own account. */
+export const useMarkAnnouncementsSeen = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => client.post('/api/stock-announcements/seen'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ANNOUNCEMENTS_KEY })
+  });
+};
 
 /** One announcement as a line: icon, type, product, message, who and when. */
 export const StockAnnouncementLine = ({ a, right = null }) => {
@@ -47,47 +87,54 @@ export const StockAnnouncementLine = ({ a, right = null }) => {
 };
 
 /**
- * Sep 24, 2026: the compact side-panel form, for the Management dashboard. The
- * full-width banner put stock news above everything else, but it's rarely
- * something an admin must act on — so here it's a quiet card that shows the
- * three newest and folds the rest behind a toggle, instead of claiming up to
- * 288px of the page's prime position.
+ * Sep 28, 2026: a small link, not a list — the third surface this can live on
+ * (after the post-login popup and the dedicated /announcements page). Sep 24's
+ * panel (3 newest + "Show more") was already a step down from the full-width
+ * banner, but it still repeated every open item on every dashboard visit. This
+ * says how many are open, and how many the viewer has not acknowledged yet,
+ * and leaves reading them to the page built for that — see AnnouncementsPage.
  */
-const PANEL_PREVIEW = 3;
-const StockAnnouncementsPanel = () => {
+const StockAnnouncementsLink = () => {
   const { data = [] } = useStockAnnouncements();
-  const [expanded, setExpanded] = useState(false);
+  const unseen = useUnseenAnnouncementsCount();
   if (!data.length) return null;
-
-  const shown = expanded ? data : data.slice(0, PANEL_PREVIEW);
-  const hidden = data.length - shown.length;
   return (
-    <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
-        <Megaphone className="w-4 h-4 text-getmeds-blue" />
-        <h2 className="text-sm font-semibold text-ink-primary">Stock from Dispatch</h2>
-        <span className="ml-auto rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-ink-secondary">{data.length}</span>
-      </div>
-      <div className="space-y-2 p-3 max-h-96 overflow-y-auto">
-        {shown.map((a) => <StockAnnouncementLine key={a.id} a={a} />)}
-      </div>
-      {(hidden > 0 || expanded) && data.length > PANEL_PREVIEW && (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="w-full border-t border-slate-100 px-4 py-2 text-xs font-semibold text-getmeds-blue hover:bg-surface rounded-b-xl"
-        >
-          {expanded ? 'Show fewer' : `Show ${hidden} more`}
-        </button>
-      )}
-    </section>
+    <Link
+      to="/announcements"
+      className={`flex items-center gap-2.5 rounded-xl border px-4 py-3 text-sm shadow-sm transition-colors ${
+        unseen > 0
+          ? 'border-getmeds-blue/30 bg-getmeds-blue/5 hover:bg-getmeds-blue/10'
+          : 'border-slate-200 bg-white hover:bg-surface'
+      }`}
+    >
+      <Megaphone className={`w-4 h-4 shrink-0 ${unseen > 0 ? 'text-getmeds-blue' : 'text-ink-secondary'}`} />
+      <span className="flex-1 min-w-0">
+        {unseen > 0 ? (
+          <span className="font-semibold text-getmeds-blue-dark">
+            {unseen} new stock announcement{unseen === 1 ? '' : 's'} from Dispatch
+          </span>
+        ) : (
+          <span className="text-ink-secondary">
+            {data.length} open stock announcement{data.length === 1 ? '' : 's'} — you're caught up
+          </span>
+        )}
+      </span>
+      <span className="shrink-0 text-xs font-semibold text-getmeds-blue flex items-center gap-1">
+        View all <ArrowRight className="w-3.5 h-3.5" />
+      </span>
+    </Link>
   );
 };
 
-/** The dashboard banner. Renders nothing when there is nothing open. */
-const StockAnnouncementsBanner = ({ variant = 'banner' }) => {
+/**
+ * The dashboard's own stock-announcements surface. `variant="link"` (the
+ * current default everywhere) is the compact link above; `variant="banner"`
+ * is the original full, always-expanded list, kept for anything that still
+ * wants it. Renders nothing when there is nothing open.
+ */
+const StockAnnouncementsBanner = ({ variant = 'link' }) => {
   const { data = [] } = useStockAnnouncements();
-  if (variant === 'panel') return <StockAnnouncementsPanel />;
+  if (variant === 'link') return <StockAnnouncementsLink />;
   if (!data.length) return null;
   return (
     <div className="bg-white shadow rounded-lg border border-slate-200 p-4">
