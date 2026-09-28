@@ -438,20 +438,30 @@ exports.getRecent = async (req, res, next) => {
       };
     };
 
-    // Sep 28, 2026: once Dispatch confirms delivery, the order moves to the
-    // "Confirmed Today" list (and its own receipt) instead of staying here —
-    // this list is only what still needs that first action, matching its own
-    // subtitle ("Verified and not shipped yet"). An order confirmed once but
-    // whose address then changed still needs a fresh confirmation, so it stays.
-    const financeConfirmed = confirmed
+    // Sep 28, 2026: three stages, an order in exactly one at a time.
+    //   1. Confirmed by Finance   still to claim — uncatered, or on hold (a
+    //                             Dispatch hold blocks the next step either way,
+    //                             catered or not, so it stays visible here until
+    //                             lifted rather than going quiet inside a table
+    //                             further down)
+    //   2. Catered Orders         someone has it and it is not on hold — the
+    //                             active fulfilment list
+    //   3. Confirmed Today        Dispatch has confirmed it for delivery
+    // An order confirmed once but whose address then changed needs a fresh
+    // confirmation, so it is treated as not confirmed for this split (and
+    // still shows up in "Confirmed Today" too, from confirmedToday below).
+    const awaitingConfirmation = confirmed
       .map(withRx(true))
       .filter((o) => !o.delivery_confirmed_at || o.delivery_address_changed);
+    const financeConfirmed = awaitingConfirmation.filter((o) => o.dispatch_hold || !o.catered);
+    const cateredOrders = awaitingConfirmation.filter((o) => !o.dispatch_hold && o.catered);
 
     res.json({
       success: true,
       data: {
         new_draft_sos: drafts.map(withRx(false)),
         finance_confirmed: financeConfirmed,
+        catered_orders: cateredOrders,
         confirmed_today: confirmedToday.map(withRx(true))
       }
     });

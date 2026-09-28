@@ -1,8 +1,9 @@
 import React from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { FilePlus2, ShieldCheck, CalendarCheck2 } from 'lucide-react';
+import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle } from 'lucide-react';
 import client from '../../api/client';
-import DeliveryActions from './DeliveryActions';
+import { useAuth } from '../../hooks/useAuth';
+import DeliveryActions, { CONFIRMABLE_STATUSES, printDeliverySlip } from './DeliveryActions';
 import RxBadge from './RxBadge';
 
 /**
@@ -102,7 +103,9 @@ const RecentDispatchPanel = ({
   });
   const drafts = data?.new_draft_sos || [];
   const confirmed = data?.finance_confirmed || [];
+  const catered = data?.catered_orders || [];
   const confirmedToday = data?.confirmed_today || [];
+  const { user } = useAuth();
   const loading = <p className="text-sm text-ink-secondary text-center py-8">Loading…</p>;
 
   if (heldView) {
@@ -246,6 +249,129 @@ const RecentDispatchPanel = ({
           </ul>
         )}
       </Card>
+    </div>
+
+    {/* Sep 28, 2026: what a Dispatch person has claimed and is actively
+        fulfilling — Stage 2 of the flow (Confirmed by Finance → Catered
+        Orders → Confirmed Today). Pressing "Cater this order" moves it out of
+        the panel above and into here; pressing "Confirm for delivery" moves it
+        on again, into the table below. */}
+    <div className="bg-white shadow rounded-lg border border-slate-200 overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-200 bg-surface">
+        <h2 className="text-sm font-semibold text-ink-primary flex items-center gap-2">
+          <PackageCheck className="w-4 h-4 text-getmeds-blue" />
+          Catered Orders
+          <span className={`min-w-[1.5rem] text-center rounded-full px-1.5 text-xs tabular-nums ${catered.length ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>
+            {catered.length}
+          </span>
+        </h2>
+        <p className="text-xs text-ink-secondary mt-0.5">Claimed and being fulfilled. Print the address, check it, then confirm the delivery.</p>
+      </div>
+      {isLoading ? loading : catered.length === 0 ? (
+        <Empty text="Nobody is catering an order right now." />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-200">
+            <thead className="bg-surface">
+              <tr>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Order</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Customer</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Receiver / Address</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Catered by</th>
+                <th className="px-4 py-2 text-right text-xs font-medium text-ink-secondary uppercase">Total</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {catered.map((o) => {
+                const role = String(user?.role || '').toLowerCase();
+                const cateredByMe = Boolean(o.catered) && String(o.catered.by_id) === String(user?.id);
+                const canRelease = cateredByMe || ['management', 'admin'].includes(role);
+                const canTakeOver = ['dispatch', 'admin'].includes(role) && !cateredByMe;
+                const canHoldOrder = CONFIRMABLE_STATUSES.includes(o.status);
+                return (
+                  <tr key={o.id} className="hover:bg-surface">
+                    <td className="px-4 py-2.5 align-top">
+                      <Opener order={o} onOpen={onOpen}>
+                        <p className="text-sm font-mono font-semibold text-getmeds-blue group-hover:underline">
+                          {o.getmeds_order_id}<WarehouseTag order={o} />
+                        </p>
+                      </Opener>
+                      {o.rx_badge && <div className="mt-1"><RxBadge badge={o.rx_badge} /></div>}
+                    </td>
+                    <td className="px-4 py-2.5 align-top text-sm text-ink-primary font-medium">{o.customer_name}</td>
+                    <td className="px-4 py-2.5 align-top text-xs text-ink-secondary max-w-xs">
+                      {o.intake_receiver && <p className="text-ink-primary font-medium">{o.intake_receiver}</p>}
+                      <p className="truncate" title={o.delivery_address || ''}>
+                        {o.delivery_address || <span className="text-red-700 font-semibold">No delivery address</span>}
+                      </p>
+                    </td>
+                    <td className="px-4 py-2.5 align-top text-xs text-ink-secondary">
+                      <p className="text-sm text-ink-primary font-medium">{cateredByMe ? 'You' : o.catered?.by}</p>
+                      {o.catered?.at && <p>{timeAgo(o.catered.at)}</p>}
+                      {canRelease && (
+                        <button
+                          type="button"
+                          disabled={confirmingId === o.id}
+                          onClick={() => onReleaseCater(o)}
+                          className="mt-1 inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 bg-white text-[11px] font-semibold text-ink-secondary hover:bg-surface disabled:opacity-50"
+                        >
+                          Release
+                        </button>
+                      )}
+                      {canTakeOver && (
+                        <button
+                          type="button"
+                          disabled={confirmingId === o.id}
+                          onClick={() => onCater(o)}
+                          className="mt-1 inline-flex items-center gap-1 px-2 py-1 rounded-md border border-getmeds-blue bg-white text-[11px] font-semibold text-getmeds-blue hover:bg-getmeds-blue/5 disabled:opacity-50"
+                        >
+                          Take over
+                        </button>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 align-top text-right text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</td>
+                    <td className="px-4 py-2.5 align-top">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => printDeliverySlip(o.id)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 bg-white text-[11px] font-semibold text-ink-primary hover:bg-surface"
+                        >
+                          <Printer className="w-3 h-3" />
+                          Print address
+                        </button>
+                        <button
+                          type="button"
+                          disabled={confirmingId === o.id || o.rx_blocking}
+                          onClick={() => onConfirm(o)}
+                          title={o.rx_blocking ? 'The prescription has to be verified by the pharmacist first.' : undefined}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-getmeds-blue text-white text-[11px] font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <CheckCircle2 className="w-3 h-3" />
+                          Confirm for delivery
+                        </button>
+                        {canHoldOrder && (
+                          <button
+                            type="button"
+                            disabled={confirmingId === o.id}
+                            onClick={() => onHoldOrder(o)}
+                            title="Flag it on hold (e.g. an item is out of stock) — it stays here, and the MedRep and Management are told"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-amber-300 bg-white text-[11px] font-semibold text-amber-900 hover:bg-amber-50 disabled:opacity-50"
+                          >
+                            <PauseCircle className="w-3 h-3" />
+                            Hold order
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
 
     {/* Sep 28, 2026: every order Dispatch itself confirmed for delivery today

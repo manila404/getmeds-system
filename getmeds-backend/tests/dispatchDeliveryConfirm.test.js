@@ -39,6 +39,7 @@ async function orderAt(status, { zohoSoId = null, prefix = 'GM-DLV', address = '
 
 const recent = async () => (await request(app).get('/api/dispatch/recent').set(auth())).body.data;
 const confirm = (id, token) => request(app).post(`/api/dispatch/orders/${id}/confirm-delivery`).set(auth(token));
+const cater = (id, token) => request(app).post(`/api/dispatch/orders/${id}/cater`).set(auth(token));
 
 describe('Dispatch: recent orders, the delivery slip, and confirming delivery', () => {
   beforeAll(async () => {
@@ -104,6 +105,39 @@ describe('Dispatch: recent orders, the delivery slip, and confirming delivery', 
     expect(today.delivery_address_changed).toBe(false);
     const queued = (await request(app).get('/api/dispatch/queue').set(auth())).body.data.orders.find((o) => o.id === order.id);
     expect(queued.delivery_confirmed_by).toBeTruthy();
+  });
+
+  test('the three stages are mutually exclusive: uncatered, catered, confirmed', async () => {
+    const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+    const stageOf = (data) => {
+      if (data.confirmed_today.some((o) => o.id === order.id)) return 'confirmed_today';
+      if (data.catered_orders.some((o) => o.id === order.id)) return 'catered_orders';
+      if (data.finance_confirmed.some((o) => o.id === order.id)) return 'finance_confirmed';
+      return null;
+    };
+
+    expect(stageOf(await recent())).toBe('finance_confirmed');
+
+    await cater(order.id);
+    const afterCater = await recent();
+    expect(stageOf(afterCater)).toBe('catered_orders');
+    const row = afterCater.catered_orders.find((o) => o.id === order.id);
+    expect(row.catered.by).toBeTruthy();
+
+    await confirm(order.id);
+    expect(stageOf(await recent())).toBe('confirmed_today');
+  });
+
+  test('an order on hold stays under "Confirmed by Finance" even once catered', async () => {
+    const order = await orderAt('ready_for_dispatch', { zohoSoId: `ZSO-${Date.now()}` });
+    await cater(order.id);
+    const holdRes = await request(app).post(`/api/dispatch/orders/${order.id}/hold`).set(auth()).send({ reason: 'Item out of stock' });
+    expect(holdRes.status).toBe(200);
+
+    const data = await recent();
+    expect(data.catered_orders.find((o) => o.id === order.id)).toBeUndefined();
+    const row = data.finance_confirmed.find((o) => o.id === order.id);
+    expect(row.dispatch_hold).toEqual(expect.objectContaining({ reason: 'Item out of stock' }));
   });
 
   test('confirming for delivery puts the order under "Confirmed Today", newest first', async () => {
