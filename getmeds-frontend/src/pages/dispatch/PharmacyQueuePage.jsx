@@ -533,7 +533,23 @@ const PharmacyQueuePage = () => {
                       {o.not_required?.reason ? `: ${o.not_required.reason}` : ''}
                     </p>
                   )}
-                  {o.prescriptions.length === 0 && o.rx_state !== 'not_required' && (
+                  {/* Sep 29, 2026: order has other attachments but none is
+                      tagged prescription — the MedRep may have mislabeled it.
+                      The existing retag tool (one click on the attachment in
+                      the order details) is the fix. */}
+                  {o.suspicious_attachments && (
+                    <p className="rounded-md bg-amber-50 border border-amber-200 px-3 py-1.5 text-xs text-amber-900">
+                      <span className="font-semibold">🟡 Has attachments — no prescription labeled.</span> One may be mislabeled. Open the order and use Retag if so.
+                    </p>
+                  )}
+                  {/* Sep 29, 2026: MedRep's reason for submitting without
+                      a prescription on an Rx-required channel. */}
+                  {o.no_rx_reason && (
+                    <p className="rounded-md bg-blue-50 border border-blue-200 px-3 py-1.5 text-xs text-blue-950">
+                      <span className="font-semibold">MedRep note (no prescription):</span> {o.no_rx_reason}
+                    </p>
+                  )}
+                  {o.prescriptions.length === 0 && o.rx_state !== 'not_required' && !o.suspicious_attachments && !o.no_rx_reason && (
                     <p className="rounded-md bg-surface px-3 py-1.5 text-xs text-ink-secondary">No prescription uploaded. Open the order to check the items and notes.</p>
                   )}
                   {liveRejections.map((p) => (

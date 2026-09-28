@@ -78,6 +78,12 @@ const SOURCE_OPTIONS = ORDER_SOURCES;
  */
 const HOSPITAL_CATEGORIES = ['hospital'];
 
+// Sep 29, 2026: channels where a prescription is expected. Split into two
+// tiers so the form can show a softer hint for HOS (sometimes) vs a required
+// field for the other four (always). These mirror the backend's PHARMACY_CHANNELS.
+const RX_REQUIRED_CHANNELS = ['URO', 'STC', 'B&B', 'B2C'];
+const RX_SOMETIMES_CHANNELS = ['HOS'];
+
 /**
  * The attachments a hospital order cannot be submitted without.
  *
@@ -358,6 +364,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   const [stagedAttachments, setStagedAttachments] = useState([]);
   const [noProofReason, setNoProofReason] = useState('');
   const [noProofNote, setNoProofNote] = useState('');
+  // Sep 29, 2026: why a MedRep in an Rx-required channel submitted without
+  // a prescription. Cleared when they actually stage one.
+  const [noRxReason, setNoRxReason] = useState('');
 
   // Does the staged list contain at least one 'payment_proof'-type file? Used
   // wherever the old code asked "is there a proof file" — the "no proof, say
@@ -365,6 +374,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // about attachments in general, so an 'other'-only staged list still needs
   // a reason.
   const hasStagedProof = stagedAttachments.some(a => a.fileType === 'payment_proof');
+  // Sep 29, 2026: does the staged list have at least one prescription? Clears
+  // the noRxReason guard for Rx-required channels.
+  const hasStagedRx = stagedAttachments.some(a => a.fileType === 'prescription');
 
 
   // "Sales Order Date (Automatic Today)" — fixed to today, never editable.
@@ -1139,6 +1151,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
       !(Boolean(noProofReason) && (noProofReason !== 'other' || Boolean(noProofNote.trim())))) {
     missingFields.push('Proof of Payment (or a reason if none)');
   }
+  // Sep 29, 2026: Rx-required channels must either attach a prescription or
+  // say why they haven't. HOS is "sometimes" — nudge only, no hard block.
+  if (!isBackOffice && !hasStagedRx && RX_REQUIRED_CHANNELS.includes(effectiveDivision) && !noRxReason.trim()) {
+    missingFields.push('Prescription (or a reason if none — Pharmacy will follow up)');
+  }
   // Sep 5, 2026 (4): management picking a MedRep here used to be
   // required (see the Sep 5 removal note on resolveOrderMedrep on the
   // backend) — it's optional again now that Division/Salesperson can be
@@ -1311,6 +1328,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         // clears these (see handleFilesSelected).
         no_payment_proof_reason: hasStagedProof ? null : (noProofReason || null),
         no_payment_proof_note: hasStagedProof ? null : (noProofNote.trim() || null),
+        // Sep 29, 2026: cleared when the MedRep has staged a prescription.
+        no_rx_reason: hasStagedRx ? null : (noRxReason.trim() || null),
         // Sep 18, 2026: only meaningful when an item was actually flagged —
         // the server recomputes that itself and ignores this otherwise, so
         // it's harmless to always send whatever is in state.
@@ -2591,6 +2610,37 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                       <AlertCircle size={13} /> A note is required when the reason is Other.
                     </p>
                   )}
+                </div>
+              )}
+
+              {/* Sep 29, 2026: amber nudge when staged files exist but none
+                  is tagged prescription, and the division is an Rx channel.
+                  RX_REQUIRED channels get ⚠️; HOS (sometimes) gets ℹ️. */}
+              {stagedAttachments.length > 0 && !hasStagedRx && (RX_REQUIRED_CHANNELS.includes(effectiveDivision) || RX_SOMETIMES_CHANNELS.includes(effectiveDivision)) && (
+                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  {RX_REQUIRED_CHANNELS.includes(effectiveDivision) ? (
+                    <><strong>⚠️ {effectiveDivision}</strong> orders usually require a prescription. If one of these files is a prescription, tag it as "Prescription" above.</>
+                  ) : (
+                    <><strong>ℹ️ Some {effectiveDivision}</strong> orders need a prescription. If one of these files is one, tag it as "Prescription" above.</>
+                  )}
+                </div>
+              )}
+
+              {/* Sep 29, 2026: Rx-required channels must either attach a
+                  prescription or give a reason. Disappears once one is staged. */}
+              {!hasStagedRx && !isBackOffice && RX_REQUIRED_CHANNELS.includes(effectiveDivision) && (
+                <div className="mt-4">
+                  <label className="block text-xs font-semibold text-ink-primary mb-1.5">
+                    No prescription? Say why <span className="text-state-error">*</span>
+                  </label>
+                  <textarea
+                    value={noRxReason}
+                    onChange={(e) => setNoRxReason(e.target.value)}
+                    rows={2}
+                    maxLength={500}
+                    placeholder="e.g. Will upload prescription before dispatch / Doctor confirmed verbally / Pharmacy to request if needed"
+                    className={`${inputClass} resize-y`}
+                  />
                 </div>
               )}
             </Field>

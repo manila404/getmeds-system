@@ -93,7 +93,7 @@ exports.getQueue = async (req, res, next) => {
     const channelParams = channel ? [PHARMACY_CHANNELS[channel]] : [];
 
     const columns = `o.id, o.getmeds_order_id, o.status, o.division, o.total_amount, o.created_at, o.updated_at,
-                o.zoho_so_number, o.delivery_notes,
+                o.zoho_so_number, o.delivery_notes, o.no_rx_reason,
                 c.name AS customer_name, u.name AS medrep_name,
                 CASE WHEN o.status = 'on_hold' THEN ${HELD_FROM_SQL} END AS held_from`;
     const joins = `FROM orders o
@@ -141,6 +141,24 @@ exports.getQueue = async (req, res, next) => {
     const listedIds = [...new Set([...orders, ...listed].map((o) => o.id))];
     const summaries = await rxSummaries(listedIds);
 
+    // Sep 29, 2026: orders that have non-prescription attachments but no
+    // prescription row — the MedRep may have mislabeled a prescription file
+    // (e.g. tagged it 'proof_of_payment'). Used in shape() to set the
+    // suspicious_attachments flag for the amber badge on the All Orders tab.
+    const suspiciousAttachmentIds = new Set();
+    if (listedIds.length) {
+      const excludeDeletedNoAlias = excludeDeleted ? ' AND deleted_at IS NULL' : '';
+      const suspRows = await db
+        .prepare(
+          `SELECT DISTINCT order_id FROM payment_proofs
+            WHERE order_id = ANY(?)
+              AND file_type != '${RX_FILE_TYPE}'
+              AND file_type != 'dispatch_proof'${excludeDeletedNoAlias}`
+        )
+        .all([listedIds]);
+      for (const r of suspRows) suspiciousAttachmentIds.add(r.order_id);
+    }
+
     // The MedRep's latest answer to a rejection, so the pharmacist sees what they said.
     const resubmits = new Map();
     if (listedIds.length) {
@@ -172,6 +190,12 @@ exports.getQueue = async (req, res, next) => {
         resubmitted: s.state === 'pending' ? resubmits.get(o.id) || null : null,
         // Sep 28, 2026: Pharmacy's own "no prescription needed" call — who, when, why.
         not_required: s.not_required || null,
+        // Sep 29, 2026: order has non-prescription attachments but zero prescription
+        // rows — the MedRep may have uploaded the prescription under the wrong type.
+        // Only meaningful when rx_state === 'none' (no prescription rows at all).
+        suspicious_attachments: s.state === 'none' && suspiciousAttachmentIds.has(o.id),
+        // Sep 29, 2026: the MedRep's reason for submitting without a prescription.
+        no_rx_reason: o.no_rx_reason || null,
       };
     };
     const rxRows = orders.map(shape);

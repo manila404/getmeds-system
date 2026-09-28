@@ -1348,6 +1348,16 @@ async function reconcileRxNotRequiredColumns(client) {
   console.log('  ✔ orders.rx_not_required_* present');
 }
 
+/**
+ * Sep 29, 2026: orders.no_rx_reason — the MedRep's explanation when they
+ * submit an order for an Rx-required channel (URO, STC, B&B, B2C) without
+ * attaching a prescription. Pharmacy sees this on the All Orders tab.
+ */
+async function reconcileNoRxReasonColumn(client) {
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS no_rx_reason TEXT');
+  console.log('  ✔ orders.no_rx_reason present');
+}
+
 async function main() {
   const url = connectionString();
   if (/:6543\//.test(url)) {
@@ -1405,6 +1415,7 @@ async function main() {
     await reconcileSalesManagerScopeNote(client);
     await reconcileStockAnnouncementsSeenColumn(client);
     await reconcileRxNotRequiredColumns(client);
+    await reconcileNoRxReasonColumn(client);
 
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = current_schema()`
