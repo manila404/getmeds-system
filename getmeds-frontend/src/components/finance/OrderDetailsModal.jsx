@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown } from 'lucide-react';
+import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import { attachmentLabel, HOSPITAL_REQUIRED_TYPES } from '../../constants/attachmentTypes';
@@ -43,9 +43,17 @@ const BADGE_TONE = {
  * One attachment card in the grid. `dim` (a superseded prescription) mutes
  * the whole tile — still openable, but visibly not the one to act on.
  */
-const AttachmentTile = ({ a, dim = false }) => {
+const AttachmentTile = ({ a, dim = false, onPreview }) => {
   const isImage = String(a.content_type || '').startsWith('image/');
   const badge = attachmentStatusBadge(a);
+  // Sep 28, 2026: an image opens the in-app lightbox (below) instead of a new
+  // tab — Pharmacy and Finance can now inspect a prescription or a receipt
+  // without leaving this screen. A PDF or scanned document has no image to
+  // zoom into, so it keeps opening in its own tab, same as before.
+  const Wrapper = isImage ? 'button' : 'a';
+  const wrapperProps = isImage
+    ? { type: 'button', onClick: () => onPreview(a) }
+    : { href: a.viewUrl, target: '_blank', rel: 'noopener noreferrer' };
   return (
     <div
       className={`relative block bg-white border rounded-lg overflow-hidden transition-colors ${
@@ -67,7 +75,7 @@ const AttachmentTile = ({ a, dim = false }) => {
           <Download className="w-3.5 h-3.5" />
         </a>
       )}
-      <a href={a.viewUrl} target="_blank" rel="noopener noreferrer" className="block">
+      <Wrapper {...wrapperProps} className="block w-full text-left">
         {/* Images preview inline; a PDF or scanned document gets an honest
             placeholder rather than a broken <img> that reads as a failed
             upload. */}
@@ -77,8 +85,7 @@ const AttachmentTile = ({ a, dim = false }) => {
             // the full original (up to several MB) every time — this asks
             // viewAttachment for a resized rendition instead (Supabase Image
             // Transformations, verified enabled on this project). The
-            // click-through <a> above still opens the full-size a.viewUrl
-            // unchanged.
+            // lightbox this opens loads the full-size a.viewUrl.
             src={`${a.viewUrl}&w=300&h=300`}
             alt={a.file_name}
             className="w-full h-32 object-cover bg-slate-50"
@@ -89,7 +96,7 @@ const AttachmentTile = ({ a, dim = false }) => {
             <FileText className="w-8 h-8 text-ink-secondary" />
           </div>
         )}
-      </a>
+      </Wrapper>
       <div className="px-2.5 py-2">
         <p className="text-[11px] font-bold uppercase tracking-wide text-getmeds-blue-dark">
           {attachmentLabel(a.file_type)}
@@ -105,6 +112,115 @@ const AttachmentTile = ({ a, dim = false }) => {
             Finance/Pharmacy decision now; every other type is evidence, not
             something to approve, and shows nothing here. */}
         {badge && <p className={`text-[11px] mt-1 font-semibold ${BADGE_TONE[badge.tone]}`}>{badge.label}</p>}
+      </div>
+    </div>
+  );
+};
+
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 4;
+const ZOOM_STEP = 0.5;
+
+/**
+ * Sep 28, 2026: an image attachment opens here instead of a new browser tab —
+ * a prescription or a receipt, inspected right on top of the current screen.
+ * Zoom in/out (buttons, the scroll wheel, or double-click) and drag to pan
+ * once zoomed; Escape, the backdrop, or the X closes it. The download button
+ * on the thumbnail behind this is untouched — this is only the click-through.
+ */
+const Lightbox = ({ attachment, onClose }) => {
+  const [zoom, setZoom] = useState(1);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(null); // { startX, startY, origX, origY } | null
+
+  // A fresh image starts un-zoomed and centred, whichever attachment opened.
+  useEffect(() => {
+    setZoom(1);
+    setPos({ x: 0, y: 0 });
+  }, [attachment?.id]);
+
+  useEffect(() => {
+    if (!attachment) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [attachment, onClose]);
+
+  if (!attachment) return null;
+
+  const clampZoom = (z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  const zoomIn = () => setZoom((z) => clampZoom(z + ZOOM_STEP));
+  const zoomOut = () =>
+    setZoom((z) => {
+      const next = clampZoom(z - ZOOM_STEP);
+      if (next === ZOOM_MIN) setPos({ x: 0, y: 0 }); // back to 1x: re-centre
+      return next;
+    });
+  const reset = () => { setZoom(1); setPos({ x: 0, y: 0 }); };
+
+  const onWheel = (e) => {
+    e.preventDefault();
+    setZoom((z) => clampZoom(z + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP)));
+  };
+  const onMouseDown = (e) => {
+    if (zoom <= 1) return;
+    setDragging({ startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y });
+  };
+  const onMouseMove = (e) => {
+    if (!dragging) return;
+    setPos({ x: dragging.origX + (e.clientX - dragging.startX), y: dragging.origY + (e.clientY - dragging.startY) });
+  };
+  const stopDrag = () => setDragging(null);
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] bg-black/90 flex flex-col"
+      onClick={onClose}
+      onMouseMove={onMouseMove}
+      onMouseUp={stopDrag}
+      onMouseLeave={stopDrag}
+    >
+      <div className="flex items-center justify-between gap-3 px-4 py-3 text-white" onClick={(e) => e.stopPropagation()}>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold truncate">{attachment.file_name}</p>
+          <p className="text-xs text-white/70">{attachmentLabel(attachment.file_type)}</p>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button type="button" onClick={zoomOut} disabled={zoom <= ZOOM_MIN} title="Zoom out" className="p-2 rounded-md hover:bg-white/10 disabled:opacity-40">
+            <ZoomOut className="w-4 h-4" />
+          </button>
+          <span className="text-xs tabular-nums w-10 text-center">{Math.round(zoom * 100)}%</span>
+          <button type="button" onClick={zoomIn} disabled={zoom >= ZOOM_MAX} title="Zoom in" className="p-2 rounded-md hover:bg-white/10 disabled:opacity-40">
+            <ZoomIn className="w-4 h-4" />
+          </button>
+          <button type="button" onClick={reset} disabled={zoom === 1 && !pos.x && !pos.y} title="Reset" className="p-2 rounded-md hover:bg-white/10 disabled:opacity-40">
+            <RotateCcw className="w-4 h-4" />
+          </button>
+          {attachment.downloadUrl && (
+            <a href={attachment.downloadUrl} title="Download" className="p-2 rounded-md hover:bg-white/10">
+              <Download className="w-4 h-4" />
+            </a>
+          )}
+          <button type="button" onClick={onClose} title="Close" className="p-2 rounded-md hover:bg-white/10">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-hidden flex items-center justify-center" onWheel={onWheel}>
+        <img
+          src={attachment.viewUrl}
+          alt={attachment.file_name}
+          onMouseDown={onMouseDown}
+          onDoubleClick={() => (zoom > 1 ? reset() : zoomIn())}
+          onClick={(e) => e.stopPropagation()}
+          draggable={false}
+          style={{
+            transform: `translate(${pos.x}px, ${pos.y}px) scale(${zoom})`,
+            cursor: zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'zoom-in',
+            transition: dragging ? 'none' : 'transform 0.15s ease-out'
+          }}
+          className="max-w-[92vw] max-h-[80vh] object-contain select-none"
+        />
       </div>
     </div>
   );
@@ -422,6 +538,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
   const visibleAttachments = attachments.filter((a) => !a.superseded);
   const supersededAttachments = attachments.filter((a) => a.superseded);
   const [showSuperseded, setShowSuperseded] = useState(false);
+  const [lightbox, setLightbox] = useState(null);
 
   // A hospital order is the one case where a missing document actually blocks
   // something downstream, so it is the only case worth calling out. Elsewhere
@@ -658,7 +775,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
               ) : (
                 <>
                   <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {visibleAttachments.map((a) => <AttachmentTile key={a.id} a={a} />)}
+                    {visibleAttachments.map((a) => <AttachmentTile key={a.id} a={a} onPreview={setLightbox} />)}
                   </div>
 
                   {/* Sep 28, 2026: superseded prescriptions — folded away by
@@ -677,7 +794,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
                       </button>
                       {showSuperseded && (
                         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-2">
-                          {supersededAttachments.map((a) => <AttachmentTile key={a.id} a={a} dim />)}
+                          {supersededAttachments.map((a) => <AttachmentTile key={a.id} a={a} dim onPreview={setLightbox} />)}
                         </div>
                       )}
                     </div>
@@ -765,6 +882,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
           </div>
         </div>
       </div>
+      <Lightbox attachment={lightbox} onClose={() => setLightbox(null)} />
     </div>
   );
 };

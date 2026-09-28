@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Pill, RefreshCw, FileSearch, ShieldCheck, XCircle, CheckCircle2, Clock, RotateCcw } from 'lucide-react';
+import { Pill, RefreshCw, ShieldCheck, XCircle, CheckCircle2, Clock, RotateCcw } from 'lucide-react';
 import toast from 'react-hot-toast';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
@@ -368,68 +368,69 @@ const PharmacyQueuePage = () => {
           </div>
         ) : (
           <ul className="divide-y divide-slate-100">
-            {orders.map((o) => (
-              <li key={o.id} className="p-4 space-y-3">
-                <div className="flex justify-between gap-4">
-                  <div className="min-w-0">
-                    <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}</p>
-                    <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
-                    <p className="text-xs text-ink-secondary">
-                      {o.medrep_name}{o.division ? ` · ${o.division}` : ''}
-                    </p>
-                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                      {STAGE_LABEL[o.status] && <FinancePill cleared={o.finance_cleared} />}
-                      <span className="text-[11px] text-ink-secondary">{STAGE_LABEL[o.status] || String(o.status).replace(/_/g, ' ')}</span>
+            {orders.map((o) => {
+              // Sep 28, 2026: the live (not superseded) rejection(s) — the one
+              // thing worth calling out at a glance now that the per-file
+              // filename row is gone; everything else about the file (who,
+              // when, which one) is what the details view is for.
+              const liveRejections = o.prescriptions.filter((p) => p.status === 'rejected' && !p.superseded && p.rejection_reason);
+              return (
+                <li
+                  key={o.id}
+                  role="button"
+                  tabIndex={0}
+                  title="Open the order details"
+                  onClick={() => setViewingId(o.id)}
+                  // Only the card itself, not a keyboard activation bubbling up
+                  // from one of its own buttons (Verify/Reject/Re-review) —
+                  // keydown bubbles even though their onClick's stopPropagation
+                  // (below) already keeps a mouse click from double-firing this.
+                  onKeyDown={(e) => {
+                    if (e.target !== e.currentTarget) return;
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setViewingId(o.id); }
+                  }}
+                  className="p-4 space-y-3 cursor-pointer hover:bg-surface transition-colors"
+                >
+                  <div className="flex justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="text-sm font-mono font-semibold text-getmeds-blue hover:underline">{o.getmeds_order_id}</p>
+                      <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
+                      <p className="text-xs text-ink-secondary">
+                        {o.medrep_name}{o.division ? ` · ${o.division}` : ''}
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        {STAGE_LABEL[o.status] && <FinancePill cleared={o.finance_cleared} />}
+                        <span className="text-[11px] text-ink-secondary">{STAGE_LABEL[o.status] || String(o.status).replace(/_/g, ' ')}</span>
+                      </div>
                     </div>
+                    <p className="text-sm font-bold text-ink-primary shrink-0">{peso(o.total_amount)}</p>
                   </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-sm font-bold text-ink-primary">{peso(o.total_amount)}</p>
-                    <button
-                      type="button"
-                      onClick={() => setViewingId(o.id)}
-                      className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
-                    >
-                      <FileSearch className="w-3.5 h-3.5" /> View files
-                    </button>
-                  </div>
-                </div>
 
-                {o.resubmitted && (
-                  <p className="rounded-md bg-blue-50 border border-blue-200 px-3 py-1.5 text-xs text-blue-950">
-                    <span className="font-semibold">↩ Re-submitted{o.resubmitted.by ? ` by ${o.resubmitted.by}` : ''}:</span> {o.resubmitted.note || 'No note.'}
-                  </p>
-                )}
-                {o.prescriptions.length === 0 && (
-                  <p className="rounded-md bg-surface px-3 py-1.5 text-xs text-ink-secondary">No prescription uploaded. Open the files to check the items and notes.</p>
-                )}
-                <ul className="space-y-1">
-                  {o.prescriptions.filter((p) => !p.superseded).map((p) => (
-                    <li key={p.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-md bg-surface px-3 py-1.5 text-xs">
-                      <Pill className="w-3.5 h-3.5 text-ink-secondary shrink-0" />
-                      <span className="font-medium text-ink-primary truncate max-w-[16rem]">{p.file_name || 'Prescription'}</span>
-                      <span className="text-ink-secondary">
-                        {p.uploaded_by_name ? `${p.uploaded_by_name} · ` : ''}{p.uploaded_at ? formatPHT(p.uploaded_at, 'short-datetime') : ''}
-                      </span>
-                      <span
-                        className={`ml-auto font-semibold ${p.status === 'verified' ? 'text-emerald-700' : p.status === 'rejected' ? 'text-red-700' : 'text-amber-800'}`}
-                      >
-                        {p.status === 'verified' ? `Verified${p.verified_by_name ? ` by ${p.verified_by_name}` : ''}` : p.status === 'rejected' ? 'Rejected' : 'Waiting'}
-                      </span>
-                      {p.status === 'rejected' && p.rejection_reason && (
-                        <span className="w-full text-red-800">Reason: {p.rejection_reason}</span>
-                      )}
-                    </li>
+                  {o.resubmitted && (
+                    <p className="rounded-md bg-blue-50 border border-blue-200 px-3 py-1.5 text-xs text-blue-950">
+                      <span className="font-semibold">↩ Re-submitted{o.resubmitted.by ? ` by ${o.resubmitted.by}` : ''}:</span> {o.resubmitted.note || 'No note.'}
+                    </p>
+                  )}
+                  {o.prescriptions.length === 0 && (
+                    <p className="rounded-md bg-surface px-3 py-1.5 text-xs text-ink-secondary">No prescription uploaded. Open the order to check the items and notes.</p>
+                  )}
+                  {liveRejections.map((p) => (
+                    <p key={p.id} className="rounded-md bg-red-50 border border-red-200 px-3 py-1.5 text-xs text-red-800">
+                      <span className="font-semibold">Rejected:</span> {p.rejection_reason}
+                    </p>
                   ))}
-                </ul>
 
-                {o.reviewable !== false && (
-                  <>
-                    <Decision order={o} canDecide={canDecide} />
-                    <ReReview order={o} canDecide={canDecide} />
-                  </>
-                )}
-              </li>
-            ))}
+                  {/* Sep 28, 2026: the card itself now opens the order — these
+                      buttons stop that click from also firing. */}
+                  {o.reviewable !== false && (
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <Decision order={o} canDecide={canDecide} />
+                      <ReReview order={o} canDecide={canDecide} />
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
