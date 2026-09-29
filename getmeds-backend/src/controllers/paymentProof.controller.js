@@ -375,10 +375,13 @@ exports.attach = async (req, res, next) => {
     // — Zoho's own "Attach File(s)" section doesn't distinguish types
     // either, and this only ever pushes NEW uploads, never backfills
     // whatever was attached before this existed.
+    // Sep 29, 2026: prescriptions are held back — they must be Pharmacy-
+    // verified before reaching Zoho; syncVerifiedPrescriptionsToZoho() in
+    // zohoAttachmentSync.js handles the push when Pharmacy clicks Verify.
     let zohoPushed = false;
     let zohoError = null;
     let zohoDocumentId = null;
-    if (order.zoho_so_id) {
+    if (order.zoho_so_id && fileType !== RX_FILE_TYPE) {
       try {
         const buffer = await proofStorage.downloadFile(storagePath);
         const pushResult = await zoho.addSalesOrderAttachment(order.zoho_so_id, {

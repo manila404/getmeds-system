@@ -38,6 +38,7 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { rxSummaries, prescriptionRows, summarize, isPharmacyReviewable, RX_FILE_TYPE, PRE_SHIP_STATUSES } = require('../services/prescriptionService');
 const { hasColumn } = require('../services/schemaColumns');
+const { syncVerifiedPrescriptionsToZoho } = require('../services/zohoAttachmentSync');
 
 // From "Sales Order created, waiting on Finance" until the parcel is packed.
 const PHARMACY_STATUSES = PRE_SHIP_STATUSES;
@@ -274,7 +275,7 @@ exports.getQueue = async (req, res, next) => {
 async function loadOrder(id) {
   return await db
     .prepare(
-      `SELECT o.id, o.getmeds_order_id, o.status, o.medrep_id, o.raised_by_id, c.name AS customer_name
+      `SELECT o.id, o.getmeds_order_id, o.status, o.medrep_id, o.raised_by_id, o.zoho_so_id, c.name AS customer_name
          FROM orders o LEFT JOIN customers c ON c.id = o.customer_id WHERE o.id = ?`
     )
     .get(id);
@@ -364,6 +365,16 @@ async function decide(req, res, next, verdict) {
         });
       }
     })();
+
+    // Sep 29, 2026: push just-verified prescriptions to Zoho immediately if the
+    // Sales Order already exists. Best-effort — a Zoho failure never fails the
+    // verify response; the file will be picked up by pushUnsyncedAttachments on
+    // the next re-sync if this call misses.
+    if (verdict === 'verified' && order.zoho_so_id) {
+      syncVerifiedPrescriptionsToZoho(order.id, order.zoho_so_id, ids).catch((err) =>
+        console.warn(`[PHARMACY] syncVerifiedPrescriptionsToZoho failed for order ${order.id}:`, err.message)
+      );
+    }
 
     const s = (await rxSummaries([order.id])).get(order.id);
     res.json({ success: true, data: { id: order.id, rx_state: s.state, prescriptions: s.prescriptions } });
@@ -546,6 +557,14 @@ exports.reReview = async (req, res, next) => {
         });
       }
     })();
+
+    // Sep 29, 2026: same Zoho push as decide() — push the re-reviewed
+    // prescription to Zoho if the Sales Order already exists.
+    if (action === 'verify' && order.zoho_so_id) {
+      syncVerifiedPrescriptionsToZoho(order.id, order.zoho_so_id, liveRejectedIds).catch((err) =>
+        console.warn(`[PHARMACY] syncVerifiedPrescriptionsToZoho (re-review) failed for order ${order.id}:`, err.message)
+      );
+    }
 
     const s = (await rxSummaries([order.id])).get(order.id);
     res.json({ success: true, data: { id: order.id, rx_state: s.state, prescriptions: s.prescriptions } });

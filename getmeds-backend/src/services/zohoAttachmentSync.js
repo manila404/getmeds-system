@@ -44,6 +44,10 @@ async function pushUnsyncedAttachments(orderId, zohoSoId) {
   const conditions = ['order_id = ?'];
   if (canSoftDelete) conditions.push('deleted_at IS NULL');
   if (canTrackPushed) conditions.push('zoho_pushed = false');
+  // Sep 29, 2026: prescriptions must be Pharmacy-verified before going to Zoho.
+  // Unverified (pending) and rejected prescription rows are held here; they reach
+  // Zoho via syncVerifiedPrescriptionsToZoho() when Pharmacy clicks Verify.
+  conditions.push("NOT (file_type = 'prescription' AND status != 'verified')");
 
   const rows = await db
     .prepare(`SELECT * FROM payment_proofs WHERE ${conditions.join(' AND ')}`)
@@ -78,4 +82,67 @@ async function pushUnsyncedAttachments(orderId, zohoSoId) {
   return { pushed, failed };
 }
 
-module.exports = { pushUnsyncedAttachments };
+/**
+ * Sep 29, 2026: push a specific set of just-verified prescription files onto
+ * the Zoho Sales Order the moment Pharmacy clicks Verify. Counterpart to the
+ * prescription-hold logic added to pushUnsyncedAttachments above.
+ *
+ * Called from pharmacy.controller.js's decide() and reReview() whenever the
+ * outcome is 'verified' and the order already has a zoho_so_id. If the order
+ * hasn't been approved by Management yet (no SO), this is a no-op — the files
+ * will be picked up by pushUnsyncedAttachments at approval time because they
+ * will already carry status='verified' by then.
+ *
+ * Best-effort, same shape as pushUnsyncedAttachments: one file failing never
+ * blocks the rest or the caller.
+ */
+async function syncVerifiedPrescriptionsToZoho(orderId, zohoSoId, proofIds) {
+  if (!orderId || !zohoSoId || !proofIds?.length) return { pushed: 0, failed: 0 };
+
+  const canTrackPushed = await hasColumn('payment_proofs', 'zoho_pushed');
+  const canSoftDelete = await hasColumn('payment_proofs', 'deleted_at');
+  const canTrackDocumentId = await hasColumn('payment_proofs', 'zoho_document_id');
+
+  const conditions = [
+    'order_id = ?',
+    "file_type = 'prescription'",
+    "status = 'verified'",
+    `id = ANY(?)`,
+  ];
+  if (canSoftDelete) conditions.push('deleted_at IS NULL');
+  if (canTrackPushed) conditions.push('zoho_pushed = false');
+
+  const rows = await db
+    .prepare(`SELECT * FROM payment_proofs WHERE ${conditions.join(' AND ')}`)
+    .all(orderId, [proofIds]);
+
+  let pushed = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      const buffer = await proofStorage.downloadFile(row.storage_path);
+      const pushResult = await zoho.addSalesOrderAttachment(zohoSoId, {
+        buffer,
+        filename: row.file_name || 'attachment',
+        contentType: row.content_type || 'application/octet-stream',
+      });
+      if (canTrackPushed) {
+        await db.prepare('UPDATE payment_proofs SET zoho_pushed = ? WHERE id = ?').run(true, row.id);
+      }
+      const documentId = pushResult?.document?.document_id || null;
+      if (documentId && canTrackDocumentId) {
+        await db.prepare('UPDATE payment_proofs SET zoho_document_id = ? WHERE id = ?').run(documentId, row.id);
+      }
+      pushed += 1;
+    } catch (err) {
+      failed += 1;
+      console.warn(
+        `[ZOHO_ATTACHMENT_SYNC] could not push verified prescription payment_proofs.id=${row.id} onto SO ${zohoSoId}:`,
+        err.message
+      );
+    }
+  }
+  return { pushed, failed };
+}
+
+module.exports = { pushUnsyncedAttachments, syncVerifiedPrescriptionsToZoho };

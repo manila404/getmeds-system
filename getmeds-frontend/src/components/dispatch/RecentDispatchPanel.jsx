@@ -213,8 +213,8 @@ const RecentDispatchPanel = ({
               <li key={o.id} className="px-4 py-3 space-y-2">
                 <div className="flex justify-between gap-3">
                   <Opener order={o} onOpen={onOpen}>
-                    <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}</p>
-                    <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}<WarehouseTag order={o} /></p>
+                    <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}<WarehouseTag order={o} /></p>
+                    <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
                   </Opener>
                   <div className="flex items-start gap-1 shrink-0">
                     <p className="text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</p>
@@ -277,8 +277,8 @@ const RecentDispatchPanel = ({
             {drafts.map((o) => (
               <li key={o.id} className="px-4 py-3 flex items-center justify-between gap-3">
                 <Opener order={o} onOpen={onOpen}>
-                  <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}</p>
-                  <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}<WarehouseTag order={o} /></p>
+                  <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}<WarehouseTag order={o} /></p>
+                  <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
                 </Opener>
                 <div className="flex items-center gap-1 shrink-0">
                   <div className="text-right">
@@ -325,7 +325,7 @@ const RecentDispatchPanel = ({
                   <div className="flex justify-between gap-3">
                     <Opener order={o} onOpen={onOpen}>
                       <p className="text-sm font-mono font-semibold text-getmeds-blue">
-                        {o.getmeds_order_id}
+                        {o.getmeds_order_id}<WarehouseTag order={o} />
                         {/* Sep 29, 2026: ⚠️ for pharmacy-channel orders not yet
                             verified — appears whenever rx_state is not 'verified'
                             or 'not_required', so Dispatch knows not to ship yet. */}
@@ -346,7 +346,7 @@ const RecentDispatchPanel = ({
                         {o.rx_badge && !dispatchHold && <RxBadge badge={o.rx_badge} compact />}
                         <HoldTag hold={dispatchHold} />
                       </p>
-                      <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}<WarehouseTag order={o} /></p>
+                      <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
                       <p className="text-xs text-ink-secondary truncate" title={o.delivery_address || ''}>
                         {o.delivery_address || <span className="text-red-700 font-semibold">No delivery address</span>}
                       </p>
