@@ -95,6 +95,21 @@ const CustomerAutocomplete = ({
   const results = payload.customers || [];
   const totalMatching = payload.total_matching ?? results.length;
 
+  // Tokenized fallback: when a multi-word phrase returns nothing, search on
+  // the first individual token so "test customer" still surfaces profiles
+  // that contain "test" anywhere in their name.
+  const tokens = debouncedTerm.trim().split(/\s+/).filter(t => t.length >= 2);
+  const fallbackToken = tokens.length > 1 ? tokens[0] : '';
+  const { data: fallbackData } = useQuery({
+    queryKey: ['customer-search-fallback', fallbackToken, includeInactive],
+    queryFn: () => fetchCustomers({ search: fallbackToken, includeInactive, limit: RESULT_LIMIT }),
+    enabled: isOpen && !disabled && !!fallbackToken,
+    staleTime: 1000 * 60,
+  });
+  const suggestions = (fallbackData?.data?.customers || []).filter(
+    s => !results.find(r => r.id === s.id)
+  );
+
   const handleSelect = (customer) => {
     // Zoho rejects a Sales Order raised against an inactive contact, so an
     // inactive client is shown (better than vanishing, which reads as a
@@ -147,66 +162,116 @@ const CustomerAutocomplete = ({
 
   return (
     <div className="relative w-full" ref={containerRef}>
-      <div className="relative">
-        <Search className="w-4 h-4 text-ink-secondary absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-        <input
-          type="text"
-          value={searchTerm}
-          onChange={(e) => {
-            setSearchTerm(e.target.value);
-            setIsOpen(true);
-          }}
-          onFocus={() => setIsOpen(true)}
-          disabled={disabled}
-          placeholder={placeholder}
-          className="w-full bg-white border border-slate-300 rounded-md pl-9 pr-8 py-2 text-sm text-ink-primary font-medium placeholder-ink-secondary/50 focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs transition-colors disabled:opacity-50"
-        />
-        {isFetching ? (
-          <Loader2 size={14} className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-ink-secondary" />
-        ) : searchTerm ? (
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 text-ink-secondary absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setIsOpen(true);
+            }}
+            onFocus={() => setIsOpen(true)}
+            disabled={disabled}
+            placeholder={placeholder}
+            className="w-full bg-white border border-slate-300 rounded-md pl-9 pr-8 py-2 text-sm text-ink-primary font-medium placeholder-ink-secondary/50 focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue shadow-2xs transition-colors disabled:opacity-50"
+          />
+          {isFetching ? (
+            <Loader2 size={14} className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-ink-secondary" />
+          ) : searchTerm ? (
+            <button
+              type="button"
+              onClick={() => setSearchTerm('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-ink-primary rounded-full transition-colors"
+            >
+              <X size={14} />
+            </button>
+          ) : null}
+        </div>
+        {!disabled && (
           <button
             type="button"
-            onClick={() => setSearchTerm('')}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-ink-primary rounded-full transition-colors"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              setCreatingFor(searchTerm.trim());
+              setIsOpen(false);
+            }}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-getmeds-blue text-getmeds-blue text-[11px] font-semibold hover:bg-getmeds-blue hover:text-white transition-colors"
           >
-            <X size={14} />
+            <UserPlus size={12} /> Add new customer
           </button>
-        ) : null}
+        )}
       </div>
+      <p className="mt-1 text-[11px] text-ink-secondary/70">
+        Try typing the patient name, hospital, or distributor first to see if it already exists.
+      </p>
 
       {isOpen && (
         <ul className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 shadow-lg rounded-md z-20 max-h-64 overflow-y-auto divide-y divide-slate-100 animate-in fade-in slide-in-from-top-1 duration-150">
           {results.length === 0 ? (
-            <li className="px-4 py-3 text-center text-xs text-ink-secondary">
-              {isFetching ? (
-                'Searching…'
-              ) : searchTerm.trim() ? (
+            <>
+              <li className="px-4 py-3 text-center text-xs text-ink-secondary">
+                {isFetching ? (
+                  'Searching…'
+                ) : searchTerm.trim() ? (
+                  <>
+                    No results for <span className="font-semibold text-ink-primary">"{searchTerm}"</span>.
+                    <span className="block mt-1 text-[11px]">
+                      Use the <strong>+ Add new customer</strong> button to create a new profile.
+                    </span>
+                  </>
+                ) : (
+                  'Start typing to search clients…'
+                )}
+              </li>
+              {!isFetching && searchTerm.trim() && suggestions.length > 0 && (
                 <>
-                  No registered customer matches <span className="font-semibold text-ink-primary">"{searchTerm}"</span>.
-                  {/* Sep 11, 2026: the way out. This used to read "ask an
-                      Admin to add or sync them from Zoho first", which is
-                      advice rather than an action — and the order waited on
-                      somebody else's inbox. */}
-                  <button
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => {
-                      setCreatingFor(searchTerm.trim());
-                      setIsOpen(false);
-                    }}
-                    className="mt-2 mx-auto flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
-                  >
-                    <UserPlus className="w-3.5 h-3.5" />
-                    Create "{searchTerm.trim()}" in Zoho
-                  </button>
-                  <span className="block mt-1.5 text-[11px]">
-                    Adds them to Zoho and selects them for this order.
-                  </span>
+                  <li className="px-4 py-2 bg-slate-50 border-t border-slate-100">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Suggested for you</p>
+                  </li>
+                  {suggestions.map((customer) => {
+                    const inactive = isInactive(customer);
+                    return (
+                      <li key={customer.id}>
+                        <button
+                          type="button"
+                          onClick={() => handleSelect(customer)}
+                          disabled={inactive}
+                          aria-disabled={inactive}
+                          className={`w-full text-left px-4 py-2.5 flex items-center justify-between gap-3 transition-colors focus:outline-none ${
+                            inactive ? 'opacity-60 cursor-not-allowed' : 'hover:bg-surface focus:bg-surface'
+                          }`}
+                        >
+                          <div className="min-w-0 flex items-center gap-2">
+                            {customer.type === 'credit' ? (
+                              <Building2 size={15} className={inactive ? 'text-slate-400 shrink-0' : 'text-getmeds-blue shrink-0'} />
+                            ) : (
+                              <User size={15} className={inactive ? 'text-slate-400 shrink-0' : 'text-amber-600 shrink-0'} />
+                            )}
+                            <div className="min-w-0">
+                              <p className={`text-sm font-semibold truncate ${inactive ? 'text-ink-secondary' : 'text-ink-primary'}`}>
+                                {customer.name}
+                              </p>
+                              {(customer.contact_person || customer.contact_number) && (
+                                <p className="text-[11px] text-ink-secondary truncate">
+                                  {[customer.contact_person, customer.contact_number].filter(Boolean).join(' · ')}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${
+                            customer.type === 'credit' ? 'bg-pharmacy-green/15 text-pharmacy-green-dark' : 'bg-state-warning-light text-amber-900'
+                          }`}>
+                            {customer.type === 'credit' ? 'Credit' : 'Direct'}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
                 </>
-              ) : (
-                'Start typing to search clients…'
               )}
-            </li>
+            </>
           ) : (
             <>
               {results.map((customer) => {

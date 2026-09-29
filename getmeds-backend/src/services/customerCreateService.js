@@ -60,7 +60,7 @@ const { buildZohoSalesOrderPayload } = require('./zohoPayloadBuilder');
  * fired for anybody; a customer created without one silently joins them, and
  * four required controls are skipped with nothing on screen to say so.
  */
-const CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd', 'patient'];
+const CATEGORIES = ['doctor', 'hospital', 'distributor', 'patient'];
 
 /**
  * Did Zoho refuse because of something about THIS customer, or because Zoho
@@ -536,40 +536,56 @@ function validate(input) {
   const c = input || {};
   const problems = [];
 
+  // Sep 29, 2026: category is now required — the four valid types each have
+  // different mandatory fields, so we cannot validate without knowing which.
+  if (!c.category || !CATEGORIES.includes(c.category)) {
+    problems.push(`Customer Type must be one of: ${CATEGORIES.join(', ')}.`);
+    return problems; // no further checks make sense without knowing the type
+  }
+
+  const isIndividual = c.category === 'patient' || c.category === 'doctor';
+  const isBusiness   = c.category === 'hospital' || c.category === 'distributor';
+
+  // display_name is always required (auto-filled by the UI from first/last or company name)
   if (!String(c.display_name || '').trim()) problems.push('Display Name is required.');
-  // Mandatory in this org's Zoho configuration (cf_contact_number). Caught
-  // here so the message names the field rather than quoting Zoho at a rep.
-  if (!String(c.contact_number || '').trim()) problems.push('Contact Number is required.');
+
+  if (isIndividual) {
+    if (!String(c.first_name || '').trim()) problems.push('First Name is required.');
+    if (!String(c.last_name  || '').trim()) problems.push('Last Name is required.');
+    if (c.category === 'doctor' && !String(c.email || '').trim()) problems.push('Email Address is required for Doctors.');
+  }
+
+  if (isBusiness) {
+    if (!String(c.display_name || '').trim()) problems.push('Display Name is required.');
+    if (!String(c.email        || '').trim()) problems.push('Email Address is required.');
+    // All license fields are mandatory for hospitals and distributors
+    if (!String(c.license_owner      || '').trim()) problems.push('License Owner is required.');
+    if (!String(c.lto_license_number || '').trim()) problems.push('LTO License Number is required.');
+    if (!String(c.lto_type           || '').trim()) problems.push('LTO Type is required.');
+    if (!String(c.license_issuance_date || '').trim()) problems.push('License Issuance Date is required.');
+    if (!String(c.license_expiry_date   || '').trim()) problems.push('License Expiry Date is required.');
+  }
+
+  // contact_number is the Zoho cf_contact_number — the frontend derives it from phone, so accept either
+  const effectiveContactNumber = String(c.contact_number || c.phone || '').trim();
+  if (!effectiveContactNumber) problems.push('Phone Number is required.');
   if (!String(c.phone || '').trim()) problems.push('Phone is required.');
 
   const billing = c.billing_address || {};
-  if (!String(billing.address || '').trim()) problems.push('Billing Address is required.');
-  if (!String(billing.phone || '').trim()) problems.push('Billing Address phone is required.');
+  if (!String(billing.address || '').trim()) problems.push('Address is required.');
 
-  // Shipping falls back to billing, so it is only checked when the caller
-  // said it differs.
   if (c.shipping_same_as_billing === false) {
     const shipping = c.shipping_address || {};
     if (!String(shipping.address || '').trim()) problems.push('Shipping Address is required.');
-    if (!String(shipping.phone || '').trim()) problems.push('Shipping Address phone is required.');
-  }
-
-  // Deliberately optional. "Not sure" is a real answer, and forcing a choice on
-  // somebody who does not have one produces a confident wrong value — which
-  // for 'hospital' is wrong in both directions: claimed and the rep is blocked
-  // on four attachments they do not need, missed and the controls vanish.
-  if (c.category != null && c.category !== '' && !CATEGORIES.includes(c.category)) {
-    problems.push(`Customer Type must be one of: ${CATEGORIES.join(', ')}.`);
+    if (!String(shipping.phone   || '').trim()) problems.push('Shipping Address phone is required.');
   }
 
   for (const [label, value] of [
     ['License Issuance Date', c.license_issuance_date],
     ['License Expiry Date', c.license_expiry_date]
   ]) {
-    // Zoho wants yyyy-mm-dd. A date it cannot parse is accepted and stored
-    // empty, which looks like the field was left blank.
     if (value && !/^\d{4}-\d{2}-\d{2}$/.test(String(value).trim())) {
-      problems.push(`${label} must be a date.`);
+      problems.push(`${label} must be a date (yyyy-mm-dd).`);
     }
   }
 

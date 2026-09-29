@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { X, Building2, MapPin, FileText, Loader2, AlertTriangle, UserCheck, CheckCircle2, CloudOff, Copy } from 'lucide-react';
@@ -54,30 +54,30 @@ const MATCH_LABEL = {
  * proceeds and succeeds.
  */
 
-const REQUIRED = ['display_name', 'contact_number', 'phone'];
+// Sep 29, 2026: per-type required fields. Patient/Doctor are Zoho Individuals;
+// Hospital/Distributor are Zoho Business contacts with mandatory license data.
+const TYPE_REQUIRED = {
+  patient:     ['first_name', 'last_name', 'phone'],
+  doctor:      ['first_name', 'last_name', 'email', 'phone'],
+  hospital:    ['display_name', 'email', 'phone', 'license_owner', 'lto_license_number', 'lto_type', 'license_issuance_date', 'license_expiry_date'],
+  distributor: ['display_name', 'email', 'phone', 'license_owner', 'lto_license_number', 'lto_type', 'license_issuance_date', 'license_expiry_date'],
+};
+
+// customer_sub_type sent to Zoho — 'individual' for Patient/Doctor, 'business' for Hospital/Distributor
+const SUB_TYPE = { patient: 'individual', doctor: 'individual', hospital: 'business', distributor: 'business' };
 
 /**
- * What kind of customer this is — and, for 'hospital', what the order form
- * will then demand.
- *
- * Sep 11, 2026: confirmed with the business that this field MEANS "hospital
- * order rules apply". Picking Hospital is what makes an order require a GL
- * Number, a receiver type, and four attachments; leaving it blank is what
- * makes all four quietly optional.
- *
- * "Not sure" is offered on purpose. Every one of the 95,063 customers already
- * in the system is uncategorised, so a blank is the status quo rather than an
- * anomaly — and forcing a guess would be wrong in both directions: claimed and
- * the rep is blocked on attachments they do not have, missed and four controls
- * disappear with nothing on screen to say so.
+ * Sep 29, 2026: restricted to the four real customer types. PWD and "Not sure
+ * yet" removed — the former is a discount programme, not a customer class;
+ * the latter produced uncategorised records that broke downstream hospital
+ * workflows. Every new customer must now be one of these four so the form can
+ * enforce the right required fields.
  */
 const CATEGORIES = [
-  { value: 'hospital', label: 'Hospital', hint: 'Orders will ask for a GL Number, receiver type and four attachments (optional).' },
-  { value: 'doctor', label: 'Doctor' },
-  { value: 'distributor', label: 'Distributor' },
-  { value: 'pwd', label: 'PWD' },
-  { value: 'patient', label: 'Patient' },
-  { value: '', label: 'Not sure yet', hint: 'Can be set later from the Clients Directory.' }
+  { value: 'patient',     label: 'Patient',             hint: 'Individual — first & last name required. Maps to Zoho Individual.' },
+  { value: 'doctor',      label: 'Doctor',              hint: 'Individual — "Dr." salutation pre-filled; email and hospital name optional. Maps to Zoho Individual.' },
+  { value: 'hospital',    label: 'Hospital',            hint: 'Business — all license fields required. Orders will ask for a GL Number, receiver type, and four attachments.' },
+  { value: 'distributor', label: 'Distributor',         hint: 'Business — all license fields required. Maps to Zoho Business.' },
 ];
 
 const Field = ({ label, required, help, children }) => (
@@ -104,11 +104,34 @@ const Section = ({ icon: Icon, title, children }) => (
   </div>
 );
 
+const FileField = ({ label, file, onChange, required }) => (
+  <div>
+    <label className="block text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-1">
+      {label}{required && <span className="text-state-error ml-0.5">*</span>}
+    </label>
+    <label className="flex items-center gap-2 cursor-pointer">
+      <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-dashed text-[12px] transition-colors ${
+        file ? 'border-getmeds-blue bg-blue-50 text-getmeds-blue' : 'border-slate-300 bg-white text-ink-secondary hover:border-getmeds-blue hover:text-getmeds-blue'
+      }`}>
+        <FileText className="w-3.5 h-3.5 shrink-0" />
+        {file ? <span className="font-medium truncate max-w-[140px]">{file.name}</span> : <span>Choose file…</span>}
+      </span>
+      <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => onChange(e.target.files?.[0] || null)} />
+      {file && (
+        <button type="button" onClick={() => onChange(null)} className="text-slate-400 hover:text-state-error">
+          <X className="w-3.5 h-3.5" />
+        </button>
+      )}
+    </label>
+  </div>
+);
+
 const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   const [form, setForm] = useState({
     display_name: initialName,
     first_name: '',
     last_name: '',
+    salutation: '',
     company_name: '',
     email: '',
     phone: '',
@@ -120,11 +143,15 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
     license_expiry_date: '',
     is_doctor: false,
     tin: '',
-    category: '',
+    follow_up_docs: false,
+    category: 'patient',
     billing_address: { address: '', city: '', country: 'Philippines', phone: '' },
     shipping_address: { address: '', city: '', country: 'Philippines', phone: '' }
   });
   const [sameAsBilling, setSameAsBilling] = useState(true);
+  const [ltoFile, setLtoFile] = useState(null);
+  const [birFile, setBirFile] = useState(null);
+  const [mayorsPermitFile, setMayorsPermitFile] = useState(null);
   const [duplicates, setDuplicates] = useState(null);
   // Sep 18, 2026: what the fuzzy pre-check found — null until checked, []
   // once checked clean. Kept separate from `duplicates` (the EXACT-match
@@ -149,6 +176,34 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const setAddr = (which, k, v) =>
     setForm((f) => ({ ...f, [which]: { ...f[which], [k]: v } }));
+
+  // Auto-fill display_name / salutation / license_owner from name fields
+  useEffect(() => {
+    const cat = form.category;
+    if (cat === 'patient') {
+      const name = [form.first_name, form.last_name].filter(Boolean).join(' ');
+      if (name) set('display_name', name);
+    } else if (cat === 'doctor') {
+      if (form.salutation !== 'Dr.') set('salutation', 'Dr.');
+      const sal = form.salutation || 'Dr.';
+      const parts = [sal, form.first_name, form.last_name].filter(Boolean);
+      if (parts.length > 1) set('display_name', parts.join(' '));
+      const fullName = [form.first_name, form.last_name].filter(Boolean).join(' ');
+      if (fullName) set('license_owner', fullName);
+    } else if (cat === 'hospital' || cat === 'distributor') {
+      const fullName = [form.first_name, form.last_name].filter(Boolean).join(' ');
+      if (fullName) set('license_owner', fullName);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.category, form.first_name, form.last_name, form.salutation]);
+
+  // Business: company_name always mirrors display_name
+  useEffect(() => {
+    if (form.category === 'hospital' || form.category === 'distributor') {
+      set('company_name', form.display_name);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.category, form.display_name]);
 
   const create = useMutation({
     mutationFn: (body) => client.post('/api/customers', body).then((r) => r.data),
@@ -187,14 +242,26 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
     mutationFn: (body) => client.post('/api/customers/check-duplicates', body).then((r) => r.data)
   });
 
-  const missing = REQUIRED.filter((k) => !String(form[k] || '').trim());
-  const billingOk = form.billing_address.address.trim() && form.billing_address.phone.trim();
-  const shippingOk =
-    sameAsBilling || (form.shipping_address.address.trim() && form.shipping_address.phone.trim());
+  const typeRequired = TYPE_REQUIRED[form.category] || ['display_name', 'phone'];
+  const missing = typeRequired.filter((k) => !String(form[k] || '').trim());
+  const displayNameOk = !!form.display_name.trim();
+  const billingOk = !!form.billing_address.address.trim();
+  const shippingOk = sameAsBilling || !!form.shipping_address.address.trim();
   const checking = checkMutation.isPending;
-  const canSubmit = missing.length === 0 && billingOk && shippingOk && !create.isPending && !checking;
+  const canSubmit = missing.length === 0 && displayNameOk && billingOk && shippingOk && !create.isPending && !checking;
 
-  const doCreate = () => create.mutate({ ...form, shipping_same_as_billing: sameAsBilling });
+  const doCreate = () => {
+    const phone = form.phone;
+    create.mutate({
+      ...form,
+      contact_number: phone, // Zoho cf_contact_number — always required in this org
+      customer_sub_type: SUB_TYPE[form.category] || 'business',
+      is_doctor: form.category === 'doctor',
+      billing_address:  { ...form.billing_address,  phone: form.billing_address.phone  || phone },
+      shipping_address: { ...form.shipping_address, phone: form.shipping_address.phone || phone },
+      shipping_same_as_billing: sameAsBilling,
+    });
+  };
 
   const submit = async (e) => {
     // Called from a click now rather than a form submission, but guarded so it
@@ -419,17 +486,14 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
         <div className="px-5 py-4">
           {/* A DIV, not a form.
               Sep 11, 2026: this modal renders inside OrderForm's own form, and
-              nested forms are invalid HTML. The browser drops the inner one, so
-              onSubmit never fired and the "Create customer" button — being
-              type="submit" — acted on the OUTER order form instead. The symptom
-              was a button that appeared to do nothing at all.
-              React said so plainly in the console: "validateDOMNesting: form
-              cannot appear as a descendant of form". */}
+              nested forms are invalid HTML. */}
+
+          {/* ── Customer Type ─────────────────────────────────────────────── */}
           <Section icon={Building2} title="Customer Type">
             <div className="flex flex-wrap gap-2">
               {CATEGORIES.map((c) => (
                 <button
-                  key={c.value || 'unset'}
+                  key={c.value}
                   type="button"
                   onClick={() => set('category', c.value)}
                   className={`px-3 py-1.5 rounded-md border text-sm font-medium ${
@@ -442,8 +506,6 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 </button>
               ))}
             </div>
-            {/* Said at the moment of choosing, because this is the one field
-                here that changes what a LATER screen will demand. */}
             {CATEGORIES.find((c) => c.value === form.category)?.hint && (
               <p className="mt-2 text-[11px] text-ink-secondary">
                 {CATEGORIES.find((c) => c.value === form.category).hint}
@@ -451,58 +513,195 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
             )}
           </Section>
 
-          <Section icon={Building2} title="Primary Contact">
+          {/* ── Patient ────────────────────────────────────────────────────── */}
+          {form.category === 'patient' && (
+            <Section icon={Building2} title="Patient Details">
+              <div className="grid grid-cols-3 gap-3">
+                <Field label="Salutation">
+                  <input className={input} placeholder="e.g. Mr., Ms." value={form.salutation} onChange={(e) => set('salutation', e.target.value)} />
+                </Field>
+                <Field label="First Name" required>
+                  <input autoFocus className={input} value={form.first_name} onChange={(e) => set('first_name', e.target.value)} />
+                </Field>
+                <Field label="Last Name" required>
+                  <input className={input} value={form.last_name} onChange={(e) => set('last_name', e.target.value)} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+                <Field label="Display Name" required help="Auto-filled from name. Edit if needed.">
+                  <input className={input} value={form.display_name} onChange={(e) => set('display_name', e.target.value)} />
+                </Field>
+                <Field label="Email Address">
+                  <input type="email" className={input} value={form.email} onChange={(e) => set('email', e.target.value)} />
+                </Field>
+                <Field label="Phone Number" required>
+                  <input className={input} placeholder="+63…" value={form.phone} onChange={(e) => set('phone', e.target.value)} />
+                </Field>
+              </div>
+              <div className="mt-3 max-w-xs">
+                <Field label="TIN">
+                  <input className={input} value={form.tin} onChange={(e) => set('tin', e.target.value)} />
+                </Field>
+              </div>
+            </Section>
+          )}
+
+          {/* ── Doctor ─────────────────────────────────────────────────────── */}
+          {form.category === 'doctor' && (
+            <Section icon={Building2} title="Doctor Details">
+              <div className="grid grid-cols-3 gap-3">
+                <Field label="Salutation" help="Auto-set to Dr.">
+                  <input className={input} value={form.salutation} onChange={(e) => set('salutation', e.target.value)} />
+                </Field>
+                <Field label="First Name" required>
+                  <input autoFocus className={input} value={form.first_name} onChange={(e) => set('first_name', e.target.value)} />
+                </Field>
+                <Field label="Last Name" required>
+                  <input className={input} value={form.last_name} onChange={(e) => set('last_name', e.target.value)} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                <Field label="Display Name" required help="Auto-filled as 'Dr. First Last'. Edit if needed.">
+                  <input className={input} value={form.display_name} onChange={(e) => set('display_name', e.target.value)} />
+                </Field>
+                <Field label="Hospital / Clinic Name">
+                  <input className={input} placeholder="Hospital Name" value={form.company_name} onChange={(e) => set('company_name', e.target.value)} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                <Field label="Email Address" required>
+                  <input type="email" className={input} value={form.email} onChange={(e) => set('email', e.target.value)} />
+                </Field>
+                <Field label="Phone Number" required>
+                  <input className={input} placeholder="+63…" value={form.phone} onChange={(e) => set('phone', e.target.value)} />
+                </Field>
+              </div>
+              <div className="mt-4 border-t border-slate-100 pt-3">
+                <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">Additional Info</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <Field label="TIN">
+                    <input className={input} value={form.tin} onChange={(e) => set('tin', e.target.value)} />
+                  </Field>
+                  <Field label="License Owner" help="Auto-filled from name. Edit if needed.">
+                    <input className={input} value={form.license_owner} onChange={(e) => set('license_owner', e.target.value)} />
+                  </Field>
+                  <Field label="LTO Number" help="Unique in Zoho.">
+                    <input className={input} value={form.lto_license_number} onChange={(e) => set('lto_license_number', e.target.value)} />
+                  </Field>
+                  <Field label="LTO Type">
+                    <input className={input} value={form.lto_type} onChange={(e) => set('lto_type', e.target.value)} />
+                  </Field>
+                </div>
+              </div>
+            </Section>
+          )}
+
+          {/* ── Hospital / Distributor ──────────────────────────────────────── */}
+          {(form.category === 'hospital' || form.category === 'distributor') && (
+            <Section icon={Building2} title={form.category === 'hospital' ? 'Hospital Details' : 'Distributor Details'}>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Field label="Display Name" required help="The name this customer is filed under in Zoho.">
+                  <input autoFocus className={input} value={form.display_name} onChange={(e) => set('display_name', e.target.value)} />
+                </Field>
+                <Field label="Company Name" help="Auto-filled from Display Name.">
+                  <input className={`${input} bg-slate-50 text-ink-secondary`} readOnly value={form.company_name} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                <Field label="Email Address" required>
+                  <input type="email" className={input} value={form.email} onChange={(e) => set('email', e.target.value)} />
+                </Field>
+                <Field label="Phone Number" required>
+                  <input className={input} placeholder="+63…" value={form.phone} onChange={(e) => set('phone', e.target.value)} />
+                </Field>
+              </div>
+
+              {/* Primary Contact — optional for business types */}
+              <div className="mt-4 border-t border-slate-100 pt-3">
+                <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">Primary Contact <span className="font-normal normal-case">(optional)</span></p>
+                <div className="grid grid-cols-3 gap-3">
+                  <Field label="Salutation">
+                    <input className={input} placeholder="e.g. Dr., Ms." value={form.salutation} onChange={(e) => set('salutation', e.target.value)} />
+                  </Field>
+                  <Field label="First Name">
+                    <input className={input} value={form.first_name} onChange={(e) => set('first_name', e.target.value)} />
+                  </Field>
+                  <Field label="Last Name">
+                    <input className={input} value={form.last_name} onChange={(e) => set('last_name', e.target.value)} />
+                  </Field>
+                </div>
+              </div>
+
+              {/* Additional Info — license fields all required + file uploads */}
+              <div className="mt-4 border-t border-slate-100 pt-3">
+                <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">
+                  Additional Info <span className="text-state-error">*</span>
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <Field label="TIN">
+                    <input className={input} value={form.tin} onChange={(e) => set('tin', e.target.value)} />
+                  </Field>
+                  <Field label="License Owner" required help="Auto-filled from contact name. Edit if needed.">
+                    <input className={input} value={form.license_owner} onChange={(e) => set('license_owner', e.target.value)} />
+                  </Field>
+                  <Field label="LTO Number" required help="Unique in Zoho.">
+                    <input className={input} value={form.lto_license_number} onChange={(e) => set('lto_license_number', e.target.value)} />
+                  </Field>
+                  <Field label="LTO Type" required>
+                    <input className={input} value={form.lto_type} onChange={(e) => set('lto_type', e.target.value)} />
+                  </Field>
+                  <Field label="License Issuance Date" required>
+                    <input type="date" className={input} value={form.license_issuance_date} onChange={(e) => set('license_issuance_date', e.target.value)} />
+                  </Field>
+                  <Field label="License Expiry Date" required>
+                    <input type="date" className={input} value={form.license_expiry_date} onChange={(e) => set('license_expiry_date', e.target.value)} />
+                  </Field>
+                </div>
+
+                {/* Document uploads */}
+                <div className="mt-3">
+                  <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">Please Upload</p>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <FileField label="LTO Attachment" file={ltoFile} onChange={setLtoFile} />
+                    <FileField label="BIR" file={birFile} onChange={setBirFile} />
+                    <FileField label="Mayor's Permit" file={mayorsPermitFile} onChange={setMayorsPermitFile} />
+                  </div>
+                </div>
+
+                {/* Follow-up checkbox — only visible when any doc is missing */}
+                {(!ltoFile || !birFile || !mayorsPermitFile) && (
+                  <label className="inline-flex items-start gap-2 mt-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={form.follow_up_docs}
+                      onChange={(e) => set('follow_up_docs', e.target.checked)}
+                      className="mt-0.5 rounded text-getmeds-blue focus:ring-getmeds-blue"
+                    />
+                    <span className="text-[12px] text-ink-secondary">
+                      I'll follow up on the missing documents — <span className="text-amber-700">submit anyway</span>
+                    </span>
+                  </label>
+                )}
+              </div>
+            </Section>
+          )}
+
+          {/* ── Address (all types) ─────────────────────────────────────────── */}
+          <Section icon={MapPin} title="Address">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="First Name">
-                <input className={input} value={form.first_name} onChange={(e) => set('first_name', e.target.value)} />
-              </Field>
-              <Field label="Last Name">
-                <input className={input} value={form.last_name} onChange={(e) => set('last_name', e.target.value)} />
-              </Field>
-              <Field label="Company Name">
-                <input className={input} value={form.company_name} onChange={(e) => set('company_name', e.target.value)} />
-              </Field>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
-              <Field
-                label="Display Name"
-                required
-                help="The name Zoho files this customer under, and what you will search for next time."
-              >
-                <input
-                  autoFocus
-                  className={input}
-                  value={form.display_name}
-                  onChange={(e) => set('display_name', e.target.value)}
-                />
-              </Field>
-              <Field label="Email Address">
-                <input type="email" className={input} value={form.email} onChange={(e) => set('email', e.target.value)} />
-              </Field>
-              <Field label="Phone" required>
-                <input className={input} placeholder="+63…" value={form.phone} onChange={(e) => set('phone', e.target.value)} />
-              </Field>
-            </div>
-          </Section>
-
-          <Section icon={MapPin} title="Billing Address">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field label="Address" required>
+              <Field label="Street Address" required>
                 <input className={input} value={form.billing_address.address} onChange={(e) => setAddr('billing_address', 'address', e.target.value)} />
               </Field>
               <Field label="City">
                 <input className={input} value={form.billing_address.city} onChange={(e) => setAddr('billing_address', 'city', e.target.value)} />
               </Field>
-              <Field label="Country/Region">
+              <Field label="Country / Region">
                 <input className={input} value={form.billing_address.country} onChange={(e) => setAddr('billing_address', 'country', e.target.value)} />
-              </Field>
-              <Field label="Phone" required>
-                <input className={input} value={form.billing_address.phone} onChange={(e) => setAddr('billing_address', 'phone', e.target.value)} />
               </Field>
             </div>
           </Section>
 
+          {/* ── Shipping Address (all types) ────────────────────────────────── */}
           <Section icon={MapPin} title="Shipping Address">
             <label className="inline-flex items-center gap-2 text-sm text-ink-primary mb-3 cursor-pointer select-none">
               <input
@@ -511,84 +710,32 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 onChange={(e) => setSameAsBilling(e.target.checked)}
                 className="rounded text-getmeds-blue focus:ring-getmeds-blue"
               />
-              Same as billing address
+              Same as Address
             </label>
-
             {!sameAsBilling && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <Field label="Address" required>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="Street Address" required>
                   <input className={input} value={form.shipping_address.address} onChange={(e) => setAddr('shipping_address', 'address', e.target.value)} />
                 </Field>
                 <Field label="City">
                   <input className={input} value={form.shipping_address.city} onChange={(e) => setAddr('shipping_address', 'city', e.target.value)} />
                 </Field>
-                <Field label="Country/Region">
+                <Field label="Country / Region">
                   <input className={input} value={form.shipping_address.country} onChange={(e) => setAddr('shipping_address', 'country', e.target.value)} />
-                </Field>
-                <Field label="Phone" required>
-                  <input className={input} value={form.shipping_address.phone} onChange={(e) => setAddr('shipping_address', 'phone', e.target.value)} />
                 </Field>
               </div>
             )}
           </Section>
 
-          <Section icon={FileText} title="Licence &amp; Tax">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="License Owner">
-                <input className={input} value={form.license_owner} onChange={(e) => set('license_owner', e.target.value)} />
-              </Field>
-              <Field
-                label="LTO License Number"
-                help="Unique in Zoho — a licence already on another customer will be refused."
-              >
-                <input className={input} value={form.lto_license_number} onChange={(e) => set('lto_license_number', e.target.value)} />
-              </Field>
-              <Field label="LTO Type">
-                <input className={input} value={form.lto_type} onChange={(e) => set('lto_type', e.target.value)} />
-              </Field>
-              <Field label="License Issuance Date">
-                <input type="date" className={input} value={form.license_issuance_date} onChange={(e) => set('license_issuance_date', e.target.value)} />
-              </Field>
-              <Field label="License Expiry Date">
-                <input type="date" className={input} value={form.license_expiry_date} onChange={(e) => set('license_expiry_date', e.target.value)} />
-              </Field>
-              <Field label="TIN">
-                <input className={input} value={form.tin} onChange={(e) => set('tin', e.target.value)} />
-              </Field>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-              <Field
-                label="Contact Number"
-                required
-                help="Mandatory in Zoho for every customer — an order cannot be raised without it."
-              >
-                <input className={input} value={form.contact_number} onChange={(e) => set('contact_number', e.target.value)} />
-              </Field>
-              <div className="flex items-end pb-2">
-                <label className="inline-flex items-center gap-2 text-sm text-ink-primary cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={form.is_doctor}
-                    onChange={(e) => set('is_doctor', e.target.checked)}
-                    className="rounded text-getmeds-blue focus:ring-getmeds-blue"
-                  />
-                  Is Doctor
-                </label>
-              </div>
-            </div>
-          </Section>
-
+          {/* ── Footer ─────────────────────────────────────────────────────── */}
           <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-4 mt-5">
             <p className="text-[11px] text-ink-secondary">
-              Created as a <strong>Business</strong> customer in Zoho.
+              {SUB_TYPE[form.category] === 'individual'
+                ? <>Created as an <strong>Individual</strong> in Zoho.</>
+                : <>Created as a <strong>Business</strong> in Zoho.</>}
             </p>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 text-sm font-semibold text-ink-secondary hover:text-ink-primary"
-              >
+              <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-semibold text-ink-secondary hover:text-ink-primary">
                 Cancel
               </button>
               <button
@@ -598,20 +745,11 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 className="px-4 py-2 rounded-md bg-getmeds-blue text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {create.isPending ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Creating in Zoho…
-                  </>
+                  <><Loader2 className="w-4 h-4 animate-spin" />Creating in Zoho…</>
                 ) : checking ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Checking for duplicates…
-                  </>
+                  <><Loader2 className="w-4 h-4 animate-spin" />Checking for duplicates…</>
                 ) : (
-                  <>
-                    <UserCheck className="w-4 h-4" />
-                    Create customer
-                  </>
+                  <><UserCheck className="w-4 h-4" />Create customer</>
                 )}
               </button>
             </div>

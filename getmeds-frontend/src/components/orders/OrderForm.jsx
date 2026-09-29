@@ -25,8 +25,7 @@ import {
   UserRound,
   FlaskConical,
   Building2,
-  ShieldCheck,
-  Plus
+  ShieldCheck
 } from 'lucide-react';
 import { useDebug } from '../../context/DebugContext';
 import { useAuth } from '../../hooks/useAuth';
@@ -1894,25 +1893,6 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   <span className="text-ink-secondary/70">— listed for reference, cannot be ordered for</span>
                 </label>
               )}
-
-              {/* Sep 9, 2026: placeholder for "the customer isn't in Zoho yet".
-                  Deliberately inert — creating a contact is a Zoho WRITE, and
-                  this app's adapter has no method that can create one on
-                  purpose (see ZohoAdapter.js). Shown disabled rather than
-                  omitted so the gap is visible where it will be filled, and so
-                  nobody wires a half-built create into the order form by
-                  accident. */}
-              <button
-                type="button"
-                disabled
-                title="Not built yet — new customers are still created in Zoho directly."
-                className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-lg border border-dashed border-slate-300 text-ink-secondary cursor-not-allowed opacity-70"
-              >
-                <Plus size={12} /> Add new customer
-              </button>
-              <span className="ml-2 text-[11px] text-ink-secondary">
-                Coming soon — create the customer in Zoho, then sync from the Clients page.
-              </span>
 
               {isHospitalOrder && (
                 <p className="mt-2 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200 text-[11px] font-semibold">

@@ -382,9 +382,9 @@ exports.getCustomers = async (req, res, next) => {
       params.push(...testZohoIds);
     }
     if (search) {
-      where.push('(name LIKE ? OR contact_person LIKE ? OR contact_number LIKE ?)');
+      where.push('(name LIKE ? OR contact_person LIKE ? OR contact_number LIKE ? OR email LIKE ?)');
       const like = `%${search}%`;
-      params.push(like, like, like);
+      params.push(like, like, like, like);
     }
     if (category) {
       where.push('category = ?');
