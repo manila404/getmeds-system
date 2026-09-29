@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
 import {
-  fetchInventoryStatus
+  fetchInventoryStatus,
+  fetchItemWarehouses,
+  fetchItemBatches
 } from '../../api/queries';
 import { parseDate } from '../../utils/dateUtils';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
@@ -18,15 +20,170 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
-  Clock
+  ChevronDown,
+  Clock,
+  Loader2
 } from 'lucide-react';
 
 const PAGE_SIZE = 25;
+
+/**
+ * Expanded detail panel rendered beneath a product row.
+ * Mounts only when the row is clicked open — so both useQuery calls are
+ * lazy by construction (they don't fire on page load, only on first open).
+ * 5-min staleTime means repeated clicks within that window hit the cache.
+ */
+const ItemDetailPanel = ({ itemId }) => {
+  const [activeTab, setActiveTab] = useState('warehouses');
+
+  const { data: wData, isLoading: wLoading, error: wError } = useQuery({
+    queryKey: ['item-warehouses', itemId],
+    queryFn: () => fetchItemWarehouses(itemId),
+    staleTime: 1000 * 60 * 5,
+  });
+
+  const { data: bData, isLoading: bLoading } = useQuery({
+    queryKey: ['item-batches', itemId],
+    queryFn: () => fetchItemBatches(itemId),
+    staleTime: 1000 * 60 * 5,
+    enabled: activeTab === 'batches',
+  });
+
+  const warehouses = wData?.data?.warehouses || [];
+  const batches    = bData?.data?.batches    || [];
+
+  const hdr  = 'pb-2 px-3 text-[10px] uppercase tracking-wider font-semibold text-slate-500 text-right';
+  const cell = 'py-1.5 px-3 text-right font-mono text-xs';
+
+  return (
+    <div className="bg-slate-50/80 border-t border-slate-200 px-6 py-4">
+      {/* Tab strip */}
+      <div className="flex items-center gap-1 mb-3 border-b border-slate-200 pb-2">
+        {[['warehouses', 'Warehouses'], ['batches', 'Batch Details']].map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setActiveTab(key); }}
+            className={`px-3 py-1 text-[11px] font-bold rounded-md transition-colors ${
+              activeTab === key
+                ? 'bg-getmeds-blue text-white'
+                : 'text-ink-secondary hover:bg-slate-200'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+        <span className="ml-auto text-[10px] text-ink-secondary/50 select-none">
+          Live from Zoho · 5-min cache
+        </span>
+      </div>
+
+      {/* Warehouses tab */}
+      {activeTab === 'warehouses' && (
+        wLoading ? (
+          <div className="flex items-center gap-2 py-3 text-xs text-ink-secondary">
+            <Loader2 size={13} className="animate-spin text-getmeds-blue" />
+            Fetching live warehouse data from Zoho…
+          </div>
+        ) : wError ? (
+          <p className="text-xs text-state-error py-2">Could not load warehouse data.</p>
+        ) : warehouses.length === 0 ? (
+          <p className="text-xs italic text-ink-secondary py-2">
+            No warehouse data returned for this item.
+          </p>
+        ) : (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-slate-200">
+                <th className="pb-2 pr-3 text-[10px] uppercase tracking-wider font-semibold text-slate-500 text-left">
+                  Warehouse
+                </th>
+                <th className={hdr}>Stock on Hand</th>
+                <th className={hdr}>Committed</th>
+                <th className={hdr}>Available for Sale</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {warehouses.map((w, i) => (
+                <tr key={w.warehouse_id || i}>
+                  <td className="py-1.5 pr-3 font-medium text-ink-primary text-xs">{w.warehouse_name}</td>
+                  <td className={cell + ' text-slate-700'}>
+                    {Number(w.stock_on_hand ?? 0).toLocaleString()}
+                  </td>
+                  <td className={cell + ' text-amber-700'}>
+                    {Number(w.committed_stock ?? 0).toLocaleString()}
+                  </td>
+                  <td className={cell + ' text-emerald-700 font-semibold'}>
+                    {Number(w.available_for_sale_stock ?? w.available_stock ?? 0).toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )
+      )}
+
+      {/* Batch Details tab */}
+      {activeTab === 'batches' && (
+        bLoading ? (
+          <div className="flex items-center gap-2 py-3 text-xs text-ink-secondary">
+            <Loader2 size={13} className="animate-spin text-getmeds-blue" />
+            Fetching batch details from Zoho…
+          </div>
+        ) : batches.length === 0 ? (
+          <p className="text-xs italic text-ink-secondary py-2">
+            No batch data available. Batch tracking may not be enabled for this item in Zoho.
+          </p>
+        ) : (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-slate-200">
+                <th className="pb-2 pr-3 text-[10px] uppercase tracking-wider font-semibold text-slate-500 text-left">Batch Ref #</th>
+                <th className="pb-2 px-3 text-[10px] uppercase tracking-wider font-semibold text-slate-500 text-left">Mfr Batch #</th>
+                <th className="pb-2 px-3 text-[10px] uppercase tracking-wider font-semibold text-slate-500 text-left">Mfr Date</th>
+                <th className="pb-2 px-3 text-[10px] uppercase tracking-wider font-semibold text-slate-500 text-left">Expiry Date</th>
+                <th className={hdr}>In Qty</th>
+                <th className={hdr}>Balance Qty</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {batches.map((b, i) => {
+                const expiryMs = b.expiry_date ? new Date(b.expiry_date).getTime() : null;
+                const soonExpiry = expiryMs && expiryMs < Date.now() + 90 * 24 * 60 * 60 * 1000;
+                return (
+                  <tr key={b.batch_number || b.batch_id || i}>
+                    <td className="py-1.5 pr-3 font-mono font-semibold text-getmeds-blue text-xs">
+                      {b.batch_number || '—'}
+                    </td>
+                    <td className="py-1.5 px-3 font-mono text-slate-600 text-xs">
+                      {b.manufacturer_batch_no || b.batch_number || '—'}
+                    </td>
+                    <td className="py-1.5 px-3 text-slate-600 text-xs">{b.manufactured_date || '—'}</td>
+                    <td className={`py-1.5 px-3 font-semibold text-xs ${soonExpiry ? 'text-amber-700' : 'text-slate-600'}`}>
+                      {b.expiry_date || '—'}{soonExpiry ? ' ⚠' : ''}
+                    </td>
+                    <td className={cell + ' text-slate-700'}>
+                      {Number(b.quantity_in ?? b.initial_quantity ?? 0).toLocaleString()}
+                    </td>
+                    <td className={cell + ' font-semibold text-ink-primary'}>
+                      {Number(b.quantity_on_hand ?? b.actual_available_stock ?? 0).toLocaleString()}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )
+      )}
+    </div>
+  );
+};
 
 const InventoryPage = () => {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
+  const [expandedId, setExpandedId] = useState(null);
 
   // Fetch Inventory Status
   // Aug 27, 2026 (2): this now reads a purely local snapshot — the
@@ -93,6 +250,7 @@ const InventoryPage = () => {
   const handleSearchChange = (e) => {
     setSearch(e.target.value);
     setPage(1); // reset to page 1 whenever the filter changes
+    setExpandedId(null); // collapse any open row when search changes
   };
 
   return (
@@ -226,7 +384,7 @@ const InventoryPage = () => {
         </div>
       </div>
 
-      {/* Product Comparison & Sync Table (read-only — no per-row actions) */}
+      {/* Product Comparison & Sync Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/50">
           <div className="relative flex-1 max-w-md">
@@ -284,75 +442,98 @@ const InventoryPage = () => {
                   // Treated as active unless explicitly 0/false, so a row from
                   // before the field was tracked is never wrongly greyed out.
                   const inactive = p.is_active === 0 || p.is_active === false;
+                  const isExpanded = expandedId === p.id;
 
                   return (
-                    <tr key={p.id} className={`transition-colors ${inactive ? 'bg-slate-50/70 hover:bg-slate-100/70' : 'hover:bg-slate-50/80'}`}>
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-2">
-                          <div className={`font-bold ${inactive ? 'text-slate-500' : 'text-slate-900'}`}>{p.name}</div>
-                          <span
-                            title={inactive ? 'Inactive in Zoho — cannot be added to a Sales Order' : 'Active in Zoho'}
-                            className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full border flex-shrink-0 ${
-                              inactive
-                                ? 'bg-slate-200 text-slate-600 border-slate-300'
-                                : 'bg-pharmacy-green/10 text-pharmacy-green-dark border-pharmacy-green/30'
-                            }`}
-                          >
-                            {inactive ? 'Inactive' : 'Active'}
+                    <React.Fragment key={p.id}>
+                      <tr
+                        className={`transition-colors cursor-pointer select-none ${
+                          inactive ? 'bg-slate-50/70 hover:bg-slate-100/70' : 'hover:bg-slate-50/80'
+                        } ${isExpanded ? 'bg-blue-50/30' : ''}`}
+                        onClick={() => setExpandedId(isExpanded ? null : p.id)}
+                      >
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-2">
+                            <div className={`font-bold ${inactive ? 'text-slate-500' : 'text-slate-900'}`}>{p.name}</div>
+                            <span
+                              title={inactive ? 'Inactive in Zoho — cannot be added to a Sales Order' : 'Active in Zoho'}
+                              className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full border flex-shrink-0 ${
+                                inactive
+                                  ? 'bg-slate-200 text-slate-600 border-slate-300'
+                                  : 'bg-pharmacy-green/10 text-pharmacy-green-dark border-pharmacy-green/30'
+                              }`}
+                            >
+                              {inactive ? 'Inactive' : 'Active'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 font-mono">{p.sku}</div>
+                        </td>
+                        <td className="py-3 px-4 text-slate-700 font-mono">
+                          ₱{Number(p.unit_price).toFixed(2)} / {p.unit}
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className="inline-block px-2.5 py-1 rounded-md font-bold text-xs bg-slate-100 text-slate-800">
+                            {p.local_stock} {p.unit}
                           </span>
-                        </div>
-                        <div className="text-[11px] text-slate-400 font-mono">{p.sku}</div>
-                      </td>
-                      <td className="py-3 px-4 text-slate-700 font-mono">
-                        ₱{Number(p.unit_price).toFixed(2)} / {p.unit}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <span className="inline-block px-2.5 py-1 rounded-md font-bold text-xs bg-slate-100 text-slate-800">
-                          {p.local_stock} {p.unit}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        {p.zoho_stock !== null ? (
-                          <span
-                            className={`inline-block px-2.5 py-1 rounded-md font-bold text-xs ${
-                              isSync
-                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                : 'bg-amber-50 text-amber-800 border border-amber-300 font-black'
-                            }`}
-                          >
-                            {p.zoho_stock} {p.unit}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400 italic">Not created</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 font-mono text-[11px] text-slate-500">
-                        {p.zoho_item_id ? (
-                          <span className="bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
-                            {p.zoho_item_id}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400">—</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4">
-                        {isSync && (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                            <CheckCircle2 size={12} /> In Sync
-                          </span>
-                        )}
-                        {isMismatch && (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">
-                            <AlertCircle size={12} /> Diff (Δ {p.zoho_stock - p.local_stock})
-                          </span>
-                        )}
-                        {p.sync_status === 'not_in_zoho' && (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200">
-                            Not in Zoho
-                          </span>
-                        )}
-                      </td>
-                    </tr>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          {p.zoho_stock !== null ? (
+                            <span
+                              className={`inline-block px-2.5 py-1 rounded-md font-bold text-xs ${
+                                isSync
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-amber-50 text-amber-800 border border-amber-300 font-black'
+                              }`}
+                            >
+                              {p.zoho_stock} {p.unit}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 italic">Not created</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 font-mono text-[11px] text-slate-500">
+                          {p.zoho_item_id ? (
+                            <span className="bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                              {p.zoho_item_id}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              {isSync && (
+                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                                  <CheckCircle2 size={12} /> In Sync
+                                </span>
+                              )}
+                              {isMismatch && (
+                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">
+                                  <AlertCircle size={12} /> Diff (Δ {p.zoho_stock - p.local_stock})
+                                </span>
+                              )}
+                              {p.sync_status === 'not_in_zoho' && (
+                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200">
+                                  Not in Zoho
+                                </span>
+                              )}
+                            </div>
+                            <ChevronDown
+                              size={13}
+                              className={`shrink-0 text-slate-400 transition-transform duration-150 ${isExpanded ? 'rotate-180 text-getmeds-blue' : ''}`}
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr>
+                          <td colSpan={6} className="p-0">
+                            <ItemDetailPanel itemId={p.id} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })
               )}

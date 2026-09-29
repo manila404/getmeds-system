@@ -17,4 +17,9 @@ router.post('/sync-pull/start', requireAuth, requireRole('admin', 'management', 
 
 router.post('/adjust', requireAuth, requireRole('admin', 'management', 'dispatch'), c.adjustStock);
 
+// Live on-demand detail views — fetched from Zoho at click time, not stored locally.
+// requireAuth only (same as /status) — page-level routing controls who can reach inventory.
+router.get('/:itemId/warehouses', requireAuth, c.getItemWarehouses);
+router.get('/:itemId/batches', requireAuth, c.getItemBatches);
+
 module.exports = router;

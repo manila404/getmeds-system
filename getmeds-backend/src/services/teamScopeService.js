@@ -49,11 +49,47 @@ const db = require('../db/database');
  * canEditOrder: only the lead's own.
  */
 
-/** This Team Lead's assigned MedRep user ids. Empty array, never null. */
+/**
+ * This Team Lead's (or Channel Head's) full set of MedRep user ids.
+ * Empty array, never null.
+ *
+ * Sep 29, 2026: extended for the Channel Head case.
+ *
+ * A Channel Head (e.g. Javed) sits in `sales_channels.head_user_id`, NOT as a
+ * direct Team Lead on any MedRep row. The intermediate Team Lead (e.g. Honey)
+ * is in `sales_managers.user_id` for that channel, and MedReps under Honey
+ * have `team_lead_id = Honey's id`. So a single-level `WHERE team_lead_id = ?`
+ * on Javed returns nothing — his team is a level further down.
+ *
+ * Two passes:
+ *   1. Direct MedReps — `users.team_lead_id = this user` (original behaviour).
+ *   2. Rolled-up MedReps — for every sales_channel where this user is
+ *      head_user_id, include all MedReps whose team_lead_id is any
+ *      sales_manager in that channel. This is exactly the "Head → TL → MedRep"
+ *      chain the Admin org-chart shows without requiring any schema change.
+ *
+ * Both sets are merged and deduplicated before return.
+ */
 async function teamMedrepIds(teamLeadUserId) {
   if (!teamLeadUserId) return [];
-  const rows = await db.prepare('SELECT id FROM users WHERE team_lead_id = ?').all(teamLeadUserId);
-  return rows.map((r) => r.id);
+
+  // 1. Direct reports
+  const directRows = await db
+    .prepare('SELECT id FROM users WHERE team_lead_id = ?')
+    .all(teamLeadUserId);
+  const directIds = directRows.map((r) => r.id);
+
+  // 2. Reports-of-reports via channel headship
+  const subRows = await db.prepare(`
+    SELECT DISTINCT u.id
+    FROM users u
+    JOIN sales_managers sm ON sm.user_id = u.team_lead_id
+    JOIN sales_channels sc ON sc.id = sm.channel_id
+    WHERE sc.head_user_id = ?
+  `).all(teamLeadUserId);
+  const subIds = subRows.map((r) => r.id);
+
+  return [...new Set([...directIds, ...subIds])];
 }
 
 /**

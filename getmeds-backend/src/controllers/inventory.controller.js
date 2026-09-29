@@ -483,11 +483,49 @@ async function adjustStock(req, res) {
   }
 }
 
+/**
+ * GET /api/inventory/:itemId/warehouses
+ * Live per-warehouse stock breakdown for a single product, fetched on-demand
+ * from Zoho (not stored locally). Requires the product to have a zoho_item_id.
+ */
+async function getItemWarehouses(req, res, next) {
+  try {
+    const { itemId } = req.params;
+    const row = await db.prepare('SELECT id, name, zoho_item_id FROM products WHERE id = ?').get(itemId);
+    if (!row) return res.status(404).json({ success: false, error: 'Product not found.' });
+    if (!row.zoho_item_id) {
+      return res.status(422).json({ success: false, error: 'This product has no Zoho Item ID — run a sync first.' });
+    }
+    const result = await zoho.getItemWarehouses(row.zoho_item_id);
+    res.json({ success: true, data: { warehouses: result.warehouses, product_name: row.name } });
+  } catch (err) { next(err); }
+}
+
+/**
+ * GET /api/inventory/:itemId/batches
+ * Live batch tracking details for a single product, fetched on-demand from
+ * Zoho. Returns an empty array when batch tracking is not enabled in Zoho.
+ */
+async function getItemBatches(req, res, next) {
+  try {
+    const { itemId } = req.params;
+    const row = await db.prepare('SELECT id, name, zoho_item_id FROM products WHERE id = ?').get(itemId);
+    if (!row) return res.status(404).json({ success: false, error: 'Product not found.' });
+    if (!row.zoho_item_id) {
+      return res.status(422).json({ success: false, error: 'This product has no Zoho Item ID — run a sync first.' });
+    }
+    const result = await zoho.getItemBatches(row.zoho_item_id);
+    res.json({ success: true, data: { batches: result.batches, product_name: row.name } });
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   getInventoryStatus,
   syncPullStock,
   startSyncJob,
   adjustStock,
+  getItemWarehouses,
+  getItemBatches,
   // See customers.controller.js's __test__ export for why this exists.
   __test__: { reconcileItems }
 };

@@ -752,6 +752,27 @@ class LiveZohoAdapter extends ZohoAdapter {
   }
 
   /**
+   * Read-only: GET /items/{item_id} — single item detail. Used specifically
+   * to pull the per-warehouse stock breakdown from item.warehouses, which the
+   * bulk listItems call does not include. Fetched on-demand (not during sync)
+   * to avoid ~3,400 extra API calls per sync run.
+   */
+  async getItemWarehouses(zohoItemId) {
+    const result = await this._request('GET', `/items/${zohoItemId}`);
+    return { code: 0, message: 'success', warehouses: result.item?.warehouses || [] };
+  }
+
+  /**
+   * Read-only: GET /items/{item_id}/batches — batch tracking detail for a
+   * specific item: batch number, manufactured date, expiry date, balance qty.
+   * Only returns data when batch tracking is enabled for the item in Zoho.
+   */
+  async getItemBatches(zohoItemId) {
+    const result = await this._request('GET', `/items/${zohoItemId}/batches`);
+    return { code: 0, message: 'success', batches: result.batches || [] };
+  }
+
+  /**
    * Read-only: GET /contacts/{contact_id} — Zoho's "Get a Contact" detail
    * call, which (unlike List Contacts) includes billing_address. See
    * customers.controller.js's getZohoAddress for why this is fetched

@@ -100,6 +100,16 @@ export const fetchCustomers = async ({ search = '', includeInactive = false, lim
   return fetchWithClientFallback(path, { token });
 };
 
+export const fetchItemWarehouses = async (itemId) => {
+  const token = sessionStorage.getItem('token');
+  return fetchWithClientFallback(`/api/inventory/${itemId}/warehouses`, { token });
+};
+
+export const fetchItemBatches = async (itemId) => {
+  const token = sessionStorage.getItem('token');
+  return fetchWithClientFallback(`/api/inventory/${itemId}/batches`, { token });
+};
+
 /**
  * Fetch live inventory synchronization status
  */
