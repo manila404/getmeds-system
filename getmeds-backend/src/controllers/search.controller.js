@@ -38,8 +38,12 @@ exports.search = async (req, res, next) => {
     }
     const like = likePattern(q);
 
-    const orderWhere = ['(o.getmeds_order_id LIKE ? OR c.name LIKE ?)'];
-    const orderParams = [like, like];
+    // Sep 29, 2026: also match on Zoho SO number, receiver name, and receiver
+    // contact so that searching "Assel B. Moreno" or "SO-68018" returns the
+    // order directly — before this, receiver searches only surfaced the client
+    // entry (non-clickable) because this WHERE clause never touched those fields.
+    const orderWhere = ['(o.getmeds_order_id LIKE ? OR o.zoho_so_number LIKE ? OR c.name LIKE ? OR o.intake_receiver LIKE ? OR o.intake_contact_no LIKE ?)'];
+    const orderParams = [like, like, like, like, like];
     if (req.user.role === 'medrep') {
       orderWhere.push('(o.medrep_id = ? OR o.raised_by_id = ?)');
       orderParams.push(req.user.id, req.user.id);
@@ -56,7 +60,7 @@ exports.search = async (req, res, next) => {
     const [orders, customers, products] = await Promise.all([
       db
         .prepare(
-          `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount, c.name AS customer_name
+          `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount, o.zoho_so_number, o.intake_receiver, c.name AS customer_name
              FROM orders o
              LEFT JOIN customers c ON o.customer_id = c.id
             WHERE ${orderWhere.join(' AND ')}

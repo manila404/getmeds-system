@@ -188,8 +188,12 @@ const Topbar = ({ onToggleSidebar }) => {
                           className="w-full flex items-center justify-between gap-2 px-3.5 py-2 text-left hover:bg-surface transition-colors"
                         >
                           <span className="min-w-0">
-                            <span className="block text-xs font-semibold text-getmeds-blue truncate">{o.getmeds_order_id}</span>
-                            <span className="block text-[11px] text-ink-secondary truncate">{o.customer_name || '—'}</span>
+                            <span className="block text-xs font-semibold text-getmeds-blue truncate">
+                              {o.getmeds_order_id}{o.zoho_so_number ? <span className="font-normal text-ink-secondary"> · {o.zoho_so_number}</span> : null}
+                            </span>
+                            <span className="block text-[11px] text-ink-secondary truncate">
+                              {o.customer_name || '—'}{o.intake_receiver ? <> · <span className="text-ink-primary">Receiver: {o.intake_receiver}</span></> : null}
+                            </span>
                           </span>
                           <span className="shrink-0 text-[11px] font-medium text-ink-secondary">
                             ₱{(Number(o.total_amount) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}

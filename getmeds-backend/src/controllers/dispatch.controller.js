@@ -428,8 +428,17 @@ exports.getRecent = async (req, res, next) => {
     const CONFIRMED_PAGE_SIZE = 15;
     const confirmedPage = Math.max(parseInt(req.query.confirmedPage, 10) || 1, 1);
     const confirmedOffset = (confirmedPage - 1) * CONFIRMED_PAGE_SIZE;
-    const confirmedOrdersWhere = `dc.delivery_confirmed_at IS NOT NULL${scopeAnd}${whAnd}${today ? ' AND dc.delivery_confirmed_at >= ?' : ''}`;
-    const confirmedOrdersParams = [...scopeParams, ...whParams, ...(today ? [today] : [])];
+    // Sep 29, 2026: free-text search across the confirmed orders table — order ID,
+    // SO number, customer name, receiver, channel (division), confirmed-by name, and
+    // tracking number. ILIKE so the search is case-insensitive.
+    const rawSearch = String(req.query.confirmedSearch || '').trim();
+    const searchPattern = rawSearch ? `%${rawSearch}%` : null;
+    const searchAnd = searchPattern
+      ? ` AND (o.getmeds_order_id ILIKE ? OR o.zoho_so_number ILIKE ? OR c.name ILIKE ? OR o.intake_receiver ILIKE ? OR o.division ILIKE ? OR dc.delivery_confirmed_by ILIKE ? OR EXISTS (SELECT 1 FROM dispatch_records dr WHERE dr.order_id = o.id AND dr.tracking_number ILIKE ?))`
+      : '';
+    const searchParams = searchPattern ? Array(7).fill(searchPattern) : [];
+    const confirmedOrdersWhere = `dc.delivery_confirmed_at IS NOT NULL${scopeAnd}${whAnd}${today ? ' AND dc.delivery_confirmed_at >= ?' : ''}${searchAnd}`;
+    const confirmedOrdersParams = [...scopeParams, ...whParams, ...(today ? [today] : []), ...searchParams];
 
     const confirmedOrdersRows = await db.prepare(`
       SELECT ${columns} ${from}

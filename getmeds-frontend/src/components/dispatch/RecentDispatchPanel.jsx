@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
-import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle } from 'lucide-react';
+import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle, Search, X } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
@@ -179,13 +179,21 @@ const RecentDispatchPanel = ({
   // whenever a filter changes underneath it, same as every other paged list
   // on this page (DispatchQueuePage.jsx's own `page`).
   const [confirmedPage, setConfirmedPage] = useState(1);
-  useEffect(() => { setConfirmedPage(1); }, [warehouse, period]);
+  const [confirmedSearchInput, setConfirmedSearchInput] = useState('');
+  const [confirmedSearch, setConfirmedSearch] = useState('');
+  // Debounce the search input 350 ms before sending the query.
+  useEffect(() => {
+    const t = setTimeout(() => setConfirmedSearch(confirmedSearchInput.trim()), 350);
+    return () => clearTimeout(t);
+  }, [confirmedSearchInput]);
+  // Reset to page 1 whenever any filter changes.
+  useEffect(() => { setConfirmedPage(1); }, [warehouse, period, confirmedSearch]);
   const { data, isLoading } = useQuery({
-    queryKey: ['dispatch-recent', warehouse, period, confirmedPage],
+    queryKey: ['dispatch-recent', warehouse, period, confirmedPage, confirmedSearch],
     enabled: !heldView,
     queryFn: () =>
       client
-        .get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined, period: period || undefined, confirmedPage } })
+        .get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined, period: period || undefined, confirmedPage, ...(confirmedSearch ? { confirmedSearch } : {}) } })
         .then((r) => r.data?.data),
     placeholderData: keepPreviousData,
     refetchInterval: 30000
@@ -501,18 +509,47 @@ const RecentDispatchPanel = ({
         and paged since without the today-only cutoff it only grows. */}
     <div className="bg-white shadow rounded-lg border border-slate-200 overflow-hidden">
       <div className="px-4 py-3 border-b border-slate-200 bg-surface">
-        <h2 className="text-sm font-semibold text-ink-primary flex items-center gap-2">
-          <CalendarCheck2 className="w-4 h-4 text-getmeds-blue" />
-          Confirmed Orders
-          <span className={`min-w-[1.5rem] text-center rounded-full px-1.5 text-xs tabular-nums ${confirmedPagination?.total ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>
-            {confirmedPagination?.total ?? confirmedOrders.length}
-          </span>
-        </h2>
-        <p className="text-xs text-ink-secondary mt-0.5">
-          {today
-            ? 'Confirmed for delivery today, across the whole Dispatch team — newest first.'
-            : 'Confirmed for delivery, across the whole Dispatch team — newest first.'}
-        </p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-ink-primary flex items-center gap-2">
+              <CalendarCheck2 className="w-4 h-4 text-getmeds-blue" />
+              Confirmed Orders
+              <span className={`min-w-[1.5rem] text-center rounded-full px-1.5 text-xs tabular-nums ${confirmedPagination?.total ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>
+                {confirmedPagination?.total ?? confirmedOrders.length}
+              </span>
+              {confirmedSearch && confirmedPagination && (
+                <span className="text-xs font-normal text-ink-secondary">
+                  — {confirmedPagination.total.toLocaleString()} matching
+                </span>
+              )}
+            </h2>
+            <p className="text-xs text-ink-secondary mt-0.5">
+              {today
+                ? 'Confirmed for delivery today, across the whole Dispatch team — newest first.'
+                : 'Confirmed for delivery, across the whole Dispatch team — newest first.'}
+            </p>
+          </div>
+          <div className="relative shrink-0 mt-0.5">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-secondary pointer-events-none" />
+            <input
+              type="text"
+              value={confirmedSearchInput}
+              onChange={(e) => setConfirmedSearchInput(e.target.value)}
+              placeholder="Search orders…"
+              className="pl-8 pr-7 py-1.5 text-xs rounded-full border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-getmeds-blue/30 focus:border-getmeds-blue w-44"
+            />
+            {confirmedSearchInput && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => setConfirmedSearchInput('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-secondary hover:text-ink-primary"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
       </div>
       {isLoading ? loading : confirmedOrders.length === 0 ? (
         <Empty text={today ? 'Nothing confirmed for delivery yet today.' : 'Nothing confirmed for delivery yet.'} />
