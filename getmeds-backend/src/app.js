@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const errorHandler = require('./middleware/errorHandler');
 
 const authRoutes = require('./routes/auth.routes');
@@ -31,6 +32,12 @@ const searchRoutes = require('./routes/search.routes');
 const attachmentViewRoutes = require('./routes/attachmentView.routes');
 
 const app = express();
+
+// Sep 29, 2026: gzip all responses — reduces JSON sizes by 60-80%, which is
+// the primary lever for staying within Supabase's 5 GB/month egress limit.
+// Must sit before every other middleware so every response is compressed
+// regardless of which route handles it.
+app.use(compression());
 
 // Sep 2, 2026: both branches of this used to `callback(null, true)` — the
 // localhost check computed an answer and then allowed everything regardless,

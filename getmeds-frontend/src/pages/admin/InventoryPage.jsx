@@ -196,7 +196,9 @@ const InventoryPage = () => {
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['inventoryStatus'],
     queryFn: fetchInventoryStatus,
-    refetchInterval: 30000 // auto-refresh every 30s — cheap now, local-only
+    // refetchInterval removed — the 30s poll was generating ~12 GB/month in Supabase egress
+    // (3,446 products × ~500 bytes × every 30s × multiple users). Use the Refresh button or
+    // Quick/Full Sync buttons for manual refreshes.
   });
 
   // Mutations
