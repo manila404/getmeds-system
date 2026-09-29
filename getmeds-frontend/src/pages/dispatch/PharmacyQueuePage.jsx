@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Pill, RefreshCw, ShieldCheck, XCircle, CheckCircle2, Clock, RotateCcw } from 'lucide-react';
+import { Pill, RefreshCw, ShieldCheck, XCircle, CheckCircle2, Clock, RotateCcw, ChevronLeft, ChevronRight } from 'lucide-react';
 import toast from 'react-hot-toast';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
@@ -25,6 +25,7 @@ import { formatPHT } from '../../utils/dateUtils';
 
 const TABS = [
   { key: 'pending', label: 'Awaiting review', hint: 'Prescriptions nobody has reviewed yet, including replacements.' },
+  { key: 'needs_attention', label: 'Needs attention', hint: 'Orders with attachments but no prescription labeled (may be mislabeled), or where the MedRep noted they have no prescription. Resolves automatically once retagged or a decision is made.' },
   { key: 'rejected', label: 'Rejected', hint: 'Sent back to the MedRep. They come back under "Awaiting review" once replaced.' },
   { key: 'verified', label: 'Verified', hint: 'Cleared by the pharmacy, and not yet packed.' },
   { key: 'all_orders', label: 'All orders', hint: 'Every order of the six channels since Sep 12, 2026, with or without a prescription attached.' },
@@ -44,6 +45,29 @@ const STAGE_LABEL = {
 
 const peso = (n) => `₱${Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
 const errorText = (err, fallback) => err?.response?.data?.error?.message || err?.message || fallback;
+
+// Returns YYYY-MM-DD in PHT (UTC+8) for today + daysOffset.
+function phtDate(daysOffset = 0) {
+  const pht = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  const d = new Date(Date.UTC(pht.getUTCFullYear(), pht.getUTCMonth(), pht.getUTCDate() + daysOffset));
+  return d.toISOString().slice(0, 10);
+}
+
+const DATE_PRESETS = [
+  { key: 'all', label: 'All dates' },
+  { key: 'today', label: 'Today' },
+  { key: 'yesterday', label: 'Yesterday' },
+  { key: 'last7', label: 'Last 7 days' },
+  { key: 'custom', label: 'Custom…' },
+];
+
+function presetToDates(preset, customFrom, customTo) {
+  if (preset === 'today') return { from: phtDate(0), to: phtDate(0) };
+  if (preset === 'yesterday') return { from: phtDate(-1), to: phtDate(-1) };
+  if (preset === 'last7') return { from: phtDate(-6), to: phtDate(0) };
+  if (preset === 'custom') return { from: customFrom || '', to: customTo || '' };
+  return { from: '', to: '' };
+}
 
 /** Verify / Reject for one order. Used on the row and in the details view's footer. */
 const Decision = ({ order, canDecide, onDone }) => {
@@ -396,15 +420,32 @@ const FinancePill = ({ cleared }) =>
 const PharmacyQueuePage = () => {
   const [tab, setTab] = useState('pending');
   const [channel, setChannel] = useState('');
+  const [datePreset, setDatePreset] = useState('all');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [page, setPage] = useState(1);
   const [viewingId, setViewingId] = useState(null);
 
+  const { from: dateFrom, to: dateTo } = presetToDates(datePreset, customFrom, customTo);
+
+  const changeTab = useCallback((key) => { setTab(key); setPage(1); }, []);
+  const changeChannel = useCallback((c) => { setChannel(c); setPage(1); }, []);
+
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['pharmacy-queue', tab, channel],
-    queryFn: () => client.get('/api/dispatch/pharmacy/queue', { params: { state: tab, ...(channel ? { channel } : {}) } }).then((r) => r.data.data),
+    queryKey: ['pharmacy-queue', tab, channel, dateFrom, dateTo, page],
+    queryFn: () => client.get('/api/dispatch/pharmacy/queue', {
+      params: {
+        state: tab,
+        ...(channel ? { channel } : {}),
+        ...(dateFrom ? { date_from: dateFrom } : {}),
+        ...(dateTo ? { date_to: dateTo } : {}),
+        page,
+      },
+    }).then((r) => r.data.data),
     refetchInterval: 30000,
   });
   const orders = data?.orders || [];
-  const counts = data?.counts || { pending: 0, rejected: 0, verified: 0, all_orders: 0 };
+  const counts = data?.counts || { pending: 0, rejected: 0, verified: 0, all_orders: 0, needs_attention: 0 };
   const canDecide = Boolean(data?.can_decide);
   const viewing = orders.find((o) => o.id === viewingId) || null;
 
@@ -439,7 +480,7 @@ const PharmacyQueuePage = () => {
             role="tab"
             aria-selected={tab === t.key}
             title={t.hint}
-            onClick={() => setTab(t.key)}
+            onClick={() => changeTab(t.key)}
             className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
               tab === t.key ? 'bg-getmeds-blue text-white border-getmeds-blue' : 'bg-white text-ink-secondary border-slate-200 hover:bg-surface hover:text-ink-primary'
             }`}
@@ -457,7 +498,7 @@ const PharmacyQueuePage = () => {
             key={c || 'all'}
             type="button"
             aria-pressed={channel === c}
-            onClick={() => setChannel(c)}
+            onClick={() => changeChannel(c)}
             className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition-colors ${
               channel === c ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-ink-secondary border-slate-200 hover:bg-surface hover:text-ink-primary'
             }`}
@@ -465,6 +506,34 @@ const PharmacyQueuePage = () => {
             {c || 'All'}
           </button>
         ))}
+
+        <span className="text-slate-300 mx-1 select-none">|</span>
+        <span className="text-[11px] font-bold uppercase tracking-wide text-ink-secondary mr-1">Date</span>
+        <select
+          value={datePreset}
+          onChange={(e) => { setDatePreset(e.target.value); setPage(1); }}
+          className="px-2.5 py-1 rounded-full text-xs font-semibold border border-slate-200 bg-white text-ink-secondary focus:outline-none focus:ring-1 focus:ring-getmeds-blue cursor-pointer"
+        >
+          {DATE_PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+        </select>
+        {datePreset === 'custom' && (
+          <>
+            <input
+              type="date"
+              value={customFrom}
+              onChange={(e) => setCustomFrom(e.target.value)}
+              className="px-2 py-1 rounded-md text-xs border border-slate-200 bg-white text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+            />
+            <span className="text-xs text-ink-secondary">to</span>
+            <input
+              type="date"
+              value={customTo}
+              min={customFrom}
+              onChange={(e) => setCustomTo(e.target.value)}
+              className="px-2 py-1 rounded-md text-xs border border-slate-200 bg-white text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+            />
+          </>
+        )}
       </div>
 
       <div className="bg-white shadow rounded-lg border border-slate-200 overflow-hidden">
@@ -474,7 +543,7 @@ const PharmacyQueuePage = () => {
           <div className="text-center py-12 text-ink-secondary">
             <CheckCircle2 className="w-10 h-10 mx-auto mb-2 text-pharmacy-green" />
             <p className="text-sm">
-              {tab === 'pending' ? 'No prescription is waiting for review.' : tab === 'rejected' ? 'No rejected prescription is waiting on a MedRep.' : tab === 'verified' ? 'Nothing verified is waiting to be packed.' : 'No orders match.'}
+              {tab === 'pending' ? 'No prescription is waiting for review.' : tab === 'needs_attention' ? 'Nothing needs attention right now.' : tab === 'rejected' ? 'No rejected prescription is waiting on a MedRep.' : tab === 'verified' ? 'Nothing verified is waiting to be packed.' : 'No orders match.'}
             </p>
           </div>
         ) : (
@@ -559,11 +628,14 @@ const PharmacyQueuePage = () => {
                   ))}
 
                   {/* Sep 28, 2026: the card itself now opens the order — these
-                      buttons stop that click from also firing. */}
-                  {o.reviewable !== false && (
+                      buttons stop that click from also firing.
+                      Sep 29, 2026: NoRxActions is shown outside the reviewable
+                      gate on the Needs Attention tab so pharmacy can act on
+                      orders at any status (pre-approval, post-ship, etc.). */}
+                  {(o.reviewable !== false || tab === 'needs_attention') && (
                     <div onClick={(e) => e.stopPropagation()}>
-                      <Decision order={o} canDecide={canDecide} />
-                      <ReReview order={o} canDecide={canDecide} />
+                      {o.reviewable !== false && <Decision order={o} canDecide={canDecide} />}
+                      {o.reviewable !== false && <ReReview order={o} canDecide={canDecide} />}
                       {o.prescriptions.length === 0 && o.rx_state !== 'not_required' && (
                         <NoRxActions order={o} canDecide={canDecide} />
                       )}
@@ -576,8 +648,53 @@ const PharmacyQueuePage = () => {
         )}
       </div>
 
-      {data?.truncated && (
-        <p className="text-xs text-ink-secondary">Showing the newest {orders.length} of {counts.all_orders} orders. Pick a channel to narrow the list.</p>
+      {data?.pagination && data.pagination.pages > 1 && (
+        <div className="flex items-center justify-between gap-3 py-2">
+          <p className="text-xs text-ink-secondary">
+            Page {data.pagination.page} of {data.pagination.pages} · {data.pagination.total.toLocaleString()} orders
+          </p>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-medium text-ink-secondary disabled:opacity-40 hover:bg-surface disabled:cursor-default"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" /> Prev
+            </button>
+            {Array.from({ length: data.pagination.pages }, (_, i) => i + 1)
+              .filter((p) => p === 1 || p === data.pagination.pages || Math.abs(p - page) <= 2)
+              .reduce((acc, p, idx, arr) => {
+                if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…');
+                acc.push(p);
+                return acc;
+              }, [])
+              .map((item, idx) =>
+                item === '…' ? (
+                  <span key={`ellipsis-${idx}`} className="px-1.5 text-xs text-ink-secondary select-none">…</span>
+                ) : (
+                  <button
+                    key={item}
+                    type="button"
+                    onClick={() => setPage(item)}
+                    className={`min-w-[30px] px-2 py-1.5 rounded-md border text-xs font-semibold transition-colors ${
+                      item === page ? 'bg-getmeds-blue text-white border-getmeds-blue' : 'bg-white text-ink-secondary border-slate-200 hover:bg-surface'
+                    }`}
+                  >
+                    {item}
+                  </button>
+                )
+              )}
+            <button
+              type="button"
+              disabled={page >= data.pagination.pages}
+              onClick={() => setPage((p) => Math.min(data.pagination.pages, p + 1))}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-medium text-ink-secondary disabled:opacity-40 hover:bg-surface disabled:cursor-default"
+            >
+              Next <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
       )}
 
       {viewing && (
@@ -585,10 +702,10 @@ const PharmacyQueuePage = () => {
           orderId={viewing.id}
           onClose={() => setViewingId(null)}
           footer={
-            viewing.reviewable !== false ? (
+            (viewing.reviewable !== false || tab === 'needs_attention') ? (
               <div className="w-full space-y-2">
-                <Decision order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
-                <ReReview order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
+                {viewing.reviewable !== false && <Decision order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />}
+                {viewing.reviewable !== false && <ReReview order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />}
                 {viewing.prescriptions.length === 0 && viewing.rx_state !== 'not_required' && (
                   <NoRxActions order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
                 )}

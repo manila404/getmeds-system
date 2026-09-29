@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
-import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight } from 'lucide-react';
+import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
@@ -37,6 +37,13 @@ const timeAgo = (iso) => {
   if (hours < 24) return `${hours}h ago`;
   return `${Math.round(hours / 24)}d ago`;
 };
+
+// Sep 29, 2026: divisions that fall under Pharmacy verification.
+// An order in one of these divisions with rx_state !== 'verified' / 'not_required'
+// gets a ⚠️ warning on the Dispatch board so Dispatch knows not to ship it yet.
+const PHARMACY_DIVISIONS = new Set(['HOS', 'TeleSales', 'TeleSales Anesthesia', 'B&B', 'STC', 'URO', 'B2C', 'MD Telesales']);
+const rxUnverified = (o) =>
+  PHARMACY_DIVISIONS.has(o.division) && o.rx_state !== 'verified' && o.rx_state !== 'not_required';
 
 const STAGE_LABEL = {
   ready_for_draft_invoice: 'Needs invoice',
@@ -319,6 +326,17 @@ const RecentDispatchPanel = ({
                     <Opener order={o} onOpen={onOpen}>
                       <p className="text-sm font-mono font-semibold text-getmeds-blue">
                         {o.getmeds_order_id}
+                        {/* Sep 29, 2026: ⚠️ for pharmacy-channel orders not yet
+                            verified — appears whenever rx_state is not 'verified'
+                            or 'not_required', so Dispatch knows not to ship yet. */}
+                        {rxUnverified(o) && (
+                          <span
+                            title="⚠️ Prescription Business — Rx not yet verified by Pharmacy. Do not ship until cleared."
+                            className="inline-flex items-center ml-1.5 align-middle text-amber-500"
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5" />
+                          </span>
+                        )}
                         {/* Sep 28, 2026: a tag, not a banner — the full wording
                             ("Finance Confirmed — Rx Rejected, waiting for
                             replacement") is now the tag's hover title, and
@@ -394,6 +412,14 @@ const RecentDispatchPanel = ({
                     <Opener order={o} onOpen={onOpen}>
                       <p className="text-sm font-mono font-semibold text-getmeds-blue">
                         {o.getmeds_order_id}<WarehouseTag order={o} />
+                        {rxUnverified(o) && (
+                          <span
+                            title="⚠️ Prescription Business — Rx not yet verified by Pharmacy. Do not ship until cleared."
+                            className="inline-flex items-center ml-1.5 align-middle text-amber-500"
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5" />
+                          </span>
+                        )}
                         {o.rx_badge && <RxBadge badge={o.rx_badge} compact />}
                       </p>
                       <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>

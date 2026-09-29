@@ -86,11 +86,33 @@ exports.getQueue = async (req, res, next) => {
     const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
     const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
     const excludeDeleted = (await hasColumn('payment_proofs', 'deleted_at')) ? ' AND p.deleted_at IS NULL' : '';
+    // Same condition without the `p.` alias — used in subqueries that re-alias.
+    const excludeDeletedNoAlias = excludeDeleted ? ' AND deleted_at IS NULL' : '';
+
+    // Sep 29, 2026: "Needs attention" tab — orders in the all-orders set that have
+    // no prescription filed yet AND either have suspicious (non-Rx) attachments OR
+    // carry a MedRep no-rx-reason note, AND pharmacy hasn't made a decision yet.
+    // No extra params — all ? markers come from allOrdersParams.
+    const needsAttentionAnd = `
+  AND NOT EXISTS (SELECT 1 FROM payment_proofs p WHERE p.order_id = o.id AND p.file_type = '${RX_FILE_TYPE}'${excludeDeletedNoAlias})
+  AND o.rx_not_required_at IS NULL
+  AND (
+    EXISTS (SELECT 1 FROM payment_proofs p WHERE p.order_id = o.id AND p.file_type != '${RX_FILE_TYPE}' AND p.file_type != 'dispatch_proof'${excludeDeletedNoAlias})
+    OR o.no_rx_reason IS NOT NULL
+  )`;
 
     // Channel pill: one of the six, or none. It narrows every tab.
     const channel = Object.keys(PHARMACY_CHANNELS).find((k) => k.toLowerCase() === String(req.query.channel || '').toLowerCase()) || null;
     const channelAnd = channel ? ' AND o.division = ANY(?)' : '';
     const channelParams = channel ? [PHARMACY_CHANNELS[channel]] : [];
+
+    // Date filter — frontend sends YYYY-MM-DD strings in PHT; backend converts to UTC.
+    const rawDateFrom = req.query.date_from ? String(req.query.date_from) : null;
+    const rawDateTo = req.query.date_to ? String(req.query.date_to) : null;
+    const dateFromUtc = rawDateFrom ? new Date(rawDateFrom + 'T00:00:00+08:00').toISOString() : null;
+    const dateToUtc = rawDateTo ? new Date(rawDateTo + 'T23:59:59+08:00').toISOString() : null;
+    const dateAnd = (dateFromUtc ? ' AND o.created_at >= ?' : '') + (dateToUtc ? ' AND o.created_at <= ?' : '');
+    const dateParams = [...(dateFromUtc ? [dateFromUtc] : []), ...(dateToUtc ? [dateToUtc] : [])];
 
     const columns = `o.id, o.getmeds_order_id, o.status, o.division, o.total_amount, o.created_at, o.updated_at,
                 o.zoho_so_number, o.delivery_notes, o.no_rx_reason,
@@ -112,11 +134,11 @@ exports.getQueue = async (req, res, next) => {
                  -- Sep 28, 2026: Pharmacy said this one needs no prescription
                  -- (noRxDecision) — it belongs in the queue same as any other
                  -- decided order, not only in "All orders".
-                 OR o.rx_not_required_at IS NOT NULL)${channelAnd}${scopeAnd}
+                 OR o.rx_not_required_at IS NOT NULL)${channelAnd}${dateAnd}${scopeAnd}
           ORDER BY o.created_at DESC
           LIMIT ${QUEUE_CAP}`
       )
-      .all([PHARMACY_STATUSES, PHARMACY_STATUSES, ...channelParams, ...scopeParams]);
+      .all([PHARMACY_STATUSES, PHARMACY_STATUSES, ...channelParams, ...dateParams, ...scopeParams]);
 
     // "All orders": every order of the six channels, whether or not a prescription
     // is attached, so the pharmacist can look at the items and notes and decide if
@@ -126,17 +148,29 @@ exports.getQueue = async (req, res, next) => {
             AND NOT (${importedSql('o')})
             AND o.created_at >= ?
             AND NOT (o.status = ANY(?))
-            AND o.division = ANY(?)${channelAnd}${scopeAnd}`;
-    const allOrdersParams = [ALL_ORDERS_SINCE, ALL_ORDERS_EXCLUDED_STATUSES, ALL_ORDERS_DIVISIONS, ...channelParams, ...scopeParams];
+            AND o.division = ANY(?)${channelAnd}${dateAnd}${scopeAnd}`;
+    const allOrdersParams = [ALL_ORDERS_SINCE, ALL_ORDERS_EXCLUDED_STATUSES, ALL_ORDERS_DIVISIONS, ...channelParams, ...dateParams, ...scopeParams];
     const allOrdersCount = Number(
       (await db.prepare(`SELECT COUNT(*) AS n ${allOrdersSql}`).get(allOrdersParams)).n
+    );
+    const needsAttentionCount = Number(
+      (await db.prepare(`SELECT COUNT(*) AS n ${allOrdersSql}${needsAttentionAnd}`).get(allOrdersParams)).n
     );
 
     const wanted = String(req.query.state || 'pending').toLowerCase();
     const wantAllOrders = wanted === 'all_orders';
+    const wantNeedsAttention = wanted === 'needs_attention';
+
+    // Pagination — only for the two large paginated tabs.
+    const PER_PAGE = 25;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const offset = (page - 1) * PER_PAGE;
+
     const listed = wantAllOrders
-      ? await db.prepare(`SELECT ${columns} ${allOrdersSql} ORDER BY o.created_at DESC LIMIT ${QUEUE_CAP}`).all(allOrdersParams)
-      : orders;
+      ? await db.prepare(`SELECT ${columns} ${allOrdersSql} ORDER BY o.created_at DESC LIMIT ${PER_PAGE} OFFSET ${offset}`).all(allOrdersParams)
+      : wantNeedsAttention
+        ? await db.prepare(`SELECT ${columns} ${allOrdersSql}${needsAttentionAnd} ORDER BY o.created_at DESC LIMIT ${PER_PAGE} OFFSET ${offset}`).all(allOrdersParams)
+        : orders;
 
     const listedIds = [...new Set([...orders, ...listed].map((o) => o.id))];
     const summaries = await rxSummaries(listedIds);
@@ -147,7 +181,6 @@ exports.getQueue = async (req, res, next) => {
     // suspicious_attachments flag for the amber badge on the All Orders tab.
     const suspiciousAttachmentIds = new Set();
     if (listedIds.length) {
-      const excludeDeletedNoAlias = excludeDeleted ? ' AND deleted_at IS NULL' : '';
       const suspRows = await db
         .prepare(
           `SELECT DISTINCT order_id FROM payment_proofs
@@ -204,17 +237,23 @@ exports.getQueue = async (req, res, next) => {
     // Pharmacy's decision the same as an actual verify, so it counts and
     // filters as part of the Verified tab rather than needing a fourth tab.
     const bucketOf = (state) => (state === 'not_required' ? 'verified' : state);
-    const counts = { pending: 0, rejected: 0, verified: 0, all: rxRows.length, all_orders: allOrdersCount };
+    const counts = { pending: 0, rejected: 0, verified: 0, all: rxRows.length, all_orders: allOrdersCount, needs_attention: needsAttentionCount };
     for (const r of rxRows) {
       const bucket = bucketOf(r.rx_state);
       if (STATES.includes(bucket)) counts[bucket] += 1;
     }
 
-    const shown = wantAllOrders
+    const shown = (wantAllOrders || wantNeedsAttention)
       ? listed.map(shape)
       : wanted === 'all'
         ? rxRows
         : rxRows.filter((r) => bucketOf(r.rx_state) === wanted);
+
+    // Pagination metadata for the two large tabs.
+    const paginatedTotal = wantAllOrders ? allOrdersCount : wantNeedsAttention ? needsAttentionCount : null;
+    const pagination = paginatedTotal !== null
+      ? { page, per_page: PER_PAGE, total: paginatedTotal, pages: Math.max(1, Math.ceil(paginatedTotal / PER_PAGE)) }
+      : null;
 
     res.json({
       success: true,
@@ -224,7 +263,7 @@ exports.getQueue = async (req, res, next) => {
         can_decide: mayDecide(req.user),
         channels: Object.keys(PHARMACY_CHANNELS),
         channel,
-        truncated: wantAllOrders && allOrdersCount > listed.length,
+        pagination,
       },
     });
   } catch (err) {
@@ -550,13 +589,13 @@ exports.noRxDecision = async (req, res, next) => {
 
     const order = await loadOrder(req.params.id);
     if (!order) return fail(res, 404, 'NOT_FOUND', 'Order not found');
-    if (!(await isPharmacyReviewable(order))) {
-      return fail(
-        res,
-        409,
-        'NOT_IN_QUEUE',
-        `Prescriptions are reviewed once the order is approved and until it is packed. This one is at "${order.status}".`
-      );
+    // Sep 29, 2026: noRxDecision is intentionally not gated on isPharmacyReviewable.
+    // The "Needs Attention" tab surfaces orders at any status (including pre-approval
+    // and post-ship) that have mislabeled attachments or a MedRep no-rx-reason note.
+    // Pharmacy should be able to mark those "not required" or request a prescription
+    // regardless of where the order currently sits in the pipeline.
+    if (order.status === 'deleted') {
+      return fail(res, 409, 'NOT_FOUND', 'This order has been deleted.');
     }
 
     const rows = await prescriptionRows([order.id]);
