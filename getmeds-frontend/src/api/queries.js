@@ -111,10 +111,19 @@ export const fetchItemBatches = async (itemId) => {
 };
 
 /**
- * Fetch live inventory synchronization status
+ * Fetch live inventory synchronization status.
+ *
+ * Sep 29, 2026: now accepts { search, page, limit } — filtering and
+ * pagination moved to the backend so only the current page of 25 rows
+ * (not all 3,446 products) travels over the wire per request.
  */
-export const fetchInventoryStatus = async () => {
-  const res = await client.get('/api/inventory/status');
+export const fetchInventoryStatus = async ({ search = '', page = 1, limit = 25 } = {}) => {
+  const qs = new URLSearchParams();
+  if (search) qs.set('search', search);
+  if (page > 1)    qs.set('page',  String(page));
+  if (limit !== 25) qs.set('limit', String(limit));
+  const query = qs.toString();
+  const res = await client.get(`/api/inventory/status${query ? `?${query}` : ''}`);
   return res.data;
 };
 

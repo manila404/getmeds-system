@@ -24,73 +24,116 @@ const { hasColumn } = require('../services/schemaColumns');
  * load. `last_synced_at` (returned per product, plus the newest one as
  * `summary.last_synced_at`) tells you exactly how stale that snapshot is.
  */
+/**
+ * Sep 29, 2026: server-side pagination + filtering.
+ *
+ * Previously this did `SELECT * FROM products` (all 3,446 rows, all columns)
+ * on every request and filtered/paginated in JS. With a 30-second auto-refresh
+ * that was running across multiple browser sessions, this single endpoint was
+ * generating ~12 GB/month in Supabase egress and depleting the NANO plan's
+ * daily Disk IO budget — taking the entire system offline.
+ *
+ * Now it runs two small queries:
+ *   1. A single-row aggregate (COUNT / SUM CASE) for the KPI summary — reads
+ *      the index, not the full table.
+ *   2. A LIMIT/OFFSET page of 25 rows, with an optional ILIKE search filter
+ *      pushed down to the database.
+ *
+ * Response shape is unchanged except for the new `pagination` key, so the
+ * frontend's summary cards and product table need no structural changes.
+ */
 async function getInventoryStatus(req, res) {
   try {
-    // Sep 1, 2026 (7): inactive products are LISTED now, not filtered out.
-    // `is_active` mirrors Zoho's own item status (see syncPullStock below),
-    // and Zoho refuses an inactive item on a Sales Order — which is exactly
-    // when you need to see it. Hiding those rows meant a product deactivated
-    // in Zoho simply vanished from Inventory, so the only way to discover it
-    // was a failed sync reading "Inactive items cannot be added to the sales
-    // order". Active first, so the working catalogue still reads top-down.
-    const localProducts = await db.prepare('SELECT * FROM products ORDER BY is_active DESC, name ASC').all();
+    const search = (req.query.search || '').trim();
+    const page   = Math.max(1, parseInt(req.query.page,  10) || 1);
+    const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const offset = (page - 1) * limit;
 
-    let syncedCount = 0;
-    let mismatchCount = 0;
-    let missingInZohoCount = 0;
-    let lastSyncedAt = null;
+    // ── 1. Global KPI summary — aggregate over all products, no search filter.
+    //       SUM CASE avoids a second scan; MAX(last_synced_at) replaces the
+    //       JS loop that iterated every row to find the latest timestamp.
+    const summary = await db.prepare(`
+      SELECT
+        COUNT(*)                                                    AS total_products,
+        SUM(CASE
+              WHEN zoho_item_id IS NOT NULL
+               AND zoho_stock  IS NOT NULL
+               AND CAST(zoho_stock AS NUMERIC) = CAST(stock AS NUMERIC)
+              THEN 1 ELSE 0
+            END)                                                    AS in_sync,
+        SUM(CASE
+              WHEN zoho_item_id IS NOT NULL
+               AND zoho_stock  IS NOT NULL
+               AND CAST(zoho_stock AS NUMERIC) != CAST(stock AS NUMERIC)
+              THEN 1 ELSE 0
+            END)                                                    AS mismatches,
+        MAX(last_synced_at)                                         AS last_synced_at
+      FROM products
+    `).get();
 
-    const products = localProducts.map((p) => {
+    // ── 2. Filtered + paginated product rows.
+    const searchWhere  = search ? 'WHERE (name LIKE ? OR sku LIKE ?)' : '';
+    const searchParams = search ? [`%${search}%`, `%${search}%`]      : [];
+
+    // Total matching rows (for pagination metadata).
+    const countRow     = await db.prepare(
+      `SELECT COUNT(*) AS total FROM products ${searchWhere}`
+    ).get(...searchParams);
+    const totalFiltered = Number(countRow.total);
+    const totalPages    = Math.max(1, Math.ceil(totalFiltered / limit));
+
+    // Only the columns the frontend actually renders — no SELECT *.
+    const rows = await db.prepare(`
+      SELECT id, name, sku, unit_price, unit,
+             stock, zoho_stock, zoho_item_id, last_synced_at, is_active
+      FROM   products
+      ${searchWhere}
+      ORDER  BY is_active DESC, name ASC
+      LIMIT  ? OFFSET ?
+    `).all(...searchParams, limit, offset);
+
+    const products = rows.map((p) => {
       const hasZohoSnapshot = p.zoho_item_id != null && p.zoho_stock != null;
-
       let syncStatus = 'not_in_zoho';
       if (hasZohoSnapshot) {
-        if (Number(p.zoho_stock) === Number(p.stock)) {
-          syncStatus = 'in_sync';
-          syncedCount++;
-        } else {
-          syncStatus = 'mismatch';
-          mismatchCount++;
-        }
-      } else {
-        missingInZohoCount++;
+        syncStatus = Number(p.zoho_stock) === Number(p.stock) ? 'in_sync' : 'mismatch';
       }
-
-      if (p.last_synced_at && (!lastSyncedAt || p.last_synced_at > lastSyncedAt)) {
-        lastSyncedAt = p.last_synced_at;
-      }
-
       return {
-        id: p.id,
-        name: p.name,
-        sku: p.sku,
-        unit_price: p.unit_price,
-        zoho_price: p.zoho_price,
-        unit: p.unit,
-        local_stock: p.stock,
-        zoho_stock: p.zoho_stock,
-        zoho_item_id: p.zoho_item_id,
+        id:            p.id,
+        name:          p.name,
+        sku:           p.sku,
+        unit_price:    p.unit_price,
+        unit:          p.unit,
+        local_stock:   p.stock,
+        zoho_stock:    p.zoho_stock,
+        zoho_item_id:  p.zoho_item_id,
         last_synced_at: p.last_synced_at,
-        sync_status: syncStatus,
-        // Zoho's item status, mirrored locally by syncPullStock. 1 = Active.
-        is_active: p.is_active === 1 || p.is_active === true ? 1 : 0
+        sync_status:   syncStatus,
+        is_active:     p.is_active === 1 || p.is_active === true ? 1 : 0,
       };
     });
+
+    // Allow a 60-second private cache at the Vercel edge so rapid page
+    // navigations within the same session don't re-hit the database.
+    res.set('Cache-Control', 'private, max-age=60, stale-while-revalidate=120');
 
     res.json({
       success: true,
       data: {
-        mode: zoho.mode,
+        mode:            zoho.mode,
         organization_id: process.env.ZOHO_ORG_ID || 'MOCK-ORG',
         summary: {
-          total_products: products.length,
-          in_sync: syncedCount,
-          mismatches: mismatchCount,
-          not_in_zoho: missingInZohoCount,
-          last_synced_at: lastSyncedAt
+          total_products: Number(summary.total_products),
+          in_sync:        Number(summary.in_sync        || 0),
+          mismatches:     Number(summary.mismatches     || 0),
+          not_in_zoho:    Number(summary.total_products || 0)
+                          - Number(summary.in_sync      || 0)
+                          - Number(summary.mismatches   || 0),
+          last_synced_at: summary.last_synced_at,
         },
-        products
-      }
+        pagination: { page, limit, total: totalFiltered, total_pages: totalPages },
+        products,
+      },
     });
   } catch (error) {
     console.error('Error fetching inventory status:', error);

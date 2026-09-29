@@ -182,23 +182,24 @@ const ItemDetailPanel = ({ itemId }) => {
 const InventoryPage = () => {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [expandedId, setExpandedId] = useState(null);
 
-  // Fetch Inventory Status
-  // Aug 27, 2026 (2): this now reads a purely local snapshot — the
-  // backend no longer calls Zoho on every request (see
-  // inventory.controller.js's getInventoryStatus) — so a 30s auto-refresh
-  // costs nothing and just keeps the "Diff (Δ...)" flags current if
-  // someone adjusts stock locally elsewhere. "Zoho Stock" below is only
-  // ever as fresh as the last time "Pull from Zoho" ran — see the
-  // last-synced note next to that button.
+  // Debounce search input so we don't fire a backend query on every keystroke.
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 400);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Sep 29, 2026: search and page are now server-side. The backend returns only
+  // the current 25-row page — not all 3,446 products — so changing either param
+  // triggers a new, small fetch rather than a client-side re-slice of a large array.
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['inventoryStatus'],
-    queryFn: fetchInventoryStatus,
-    // refetchInterval removed — the 30s poll was generating ~12 GB/month in Supabase egress
-    // (3,446 products × ~500 bytes × every 30s × multiple users). Use the Refresh button or
-    // Quick/Full Sync buttons for manual refreshes.
+    queryKey: ['inventoryStatus', debouncedSearch, page],
+    queryFn: () => fetchInventoryStatus({ search: debouncedSearch, page }),
+    staleTime: 1000 * 60 * 5,
+    keepPreviousData: true,
   });
 
   // Mutations
@@ -233,26 +234,22 @@ const InventoryPage = () => {
   const syncBusy = isRunning('inventory') || isStarting;
 
   const inventoryData = data?.data || {};
-  const products = inventoryData.products || [];
-  const summary = inventoryData.summary || {};
-  const mode = inventoryData.mode || 'mock';
-  const orgId = inventoryData.organization_id || '936158981';
+  const pagedProducts = inventoryData.products || [];
+  const summary       = inventoryData.summary    || {};
+  const pagination    = inventoryData.pagination || {};
+  const mode          = inventoryData.mode       || 'mock';
+  const orgId         = inventoryData.organization_id || '936158981';
 
-  const filteredProducts = products.filter(
-    (p) =>
-      p.name.toLowerCase().includes(search.toLowerCase()) ||
-      p.sku.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / PAGE_SIZE));
-  const safePage = Math.min(page, totalPages);
-  const pageStartIdx = (safePage - 1) * PAGE_SIZE;
-  const pagedProducts = filteredProducts.slice(pageStartIdx, pageStartIdx + PAGE_SIZE);
+  const totalPages  = pagination.total_pages || 1;
+  const safePage    = Math.min(page, totalPages);
+  const totalItems  = pagination.total       || 0;
+  const pageStart   = totalItems === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
+  const pageEnd     = Math.min(safePage * PAGE_SIZE, totalItems);
 
   const handleSearchChange = (e) => {
     setSearch(e.target.value);
-    setPage(1); // reset to page 1 whenever the filter changes
-    setExpandedId(null); // collapse any open row when search changes
+    setPage(1);      // reset page on new search
+    setExpandedId(null);
   };
 
   return (
@@ -400,9 +397,9 @@ const InventoryPage = () => {
             />
           </div>
           <div className="text-xs text-slate-500">
-            {filteredProducts.length > 0 ? (
+            {totalItems > 0 ? (
               <>
-                Showing <strong>{pageStartIdx + 1}–{Math.min(pageStartIdx + PAGE_SIZE, filteredProducts.length)}</strong> of <strong>{filteredProducts.length}</strong> items
+                Showing <strong>{pageStart}–{pageEnd}</strong> of <strong>{totalItems}</strong> items
               </>
             ) : (
               <>Showing <strong>0</strong> items</>
@@ -433,7 +430,7 @@ const InventoryPage = () => {
               ) : pagedProducts.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-8 text-center text-slate-400">
-                    No products found matching "{search}"
+                    No products found matching "{debouncedSearch}"
                   </td>
                 </tr>
               ) : (
@@ -544,10 +541,10 @@ const InventoryPage = () => {
         </div>
 
         {/* Pagination */}
-        {filteredProducts.length > PAGE_SIZE && (
+        {totalPages > 1 && (
           <div className="p-3 border-t border-slate-100 flex items-center justify-between gap-3 bg-slate-50/50">
             <span className="text-xs text-slate-500">
-              Page <strong>{safePage}</strong> of <strong>{totalPages}</strong>
+              Page <strong>{page}</strong> of <strong>{totalPages}</strong>
             </span>
             <div className="flex items-center gap-2">
               <button
