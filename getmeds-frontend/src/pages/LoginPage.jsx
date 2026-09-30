@@ -28,7 +28,7 @@ const LoginPage = () => {
       await login(email, password);
       navigate('/');
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to log in. Please check your credentials.');
+      setError(err.response?.data?.error?.message || err.response?.data?.message || 'Failed to log in. Please check your credentials.');
     } finally {
       setIsLoading(false);
     }
