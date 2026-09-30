@@ -109,7 +109,12 @@ exports.getQueue = async (req, res, next) => {
     const rawDateTo = req.query.date_to ? String(req.query.date_to) : null;
     const dateFromUtc = rawDateFrom ? new Date(rawDateFrom + 'T00:00:00+08:00').toISOString() : null;
     const dateToUtc = rawDateTo ? new Date(rawDateTo + 'T23:59:59+08:00').toISOString() : null;
-    const dateAnd = (dateFromUtc ? ' AND o.created_at >= ?' : '') + (dateToUtc ? ' AND o.created_at <= ?' : '');
+    // Use finance confirmation date when available (it's when the order actively
+    // enters Pharmacy's responsibility); fall back to creation date for orders
+    // not yet confirmed by Finance. This matches Dispatch's own date filtering
+    // so "Today" in Pharmacy and Dispatch refer to the same operational moment.
+    const dateAnd = (dateFromUtc ? ' AND COALESCE(o.primary_finance_verified_at, o.created_at) >= ?' : '') +
+                    (dateToUtc   ? ' AND COALESCE(o.primary_finance_verified_at, o.created_at) <= ?' : '');
     const dateParams = [...(dateFromUtc ? [dateFromUtc] : []), ...(dateToUtc ? [dateToUtc] : [])];
 
     const columns = `o.id, o.getmeds_order_id, o.status, o.division, o.total_amount, o.created_at, o.updated_at,
@@ -142,8 +147,7 @@ exports.getQueue = async (req, res, next) => {
     // is attached, so the pharmacist can look at the items and notes and decide if
     // one is needed. Native GM- orders only, from Sep 12, 2026.
     const allOrdersSql = `${joins}
-          WHERE o.getmeds_order_id LIKE 'GM-%'
-            AND NOT (${importedSql('o')})
+          WHERE NOT (${importedSql('o')})
             AND o.created_at >= ?
             AND NOT (o.status = ANY(?))
             AND o.division = ANY(?)${channelAnd}${dateAnd}${scopeAnd}`;
