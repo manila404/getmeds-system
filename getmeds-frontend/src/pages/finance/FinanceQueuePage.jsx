@@ -129,7 +129,7 @@ const FinanceQueuePage = () => {
 
   const view  = searchParams.get('view')   || null;         // 'mine' | 'reports' | null
   const stage = searchParams.get('stage')  || 'actionable'; // default to actionable
-  const source = searchParams.get('source') || 'all';       // 'all' | 'getmeds' | 'zoho'
+  const source = searchParams.get('source') || 'getmeds';   // 'getmeds' | 'zoho' | 'all'
   const search = searchParams.get('q')     || '';
   const page   = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
 
@@ -451,20 +451,24 @@ const FinanceQueuePage = () => {
               />
             </div>
 
-            {/* Source filter */}
+            {/* Source filter — GetMeds is the default */}
             <div className="flex items-center rounded-md border border-slate-200 overflow-hidden text-xs font-semibold">
-              {['all', 'getmeds', 'zoho'].map((s) => (
+              {[
+                { key: 'getmeds', label: 'GetMeds' },
+                { key: 'zoho',    label: 'Zoho' },
+                { key: 'all',     label: 'All' },
+              ].map(({ key, label }) => (
                 <button
-                  key={s}
+                  key={key}
                   type="button"
-                  onClick={() => setParam('source', s === 'all' ? null : s, true)}
+                  onClick={() => setParam('source', key === 'getmeds' ? null : key, true)}
                   className={`px-3 py-1.5 transition-colors ${
-                    source === s
+                    source === key
                       ? 'bg-getmeds-blue text-white'
                       : 'bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'
                   }`}
                 >
-                  {s === 'all' ? 'All' : s === 'getmeds' ? 'GetMeds' : 'Zoho'}
+                  {label}
                 </button>
               ))}
             </div>
