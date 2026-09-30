@@ -543,7 +543,7 @@ const Section = ({ title, children }) => (
 // Sep 15, 2026: `footer` — Dispatch opens this same panel as the order's
 // receipt (what to prepare), and puts its own actions there instead of
 // Finance's Confirm. Without `onConfirm` no Confirm button can appear anyway.
-const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, workflowV2 = false, footer = null }) => {
+const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfirm = null, confirming, workflowV2 = false, footer = null }) => {
   const detail = useQuery({
     queryKey: ['finance-order-detail', orderId],
     queryFn: () => client.get(`/api/orders/${orderId}`).then((r) => r.data),
