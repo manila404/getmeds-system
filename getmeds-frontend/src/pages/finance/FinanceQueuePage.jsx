@@ -43,6 +43,37 @@ function relativeTime(isoStr) {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+function getSummaryDates(period, cFrom, cTo) {
+  const PHT_MS = 8 * 60 * 60 * 1000;
+  const today = new Date(Date.now() + PHT_MS).toISOString().slice(0, 10);
+  const [y, m] = today.split('-').map(Number);
+  const pad = (n) => String(n).padStart(2, '0');
+  if (period === 'last_month') {
+    const lm = m === 1 ? 12 : m - 1;
+    const ly = m === 1 ? y - 1 : y;
+    const lastDay = new Date(ly, lm, 0).getDate();
+    return { from: `${ly}-${pad(lm)}-01`, to: `${ly}-${pad(lm)}-${pad(lastDay)}` };
+  }
+  if (period === 'this_year') return { from: `${y}-01-01`, to: today };
+  if (period === 'custom')    return { from: cFrom || `${y}-${pad(m)}-01`, to: cTo || today };
+  return { from: `${y}-${pad(m)}-01`, to: today }; // this_month
+}
+
+function getPeriodLabel(period, rangeFrom) {
+  if (!rangeFrom) return 'This month';
+  if (period === 'this_month' || period === 'last_month') {
+    return new Date(rangeFrom + 'T12:00:00+08:00').toLocaleDateString('en-PH', {
+      month: 'long', year: 'numeric', timeZone: 'Asia/Manila',
+    });
+  }
+  if (period === 'this_year') {
+    return new Date(rangeFrom + 'T12:00:00+08:00').toLocaleDateString('en-PH', {
+      year: 'numeric', timeZone: 'Asia/Manila',
+    });
+  }
+  return rangeFrom; // custom — show raw date
+}
+
 // Per-stage card descriptors (display labels + sub-titles matching the mockup)
 const CARD_META = {
   actionable: { label: 'Awaiting you',        sub: 'Only Finance can clear' },
@@ -154,6 +185,11 @@ const FinanceQueuePage = () => {
   const [confirmOrder, setConfirmOrder]   = useState(null); // order for FinanceConfirmModal
   const undoTimerRef = useRef(null);
 
+  // ── Summary period filter ───────────────────────────────────────────────────
+  const [summaryPeriod, setSummaryPeriod] = useState('this_month');
+  const [customFrom, setCustomFrom]       = useState('');
+  const [customTo, setCustomTo]           = useState('');
+
   // ── Main queue query ────────────────────────────────────────────────────────
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['finance-orders', stage, source, search, page],
@@ -173,9 +209,14 @@ const FinanceQueuePage = () => {
   });
 
   // ── Sales summary (header totals) ──────────────────────────────────────────
+  const summaryDates = getSummaryDates(summaryPeriod, customFrom, customTo);
+
   const { data: summaryData } = useQuery({
-    queryKey: ['finance-sales-summary'],
-    queryFn: () => client.get('/api/finance/sales-summary').then((r) => r.data),
+    queryKey: ['finance-sales-summary', summaryDates.from, summaryDates.to],
+    queryFn: () =>
+      client.get('/api/finance/sales-summary', {
+        params: { date_from: summaryDates.from, date_to: summaryDates.to },
+      }).then((r) => r.data),
     staleTime: 60_000,
     refetchInterval: 60_000,
   });
@@ -186,15 +227,12 @@ const FinanceQueuePage = () => {
   const workflowV2 = Boolean(data?.data?.workflow_v2);
   const zohoSyncedAt = data?.data?.zoho_synced_at || null;
 
-  const monthTotal = Number(summaryData?.data?.month?.total || 0);
-  const monthCount = Number(summaryData?.data?.month?.count || 0);
-  const todayTotal = Number(summaryData?.data?.today?.total || 0);
-  const monthFrom  = summaryData?.data?.month?.from;
-  const monthLabel = monthFrom
-    ? new Date(monthFrom + 'T12:00:00+08:00').toLocaleDateString('en-PH', {
-        month: 'long', year: 'numeric', timeZone: 'Asia/Manila'
-      })
-    : 'This month';
+  const forecastTotal = Number(summaryData?.data?.forecast?.total || 0);
+  const forecastCount = Number(summaryData?.data?.forecast?.count || 0);
+  const actualTotal   = Number(summaryData?.data?.actual?.total   || 0);
+  const actualCount   = Number(summaryData?.data?.actual?.count   || 0);
+  const todayTotal    = Number(summaryData?.data?.today?.total    || 0);
+  const periodLabel   = getPeriodLabel(summaryPeriod, summaryData?.data?.range?.from);
 
   // ── Fetching indicator for sub-views ───────────────────────────────────────
   const mineFetching    = useIsFetching({ queryKey: ['finance-my-confirmations'] }) > 0;
@@ -351,12 +389,45 @@ const FinanceQueuePage = () => {
           ) : (
             <>
               <h1 className="text-2xl font-semibold text-ink-primary">Orders</h1>
-              <p className="text-sm text-ink-secondary mt-0.5">
-                {monthLabel} ·{' '}
-                <span className="font-medium text-ink-primary">{peso(monthTotal)}</span>
-                {' '}confirmed ({monthCount.toLocaleString('en-PH')} orders) · Today{' '}
-                <span className="font-medium text-ink-primary">{peso(todayTotal)}</span>
-              </p>
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={summaryPeriod}
+                    onChange={(e) => setSummaryPeriod(e.target.value)}
+                    className="text-xs border border-slate-200 rounded px-2 py-0.5 bg-white text-ink-secondary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
+                  >
+                    <option value="this_month">This month</option>
+                    <option value="last_month">Last month</option>
+                    <option value="this_year">This year</option>
+                    <option value="custom">Custom…</option>
+                  </select>
+                  {summaryPeriod === 'custom' && (
+                    <>
+                      <input
+                        type="date"
+                        value={customFrom}
+                        onChange={(e) => setCustomFrom(e.target.value)}
+                        className="text-xs border border-slate-200 rounded px-2 py-0.5 bg-white text-ink-secondary focus:outline-none"
+                      />
+                      <span className="text-xs text-ink-secondary">–</span>
+                      <input
+                        type="date"
+                        value={customTo}
+                        onChange={(e) => setCustomTo(e.target.value)}
+                        className="text-xs border border-slate-200 rounded px-2 py-0.5 bg-white text-ink-secondary focus:outline-none"
+                      />
+                    </>
+                  )}
+                </div>
+                <p className="text-sm text-ink-secondary">
+                  {periodLabel} ·{' '}
+                  <span className="font-medium text-ink-primary">{peso(forecastTotal)}</span>
+                  {' '}forecast ({forecastCount.toLocaleString('en-PH')} orders) ·{' '}
+                  <span className="font-medium text-ink-primary">{peso(actualTotal)}</span>
+                  {' '}total sales ({actualCount.toLocaleString('en-PH')} delivered) · Today{' '}
+                  <span className="font-medium text-ink-primary">{peso(todayTotal)}</span>
+                </p>
+              </div>
             </>
           )}
         </div>

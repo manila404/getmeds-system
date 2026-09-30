@@ -625,7 +625,12 @@ exports.getSalesSummary = async (req, res, next) => {
     const manilaDateStr = new Date(Date.now() + MANILA_OFFSET_MS).toISOString().slice(0, 10);
     const monthStartStr = manilaDateStr.slice(0, 8) + '01';
 
-    const monthFromUtc = new Date(monthStartStr + 'T00:00:00+08:00').toISOString();
+    // Accept optional date_from / date_to (YYYY-MM-DD PHT); default to current month → today.
+    const rawFrom = req.query.date_from ? String(req.query.date_from) : monthStartStr;
+    const rawTo   = req.query.date_to   ? String(req.query.date_to)   : manilaDateStr;
+
+    const fromUtc    = new Date(rawFrom + 'T00:00:00+08:00').toISOString();
+    const toUtc      = new Date(rawTo   + 'T23:59:59.999+08:00').toISOString();
     const todayFromUtc = new Date(manilaDateStr + 'T00:00:00+08:00').toISOString();
     const todayToUtc   = new Date(manilaDateStr + 'T23:59:59.999+08:00').toISOString();
 
@@ -634,26 +639,40 @@ exports.getSalesSummary = async (req, res, next) => {
                   WHERE fe.event_type = 'FINANCE_VERIFIED'
                     AND NOT (${importedSql('o')})`;
 
-    const [monthRow, todayRow, dailyRows] = await Promise.all([
-      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count ${BASE} AND fe.created_at >= ?`).get(monthFromUtc),
-      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?`).get(todayFromUtc, todayToUtc),
+    const [forecastRow, actualRow, todayRow, dailyRows] = await Promise.all([
+      // Forecast: Finance-verified in range (confirmed but delivery not required yet)
+      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count
+                  ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?`)
+        .get(fromUtc, toUtc),
+      // Actual sales: Finance-verified in range AND order is completed (paid + shipped)
+      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count
+                  ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?
+                    AND o.status = 'completed'`)
+        .get(fromUtc, toUtc),
+      // Today always refers to the current Manila day, independent of the range filter.
+      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count
+                  ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?`)
+        .get(todayFromUtc, todayToUtc),
+      // Daily breakdown over the selected range (for trend charts).
       db.prepare(
         `SELECT TO_CHAR((fe.created_at::timestamptz) AT TIME ZONE 'Asia/Manila', 'YYYY-MM-DD') AS day,
                 COALESCE(SUM(o.total_amount), 0) AS total,
                 COUNT(*) AS count
          ${BASE}
-           AND fe.created_at >= ?
+           AND fe.created_at >= ? AND fe.created_at <= ?
          GROUP BY TO_CHAR((fe.created_at::timestamptz) AT TIME ZONE 'Asia/Manila', 'YYYY-MM-DD')
          ORDER BY day`
-      ).all(monthFromUtc),
+      ).all(fromUtc, toUtc),
     ]);
 
     res.json({
       success: true,
       data: {
-        month: { from: monthStartStr, total: Number(monthRow?.total || 0), count: Number(monthRow?.count || 0) },
-        today: { date: manilaDateStr, total: Number(todayRow?.total || 0), count: Number(todayRow?.count || 0) },
-        daily: (dailyRows || []).map(r => ({ day: r.day, total: Number(r.total), count: Number(r.count) })),
+        range:    { from: rawFrom, to: rawTo },
+        forecast: { total: Number(forecastRow?.total || 0), count: Number(forecastRow?.count || 0) },
+        actual:   { total: Number(actualRow?.total   || 0), count: Number(actualRow?.count   || 0) },
+        today:    { date: manilaDateStr, total: Number(todayRow?.total || 0), count: Number(todayRow?.count || 0) },
+        daily:    (dailyRows || []).map(r => ({ day: r.day, total: Number(r.total), count: Number(r.count) })),
       },
     });
   } catch (err) { next(err); }
