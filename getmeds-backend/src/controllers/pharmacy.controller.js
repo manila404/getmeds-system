@@ -90,17 +90,14 @@ exports.getQueue = async (req, res, next) => {
     // Same condition without the `p.` alias — used in subqueries that re-alias.
     const excludeDeletedNoAlias = excludeDeleted ? ' AND deleted_at IS NULL' : '';
 
-    // Sep 29, 2026: "Needs attention" tab — orders in the all-orders set that have
-    // no prescription filed yet AND either have suspicious (non-Rx) attachments OR
-    // carry a MedRep no-rx-reason note, AND pharmacy hasn't made a decision yet.
+    // "Needs attention" tab — orders in the all-orders set that have no prescription
+    // filed yet AND pharmacy hasn't cleared them. No extra condition is required:
+    // any active pharmacy-channel order without a prescription IS a concern, including
+    // those with zero attachments (the most critical case — no proof filed at all).
     // No extra params — all ? markers come from allOrdersParams.
     const needsAttentionAnd = `
   AND NOT EXISTS (SELECT 1 FROM payment_proofs p WHERE p.order_id = o.id AND p.file_type = '${RX_FILE_TYPE}'${excludeDeletedNoAlias})
-  AND o.rx_not_required_at IS NULL
-  AND (
-    EXISTS (SELECT 1 FROM payment_proofs p WHERE p.order_id = o.id AND p.file_type != '${RX_FILE_TYPE}' AND p.file_type != 'dispatch_proof'${excludeDeletedNoAlias})
-    OR o.no_rx_reason IS NOT NULL
-  )`;
+  AND o.rx_not_required_at IS NULL`;
 
     // Channel pill: one of the six, or none. It narrows every tab.
     const channel = Object.keys(PHARMACY_CHANNELS).find((k) => k.toLowerCase() === String(req.query.channel || '').toLowerCase()) || null;

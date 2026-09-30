@@ -462,6 +462,20 @@ async function reconcileCustomersTin(client) {
   console.log('  ✔ customers.tin added');
 }
 
+async function reconcileCustomerOutstandingReceivable(client) {
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'customers' AND column_name = 'outstanding_receivable'`
+  );
+  if (rows.length) {
+    console.log('  ✔ customers.outstanding_receivable already present');
+    return;
+  }
+  console.log('  ↻ customers.outstanding_receivable is missing — adding (existing rows default to 0)');
+  await client.query('ALTER TABLE customers ADD COLUMN outstanding_receivable DOUBLE PRECISION DEFAULT 0');
+  console.log('  ✔ customers.outstanding_receivable added');
+}
+
 /**
  * Sep 8, 2026 (6): `orders.gm_lead_id` — the identity of the admin/
  * management account that created an order (the order form's "Admin"
@@ -1384,6 +1398,7 @@ async function main() {
     await reconcileOrdersSubDivision(client);
     await reconcileOrdersDivisionSalesperson(client);
     await reconcileCustomersTin(client);
+    await reconcileCustomerOutstandingReceivable(client);
     await reconcileOrdersGmLeadId(client);
     await reconcileOrdersZohoDetailSyncedAt(client);
     await reconcileMasterFormColumns(client);

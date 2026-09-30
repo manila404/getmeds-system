@@ -202,6 +202,10 @@ CREATE TABLE IF NOT EXISTS customers (
   -- updateCustomerTin) — a narrow, deliberate exception to this app's
   -- otherwise create-only Zoho write policy (see ZohoAdapter.js).
   tin TEXT,
+  -- Sep 30, 2026: synced from Zoho's outstanding_receivable_amount on each
+  -- contact sync. Shown in the order-form customer dropdown so MedReps can
+  -- identify the main operational account among similarly-named duplicates.
+  outstanding_receivable DOUBLE PRECISION DEFAULT 0,
   created_at TEXT DEFAULT iso_now()
 );
 

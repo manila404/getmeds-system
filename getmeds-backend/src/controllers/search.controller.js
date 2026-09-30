@@ -73,10 +73,11 @@ exports.search = async (req, res, next) => {
           `SELECT id, name, contact_person, contact_number, type
              FROM customers
             WHERE (name LIKE ? OR contact_person LIKE ? OR contact_number LIKE ?)
-            ORDER BY name
+               OR word_similarity(?, name) > 0.3
+            ORDER BY word_similarity(?, name) DESC, name ASC
             LIMIT ${MAX_PER_CATEGORY}`
         )
-        .all(like, like, like),
+        .all(like, like, like, q, q),
       db
         .prepare(
           `SELECT id, name, sku, unit_price, is_active

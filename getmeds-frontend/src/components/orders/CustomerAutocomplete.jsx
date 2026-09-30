@@ -258,6 +258,11 @@ const CustomerAutocomplete = ({
                                   {[customer.contact_person, customer.contact_number].filter(Boolean).join(' · ')}
                                 </p>
                               )}
+                              {customer.outstanding_receivable > 0 && (
+                                <p className="text-[11px] font-medium text-pharmacy-green-dark truncate">
+                                  PHP {Number(customer.outstanding_receivable).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </p>
+                              )}
                             </div>
                           </div>
                           <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${
@@ -301,6 +306,11 @@ const CustomerAutocomplete = ({
                           {(customer.contact_person || customer.contact_number) && (
                             <p className="text-[11px] text-ink-secondary truncate">
                               {[customer.contact_person, customer.contact_number].filter(Boolean).join(' · ')}
+                            </p>
+                          )}
+                          {customer.outstanding_receivable > 0 && (
+                            <p className="text-[11px] font-medium text-pharmacy-green-dark truncate">
+                              PHP {Number(customer.outstanding_receivable).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </p>
                           )}
                         </div>

@@ -53,9 +53,9 @@ async function getCustomersOverview(req, res, next) {
     // 'all' adds no clause.
 
     if (search) {
-      where.push('(name LIKE ? OR contact_person LIKE ? OR contact_number LIKE ?)');
+      where.push('((name LIKE ? OR contact_person LIKE ? OR contact_number LIKE ?) OR word_similarity(?, name) > 0.3)');
       const like = `%${search}%`;
-      params.push(like, like, like);
+      params.push(like, like, like, search);
     }
     if (category) {
       if (category === 'uncategorized') {
@@ -71,11 +71,13 @@ async function getCustomersOverview(req, res, next) {
     }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const orderBy = search ? `word_similarity(?, name) DESC, name ASC` : `name ASC`;
+    const orderByExtra = search ? [search] : [];
 
     const total = (await db.prepare(`SELECT COUNT(*) AS count FROM customers ${whereSql}`).get(...params)).count;
     const customers = await db
-      .prepare(`SELECT * FROM customers ${whereSql} ORDER BY name LIMIT ? OFFSET ?`)
-      .all(...params, limit, offset);
+      .prepare(`SELECT * FROM customers ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
+      .all(...params, ...orderByExtra, limit, offset);
 
     // Aug 31, 2026 (6): reads the full list now (TEST-CUSTOMER_1/2/3), not
     // just one id — see zohoTestFlags.js. Every designated test customer
@@ -353,7 +355,8 @@ async function reconcileContacts(contacts, opts = {}) {
       // locally no matter how many times Sync from Zoho ran. Blank/missing
       // stays null rather than '' so the DO UPDATE below can tell "Zoho has
       // nothing" from "Zoho says empty" and leave a local value alone.
-      tin: contact.cf_tin ? String(contact.cf_tin).trim() || null : null
+      tin: contact.cf_tin ? String(contact.cf_tin).trim() || null : null,
+      outstanding_receivable: contact.outstanding_receivable_amount || 0,
     });
   }
 
@@ -399,8 +402,8 @@ async function reconcileContacts(contacts, opts = {}) {
 
       const params = [];
       const tuples = batch.map((r) => {
-        params.push(r.name, r.type, r.zohoId, r.contactPerson, r.phone, r.address, r.isActive, r.tin);
-        return "(?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?, ?)";
+        params.push(r.name, r.type, r.zohoId, r.contactPerson, r.phone, r.address, r.isActive, r.tin, r.outstanding_receivable);
+        return "(?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?, ?, ?)";
       });
 
       // ON CONFLICT names the index predicate as well as the column because
@@ -423,7 +426,7 @@ async function reconcileContacts(contacts, opts = {}) {
       // is never wiped out by its own absence on the Zoho side.
       await db
         .prepare(
-          `INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active, tin)
+          `INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active, tin, outstanding_receivable)
            VALUES ${tuples.join(', ')}
            ON CONFLICT (zoho_contact_id) WHERE zoho_contact_id IS NOT NULL
            DO UPDATE SET
@@ -433,7 +436,8 @@ async function reconcileContacts(contacts, opts = {}) {
              address = EXCLUDED.address,
              is_active = EXCLUDED.is_active,
              last_synced_at = EXCLUDED.last_synced_at,
-             tin = COALESCE(EXCLUDED.tin, customers.tin)`
+             tin = COALESCE(EXCLUDED.tin, customers.tin),
+             outstanding_receivable = EXCLUDED.outstanding_receivable`
         )
         .run(...params);
 
