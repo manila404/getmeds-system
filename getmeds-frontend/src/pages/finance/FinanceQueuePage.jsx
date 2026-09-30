@@ -1,1328 +1,638 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient, useIsFetching, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3, ArrowRight } from 'lucide-react';
+import {
+  ShieldCheck, RefreshCw, Search, Download, ChevronLeft, ChevronRight, X
+} from 'lucide-react';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
+import FinanceConfirmModal from '../../components/finance/FinanceConfirmModal';
 import MyConfirmationsPanel from '../../components/finance/MyConfirmationsPanel';
 import SalesBySalespersonPanel from '../../components/finance/SalesBySalespersonPanel';
-import SalesSummaryPanel from '../../components/finance/SalesSummaryPanel';
-import { useSearchParams, Link } from 'react-router-dom';
-import { FINANCE_STAGES, financeStageLabel } from '../../constants/financeStages';
+import { useSearchParams } from 'react-router-dom';
+import { FINANCE_STAGES } from '../../constants/financeStages';
 import { formatPHT } from '../../utils/dateUtils';
 
-// Almost read-only. Every stage below EXCEPT the first is reported by Zoho:
-//   1. MedRep submits an order here -> it syncs to Zoho as a Sales Order.
-//   2. Finance confirms the Sales Order in Zoho.
-//   3. >>> Finance checks the customer's account and verifies it HERE. <<<
-//   4. Finance converts it to an Invoice in Zoho.
-//   5. Finance marks that Invoice as Sent in Zoho.
-//   6. Finance records the Customer Payment against it in Zoho.
-// Steps 2, 4, 5 and 6 call back to this app's webhook and move the order on
-// their own — this page just shows where things stand for those.
-//
-// Step 3 is the exception, and the reason this page has buttons at all: there
-// is nothing in Zoho that represents "Finance looked at this customer's
-// account and it's fine to invoice them". It's a human judgement, so it is
-// recorded here, against the person who made it.
-const NO_PROOF_REASONS = {
-  on_payment_terms:  'Customer is on payment terms',
-  payment_to_follow: 'Payment to follow',
-  paid_no_slip:      'Paid — no slip issued',
-  other:             'Other',
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const peso = (n) =>
+  `₱${Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+function humanDuration(ms) {
+  if (!ms || ms < 0) return '—';
+  const m = Math.floor(ms / 60_000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+function msAgo(isoStr) {
+  if (!isoStr) return null;
+  return Date.now() - new Date(isoStr).getTime();
+}
+
+function relativeTime(isoStr) {
+  if (!isoStr) return null;
+  const ms = Date.now() - new Date(isoStr).getTime();
+  const m = Math.floor(ms / 60_000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+// Per-stage card descriptors (display labels + sub-titles matching the mockup)
+const CARD_META = {
+  actionable: { label: 'Awaiting you',        sub: 'Only Finance can clear' },
+  upstream:   { label: 'Not yet with Finance', sub: 'With MedRep or Zoho' },
+  invoicing:  { label: 'Invoicing in Zoho',    sub: 'Confirmed, being invoiced' },
+  fulfilling: { label: 'In fulfilment',         sub: 'Packing and on the road' },
+  completed:  { label: 'Completed',             sub: 'Delivered and closed' },
+  exceptions: { label: 'Needs attention',       sub: 'On hold, cancelled, exception' },
 };
+
+// The time column header and value depend on the active stage.
+function timeCol(order, stageKey) {
+  if (stageKey === 'actionable') {
+    const ms = msAgo(order.submitted_at);
+    return { label: 'Waiting', value: humanDuration(ms), overdue: (ms || 0) > 2 * 3_600_000 };
+  }
+  if (stageKey === 'invoicing') {
+    return { label: 'Since confirmed', value: humanDuration(msAgo(order.finance_confirmed_at)), overdue: false };
+  }
+  if (stageKey === 'fulfilling') {
+    return { label: 'In stage', value: humanDuration(msAgo(order.updated_at)), overdue: false };
+  }
+  if (stageKey === 'completed') {
+    return {
+      label: 'Completed',
+      value: order.updated_at ? formatPHT(order.updated_at, 'short-date') : '—',
+      overdue: false,
+    };
+  }
+  return { label: 'Time', value: humanDuration(msAgo(order.updated_at)), overdue: false };
+}
+
+// Status badge colours
+const PILL_STYLES = {
+  ready_for_finance_verified: 'bg-purple-100 text-purple-800',
+  ready_for_draft_invoice:    'bg-amber-100 text-amber-800',
+  ready_for_invoice_sent:     'bg-blue-100 text-blue-800',
+  ready_for_dispatch:         'bg-indigo-100 text-indigo-700',
+  picking_packing:            'bg-indigo-50 text-indigo-700',
+  dispatched:                 'bg-indigo-50 text-indigo-700',
+  tracking_shared:            'bg-indigo-50 text-indigo-700',
+  completed:                  'bg-pharmacy-green/15 text-pharmacy-green-dark',
+  on_hold:                    'bg-state-error-light text-red-800',
+  exception:                  'bg-state-error-light text-red-800',
+  cancelled:                  'bg-state-error-light text-red-800',
+  deleted:                    'bg-state-error-light text-red-800',
+};
+const PILL_LABELS = {
+  ready_for_finance_verified: 'Awaiting you',
+  ready_for_draft_invoice:    'Invoicing',
+  ready_for_invoice_sent:     'Invoice sent',
+  ready_for_dispatch:         'Awaiting dispatch',
+  picking_packing:            'Picking & packing',
+  dispatched:                 'Dispatched',
+  tracking_shared:            'Tracking shared',
+  completed:                  'Completed',
+  on_hold:                    'On hold',
+  exception:                  'Exception',
+  cancelled:                  'Cancelled',
+  deleted:                    'Deleted in Zoho',
+  draft:                      'Draft',
+  submitted:                  'Submitted',
+  validating:                 'Validating',
+  so_pending:                 'SO pending',
+  so_created:                 'SO created',
+  pending_management_approval:'Pending approval',
+};
+
+const StagePill = ({ status }) => {
+  const cls = PILL_STYLES[status] || 'bg-slate-100 text-slate-700';
+  const lbl = PILL_LABELS[status] || String(status || '').replace(/_/g, ' ');
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${cls}`}>
+      {lbl}
+    </span>
+  );
+};
+
+// ─── Main component ───────────────────────────────────────────────────────────
 
 const FinanceQueuePage = () => {
   const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  /**
-   * Sep 12, 2026. Two queues, not one.
-   *
-   * The Zoho import brought historical Sales Orders in carrying real statuses,
-   * four of which this page selects on — so Finance opened it to 138 imported
-   * orders and the 4 they were meant to act on. Nothing was broken; the work
-   * was buried at roughly 35 to 1.
-   *
-   * Imported orders are separated rather than hidden. They are still the ones
-   * someone rings up about, and a queue that silently drops rows is worse than
-   * a crowded one — so the other tab is always visible and always carries its
-   * count, even when this one is empty.
-   */
-  const [origin, setOrigin] = useState('getmeds');
+  const view  = searchParams.get('view')   || null;         // 'mine' | 'reports' | null
+  const stage = searchParams.get('stage')  || 'actionable'; // default to actionable
+  const source = searchParams.get('source') || 'all';       // 'all' | 'getmeds' | 'zoho'
+  const search = searchParams.get('q')     || '';
+  const page   = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
 
-  // Sep 19, 2026: two extra views beside the shared queue — "My
-  // Confirmations" (a personal, date-filterable log) and "Reports" (sales by
-  // salesperson). Now driven by ?view= in the URL so the sidebar NavLinks can
-  // navigate directly to them, and a loaded view survives a page refresh.
-  // Oct 1, 2026: moved from local state to URL param.
-  const view = searchParams.get('view') || null; // null | 'mine' | 'reports'
-  const closePanel = () => {
-    const next = new URLSearchParams(searchParams);
-    next.delete('view');
-    setSearchParams(next, { replace: true });
+  const setParam = (key, value, resetPage = false) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (value) next.set(key, String(value)); else next.delete(key);
+      if (resetPage) next.delete('page');
+      return next;
+    }, { replace: true });
   };
 
-  /**
-   * Sep 12, 2026: which order is open in the details panel.
-   *
-   * An id rather than the row object, so the panel always fetches fresh
-   * detail and a freshly signed URL per attachment. Holding the row would
-   * mean showing the queue's summary columns back as if they were the whole
-   * order, which is exactly the gap this closes.
-   */
+  const closeView = () => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('view');
+      return next;
+    }, { replace: true });
+  };
+
   const [detailOrderId, setDetailOrderId] = useState(null);
+  const [confirmOrder, setConfirmOrder]   = useState(null); // order for FinanceConfirmModal
+  const undoTimerRef = useRef(null);
 
-  /**
-   * Sep 12, 2026: this page stopped being a four-status queue.
-   *
-   * Finance and the MedRep need the same picture of an order. Previously an
-   * order was invisible here until the moment it needed confirming and
-   * invisible again afterwards, so "where did it go" had no answer on the one
-   * screen Finance uses. Now every stage shows, filtered by these chips.
-   *
-   * What Finance can DO is unchanged and still narrow: confirm, and nothing
-   * else. Seeing is not acting.
-   */
-  /**
-   * Sep 12, 2026: the stage lives in the URL, not in component state.
-   *
-   * The sidebar's "Finance Confirmation" group links straight to a stage, so
-   * the page has to be able to open already filtered. Keeping it in state
-   * would mean those links landed on an unfiltered page and the selection had
-   * to be re-applied by hand.
-   *
-   * It also makes a view shareable: "look at the on-hold ones" is now a link
-   * somebody can paste, rather than an instruction to click two things.
-   *
-   * The server validates it independently — an unrecognised stage in a
-   * hand-edited URL shows everything rather than nothing.
-   */
-  const [searchParams, setSearchParams] = useSearchParams();
-  const stage = searchParams.get('stage') || null;
-  const [page, setPage] = useState(1);
-
-  // Sep 19, 2026: "why does it only show 9 when [Zoho] shows a total of 20"
-  // — the two were never the same number (Zoho's own report is invoices
-  // raised org-wide TODAY; this queue's counts were an all-time total with
-  // no date filter at all). Optional, and empty by default — the queue
-  // still means "everything outstanding" unless a range is picked, same as
-  // ManagementDashboardPage.jsx's own date_from/date_to.
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const hasDateFilter = Boolean(dateFrom || dateTo);
-  const clearDateFilter = () => { setDateFrom(''); setDateTo(''); setPage(1); };
-
-  // Paging is per-view, so a stage arriving from the URL must not land on
-  // page 7 of the view that was open before it.
-  useEffect(() => { setPage(1); }, [stage, dateFrom, dateTo]);
-
-  const { data, isLoading, refetch, isFetching } = useQuery({
-    // Every input is part of the key, or a tab would serve another's rows.
-    queryKey: ['finance-queue', origin, stage, page, dateFrom, dateTo],
+  // ── Main queue query ────────────────────────────────────────────────────────
+  const { data, isLoading, isFetching, refetch } = useQuery({
+    queryKey: ['finance-orders', stage, source, search, page],
     queryFn: () =>
-      client
-        .get('/api/finance/queue', {
-          params: {
-            origin,
-            stage: stage || undefined,
-            page,
-            date_from: dateFrom || undefined,
-            date_to: dateTo || undefined,
-            // The dashboard renders no list, so it asks for the smallest page
-            // the endpoint allows rather than 20 rows nobody sees — this
-            // refetches every 30s, and on the Zoho tab those rows are drawn
-            // from 60,948. stats, counts and `recent` are unaffected: they are
-            // computed independently of the page.
-            limit: stage ? undefined : 1,
-          },
-        })
-        .then(r => r.data),
-    refetchInterval: 30000,
-    // Keeps the previous view's rows on screen while the next loads, so
-    // switching does not flash the empty state. v5 spelling: the old
-    // `keepPreviousData: true` option was removed and is silently ignored,
-    // which looks like it works until you switch on a slow connection.
-    placeholderData: keepPreviousData
+      client.get('/api/finance/queue', {
+        params: {
+          stage,
+          origin: source === 'all' ? 'all' : source,
+          search: search || undefined,
+          page,
+          limit: 25,
+        },
+      }).then((r) => r.data),
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
+    enabled: !view, // don't poll while in a sub-view
   });
-  const orders = data?.data?.orders || [];
-  const counts = data?.data?.counts || { getmeds: 0, zoho: 0, total: 0 };
-  const recent = data?.data?.recent || [];
-  const stats = data?.data?.stats || {};
-  const pagination = data?.data?.pagination || { page: 1, pages: 1, total: 0, limit: 25 };
 
-  // Sep 19, 2026: "fix refresh button" — it used to always refetch the
-  // shared queue's own query, even while My Confirmations or Reports (each
-  // with its OWN useQuery, and its own query key) was the thing actually on
-  // screen — the icon span reflected the wrong request, and clicking it
-  // silently refreshed data nobody could see. useIsFetching reads a panel's
-  // in-flight state without lifting its query up here; invalidateQueries by
-  // key prefix refreshes it without each panel needing a passed-down
-  // refetch prop.
-  const mineFetching = useIsFetching({ queryKey: ['finance-my-confirmations'] }) > 0;
+  // ── Sales summary (header totals) ──────────────────────────────────────────
+  const { data: summaryData } = useQuery({
+    queryKey: ['finance-sales-summary'],
+    queryFn: () => client.get('/api/finance/sales-summary').then((r) => r.data),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  });
+
+  const orders     = data?.data?.orders     || [];
+  const stats      = data?.data?.stats      || {};
+  const pagination = data?.data?.pagination || { page: 1, pages: 1, total: 0, limit: 25 };
+  const workflowV2 = Boolean(data?.data?.workflow_v2);
+  const zohoSyncedAt = data?.data?.zoho_synced_at || null;
+
+  const monthTotal = Number(summaryData?.data?.month?.total || 0);
+  const monthCount = Number(summaryData?.data?.month?.count || 0);
+  const todayTotal = Number(summaryData?.data?.today?.total || 0);
+  const monthFrom  = summaryData?.data?.month?.from;
+  const monthLabel = monthFrom
+    ? new Date(monthFrom + 'T12:00:00+08:00').toLocaleDateString('en-PH', {
+        month: 'long', year: 'numeric', timeZone: 'Asia/Manila'
+      })
+    : 'This month';
+
+  // ── Fetching indicator for sub-views ───────────────────────────────────────
+  const mineFetching    = useIsFetching({ queryKey: ['finance-my-confirmations'] }) > 0;
   const reportsFetching = useIsFetching({ queryKey: ['finance-sales-by-salesperson'] }) > 0;
-  const salesFetching = useIsFetching({ queryKey: ['finance-sales-summary'] }) > 0;
-  // Sales summary is now always visible, so its fetch state contributes to the
-  // spinner on the main dashboard (not inside a panel that might be closed).
-  const activeIsFetching = view === 'mine' ? mineFetching : view === 'reports' ? reportsFetching : isFetching || salesFetching;
+  const activeIsFetching = view === 'mine' ? mineFetching
+    : view === 'reports' ? reportsFetching
+    : isFetching;
+
   const handleRefresh = () => {
-    if (view === 'mine') qc.invalidateQueries({ queryKey: ['finance-my-confirmations'] });
+    if (view === 'mine')    qc.invalidateQueries({ queryKey: ['finance-my-confirmations'] });
     else if (view === 'reports') qc.invalidateQueries({ queryKey: ['finance-sales-by-salesperson'] });
     else {
       refetch();
       qc.invalidateQueries({ queryKey: ['finance-sales-summary'] });
     }
   };
-  // Sep 12, 2026: GETMEDS_WORKFLOW_V2, as reported by the server. When on,
-  // Finance's Confirm order acts on the draft Sales Order (so_created) and
-  // confirms it in Zoho from here; the invoice is then Dispatch's.
-  const workflowV2 = Boolean(data?.data?.workflow_v2);
 
-  // Changing what is being listed must reset the pager, or switching to a tab
-  // with fewer pages lands on an empty one that looks like no results.
-  const chooseOrigin = (key) => { setOrigin(key); setPage(1); };
-  const chooseStage = (key) => {
-    // Clicking the selected stage again clears it — the cards are toggles, and
-    // `replace` keeps that out of the browser's back history, where a trail of
-    // filter changes is noise rather than navigation.
-    const next = new URLSearchParams(searchParams);
-    if (stage === key) next.delete('stage');
-    else next.set('stage', key);
-    setSearchParams(next, { replace: true });
-    setPage(1);
-  };
-
-  /**
-   * The cards, in pipeline order. Mirrors the MedRep dashboard's shape
-   * deliberately — same layout, Finance's meanings — with 'exceptions' pulled
-   * out below as a banner rather than a card, exactly as that page does it.
-   *
-   * Keys and labels must match services/financeStages.js on the server, which
-   * is what `stats` is keyed by.
-   */
-  const STAGE_ICONS = {
-    actionable: { icon: ShieldCheck, color: 'bg-purple-100 text-purple-700' },
-    upstream:   { icon: Clock,       color: 'bg-state-warning-light text-state-warning' },
-    invoicing:  { icon: Receipt,     color: 'bg-getmeds-blue/15 text-getmeds-blue' },
-    fulfilling: { icon: Truck,       color: 'bg-indigo-100 text-indigo-700' },
-    completed:  { icon: CheckCircle, color: 'bg-pharmacy-green/15 text-pharmacy-green' },
-    exceptions: { icon: XCircle,     color: 'bg-state-error-light text-state-error' },
-  };
-  // 'exceptions' is a banner below, not a card — same reason MedrepDashboardPage
-  // keeps it out of its own row of cards: it is not a pipeline stage, it is
-  // things that stopped.
-  const STAGE_CARDS = FINANCE_STAGES
-    .filter(g => g.key !== 'exceptions')
-    .map(g => ({ ...g, title: g.label, ...STAGE_ICONS[g.key] }));
-
-  const TABS = [
-    {
-      key: 'getmeds',
-      label: 'Raised in GetMeds',
-      count: counts.getmeds,
-      hint: stage
-        ? `Orders raised here at this stage.`
-        : 'Orders your MedReps submitted here. This is the work.'
-    },
-    {
-      key: 'zoho',
-      label: 'Imported from Zoho',
-      count: counts.zoho,
-      hint: stage
-        ? 'Imported Sales Orders at this stage. Reference only — they are maintained in Zoho.'
-        : 'Historical Sales Orders brought over by the import. Reference only — they are maintained in Zoho.'
-    }
-  ];
-
-  // Which order's reject box is open, and what's been typed into it. Kept as
-  // an id rather than a boolean so only one is ever open at a time.
-  const [rejectingId, setRejectingId] = useState(null);
-
-  /**
-   * Sep 12, 2026: lifting a hold Finance itself applied.
-   *
-   * The MedRep already has a way back — attach or correct something and the
-   * order returns on its own. This is the other case: Finance holds an order,
-   * sorts the account out themselves, and would otherwise have to ask the rep
-   * to touch it just so it reappears on Finance's own queue.
-   *
-   * Same shape as the hold it undoes: an id for which row is open, and a
-   * reason, because an order that silently reappears with no account of why is
-   * worse than one that never left.
-   */
-  const [reopeningId, setReopeningId] = useState(null);
-  const [reopenReason, setReopenReason] = useState('');
-  const [rejectReason, setRejectReason] = useState('');
-
-  // Sep 4, 2026: proof of payment. Signed view URLs are short-lived and minted
-  // per request, so they are fetched for the row being looked at rather than
-  // for every row up front — a queue of thirty would otherwise mint thirty
-  // links that mostly expire unused.
-  const [viewingProof, setViewingProof] = useState({});
-  const [rejectingProofId, setRejectingProofId] = useState(null);
-  const [proofReason, setProofReason] = useState('');
-
-  const openProof = async (orderId) => {
-    try {
-      const res = await client.get(`/api/orders/${orderId}/payment-proof`);
-      const proof = res.data?.data?.proof;
-      if (!proof?.viewUrl) throw new Error('No document on this record');
-      setViewingProof((v) => ({ ...v, [orderId]: proof }));
-    } catch (err) {
-      toast.error(err.response?.data?.error?.message || err.message || 'Could not open that document');
-    }
-  };
-
-  // Rejecting the SLIP, not the order. "This is for another invoice, send the
-  // right one" should not put the order on hold while a correct one is
-  // fetched — that is what the Hold button is for, and it is a different
-  // judgement. There is no matching approve: verifying the order below marks a
-  // pending proof verified in the same transaction.
-  const rejectProofMutation = useMutation({
-    mutationFn: ({ id, reason }) =>
-      client.post(`/api/finance/orders/${id}/payment-proof/reject`, { reason }).then(r => r.data),
-    onSuccess: () => {
-      toast.success('Proof rejected. The MedRep has been asked to upload a replacement.');
-      setRejectingProofId(null);
-      setProofReason('');
-      setViewingProof({});
-      qc.invalidateQueries({ queryKey: ['finance-queue'] });
-    },
-    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that')
-  });
-
-  /**
-   * Sep 14, 2026 (GETMEDS_WORKFLOW_V2): the two ticks — the prices, and the
-   * proof of payment — that confirming asks for when the switch is on, because
-   * Dispatch raises the invoice straight after it. Per order, and required by
-   * the server too; they are the record of what Finance actually checked.
-   */
-  const [checks, setChecks] = useState({});
-  const toggleCheck = (id, key) =>
-    setChecks((c) => ({ ...c, [id]: { ...c[id], [key]: !c[id]?.[key] } }));
-
-  const reopenMutation = useMutation({
-    mutationFn: ({ id, reason }) =>
-      client.post(`/api/finance/orders/${id}/reopen`, { reason }).then(r => r.data),
-    onSuccess: () => {
-      toast.success('Back in the queue for confirmation.');
-      setReopeningId(null);
-      setReopenReason('');
-      qc.invalidateQueries({ queryKey: ['finance-queue'] });
-      qc.invalidateQueries({ queryKey: ['finance-order-detail'] });
-    },
-    onError: (err) => {
-      // The server refuses a hold Finance did not apply, and says so in terms
-      // worth repeating verbatim — the fix is to talk to whoever held it.
-      toast.error(
-        err.response?.data?.error?.message ||
-          err.response?.data?.message ||
-          'Could not reopen this order.'
-      );
-    }
-  });
-
+  // ── Verify mutation ─────────────────────────────────────────────────────────
   const verifyMutation = useMutation({
-    mutationFn: ({ id, approved, reason, pricesChecked, proofChecked }) =>
-      client.post(`/api/finance/orders/${id}/verify`, { approved, reason, pricesChecked, proofChecked }).then(r => r.data),
+    mutationFn: ({ id, approved, reason }) =>
+      client.post(`/api/finance/orders/${id}/verify`, {
+        approved, reason,
+        pricesChecked: approved ? true : undefined,
+        proofChecked:  approved ? true : undefined,
+      }).then((r) => r.data),
     onSuccess: (res, vars) => {
-      const zohoConfirm = res?.data?.zohoConfirmed;
-      if (res?.data?.approved && zohoConfirm && zohoConfirm.ok === false) {
-        // The verification stands; Zoho just has not caught up. Say so, and
-        // say what finishes it, rather than a green tick that hides it.
-        toast.error(
-          `Verified — but the Sales Order is not confirmed in Zoho yet (${zohoConfirm.error || 'Zoho did not answer'}). ` +
-            (workflowV2 ? "Dispatch's Create invoice will confirm it." : 'Confirm it in Zoho Books.'),
-          { duration: 9000 }
-        );
-      } else {
-        toast.success(res?.data?.approved
-          ? (res?.data?.paymentProofVerified
-              ? 'Confirmed with proof of payment ✓ — moved to Invoicing in Zoho.'
-              : 'Confirmed ✓ — moved to Invoicing in Zoho.')
-          : 'Put on hold — moved to On hold & exceptions. The reason is on the order timeline.');
-      }
-      setRejectingId(null);
-      setRejectReason('');
-      setChecks((c) => { const next = { ...c }; delete next[vars.id]; return next; });
-      qc.invalidateQueries({ queryKey: ['finance-queue'] });
-      // The details panel holds its own copy of the order; without this it
-      // would still offer Confirm on an order just confirmed.
+      const orderId = vars.id;
+
       qc.invalidateQueries({ queryKey: ['finance-order-detail'] });
-    },
-    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that')
-  });
+      qc.invalidateQueries({ queryKey: ['finance-sales-summary'] });
 
-  const awaitingFinance = (order) => order.status === 'ready_for_finance_verified';
-  const isBusy = (id) => verifyMutation.isPending && verifyMutation.variables?.id === id;
+      if (vars.approved) {
+        const orderRef  = orders.find((o) => o.id === orderId)?.getmeds_order_id || `#${orderId}`;
+        const custName  = orders.find((o) => o.id === orderId)?.customer_name || '';
 
-  const waitingHours = (order) => {
-    if (!order.submitted_at) return '—';
-    const h = (Date.now() - new Date(order.submitted_at).getTime()) / 3600000;
-    return h < 1 ? `${Math.round(h * 60)}m` : `${h.toFixed(1)}h`;
-  };
+        // Optimistically remove from the current list and adjust the count
+        qc.setQueryData(['finance-orders', stage, source, search, page], (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            data: {
+              ...old.data,
+              orders: old.data.orders.filter((o) => o.id !== orderId),
+              stats: {
+                ...old.data.stats,
+                actionable: Math.max(0, (old.data.stats.actionable || 0) - 1),
+              },
+              pagination: {
+                ...old.data.pagination,
+                total: Math.max(0, old.data.pagination.total - 1),
+              },
+            },
+          };
+        });
 
-  // Sep 19, 2026: "add dates when it was confirmed and sync to Zoho" — both
-  // come from finance.controller.js's QUEUE_ROW_SELECT, sourced from the
-  // audit trail (order_events) rather than a column on the order itself.
-  // zoho_synced_at is only meaningful alongside zoho_so_id — the event that
-  // produces it is logged whether or not the Zoho create call actually
-  // succeeded, so an order with no zoho_so_id never shows a synced date even
-  // if the row is present.
-  const financeDates = (order) => {
-    const rows = [];
-    if (order.zoho_so_id && order.zoho_synced_at) {
-      rows.push(`Synced to Zoho ${formatPHT(order.zoho_synced_at, 'short-datetime')}`);
-    }
-    if (order.finance_confirmed_at) {
-      rows.push(`Confirmed ${formatPHT(order.finance_confirmed_at, 'short-datetime')}${order.finance_confirmed_by ? ` by ${order.finance_confirmed_by}` : ''}`);
-    }
-    return rows;
-  };
+        setDetailOrderId(null);
+        setConfirmOrder(null);
 
-  // Sep 1, 2026: rewritten for the renamed pipeline. This used to be a
-  // two-way check on 'invoice_drafted', a status that no longer exists — so
-  // every row in the queue was falling through to the "Sales Order confirmed"
-  // branch and telling Finance the wrong thing about where the order was.
-  const STAGES = {
-    ready_for_finance_verified: {
-      label: 'Awaiting your account check',
-      hint: 'Check the proof of payment below and this customer in Zoho Books (overdue balance, account problems), then verify.',
-      icon: ShieldCheck,
-      className: 'bg-purple-50 text-purple-800 border-purple-300'
-    },
-    ready_for_draft_invoice: workflowV2 ? {
-      label: 'Confirmed — with Dispatch for invoicing',
-      hint: 'Dispatch creates and sends the invoice from GetMeds. Nothing for Finance until the payment lands.',
-      icon: Banknote,
-      className: 'bg-state-warning-light text-amber-950 border-state-warning'
-    } : {
-      label: 'Verified — raise the invoice',
-      hint: 'Convert the Sales Order to an Invoice in Zoho Books.',
-      icon: Banknote,
-      className: 'bg-state-warning-light text-amber-950 border-state-warning'
-    },
-    ready_for_invoice_sent: {
-      label: 'Invoice drafted in Zoho',
-      hint: 'Mark the Invoice as Sent in Zoho so the customer receives it.',
-      icon: FileText,
-      className: 'bg-indigo-50 text-indigo-700 border-indigo-300'
-    },
-    ready_for_dispatch: {
-      label: 'Invoice issued — with the warehouse',
-      hint: 'Nothing for Finance to do until the payment lands. Customers are on terms, so it may arrive after the goods ship.',
-      icon: Truck,
-      className: 'bg-getmeds-blue/10 text-getmeds-blue-dark border-getmeds-blue/30'
-    },
+        // Undo toast — 8 seconds
+        const zohoConfirm = res?.data?.zohoConfirmed;
+        const zohoFailed  = zohoConfirm && zohoConfirm.ok === false;
 
-    // Sep 12, 2026: the stages BEFORE and AFTER Finance.
-    //
-    // This map used to hold only the four statuses the page could show, and
-    // anything else fell through to "at an unexpected status". Now that every
-    // stage is listed, that fallback would fire on most rows and describe a
-    // perfectly normal completed order as a problem.
-    //
-    // Each says what Finance should do, and for most of them the answer is
-    // nothing — which is worth saying plainly rather than leaving someone to
-    // wonder whether a row is waiting on them.
-    draft: {
-      label: 'Draft — not submitted',
-      hint: 'The MedRep has not sent this yet. Nothing for Finance.',
-      icon: FileText,
-      className: 'bg-slate-100 text-slate-700 border-slate-300'
-    },
-    pending_management_approval: {
-      label: 'Waiting for Management approval',
-      hint: 'A manager has to approve it before it reaches Zoho, and Finance after that.',
-      icon: Clock,
-      className: 'bg-slate-100 text-slate-700 border-slate-300'
-    },
-    submitted: {
-      label: 'Submitted',
-      hint: 'On its way to Zoho. Nothing for Finance yet.',
-      icon: Clock,
-      className: 'bg-slate-100 text-slate-700 border-slate-300'
-    },
-    validating: {
-      label: 'Validating',
-      hint: 'Being checked before the Sales Order is raised. Nothing for Finance yet.',
-      icon: Clock,
-      className: 'bg-slate-100 text-slate-700 border-slate-300'
-    },
-    so_pending: {
-      label: 'Sales Order pending in Zoho',
-      hint: 'Waiting on Zoho to accept the Sales Order. Nothing for Finance yet.',
-      icon: Clock,
-      className: 'bg-slate-100 text-slate-700 border-slate-300'
-    },
-    so_created: {
-      label: 'Sales Order created',
-      hint: 'Raised in Zoho. It reaches Finance once it is confirmed there.',
-      icon: Receipt,
-      className: 'bg-slate-100 text-slate-700 border-slate-300'
-    },
-    picking_packing: {
-      label: 'Picking and packing',
-      hint: 'With the warehouse. Nothing for Finance unless the payment is still outstanding.',
-      icon: Truck,
-      className: 'bg-indigo-50 text-indigo-700 border-indigo-200'
-    },
-    dispatched: {
-      label: 'Dispatched',
-      hint: 'On the road to the customer. Nothing for Finance.',
-      icon: Truck,
-      className: 'bg-indigo-50 text-indigo-700 border-indigo-200'
-    },
-    tracking_shared: {
-      label: 'Tracking shared',
-      hint: 'The customer has the tracking details. Nothing for Finance.',
-      icon: Truck,
-      className: 'bg-indigo-50 text-indigo-700 border-indigo-200'
-    },
-    completed: {
-      label: 'Completed',
-      hint: 'Delivered and closed. Kept here so the order does not disappear once it is done.',
-      icon: CheckCircle,
-      className: 'bg-pharmacy-green/15 text-pharmacy-green-dark border-pharmacy-green/40'
-    },
-    on_hold: {
-      label: 'On hold',
-      hint: 'Someone paused this deliberately. The trail on the order says who and why.',
-      icon: XCircle,
-      className: 'bg-state-error-light text-red-800 border-state-error/40'
-    },
-    exception: {
-      label: 'Exception',
-      hint: 'Something went wrong and a human has to look. Open the details for the trail.',
-      icon: XCircle,
-      className: 'bg-state-error-light text-red-800 border-state-error/40'
-    },
-    cancelled: {
-      label: 'Cancelled',
-      hint: 'No longer going ahead. Shown so it is not mistaken for missing.',
-      icon: XCircle,
-      className: 'bg-state-error-light text-red-800 border-state-error/40'
-    },
-    deleted: {
-      label: 'Deleted in Zoho',
-      hint: 'The Sales Order was removed in Zoho. Shown so it is not mistaken for missing.',
-      icon: XCircle,
-      className: 'bg-state-error-light text-red-800 border-state-error/40'
-    }
-  };
-  // Still here for a status the workflow gains that nobody wires up. It no
-  // longer fires for anything in the state machine today — financeStages.js
-  // has a test pinning that every status is accounted for.
-  const stageInfo = (status) => STAGES[status] || {
-    label: String(status || 'Unknown').replace(/_/g, ' '),
-    hint: 'This order is at a status this page does not recognise yet.',
-    icon: Clock,
-    className: 'bg-slate-100 text-slate-700 border-slate-300'
-  };
-
-
-
-  return (
-    <div className="space-y-6">
-      {/* Sep 12, 2026: two views, not one scrolling page.
-          Everything used to stack — cards, then the confirmation panel, then
-          the tabs, then the list — so an order awaiting confirmation appeared
-          TWICE on the same screen, once in the panel and once in the list,
-          with a different button label on each. The dashboard now summarises
-          and a stage page lists; neither shows an order the other is showing. */}
-      <div className="flex items-center justify-between">
-        <div className="min-w-0">
-          {stage ? (
-            <>
+        let toastId;
+        toastId = toast.custom(
+          (t) => (
+            <div
+              className={`${t.visible ? 'opacity-100' : 'opacity-0'} transition-opacity flex items-center gap-3 bg-white border border-slate-200 rounded-lg shadow-lg px-4 py-3 text-sm max-w-sm`}
+            >
+              <ShieldCheck className="w-4 h-4 text-pharmacy-green shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-ink-primary font-semibold truncate">{orderRef} confirmed</p>
+                {custName && <p className="text-ink-secondary text-xs truncate">{custName}</p>}
+                {zohoFailed && (
+                  <p className="text-xs text-state-error mt-0.5">
+                    Zoho not updated yet — confirm the SO there too.
+                  </p>
+                )}
+              </div>
               <button
                 type="button"
-                onClick={() => chooseStage(stage)}
-                className="inline-flex items-center gap-1 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark mb-1"
+                onClick={() => {
+                  toast.dismiss(toastId);
+                  if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+                  unverifyMutation.mutate({ id: orderId });
+                }}
+                className="shrink-0 text-xs font-bold text-getmeds-blue hover:text-getmeds-blue-dark"
               >
-                <ChevronLeft className="w-3.5 h-3.5" /> Finance Confirmation
+                Undo
               </button>
-              <h1 className="text-2xl font-semibold text-ink-primary">
-                {financeStageLabel(stage) || 'Orders'}
-              </h1>
-              <p className="text-sm text-ink-secondary mt-1">
-                {(FINANCE_STAGES.find(g => g.key === stage) || {}).sub || ''}
-              </p>
+            </div>
+          ),
+          { duration: 8_000, position: 'bottom-right' }
+        );
+
+        undoTimerRef.current = setTimeout(() => {
+          // After undo window, do a hard refetch to sync any optimistic state
+          qc.invalidateQueries({ queryKey: ['finance-orders'] });
+        }, 8_500);
+      } else {
+        // Hold
+        toast.success('Order put on hold.');
+        setDetailOrderId(null);
+        qc.invalidateQueries({ queryKey: ['finance-orders'] });
+      }
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that'),
+  });
+
+  // ── Unverify mutation (undo) ────────────────────────────────────────────────
+  const unverifyMutation = useMutation({
+    mutationFn: ({ id }) =>
+      client.post(`/api/finance/orders/${id}/unverify`).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['finance-orders'] });
+      qc.invalidateQueries({ queryKey: ['finance-sales-summary'] });
+      toast.success('Confirmation reversed — order is back in the queue.');
+    },
+    onError: (err) =>
+      toast.error(err.response?.data?.error?.message || 'Could not undo — the order may have moved on.'),
+  });
+
+  const handleConfirmSubmit = () => {
+    if (!confirmOrder) return;
+    verifyMutation.mutate({ id: confirmOrder.id, approved: true });
+  };
+
+  const handleHold = (id, reason) => {
+    verifyMutation.mutate({ id, approved: false, reason });
+  };
+
+  // ── Derived ─────────────────────────────────────────────────────────────────
+  const currentCard = CARD_META[stage] || CARD_META.actionable;
+  const thCol       = timeCol(orders[0] || {}, stage); // for header label
+  const showingFrom = pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.limit + 1;
+  const showingTo   = Math.min(pagination.page * pagination.limit, pagination.total);
+
+  // ── Render ───────────────────────────────────────────────────────────────────
+  return (
+    <div className="space-y-5">
+
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="min-w-0">
+          {view === 'mine' ? (
+            <>
+              <h1 className="text-2xl font-semibold text-ink-primary">My Confirmations</h1>
+              <p className="text-sm text-ink-secondary mt-0.5">Orders you have confirmed or held.</p>
+            </>
+          ) : view === 'reports' ? (
+            <>
+              <h1 className="text-2xl font-semibold text-ink-primary">Reports</h1>
+              <p className="text-sm text-ink-secondary mt-0.5">Sales by salesperson.</p>
             </>
           ) : (
             <>
-              <h1 className="text-2xl font-semibold text-ink-primary">Finance Confirmation</h1>
-              <p className="text-sm text-ink-secondary mt-1">
-                {workflowV2
-                  ? 'Every order, at every stage — the same picture the MedRep has. Confirming the order is yours, and confirms it in Zoho; Dispatch invoices it, and payments are recorded in Zoho Books.'
-                  : "Every order, at every stage — the same picture the MedRep has. Confirming the customer's account is yours; invoicing and payment happen in Zoho and appear here once Zoho reports them."}
+              <h1 className="text-2xl font-semibold text-ink-primary">Orders</h1>
+              <p className="text-sm text-ink-secondary mt-0.5">
+                {monthLabel} ·{' '}
+                <span className="font-medium text-ink-primary">{peso(monthTotal)}</span>
+                {' '}confirmed ({monthCount.toLocaleString('en-PH')} orders) · Today{' '}
+                <span className="font-medium text-ink-primary">{peso(todayTotal)}</span>
               </p>
             </>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {/* Oct 1, 2026: Sales/My Confirmations/Reports moved to the sidebar.
-              Only Refresh remains here as a page-level action. */}
-          <button onClick={handleRefresh} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0">
-            <RefreshCw className={`w-4 h-4 ${activeIsFetching ? 'animate-spin' : ''}`} /> Refresh
-          </button>
-        </div>
-      </div>
-
-      {view === 'mine' && <MyConfirmationsPanel onClose={closePanel} />}
-      {view === 'reports' && <SalesBySalespersonPanel onClose={closePanel} />}
-
-      {!view && (<>
-      {/* Oct 1, 2026: Sales Summary always visible on the main dashboard —
-          month total and today total at a glance, no button required. */}
-      <SalesSummaryPanel embedded />
-
-      {/* Sep 12, 2026: the split. Both tabs always show, both always carry
-          their count — an empty GetMeds tab beside "Imported from Zoho (138)"
-          says the queue is clear, where a single merged list of 143 said
-          nothing at all. */}
-      <div className="flex flex-wrap items-center gap-2" role="tablist">
-        {TABS.map(t => (
-          <button
-            key={t.key}
-            role="tab"
-            aria-selected={origin === t.key}
-            onClick={() => chooseOrigin(t.key)}
-            title={t.hint}
-            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors border ${
-              origin === t.key
-                ? 'bg-getmeds-blue text-white border-getmeds-blue'
-                : 'bg-white text-ink-secondary border-slate-200 hover:bg-surface hover:text-ink-primary'
-            }`}
-          >
-            {t.label}
-            <span className={`ml-1.5 font-normal ${origin === t.key ? 'text-white/80' : 'text-ink-secondary'}`}>
-              ({t.count})
+        <div className="flex items-center gap-2.5 shrink-0">
+          {!view && zohoSyncedAt && (
+            <span className="text-xs text-ink-secondary hidden sm:block">
+              Zoho synced {relativeTime(zohoSyncedAt)}
             </span>
-          </button>
-        ))}
-
-        {/* Sep 19, 2026: optional — every count above is all-time unless this
-            is set, same as it always was. Filters on when an order last
-            changed (updated_at), so "Completed, today" means "reached
-            Completed today," not "raised today." */}
-        <span className="ml-auto flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-            From
-            <input
-              type="date"
-              value={dateFrom}
-              max={dateTo || undefined}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="px-2 py-1 border border-slate-200 rounded text-xs text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
-            />
-          </label>
-          <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-            To
-            <input
-              type="date"
-              value={dateTo}
-              min={dateFrom || undefined}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="px-2 py-1 border border-slate-200 rounded text-xs text-ink-primary focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
-            />
-          </label>
-          {hasDateFilter && (
-            <button
-              type="button"
-              onClick={clearDateFilter}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-ink-secondary hover:text-ink-primary border border-slate-200 rounded hover:bg-surface"
-            >
-              <XCircle className="w-3 h-3" /> Clear dates
-            </button>
           )}
-        </span>
+          <button
+            type="button"
+            onClick={handleRefresh}
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary"
+          >
+            <RefreshCw className={`w-4 h-4 ${activeIsFetching ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
       </div>
-      {hasDateFilter && (
-        <p className="text-[11px] text-ink-secondary -mt-3">
-          Counts below are narrowed to this range. This still won't match a Zoho report for the same days —
-          Zoho counts invoices org-wide; these counts are GetMeds orders only, by their own stage.
-        </p>
-      )}
 
-      {/* Sep 12, 2026: the same dashboard shape the MedRep gets, counting the
-          things Finance acts on. Each card OPENS that stage rather than
-          filtering in place — the number and the way to see what is behind it
-          should not be two separate controls. */}
-      {!stage && (
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        {STAGE_CARDS.map(card => {
-          const Icon = card.icon;
-          const isActionable = card.key === 'actionable';
-          return (
-            <button
-              key={card.key}
-              type="button"
-              onClick={() => chooseStage(card.key)}
-              className={`group text-left rounded-xl border p-4 transition-all hover:shadow-sm ${
-                isActionable && (stats[card.key] ?? 0) > 0
-                  ? 'bg-purple-50 border-purple-200 hover:border-purple-400'
-                  : 'bg-white border-slate-200 hover:border-getmeds-blue'
-              }`}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-secondary leading-tight">
-                  {card.title}
-                </p>
-                <div className={`p-1.5 rounded-lg shrink-0 ${card.color}`}>
-                  <Icon className="w-4 h-4" />
+      {/* ── Sub-views: My Confirmations / Reports ──────────────────────────── */}
+      {view === 'mine'    && <MyConfirmationsPanel    onClose={closeView} />}
+      {view === 'reports' && <SalesBySalespersonPanel onClose={closeView} />}
+
+      {/* ── Main Orders view ───────────────────────────────────────────────── */}
+      {!view && (<>
+
+        {/* Stage cards — all 6, one always selected */}
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+          {FINANCE_STAGES.map((card) => {
+            const isSelected  = stage === card.key;
+            const isException = card.key === 'exceptions';
+            const count = stats[card.key] ?? 0;
+            const meta  = CARD_META[card.key] || {};
+            return (
+              <button
+                key={card.key}
+                type="button"
+                aria-pressed={isSelected}
+                onClick={() => setParam('stage', card.key, true)}
+                className={`text-left rounded-xl border p-4 transition-all ${
+                  isSelected
+                    ? 'border-getmeds-blue bg-getmeds-blue/5 ring-1 ring-getmeds-blue'
+                    : isException
+                    ? 'border-state-error/30 bg-white hover:border-state-error/60 hover:shadow-sm'
+                    : 'border-slate-200 bg-white hover:border-getmeds-blue/50 hover:shadow-sm'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-1">
+                  <p className={`text-[10px] font-bold uppercase tracking-wider leading-tight ${
+                    isException ? 'text-state-error' : isSelected ? 'text-getmeds-blue-dark' : 'text-ink-secondary'
+                  }`}>
+                    {meta.label}
+                  </p>
+                  {isSelected && <span className="w-2 h-2 rounded-full bg-getmeds-blue shrink-0 mt-0.5" />}
                 </div>
-              </div>
-              <p className={`text-2xl font-bold mt-2 ${isActionable && (stats[card.key] ?? 0) > 0 ? 'text-purple-700' : 'text-ink-primary'}`}>
-                {stats[card.key] ?? 0}
-              </p>
-              <div className="flex items-center justify-between mt-0.5">
-                <p className="text-[11px] text-ink-secondary">{card.sub}</p>
-                <span className="text-[11px] font-semibold text-getmeds-blue opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
-                  View <ArrowRight className="w-3 h-3" />
-                </span>
-              </div>
-            </button>
-          );
-        })}
-      </div>
-      )}
-
-      {/* A banner rather than a sixth card, the way MedrepDashboardPage does
-          it: these are not a pipeline stage, they are things that stopped. */}
-      {!stage && stats.exceptions > 0 && (
-        <button
-          type="button"
-          onClick={() => chooseStage('exceptions')}
-          className={`w-full text-left rounded-xl border p-4 flex items-center justify-between gap-3 transition-colors ${
-            stage === 'exceptions'
-              ? 'border-state-error ring-1 ring-state-error bg-state-error-light'
-              : 'border-state-error/30 bg-state-error-light hover:border-state-error'
-          }`}
-        >
-          <span className="flex items-center gap-2 min-w-0">
-            <XCircle className="w-5 h-5 text-state-error shrink-0" />
-            <span className="text-sm text-ink-primary">
-              <span className="font-semibold">{stats.exceptions}</span> on hold, cancelled or in
-              exception
-            </span>
-          </span>
-          <span className="text-xs font-semibold text-state-error shrink-0">
-            {stage === 'exceptions' ? 'Showing these' : 'Show these'}
-          </span>
-        </button>
-      )}
-
-      {/* "All clear" state — shown on the dashboard when nothing is waiting. */}
-      {!stage && !isLoading && (stats.actionable ?? 0) === 0 && (
-        <div className="bg-pharmacy-green/5 border border-pharmacy-green/20 rounded-xl px-5 py-4 flex items-center gap-3">
-          <CheckCircle className="w-5 h-5 text-pharmacy-green shrink-0" />
-          <div>
-            <p className="text-sm font-semibold text-pharmacy-green-dark">You're all clear</p>
-            <p className="text-[12px] text-ink-secondary mt-0.5">Nothing is waiting on your confirmation right now. Use the cards above to browse other stages.</p>
-          </div>
+                <p className={`text-2xl font-bold mt-2 tabular-nums ${
+                  isException ? 'text-state-error' : 'text-ink-primary'
+                }`}>
+                  {count.toLocaleString('en-PH')}
+                </p>
+                <p className="text-[11px] text-ink-secondary mt-0.5 leading-tight">{meta.sub}</p>
+              </button>
+            );
+          })}
         </div>
-      )}
 
-      {/* The orders actually waiting on Finance, newest first. Served separately
-          from the list so it ignores the stage filter and the page. */}
-      {!stage && recent.length > 0 && (
-        <div className="bg-white shadow rounded-lg border border-purple-200 overflow-hidden">
-          <div className="px-4 py-3 border-b border-purple-100 bg-purple-50 flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-purple-700 shrink-0" />
-            <h2 className="text-sm font-semibold text-purple-900">
-              Needs your confirmation
-              {stats.actionable > recent.length && (
-                <span className="ml-1.5 font-normal text-purple-800">
-                  · showing the {recent.length} most recent of {stats.actionable}
+        {/* Order table */}
+        <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+
+          {/* Toolbar */}
+          <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center gap-3">
+            {/* Title */}
+            <div className="flex-1 min-w-0">
+              <h2 className="text-sm font-semibold text-ink-primary">
+                {currentCard.label}
+                <span className="ml-1.5 font-normal text-ink-secondary">
+                  · {pagination.total.toLocaleString('en-PH')} orders
                 </span>
+              </h2>
+            </div>
+
+            {/* Search */}
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-secondary pointer-events-none" />
+              <input
+                type="search"
+                placeholder="Order #, customer, MedRep"
+                value={search}
+                onChange={(e) => setParam('q', e.target.value || null, true)}
+                className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-md w-52 focus:outline-none focus:ring-1 focus:ring-getmeds-blue text-ink-primary placeholder:text-ink-secondary"
+              />
+            </div>
+
+            {/* Source filter */}
+            <div className="flex items-center rounded-md border border-slate-200 overflow-hidden text-xs font-semibold">
+              {['all', 'getmeds', 'zoho'].map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setParam('source', s === 'all' ? null : s, true)}
+                  className={`px-3 py-1.5 transition-colors ${
+                    source === s
+                      ? 'bg-getmeds-blue text-white'
+                      : 'bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'
+                  }`}
+                >
+                  {s === 'all' ? 'All' : s === 'getmeds' ? 'GetMeds' : 'Zoho'}
+                </button>
+              ))}
+            </div>
+
+            {/* Export CSV (stub) */}
+            <button
+              type="button"
+              onClick={() => toast('CSV export coming soon', { icon: '📋' })}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-md text-ink-secondary hover:bg-surface hover:text-ink-primary"
+            >
+              <Download className="w-3.5 h-3.5" /> Export CSV
+            </button>
+          </div>
+
+          {/* Table */}
+          {isLoading ? (
+            <div className="flex justify-center py-14">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-getmeds-blue" />
+            </div>
+          ) : orders.length === 0 ? (
+            <div className="text-center py-14 text-ink-secondary">
+              <p className="text-sm">No orders match this stage{source !== 'all' ? ` and source` : ''}{search ? ' and search' : ''}.</p>
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setParam('q', null)}
+                  className="mt-2 text-xs font-semibold text-getmeds-blue hover:underline"
+                >
+                  Clear search
+                </button>
               )}
-            </h2>
-            {stats.actionable > recent.length && (
-              <button
-                type="button"
-                onClick={() => chooseStage('actionable')}
-                className="ml-auto text-xs font-semibold text-purple-800 hover:text-purple-900"
-              >
-                See all {stats.actionable}
-              </button>
-            )}
-          </div>
-
-          <ul className="divide-y divide-purple-100">
-            {recent.map(order => {
-              const busy = isBusy(order.id);
-              return (
-                <li key={order.id} className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
-                  <div className="min-w-0 flex-1">
-                    {/* "orders should be clickable so the details and trail
-                        will show" — was styled like a link, never was one. */}
-                    <Link
-                      to={`/orders/${order.id}`}
-                      className="block text-sm font-mono font-semibold text-getmeds-blue hover:text-getmeds-blue-dark hover:underline w-fit"
-                    >
-                      {order.getmeds_order_id}
-                    </Link>
-                    <p className="text-[13px] text-ink-primary truncate">
-                      {order.customer_name}
-                      <span className="text-ink-secondary"> · {order.medrep_name}</span>
-                    </p>
-                    {financeDates(order).map((row, i) => (
-                      <p key={i} className="text-[11px] text-ink-secondary">{row}</p>
-                    ))}
-                    {/* "the finance will see the resubmit in queue" — the
-                        MedRep's own remarks, right on the row, not just in
-                        Details & files. */}
-                    {order.resubmitted_at && (
-                      <p className="text-[11px] text-indigo-700 mt-0.5 flex items-start gap-1">
-                        <RefreshCw className="w-3 h-3 mt-0.5 shrink-0" />
-                        <span>{order.resubmit_note}</span>
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="text-right shrink-0">
-                    <p className="text-sm font-bold text-ink-primary">
-                      ₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-                    </p>
-                    <p className="text-[11px] text-ink-secondary">Waiting {waitingHours(order)}</p>
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    {/* Details first, and deliberately: the attachments are
-                        the evidence the confirmation rests on. */}
-                    <button
-                      type="button"
-                      onClick={() => setDetailOrderId(order.id)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-200 text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
-                    >
-                      <FileSearch className="w-3.5 h-3.5" /> Details & files
-                    </button>
-                    {/* With the switch on, confirming needs its two ticks, so
-                        from this short panel it opens the details, where the
-                        ticks sit beside the evidence. */}
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => (workflowV2
-                        ? setDetailOrderId(order.id)
-                        : verifyMutation.mutate({ id: order.id, approved: true }))}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      {busy ? 'Confirming…' : workflowV2 ? 'Check & confirm' : 'Confirm'}
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
-
-
-      {/* The LIST is the stage page. On the dashboard it would repeat the
-          orders the panel above already shows, which is exactly the
-          duplication this split removes. */}
-      {stage && (<>
-      <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200">
-        <div className="px-4 py-3 border-b border-slate-200 bg-surface flex items-center gap-2">
-          <Clock className="w-4 h-4 text-state-warning" />
-          <h2 className="text-sm font-semibold text-ink-primary">
-            {origin === 'zoho' ? 'Imported from Zoho' : 'Raised in GetMeds'}
-            {/* The filtered total, not this page's row count — showing 20 on a
-                list of 60,948 reads as though that is all there is. */}
-            <span className="ml-1.5 font-normal text-ink-secondary">
-              ({pagination.total.toLocaleString('en-PH')})
-            </span>
-          </h2>
-        </div>
-
-        {/* Said once, at the top of the tab, rather than on all 138 rows. */}
-        {origin === 'zoho' && (
-          <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200">
-            <p className="text-[12px] text-ink-secondary">
-              These came from the Zoho import and are kept for reference — they are maintained in
-              Zoho, not here. MedReps can view them but cannot change them.
-            </p>
-          </div>
-        )}
-
-        {isLoading ? (
-          <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-getmeds-blue" /></div>
-        ) : orders.length === 0 ? (
-          <div className="text-center py-12 text-ink-secondary">
-            <CheckCircle className="w-10 h-10 mx-auto mb-2 text-pharmacy-green" />
-            <p className="text-sm">
-              {origin === 'zoho'
-                ? 'No imported Zoho orders are sitting in the Finance queue'
-                : 'No orders currently waiting on Finance'}
-            </p>
-            {/* An empty GetMeds tab while imported orders are waiting used to
-                be indistinguishable from a broken page. */}
-            {origin === 'getmeds' && counts.zoho > 0 && (
-              <button
-                type="button"
-                onClick={() => chooseOrigin('zoho')}
-                className="mt-2 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
-              >
-                {counts.zoho} imported Zoho order{counts.zoho === 1 ? '' : 's'}{' '}
-                {counts.zoho === 1 ? 'is' : 'are'} here too
-              </button>
-            )}
-          </div>
-        ) : (
-          <ul className="divide-y divide-slate-100">
-            {orders.map(order => {
-              const stage = stageInfo(order.status);
-              const Icon = stage.icon;
-              const needsVerification = awaitingFinance(order);
-              const confirmsOrder = needsVerification && workflowV2;
-              const busy = isBusy(order.id);
-              const rowChecks = checks[order.id] || {};
-              // Sep 12, 2026: a held order Finance can pull back itself.
-              const isHeld = order.status === 'on_hold';
-              return (
-                <li key={order.id} className="p-4">
-                  <div className="flex justify-between items-start gap-4">
-                    <div className="min-w-0">
-                      <Link
-                        to={`/orders/${order.id}`}
-                        className="block text-sm font-mono font-semibold text-getmeds-blue hover:text-getmeds-blue-dark hover:underline w-fit"
-                      >
-                        {order.getmeds_order_id}
-                      </Link>
-                      <p className="text-sm text-ink-primary mt-0.5 font-medium truncate">{order.customer_name}</p>
-                      <p className="text-xs text-ink-secondary">{order.medrep_name}</p>
-                      {order.zoho_so_number && (
-                        <p className="text-xs text-ink-secondary mt-1">
-                          Zoho SO: <span className="font-mono">{order.zoho_so_number}</span>
-                          {order.zoho_invoice_number && <> · Invoice: <span className="font-mono">{order.zoho_invoice_number}</span></>}
-                        </p>
-                      )}
-                      {/* Sep 22, 2026: split-invoicing orders — this row's own
-                          Confirm/Hold only ever verifies the PRIMARY entity.
-                          A second entity (order_split_sales_orders) needs its
-                          own Verify, which only lives inside "Details & files"
-                          (see components/finance/OrderDetailsModal.jsx). Without
-                          this, the row looks fully actionable and Finance never
-                          learns the order is still short one verification. */}
-                      {Number(order.split_count) > 0 && (
-                        <p className="text-xs font-semibold text-indigo-700 mt-1 flex items-center gap-1">
-                          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                          Split order — also billed to {order.split_entities}.{' '}
-                          {Number(order.split_pending_count) > 0
-                            ? `Open "Details & files" to verify ${Number(order.split_pending_count) > 1 ? 'them' : 'it'} too.`
-                            : 'Other entity already verified.'}
-                        </p>
-                      )}
-                      {financeDates(order).map((row, i) => (
-                        <p key={i} className="text-xs text-ink-secondary">{row}</p>
-                      ))}
-                      {/* Only while it's still awaiting Finance — a stale
-                          "just resubmitted" note on a long-since-confirmed
-                          order (e.g. viewed under the Completed stage) would
-                          read as current when it isn't. */}
-                      {needsVerification && order.resubmitted_at && (
-                        <p className="text-xs text-indigo-700 mt-1 flex items-start gap-1">
-                          <RefreshCw className="w-3 h-3 mt-0.5 shrink-0" />
-                          <span>{order.resubmit_note}</span>
-                        </p>
-                      )}
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-sm font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
-                      <p className="text-xs text-ink-secondary font-medium mt-0.5">Waiting {waitingHours(order)}</p>
-                      {/* Sep 12, 2026: the row shows the proof of payment and
-                          nothing else. An order can carry five other document
-                          types, and a hospital order is required to carry four
-                          — so the evidence Finance verifies against was not on
-                          this screen at all. */}
-                      <button
-                        type="button"
-                        onClick={() => setDetailOrderId(order.id)}
-                        className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
-                      >
-                        <FileSearch className="w-3.5 h-3.5" /> Details & files
-                      </button>
-                    </div>
-                  </div>
-                  <div className={`mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${stage.className}`}>
-                    <Icon className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                    <div>
-                      <p className="font-semibold">{stage.label}</p>
-                      <p className="opacity-90 mt-0.5">{stage.hint}</p>
-                    </div>
-                  </div>
-
-                  {/* Sep 4, 2026: the proof of payment, on the row where the
-                      decision is actually made. Deliberately NOT a separate
-                      queue — this is evidence for the account check, not a
-                      second verification, and a second list would be a second
-                      place to forget to look. */}
-                  {needsVerification && (() => {
-                    const proof = viewingProof[order.id];
-                    const isImage = (proof?.content_type || order.payment_proof_content_type || '').startsWith('image/');
-                    const proofBusy = rejectProofMutation.isPending && rejectProofMutation.variables?.id === order.id;
-
-                    // No proof is a normal, allowed state — it is a soft gate,
-                    // for the same reason the account check is one. Finance is
-                    // told, and decides.
-                    if (!order.payment_proof_status) {
-                      return (
-                        <div className="mt-3 flex items-start gap-2 rounded-md border border-slate-200 bg-surface px-3 py-2 text-xs text-ink-secondary">
-                          <Receipt className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                          <div>
-                            {order.no_payment_proof_reason ? (
-                              <>
-                                <p className="font-semibold text-ink-primary">
-                                  No proof — {NO_PROOF_REASONS[order.no_payment_proof_reason] || order.no_payment_proof_reason}
-                                </p>
-                                {order.no_payment_proof_note && <p className="mt-0.5">{order.no_payment_proof_note}</p>}
-                              </>
-                            ) : (
-                              <p className="font-semibold text-ink-primary">No proof of payment attached, and no reason on file.</p>
-                            )}
-                            <p className="mt-0.5">You can still verify — the timeline records that none was attached.</p>
-                          </div>
-                        </div>
-                      );
-                    }
-
-                    if (order.payment_proof_status === 'rejected') {
-                      return (
-                        <div className="mt-3 flex items-start gap-2 rounded-md border border-state-error/40 bg-state-error-light px-3 py-2 text-xs text-red-800">
-                          <XCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                          <p>Proof of payment rejected — waiting for the MedRep to upload a replacement.</p>
-                        </div>
-                      );
-                    }
-
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-[13px]">
+                <thead>
+                  <tr className="bg-surface border-b border-slate-200">
+                    <th className="px-4 py-2.5 text-left font-semibold text-ink-secondary text-[11px] uppercase tracking-wide">
+                      Order #
+                    </th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-ink-secondary text-[11px] uppercase tracking-wide">
+                      Customer
+                    </th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-ink-secondary text-[11px] uppercase tracking-wide hidden md:table-cell">
+                      MedRep
+                    </th>
+                    <th className="px-4 py-2.5 text-right font-semibold text-ink-secondary text-[11px] uppercase tracking-wide">
+                      Amount
+                    </th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-ink-secondary text-[11px] uppercase tracking-wide hidden lg:table-cell">
+                      Stage
+                    </th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-ink-secondary text-[11px] uppercase tracking-wide">
+                      {timeCol({}, stage).label}
+                    </th>
+                    <th className="px-4 py-2.5" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {orders.map((order) => {
+                    const tc = timeCol(order, stage);
+                    const isZoho = order.is_zoho_import;
                     return (
-                      <div className="mt-3 rounded-md border border-slate-200 bg-surface overflow-hidden">
-                        <div className="px-3 py-2 border-b border-slate-200 flex items-center justify-between gap-2">
-                          <span className="text-xs font-semibold text-ink-primary flex items-center gap-1.5">
-                            <Receipt className="w-3.5 h-3.5" />
-                            Proof of payment
-                          </span>
-                          <span className="text-xs text-ink-secondary truncate">
-                            {order.payment_proof_uploaded_by_name || '—'}
-                          </span>
-                        </div>
-
-                        {!proof ? (
+                      <tr
+                        key={order.id}
+                        className="hover:bg-surface/50 transition-colors cursor-pointer"
+                        onClick={() => setDetailOrderId(order.id)}
+                      >
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono font-semibold text-getmeds-blue">
+                              {order.getmeds_order_id}
+                            </span>
+                            {isZoho && (
+                              <span className="text-[10px] font-bold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded tracking-wide">
+                                ZOHO
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-ink-primary max-w-[180px] truncate">
+                          {order.customer_name}
+                        </td>
+                        <td className="px-4 py-3 text-ink-secondary hidden md:table-cell max-w-[140px] truncate">
+                          {order.medrep_name || '—'}
+                        </td>
+                        <td className="px-4 py-3 text-right font-semibold text-ink-primary tabular-nums whitespace-nowrap">
+                          {peso(order.total_amount)}
+                        </td>
+                        <td className="px-4 py-3 hidden lg:table-cell">
+                          <StagePill status={order.status} />
+                        </td>
+                        <td className={`px-4 py-3 font-mono text-xs tabular-nums ${
+                          tc.overdue ? 'text-state-error font-bold' : 'text-ink-secondary'
+                        }`}>
+                          {tc.value}
+                        </td>
+                        <td className="px-4 py-3 text-right">
                           <button
-                            onClick={() => openProof(order.id)}
-                            className="w-full flex items-center justify-center gap-2 px-3 py-3 text-xs font-semibold text-getmeds-blue hover:bg-white"
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setDetailOrderId(order.id); }}
+                            className="px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-md text-ink-secondary hover:bg-surface hover:text-ink-primary whitespace-nowrap"
                           >
-                            {isImage ? <Receipt className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
-                            Show {order.payment_proof_file_name || 'the document'}
+                            Details
                           </button>
-                        ) : isImage ? (
-                          <div className="bg-white">
-                            <a href={proof.viewUrl} target="_blank" rel="noopener noreferrer" className="block">
-                              {/* Sep 23, 2026 (Priority 2): resized rendition for this inline row preview — see OrderDetailsModal.jsx/PaymentProofPanel.jsx for the same change. */}
-                              <img src={`${proof.viewUrl}&w=1000`} alt={`Proof of payment for ${order.getmeds_order_id}`} className="max-h-80 w-auto mx-auto" />
-                            </a>
-                            {proof.downloadUrl && (
-                              <div className="px-3 py-1.5 border-t border-slate-100 text-right">
-                                <a
-                                  href={proof.downloadUrl}
-                                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
-                                >
-                                  <Download className="w-3 h-3" /> Download
-                                </a>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="p-4 text-center flex items-center justify-center gap-4">
-                            <a href={proof.viewUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-semibold text-getmeds-blue underline">
-                              Open {proof.file_name || 'document'}
-                            </a>
-                            {proof.downloadUrl && (
-                              <a href={proof.downloadUrl} className="inline-flex items-center gap-1 text-sm font-semibold text-getmeds-blue hover:text-getmeds-blue-dark">
-                                <Download className="w-3.5 h-3.5" /> Download
-                              </a>
-                            )}
-                          </div>
-                        )}
-
-                        {rejectingProofId === order.id ? (
-                          <div className="border-t border-slate-200 p-3 space-y-2">
-                            <label className="block text-xs font-semibold text-red-900">
-                              What is wrong with this proof?
-                            </label>
-                            <textarea
-                              autoFocus
-                              rows={2}
-                              value={proofReason}
-                              onChange={(e) => setProofReason(e.target.value)}
-                              placeholder="e.g. slip is for invoice INV-0042, not this order"
-                              className="w-full text-sm rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400"
-                            />
-                            <div className="flex gap-2">
-                              <button
-                                disabled={!proofReason.trim() || proofBusy}
-                                onClick={() => rejectProofMutation.mutate({ id: order.id, reason: proofReason.trim() })}
-                                className="px-3 py-1.5 rounded-md bg-state-error text-white text-xs font-semibold disabled:opacity-50"
-                              >
-                                {proofBusy ? 'Rejecting…' : 'Ask for a new one'}
-                              </button>
-                              <button
-                                onClick={() => { setRejectingProofId(null); setProofReason(''); }}
-                                className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs text-ink-secondary"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="border-t border-slate-200 px-3 py-2">
-                            <button
-                              onClick={() => { setRejectingProofId(order.id); setProofReason(''); }}
-                              className="text-xs font-semibold text-state-error hover:underline"
-                            >
-                              Reject this proof (without holding the order)
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                        </td>
+                      </tr>
                     );
-                  })()}
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
 
-                  {/* Sep 12, 2026: the way out of a hold Finance applied.
-                      The MedRep's way back is to attach or correct something,
-                      which leaves a record of WHAT changed; this one records
-                      why Finance decided the hold could be lifted. */}
-                  {isHeld && (
-                    <div className="mt-3">
-                      {reopeningId === order.id ? (
-                        <div className="rounded-md border border-getmeds-blue/40 bg-getmeds-blue/5 p-3 space-y-2">
-                          <label className="block text-xs font-semibold text-getmeds-blue-dark">
-                            Why is this going back for confirmation?
-                          </label>
-                          <textarea
-                            autoFocus
-                            rows={2}
-                            value={reopenReason}
-                            onChange={(e) => setReopenReason(e.target.value)}
-                            placeholder="e.g. spoke to the customer — payment posted in Zoho this morning"
-                            className="w-full text-sm rounded-md border border-getmeds-blue/40 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue"
-                          />
-                          <div className="flex gap-2">
-                            <button
-                              disabled={!reopenReason.trim() || reopenMutation.isPending}
-                              onClick={() => reopenMutation.mutate({ id: order.id, reason: reopenReason.trim() })}
-                              className="px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold disabled:opacity-50"
-                            >
-                              {reopenMutation.isPending ? 'Reopening…' : 'Return for confirmation'}
-                            </button>
-                            <button
-                              onClick={() => { setReopeningId(null); setReopenReason(''); }}
-                              className="px-3 py-1.5 rounded-md border border-slate-200 text-xs font-semibold text-ink-secondary hover:bg-surface"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => { setReopeningId(order.id); setReopenReason(''); }}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-getmeds-blue/40 text-getmeds-blue text-xs font-semibold hover:bg-getmeds-blue/5"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" /> Return for confirmation
-                        </button>
-                      )}
-                    </div>
-                  )}
-
-                  {needsVerification && (
-                    <div className="mt-3">
-                      {rejectingId === order.id ? (
-                        // The reason is the entire output of a rejection — it is
-                        // what the MedRep and Management act on — so the API
-                        // requires one and the button stays disabled without it.
-                        <div className="rounded-md border border-state-error/40 bg-state-error-light p-3 space-y-2">
-                          <label className="block text-xs font-semibold text-red-900">
-                            Why is this order being held?
-                          </label>
-                          <textarea
-                            autoFocus
-                            rows={2}
-                            value={rejectReason}
-                            onChange={(e) => setRejectReason(e.target.value)}
-                            placeholder="e.g. ₱48,000 overdue past 60 days — collect before invoicing"
-                            className="w-full text-sm rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400"
-                          />
-                          <div className="flex gap-2">
-                            <button
-                              disabled={!rejectReason.trim() || busy}
-                              onClick={() => verifyMutation.mutate({ id: order.id, approved: false, reason: rejectReason.trim() })}
-                              className="px-3 py-1.5 rounded-md bg-state-error text-white text-xs font-semibold disabled:opacity-50"
-                            >
-                              {busy ? 'Putting on hold…' : 'Put on hold'}
-                            </button>
-                            <button
-                              onClick={() => { setRejectingId(null); setRejectReason(''); }}
-                              className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs text-ink-secondary"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : confirmsOrder ? (
-                        <div className="space-y-2">
-                          <fieldset className="space-y-1.5">
-                            <legend className="text-xs font-semibold text-ink-primary">Before confirming</legend>
-                            <label htmlFor={`prices-${order.id}`} className="flex items-start gap-2 text-xs text-ink-primary">
-                              <input
-                                id={`prices-${order.id}`}
-                                type="checkbox"
-                                checked={Boolean(rowChecks.prices)}
-                                onChange={() => toggleCheck(order.id, 'prices')}
-                                className="mt-0.5"
-                              />
-                              I checked the prices on the Sales Order.
-                            </label>
-                            <label htmlFor={`proof-${order.id}`} className="flex items-start gap-2 text-xs text-ink-primary">
-                              <input
-                                id={`proof-${order.id}`}
-                                type="checkbox"
-                                checked={Boolean(rowChecks.proof)}
-                                onChange={() => toggleCheck(order.id, 'proof')}
-                                className="mt-0.5"
-                              />
-                              I checked the proof of payment, or the reason there is none.
-                            </label>
-                          </fieldset>
-                          <div className="flex gap-2">
-                            <button
-                              disabled={busy || !(rowChecks.prices && rowChecks.proof)}
-                              onClick={() => verifyMutation.mutate({ id: order.id, approved: true, pricesChecked: true, proofChecked: true })}
-                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              <ShieldCheck className="w-3.5 h-3.5" />
-                              {busy ? 'Confirming…' : 'Confirm order'}
-                            </button>
-                            <button
-                              disabled={busy}
-                              onClick={() => { setRejectingId(order.id); setRejectReason(''); }}
-                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-state-error/40 text-state-error text-xs font-semibold hover:bg-state-error-light disabled:opacity-50"
-                            >
-                              <XCircle className="w-3.5 h-3.5" /> Hold
-                            </button>
-                          </div>
-                          <p className="text-[11px] text-ink-secondary">
-                            Confirms Sales Order {order.zoho_so_number || ''} in Zoho. Dispatch invoices it next.
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="flex gap-2">
-                          <button
-                            disabled={busy}
-                            onClick={() => verifyMutation.mutate({ id: order.id, approved: true })}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50"
-                          >
-                            <ShieldCheck className="w-3.5 h-3.5" />
-                            {busy ? 'Confirming…' : 'Confirm'}
-                          </button>
-                          <button
-                            disabled={busy}
-                            onClick={() => { setRejectingId(order.id); setRejectReason(''); }}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-state-error/40 text-state-error text-xs font-semibold hover:bg-state-error-light disabled:opacity-50"
-                          >
-                            <XCircle className="w-3.5 h-3.5" /> Hold
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
-      <div className="flex items-start gap-2 text-xs text-ink-secondary bg-surface border border-slate-200 rounded-lg p-3">
-        <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-        {/* Sep 12, 2026: this used to say verifying creates nothing in Zoho.
-            It now does — confirming is what moves the Sales Order out of
-            Draft, and leaving the old wording up would have been the screen
-            telling Finance the opposite of what their click does.
-
-            Sep 14, 2026: "the sync is retried" was not true — nothing retries
-            a failed confirmation on its own. With the switch on, Dispatch's
-            Create invoice finishes it; otherwise it is confirmed in Zoho Books. */}
-        {workflowV2 ? (
-          <p>Confirming here checks the order and moves the Sales Order in Zoho from Draft to Confirmed — there
-            is no need to confirm it there as well. Dispatch then raises and sends the invoice from GetMeds.
-            Recording the Customer Payment still happens in Zoho Books, and this page follows along
-            automatically. If Zoho is unreachable the confirmation still stands here, and Dispatch&rsquo;s
-            Create invoice finishes it.</p>
-        ) : (
-          <p>Confirming here checks the customer&rsquo;s account and moves the Sales Order in Zoho from Draft to
-            Confirmed, which is what releases it to be invoiced. Raising the Invoice, marking it Sent and
-            recording the Customer Payment all still happen in Zoho Books, and this page follows along
-            automatically. If Zoho is unreachable the confirmation still stands here and the timeline says so —
-            confirm it in Zoho Books.</p>
-        )}
-      </div>
-
-
-      {/* Sep 12, 2026: needed from the moment this page widened to every
-          status — the Zoho tab is 60,948 orders, where the old four-status
-          queue could only ever be a few hundred. */}
-      {pagination.pages > 1 && (
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-xs text-ink-secondary">
-            Page {pagination.page} of {pagination.pages.toLocaleString('en-PH')} ·{' '}
-            {pagination.total.toLocaleString('en-PH')} orders
-          </p>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={pagination.page <= 1 || isFetching}
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              className="px-3 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Previous
-            </button>
-            <button
-              type="button"
-              disabled={pagination.page >= pagination.pages || isFetching}
-              onClick={() => setPage(p => p + 1)}
-              className="px-3 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Next
-            </button>
-          </div>
+          {/* Pagination */}
+          {pagination.total > 0 && (
+            <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between gap-3 text-xs text-ink-secondary">
+              <p>
+                {pagination.total > 0
+                  ? `Showing ${showingFrom.toLocaleString('en-PH')}–${showingTo.toLocaleString('en-PH')} of ${pagination.total.toLocaleString('en-PH')}`
+                  : 'No orders'}
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={pagination.page <= 1 || isFetching}
+                  onClick={() => setParam('page', String(page - 1))}
+                  className="flex items-center gap-1 px-3 py-1.5 border border-slate-200 rounded-md font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" /> Previous
+                </button>
+                <button
+                  type="button"
+                  disabled={pagination.page >= pagination.pages || isFetching}
+                  onClick={() => setParam('page', String(page + 1))}
+                  className="flex items-center gap-1 px-3 py-1.5 border border-slate-200 rounded-md font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Next <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
-      )}
-      </>)}
+
       </>)}
 
-
-      {/* Mounted once at page level, not per row: it would otherwise be
-          instantiated for every row and is almost never open. */}
+      {/* ── Details drawer ─────────────────────────────────────────────────── */}
       {detailOrderId && (
         <OrderDetailsModal
           orderId={detailOrderId}
           onClose={() => setDetailOrderId(null)}
-          // Confirming from the panel is the point of opening it: the
-          // attachments are the evidence, and making someone close the
-          // evidence to act on it is how people end up confirming from the
-          // row without looking.
-          // Sep 14, 2026: with the switch on the panel passes its two ticks;
-          // with it off it passes nothing and the server asks for none.
-          onConfirm={(id, panelChecks) => verifyMutation.mutate({
-            id, approved: true, pricesChecked: panelChecks?.prices, proofChecked: panelChecks?.proof
-          })}
-          // Sep 22, 2026: split-invoicing orders — the primary's own inline
-          // Hold (inside the "Split Sales Orders" section) reuses this same
-          // mutation, the same as the queue row's own reject box always has.
+          onOpenConfirm={(order) => setConfirmOrder(order)}
+          onConfirm={(id, panelChecks) =>
+            verifyMutation.mutate({ id, approved: true, pricesChecked: panelChecks?.prices, proofChecked: panelChecks?.proof })
+          }
           onReject={(id, reason) => verifyMutation.mutate({ id, approved: false, reason })}
           confirming={verifyMutation.isPending}
+          workflowV2={workflowV2}
+        />
+      )}
+
+      {/* ── Confirm modal ──────────────────────────────────────────────────── */}
+      {confirmOrder && (
+        <FinanceConfirmModal
+          order={confirmOrder}
+          confirming={verifyMutation.isPending}
+          onClose={() => setConfirmOrder(null)}
+          onConfirm={handleConfirmSubmit}
           workflowV2={workflowV2}
         />
       )}

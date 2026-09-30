@@ -617,17 +617,15 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
   const checksDone = checks.prices && checks.proof;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 overflow-y-auto"
-      onClick={onClose}
-    >
-      {/* The backdrop closes; the panel must not, or every click inside it
-          dismisses the thing being read. */}
+    <>
       <div
-        className="bg-surface rounded-xl shadow-xl w-full max-w-4xl my-4"
-        onClick={(e) => e.stopPropagation()}
+        className="fixed inset-0 z-50 bg-black/30"
+        onClick={onClose}
+      />
+      <div
+        className="fixed inset-y-0 right-0 z-50 w-full max-w-2xl bg-surface shadow-2xl flex flex-col overflow-hidden"
       >
-        <div className="px-5 py-3.5 border-b border-slate-200 bg-white rounded-t-xl flex items-start justify-between gap-3 sticky top-0 z-10">
+        <div className="px-5 py-3.5 border-b border-slate-200 bg-white flex items-start justify-between gap-3 shrink-0">
           <div className="min-w-0">
             <h2 className="text-base font-bold text-ink-primary font-mono">
               {order?.getmeds_order_id || 'Loading…'}
@@ -656,7 +654,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
             </button>
           </div>
         </div>
-
+        <div className="flex-1 overflow-y-auto min-h-0">
         {detail.isLoading ? (
           <div className="flex items-center justify-center gap-2 py-16 text-ink-secondary text-sm">
             <Loader2 className="w-4 h-4 animate-spin" /> Loading the order…
@@ -868,8 +866,8 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
             </div>
           </div>
         )}
-
-        <div className="px-5 py-3 border-t border-slate-200 bg-white rounded-b-xl flex items-center justify-between gap-3">
+        </div>
+        <div className="px-5 py-3 border-t border-slate-200 bg-white flex items-center justify-between gap-3 shrink-0">
           {/* Says why there is no Confirm button, rather than leaving its
               absence to be read as the panel being broken.
               Sep 22, 2026: for a split order, the primary now has its own
@@ -925,24 +923,38 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, confirming, 
               Close
             </button>
             {canConfirm && splits.length === 0 && (
-              <button
-                onClick={() => (confirmsSalesOrder ? onConfirm(order.id, checks) : onConfirm(order.id))}
-                disabled={confirming || (confirmsSalesOrder && !checksDone)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {confirming ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
+              onOpenConfirm ? (
+                // Oct 1, 2026: new confirm flow — opens the FinanceConfirmModal
+                // overlay instead of confirming directly. The checkbox lives
+                // there; the confirm button here is just the entry point.
+                <button
+                  onClick={() => onOpenConfirm(order)}
+                  disabled={confirming}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
+                >
                   <ShieldCheck className="w-4 h-4" />
-                )}
-                {confirmsSalesOrder ? 'Confirm order' : 'Confirm account'}
-              </button>
+                  Confirm payment…
+                </button>
+              ) : (
+                <button
+                  onClick={() => (confirmsSalesOrder ? onConfirm(order.id, checks) : onConfirm(order.id))}
+                  disabled={confirming || (confirmsSalesOrder && !checksDone)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {confirming ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <ShieldCheck className="w-4 h-4" />
+                  )}
+                  {confirmsSalesOrder ? 'Confirm order' : 'Confirm account'}
+                </button>
+              )
             )}
           </div>
         </div>
       </div>
       <Lightbox attachment={lightbox} onClose={() => setLightbox(null)} />
-    </div>
+    </>
   );
 };
 

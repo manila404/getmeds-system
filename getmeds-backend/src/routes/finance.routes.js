@@ -52,6 +52,12 @@ router.post('/orders/:id/verify', c.verifyAccount);
 // verifySplitAccount's own header comment.
 router.post('/orders/:id/splits/:splitId/verify', c.verifySplitAccount);
 
+// Oct 1, 2026: undo a Finance confirmation within 90 seconds. The order
+// is returned to ready_for_finance_verified. Note: Zoho Sales Order
+// confirmation is NOT reversed — Finance must un-confirm it in Zoho Books
+// manually if the Zoho call already went through.
+router.post('/orders/:id/unverify', c.unverifyAccount);
+
 // Sep 12, 2026: lift a hold Finance itself applied and put the order back in
 // the queue. The MedRep can already do this by attaching or correcting
 // something; this is for when Finance resolves the account themselves and

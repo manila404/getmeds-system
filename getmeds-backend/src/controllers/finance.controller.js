@@ -123,7 +123,10 @@ const QUEUE_ROW_SELECT = `
          -- entity. See orderSplitService.js / finance.controller.js's
          -- verifySplitAccount, which is the only place that entity gets
          -- verified (inside the OrderDetailsModal, not this row).
-         sso.split_count, sso.split_pending_count, sso.split_entities
+         sso.split_count, sso.split_pending_count, sso.split_entities,
+         -- Oct 1, 2026: per-row origin indicator so the table can badge
+         -- Zoho-imported rows when the source filter is set to "All".
+         (${importedSql('o')}) AS is_zoho_import
   FROM orders o
   LEFT JOIN customers c ON o.customer_id = c.id
   LEFT JOIN users u ON o.medrep_id = u.id
@@ -252,6 +255,16 @@ exports.getQueue = async (req, res, next) => {
     if (dateTo) { dateParts.push('o.updated_at <= ?'); dateParams.push(`${dateTo}T23:59:59.999Z`); }
     const dateAnd = dateParts.length ? ` AND ${dateParts.join(' AND ')}` : '';
 
+    // Oct 1, 2026: text search — order ID, customer name, MedRep name.
+    // Applied to the orders list only; card counts are not narrowed by search
+    // so the stage cards stay stable while the user is typing.
+    const rawSearch = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const searchAnd = rawSearch
+      ? ` AND (o.getmeds_order_id ILIKE ? OR c.name ILIKE ? OR u.name ILIKE ?)`
+      : '';
+    const searchLike = rawSearch ? `%${rawSearch}%` : null;
+    const searchParams = rawSearch ? [searchLike, searchLike, searchLike] : [];
+
     /**
      * Paginated, and not optionally: widening to every status put 60,948
      * imported orders behind the Zoho tab. The previous version had no LIMIT
@@ -273,7 +286,7 @@ exports.getQueue = async (req, res, next) => {
      * latency was the bill.
      */
     const ordersQuery = db.prepare(`${QUEUE_ROW_SELECT}
-      WHERE 1 = 1${scopeAnd}${originAnd}${stageAnd}${dateAnd}
+      WHERE 1 = 1${scopeAnd}${originAnd}${stageAnd}${dateAnd}${searchAnd}
       -- Newest first. The old queue sorted oldest-first because it held only
       -- work waiting to be done and the oldest was the most overdue; this list
       -- is now mostly finished orders, where the useful end is the recent one.
@@ -284,7 +297,7 @@ exports.getQueue = async (req, res, next) => {
       -- as well, which is the point of the exercise.
       ORDER BY o.created_at DESC
       LIMIT ? OFFSET ?
-    `).all(...scopeParams, ...stageParams, ...dateParams, limit, offset);
+    `).all(...scopeParams, ...stageParams, ...dateParams, ...searchParams, limit, offset);
 
     /**
      * Tab sizes: scope-limited and stage-limited, but deliberately NOT
@@ -363,6 +376,13 @@ exports.getQueue = async (req, res, next) => {
       // which is every Finance user, since they are not division-scoped.
       .all([ACTIONABLE, ...scopeParams]);
 
+    // Oct 1, 2026: global Zoho sync indicator for the page header.
+    const zohoSyncQuery = db.prepare(`
+      SELECT MAX(created_at) AS zoho_synced_at
+      FROM order_events
+      WHERE event_type = 'STATUS_CHANGE' AND new_status = 'so_created'
+    `).get();
+
     const [orders, counts, stageRow, recent] = await Promise.all([
       ordersQuery,
       countsQuery,
@@ -394,6 +414,7 @@ exports.getQueue = async (req, res, next) => {
         // Sep 14, 2026: tells the page to draw the two ticks beside Confirm —
         // under GETMEDS_WORKFLOW_V2 Dispatch invoices straight after it.
         workflow_v2: isWorkflowV2Enabled(),
+        zoho_synced_at: zohoSyncQuery?.zoho_synced_at || null,
         pagination: {
           page,
           limit,
@@ -1205,5 +1226,80 @@ exports.verifySplitAccount = async (req, res, next) => {
       success: true,
       data: { status: newStatus, approved: true, invoicingFrom: split.invoicing_from, zohoConfirmed: zohoConfirm, awaitingOtherEntities: stillPending.map((s) => s.invoicing_from) }
     });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/finance/orders/:id/unverify — Oct 1, 2026.
+ *
+ * The undo action for a Finance confirmation. Reverts an order from
+ * ready_for_draft_invoice back to ready_for_finance_verified provided the
+ * confirmation happened within the last 90 seconds. After that window the
+ * order may have been acted on in Zoho, so the reversal is refused.
+ *
+ * Note: this does NOT undo the Zoho Sales Order confirmation. If Zoho was
+ * already updated, Finance should un-confirm it in Zoho Books manually.
+ */
+exports.unverifyAccount = async (req, res, next) => {
+  try {
+    const order = await db.prepare(
+      'SELECT o.*, c.name AS customer_name FROM orders o LEFT JOIN customers c ON o.customer_id = c.id WHERE o.id = ?'
+    ).get(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    }
+
+    if (order.status !== 'ready_for_draft_invoice') {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'CANNOT_UNDO',
+          message: `This order is at "${order.status}" — it has moved past the Finance-confirmed stage and cannot be undone here.`
+        }
+      });
+    }
+
+    // Only allow undo within 90 seconds of the confirmation event.
+    const event = await db.prepare(
+      `SELECT created_at FROM order_events WHERE order_id = ? AND event_type = 'FINANCE_VERIFIED' ORDER BY id DESC LIMIT 1`
+    ).get(order.id);
+
+    if (!event) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'CANNOT_UNDO', message: 'No confirmation event found for this order.' }
+      });
+    }
+
+    const ageMs = Date.now() - new Date(event.created_at).getTime();
+    if (ageMs > 90_000) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'UNDO_WINDOW_EXPIRED', message: 'The undo window (90 seconds) has passed for this confirmation.' }
+      });
+    }
+
+    const actor = await resolveActor(req.user, 'finance');
+    const now = new Date().toISOString();
+
+    await db.transaction(async () => {
+      await db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?')
+        .run('ready_for_finance_verified', now, order.id);
+      if (await hasColumn('orders', 'primary_finance_verified_at')) {
+        await db.prepare('UPDATE orders SET primary_finance_verified_at = NULL WHERE id = ?').run(order.id);
+      }
+      await logEvent({
+        orderId: order.id,
+        eventType: 'FINANCE_VERIFICATION_UNDONE',
+        oldStatus: 'ready_for_draft_invoice',
+        newStatus: 'ready_for_finance_verified',
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Finance confirmation undone by ${actor.name} — order returned to awaiting verification.`
+      });
+    });
+
+    res.json({ success: true, data: { reverted: true, status: 'ready_for_finance_verified' } });
   } catch (err) { next(err); }
 };
