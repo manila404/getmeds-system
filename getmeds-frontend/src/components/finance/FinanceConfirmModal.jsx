@@ -15,6 +15,7 @@ import { ShieldCheck, X, AlertCircle } from 'lucide-react';
  */
 const FinanceConfirmModal = ({ order, confirming, onClose, onConfirm, workflowV2 }) => {
   const [checked, setChecked] = useState(false);
+  const [note, setNote] = useState('');
 
   if (!order) return null;
 
@@ -87,6 +88,20 @@ const FinanceConfirmModal = ({ order, confirming, onClose, onConfirm, workflowV2
               I have checked the proof of payment (or confirmed there is none on file).
             </span>
           </label>
+
+          {/* Optional note */}
+          <div>
+            <label className="block text-xs font-semibold text-ink-secondary mb-1">
+              Note <span className="font-normal">(optional)</span>
+            </label>
+            <textarea
+              rows={2}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Any remarks about this confirmation…"
+              className="w-full text-sm rounded-md border border-slate-200 px-3 py-2 focus:outline-none focus:ring-1 focus:ring-pharmacy-green resize-none"
+            />
+          </div>
         </div>
 
         {/* Footer */}
@@ -101,7 +116,7 @@ const FinanceConfirmModal = ({ order, confirming, onClose, onConfirm, workflowV2
           </button>
           <button
             type="button"
-            onClick={onConfirm}
+            onClick={() => onConfirm(note.trim() || null)}
             disabled={!checked || confirming}
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
           >

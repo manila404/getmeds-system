@@ -316,9 +316,9 @@ const FinanceQueuePage = () => {
       toast.error(err.response?.data?.error?.message || 'Could not undo — the order may have moved on.'),
   });
 
-  const handleConfirmSubmit = () => {
+  const handleConfirmSubmit = (note) => {
     if (!confirmOrder) return;
-    verifyMutation.mutate({ id: confirmOrder.id, approved: true });
+    verifyMutation.mutate({ id: confirmOrder.id, approved: true, reason: note || undefined });
   };
 
   const handleHold = (id, reason) => {
