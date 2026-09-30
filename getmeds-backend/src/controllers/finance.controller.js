@@ -589,6 +589,56 @@ exports.getSalesBySalesperson = async (req, res, next) => {
 };
 
 /**
+ * GET /api/finance/sales-summary — high-level totals for the current month and
+ * today, with a daily breakdown for the trend chart.
+ *
+ * Sep 30, 2026. Source of truth is FINANCE_VERIFIED events — the moment Finance
+ * confirmed the order. Imported (ZOHO-) orders are excluded: they were confirmed
+ * in Zoho, not in this app, so including them would mix two different numbers.
+ *
+ * All date arithmetic uses Manila time (UTC+8, no DST).
+ */
+exports.getSalesSummary = async (req, res, next) => {
+  try {
+    const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+    const manilaDateStr = new Date(Date.now() + MANILA_OFFSET_MS).toISOString().slice(0, 10);
+    const monthStartStr = manilaDateStr.slice(0, 8) + '01';
+
+    const monthFromUtc = new Date(monthStartStr + 'T00:00:00+08:00').toISOString();
+    const todayFromUtc = new Date(manilaDateStr + 'T00:00:00+08:00').toISOString();
+    const todayToUtc   = new Date(manilaDateStr + 'T23:59:59.999+08:00').toISOString();
+
+    const BASE = `FROM order_events fe
+                   JOIN orders o ON o.id = fe.order_id
+                  WHERE fe.event_type = 'FINANCE_VERIFIED'
+                    AND NOT (${importedSql('o')})`;
+
+    const [monthRow, todayRow, dailyRows] = await Promise.all([
+      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count ${BASE} AND fe.created_at >= ?`).get(monthFromUtc),
+      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?`).get(todayFromUtc, todayToUtc),
+      db.prepare(
+        `SELECT DATE(fe.created_at AT TIME ZONE 'Asia/Manila') AS day,
+                COALESCE(SUM(o.total_amount), 0) AS total,
+                COUNT(*) AS count
+         ${BASE}
+           AND fe.created_at >= ?
+         GROUP BY DATE(fe.created_at AT TIME ZONE 'Asia/Manila')
+         ORDER BY day`
+      ).all(monthFromUtc),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        month: { from: monthStartStr, total: Number(monthRow?.total || 0), count: Number(monthRow?.count || 0) },
+        today: { date: manilaDateStr, total: Number(todayRow?.total || 0), count: Number(todayRow?.count || 0) },
+        daily: (dailyRows || []).map(r => ({ day: r.day, total: Number(r.total), count: Number(r.count) })),
+      },
+    });
+  } catch (err) { next(err); }
+};
+
+/**
  * Pull a held order back for another look.
  *
  * Sep 12, 2026. Finance can put an order on hold; until now only the MedRep

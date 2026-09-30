@@ -29,6 +29,8 @@ router.get('/my-confirmations', c.getMyConfirmations);
 // sales by salesperson, built from this app's own orders. See the
 // handler's own header for why it isn't a reproduction of Zoho's report.
 router.get('/reports/sales-by-salesperson', c.getSalesBySalesperson);
+// Sep 30, 2026: high-level monthly + today sales totals for the Sales Summary panel.
+router.get('/sales-summary', c.getSalesSummary);
 router.get('/orders/:id/payment', c.getPayment);
 
 // Sep 1, 2026 (8): the exception to the read-only rule above. Finance

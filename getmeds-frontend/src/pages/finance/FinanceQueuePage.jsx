@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient, useIsFetching, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3, ArrowRight } from 'lucide-react';
+import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3, ArrowRight, TrendingUp } from 'lucide-react';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import MyConfirmationsPanel from '../../components/finance/MyConfirmationsPanel';
 import SalesBySalespersonPanel from '../../components/finance/SalesBySalespersonPanel';
+import SalesSummaryPanel from '../../components/finance/SalesSummaryPanel';
 import { useSearchParams, Link } from 'react-router-dom';
 import { FINANCE_STAGES, financeStageLabel } from '../../constants/financeStages';
 import { formatPHT } from '../../utils/dateUtils';
@@ -153,10 +154,12 @@ const FinanceQueuePage = () => {
   // refetch prop.
   const mineFetching = useIsFetching({ queryKey: ['finance-my-confirmations'] }) > 0;
   const reportsFetching = useIsFetching({ queryKey: ['finance-sales-by-salesperson'] }) > 0;
-  const activeIsFetching = activePanel === 'mine' ? mineFetching : activePanel === 'reports' ? reportsFetching : isFetching;
+  const salesFetching = useIsFetching({ queryKey: ['finance-sales-summary'] }) > 0;
+  const activeIsFetching = activePanel === 'mine' ? mineFetching : activePanel === 'reports' ? reportsFetching : activePanel === 'sales' ? salesFetching : isFetching;
   const handleRefresh = () => {
     if (activePanel === 'mine') qc.invalidateQueries({ queryKey: ['finance-my-confirmations'] });
     else if (activePanel === 'reports') qc.invalidateQueries({ queryKey: ['finance-sales-by-salesperson'] });
+    else if (activePanel === 'sales') qc.invalidateQueries({ queryKey: ['finance-sales-summary'] });
     else refetch();
   };
   // Sep 12, 2026: GETMEDS_WORKFLOW_V2, as reported by the server. When on,
@@ -554,6 +557,17 @@ const FinanceQueuePage = () => {
               orders — see SalesBySalespersonPanel's own header for why it
               can't match Zoho's report column-for-column). */}
           <button
+            onClick={() => setActivePanel((v) => (v === 'sales' ? null : 'sales'))}
+            aria-pressed={activePanel === 'sales'}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-semibold shrink-0 border ${
+              activePanel === 'sales'
+                ? 'bg-getmeds-blue text-white border-getmeds-blue'
+                : 'border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary'
+            }`}
+          >
+            <TrendingUp className="w-4 h-4" /> Sales
+          </button>
+          <button
             onClick={() => setActivePanel((v) => (v === 'mine' ? null : 'mine'))}
             aria-pressed={activePanel === 'mine'}
             className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-semibold shrink-0 border ${
@@ -581,6 +595,7 @@ const FinanceQueuePage = () => {
         </div>
       </div>
 
+      {activePanel === 'sales' && <SalesSummaryPanel onClose={() => setActivePanel(null)} />}
       {activePanel === 'mine' && <MyConfirmationsPanel onClose={() => setActivePanel(null)} />}
       {activePanel === 'reports' && <SalesBySalespersonPanel onClose={() => setActivePanel(null)} />}
 
