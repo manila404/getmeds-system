@@ -568,6 +568,11 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
   const items = detail.data?.data?.items || [];
   const splits = detail.data?.data?.splits || [];
   const attachments = files.data?.data?.attachments || [];
+  const holdActivity = (detail.data?.data?.events || []).filter(
+    (e) => e.event_type === 'FINANCE_REJECTED' ||
+           e.event_type === 'RETURNED_TO_FINANCE' ||
+           e.event_type === 'ORDER_RESUBMITTED'
+  );
   // Sep 28, 2026: a superseded prescription (an old rejection with a
   // resubmitted replacement already on file — see supersededIds in
   // prescriptionService.js) is history, not something Pharmacy still has to
@@ -664,6 +669,46 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
           </div>
         ) : (
           <div className="px-5 py-4 space-y-4">
+            {holdActivity.length > 0 && (
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-ink-secondary">
+                    Hold &amp; re-submission history
+                  </p>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {holdActivity.map((e) => {
+                    const isHold = e.event_type === 'FINANCE_REJECTED';
+                    return (
+                      <div
+                        key={e.id}
+                        className={`flex gap-2.5 px-3 py-2.5 ${isHold ? 'bg-red-50/60' : 'bg-blue-50/40'}`}
+                      >
+                        <div className="mt-0.5 shrink-0">
+                          {isHold
+                            ? <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
+                            : <RotateCcw className="w-3.5 h-3.5 text-getmeds-blue" />
+                          }
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className={`text-[11px] font-semibold ${isHold ? 'text-red-700' : 'text-getmeds-blue'}`}>
+                            {isHold ? 'Finance hold' : 'Re-submitted'}
+                          </p>
+                          {e.notes && (
+                            <p className="text-[12px] text-ink-primary mt-0.5 break-words">{e.notes}</p>
+                          )}
+                          <p className="text-[11px] text-ink-secondary mt-0.5">
+                            {e.actor_name}
+                            {e.created_at ? ` · ${formatPHT(e.created_at, 'short-datetime')}` : ''}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {missing.length > 0 && (
               <div className="flex items-start gap-2 rounded-lg border border-state-warning bg-state-warning-light px-3 py-2.5">
                 <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-900" />
