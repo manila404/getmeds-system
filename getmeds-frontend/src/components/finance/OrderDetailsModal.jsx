@@ -616,6 +616,11 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
   useEffect(() => { setChecks({ prices: false, proof: false }); }, [orderId]);
   const checksDone = checks.prices && checks.proof;
 
+  const canHold = Boolean(onReject) && order?.status === 'ready_for_finance_verified';
+  const [rejecting, setRejecting] = useState(false);
+  const [holdReason, setHoldReason] = useState('');
+  useEffect(() => { setRejecting(false); setHoldReason(''); }, [orderId]);
+
   return (
     <>
       <div
@@ -639,16 +644,6 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {order && (
-              <a
-                href={`/orders/${order.id}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
-              >
-                Full page <ExternalLink className="w-3 h-3" />
-              </a>
-            )}
             <button onClick={onClose} className="text-ink-secondary hover:text-ink-primary" title="Close">
               <X className="w-5 h-5" />
             </button>
@@ -874,7 +869,18 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
               Verify/Hold inline in the "Split Sales Orders" section above —
               this footer would otherwise offer the exact same action a
               second time, with no Hold of its own to match it. */}
-          {footer ? (
+          {rejecting ? (
+            <div className="min-w-0 flex-1">
+              <textarea
+                autoFocus
+                rows={2}
+                value={holdReason}
+                onChange={(e) => setHoldReason(e.target.value)}
+                placeholder="Why is this order being held?"
+                className="w-full text-xs rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400 resize-none"
+              />
+            </div>
+          ) : footer ? (
             <div className="min-w-0">{footer}</div>
           ) : splits.length > 0 ? (
             <p className="text-[11px] text-ink-secondary min-w-0">
@@ -916,39 +922,69 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
             </p>
           )}
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 rounded-md border border-slate-200 text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
-            >
-              Close
-            </button>
-            {canConfirm && splits.length === 0 && (
-              onOpenConfirm ? (
-                // Oct 1, 2026: new confirm flow — opens the FinanceConfirmModal
-                // overlay instead of confirming directly. The checkbox lives
-                // there; the confirm button here is just the entry point.
+            {rejecting ? (
+              <>
                 <button
-                  onClick={() => onOpenConfirm(order)}
-                  disabled={confirming}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={() => { setRejecting(false); setHoldReason(''); }}
+                  className="px-4 py-2 rounded-md border border-slate-200 text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
                 >
-                  <ShieldCheck className="w-4 h-4" />
-                  Confirm payment…
+                  Cancel
                 </button>
-              ) : (
                 <button
-                  onClick={() => (confirmsSalesOrder ? onConfirm(order.id, checks) : onConfirm(order.id))}
-                  disabled={confirming || (confirmsSalesOrder && !checksDone)}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={!holdReason.trim() || confirming}
+                  onClick={() => {
+                    onReject(order.id, holdReason.trim());
+                    setRejecting(false);
+                    setHoldReason('');
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-state-error text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {confirming ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                  Confirm hold
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={onClose}
+                  className="px-4 py-2 rounded-md border border-slate-200 text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
+                >
+                  Close
+                </button>
+                {canHold && (
+                  <button
+                    onClick={() => setRejecting(true)}
+                    disabled={confirming}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md border border-state-error/40 text-state-error text-sm font-semibold hover:bg-state-error-light disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Hold
+                  </button>
+                )}
+                {canConfirm && splits.length === 0 && (
+                  onOpenConfirm ? (
+                    <button
+                      onClick={() => onOpenConfirm(order)}
+                      disabled={confirming}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                      Confirm payment…
+                    </button>
                   ) : (
-                    <ShieldCheck className="w-4 h-4" />
-                  )}
-                  {confirmsSalesOrder ? 'Confirm order' : 'Confirm account'}
-                </button>
-              )
+                    <button
+                      onClick={() => (confirmsSalesOrder ? onConfirm(order.id, checks) : onConfirm(order.id))}
+                      disabled={confirming || (confirmsSalesOrder && !checksDone)}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-sm font-semibold hover:bg-pharmacy-green-dark disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {confirming ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <ShieldCheck className="w-4 h-4" />
+                      )}
+                      {confirmsSalesOrder ? 'Confirm order' : 'Confirm account'}
+                    </button>
+                  )
+                )}
+              </>
             )}
           </div>
         </div>
