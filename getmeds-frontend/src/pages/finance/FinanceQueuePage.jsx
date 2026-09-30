@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient, useIsFetching, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3, ArrowRight, TrendingUp } from 'lucide-react';
+import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3, ArrowRight } from 'lucide-react';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import MyConfirmationsPanel from '../../components/finance/MyConfirmationsPanel';
@@ -52,9 +52,15 @@ const FinanceQueuePage = () => {
 
   // Sep 19, 2026: two extra views beside the shared queue — "My
   // Confirmations" (a personal, date-filterable log) and "Reports" (sales by
-  // salesperson, built from this app's own orders). Mutually exclusive with
-  // the queue and each other, so one string rather than two booleans.
-  const [activePanel, setActivePanel] = useState(null); // null | 'mine' | 'reports'
+  // salesperson). Now driven by ?view= in the URL so the sidebar NavLinks can
+  // navigate directly to them, and a loaded view survives a page refresh.
+  // Oct 1, 2026: moved from local state to URL param.
+  const view = searchParams.get('view') || null; // null | 'mine' | 'reports'
+  const closePanel = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('view');
+    setSearchParams(next, { replace: true });
+  };
 
   /**
    * Sep 12, 2026: which order is open in the details panel.
@@ -155,12 +161,16 @@ const FinanceQueuePage = () => {
   const mineFetching = useIsFetching({ queryKey: ['finance-my-confirmations'] }) > 0;
   const reportsFetching = useIsFetching({ queryKey: ['finance-sales-by-salesperson'] }) > 0;
   const salesFetching = useIsFetching({ queryKey: ['finance-sales-summary'] }) > 0;
-  const activeIsFetching = activePanel === 'mine' ? mineFetching : activePanel === 'reports' ? reportsFetching : activePanel === 'sales' ? salesFetching : isFetching;
+  // Sales summary is now always visible, so its fetch state contributes to the
+  // spinner on the main dashboard (not inside a panel that might be closed).
+  const activeIsFetching = view === 'mine' ? mineFetching : view === 'reports' ? reportsFetching : isFetching || salesFetching;
   const handleRefresh = () => {
-    if (activePanel === 'mine') qc.invalidateQueries({ queryKey: ['finance-my-confirmations'] });
-    else if (activePanel === 'reports') qc.invalidateQueries({ queryKey: ['finance-sales-by-salesperson'] });
-    else if (activePanel === 'sales') qc.invalidateQueries({ queryKey: ['finance-sales-summary'] });
-    else refetch();
+    if (view === 'mine') qc.invalidateQueries({ queryKey: ['finance-my-confirmations'] });
+    else if (view === 'reports') qc.invalidateQueries({ queryKey: ['finance-sales-by-salesperson'] });
+    else {
+      refetch();
+      qc.invalidateQueries({ queryKey: ['finance-sales-summary'] });
+    }
   };
   // Sep 12, 2026: GETMEDS_WORKFLOW_V2, as reported by the server. When on,
   // Finance's Confirm order acts on the draft Sales Order (so_created) and
@@ -549,57 +559,22 @@ const FinanceQueuePage = () => {
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {/* Sep 19, 2026: two views beside the shared queue, each toggling
-              the whole page body rather than living inside it — the same way
-              picking a stage does. "each finance can see their approved/
-              verified SO" -> My Confirmations; "create a report tab" ->
-              Reports (sales by salesperson, built from this app's own
-              orders — see SalesBySalespersonPanel's own header for why it
-              can't match Zoho's report column-for-column). */}
-          <button
-            onClick={() => setActivePanel((v) => (v === 'sales' ? null : 'sales'))}
-            aria-pressed={activePanel === 'sales'}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-semibold shrink-0 border ${
-              activePanel === 'sales'
-                ? 'bg-getmeds-blue text-white border-getmeds-blue'
-                : 'border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary'
-            }`}
-          >
-            <TrendingUp className="w-4 h-4" /> Sales
-          </button>
-          <button
-            onClick={() => setActivePanel((v) => (v === 'mine' ? null : 'mine'))}
-            aria-pressed={activePanel === 'mine'}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-semibold shrink-0 border ${
-              activePanel === 'mine'
-                ? 'bg-getmeds-blue text-white border-getmeds-blue'
-                : 'border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary'
-            }`}
-          >
-            <ShieldCheck className="w-4 h-4" /> My Confirmations
-          </button>
-          <button
-            onClick={() => setActivePanel((v) => (v === 'reports' ? null : 'reports'))}
-            aria-pressed={activePanel === 'reports'}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-semibold shrink-0 border ${
-              activePanel === 'reports'
-                ? 'bg-getmeds-blue text-white border-getmeds-blue'
-                : 'border-slate-200 text-ink-secondary hover:bg-surface hover:text-ink-primary'
-            }`}
-          >
-            <BarChart3 className="w-4 h-4" /> Reports
-          </button>
+          {/* Oct 1, 2026: Sales/My Confirmations/Reports moved to the sidebar.
+              Only Refresh remains here as a page-level action. */}
           <button onClick={handleRefresh} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0">
             <RefreshCw className={`w-4 h-4 ${activeIsFetching ? 'animate-spin' : ''}`} /> Refresh
           </button>
         </div>
       </div>
 
-      {activePanel === 'sales' && <SalesSummaryPanel onClose={() => setActivePanel(null)} />}
-      {activePanel === 'mine' && <MyConfirmationsPanel onClose={() => setActivePanel(null)} />}
-      {activePanel === 'reports' && <SalesBySalespersonPanel onClose={() => setActivePanel(null)} />}
+      {view === 'mine' && <MyConfirmationsPanel onClose={closePanel} />}
+      {view === 'reports' && <SalesBySalespersonPanel onClose={closePanel} />}
 
-      {!activePanel && (<>
+      {!view && (<>
+      {/* Oct 1, 2026: Sales Summary always visible on the main dashboard —
+          month total and today total at a glance, no button required. */}
+      <SalesSummaryPanel embedded />
+
       {/* Sep 12, 2026: the split. Both tabs always show, both always carry
           their count — an empty GetMeds tab beside "Imported from Zoho (138)"
           says the queue is clear, where a single merged list of 143 said

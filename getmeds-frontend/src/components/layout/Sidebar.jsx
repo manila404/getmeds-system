@@ -188,8 +188,15 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
     // is. 'All Orders Log' is gone from here: it pointed at MyOrdersPage,
     // which is worded for a MedRep ("orders you have submitted") and listed
     // all 60,958 orders unscoped. /finance answers that need properly now.
+    //
+    // Oct 1, 2026: My Confirmations and Reports moved from top-right header
+    // buttons into the sidebar so Finance has a consistent nav home for them.
+    // `viewNone` on Dashboard keeps it highlighted only when no ?view= param is
+    // set; each sub-item uses its own `view` key via isLinkActive.
     mainLinks.push(
-      { to: '/finance', icon: <LayoutDashboard size={19} />, label: 'Dashboard' },
+      { to: '/finance', viewNone: true, icon: <LayoutDashboard size={19} />, label: 'Dashboard' },
+      { to: '/finance?view=mine', view: 'mine', icon: <UserCheck size={19} />, label: 'My Confirmations' },
+      { to: '/finance?view=reports', view: 'reports', icon: <BarChart3 size={19} />, label: 'Reports' },
       { to: '/finance/history', icon: <History size={19} />, label: 'Payment History' }
     );
   } else if (role === 'dispatch') {
@@ -298,7 +305,11 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   // active only when that stage is the one showing (NavLink's own isActive
   // ignores the query string and would light it up on every /finance view).
   const isLinkActive = (l) =>
-    l.stage
+    l.view !== undefined
+      ? location.pathname === '/finance' && searchParams.get('view') === l.view
+      : l.viewNone
+      ? location.pathname === '/finance' && !searchParams.get('view')
+      : l.stage
       ? location.pathname === '/finance' && searchParams.get('stage') === l.stage
       : l.to === '/management' || l.to === '/orders'
         ? location.pathname === l.to
@@ -460,19 +471,24 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                   )}
                   <ul className="space-y-1">
                     {restOfMainLinks.map((link) => (
-                      <li key={link.to}>
+                      <li key={link.to + (link.view || '')}>
                         <NavLink
                           to={link.to}
                           title={link.label}
                           onClick={handleLinkClick}
                           end={link.to === '/orders' || link.to === '/finance' || link.to === '/dispatch' || link.to === '/management'}
-                          className={({ isActive }) =>
-                            `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
+                          className={({ isActive: navIsActive }) => {
+                            // Links with view/viewNone need custom active logic because
+                            // NavLink ignores the query string for isActive.
+                            const isActive = (link.view !== undefined || link.viewNone)
+                              ? isLinkActive(link)
+                              : navIsActive;
+                            return `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
                               isActive
                                 ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-4 border-getmeds-blue'
                                 : 'text-ink-primary hover:bg-surface'
-                            }`
-                          }
+                            }`;
+                          }}
                         >
                           <span className={`mr-3 ${isCollapsed ? 'lg:mr-0' : ''}`}>{link.icon}</span>
                           <span className={`truncate flex-1 ${hideWhenCollapsed}`}>{link.label}</span>
@@ -495,7 +511,32 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                     one of them. */}
                 {navGroups.map((g) =>
                   g.special === 'finance' ? (
-                    <React.Fragment key="finance">{financeNavLink}</React.Fragment>
+                    // Oct 1, 2026: Finance Confirmation link + sub-items that
+                    // were previously top-right header buttons on FinanceQueuePage.
+                    <React.Fragment key="finance">
+                      {financeNavLink}
+                      {canSeeFinance && ([
+                        { to: '/finance?view=mine', view: 'mine', icon: <UserCheck size={19} />, label: 'My Confirmations' },
+                        { to: '/finance?view=reports', view: 'reports', icon: <BarChart3 size={19} />, label: 'Reports' },
+                      ].map((link) => (
+                        <NavLink
+                          key={link.to}
+                          to={link.to}
+                          onClick={handleLinkClick}
+                          className={() => {
+                            const isActive = isLinkActive(link);
+                            return `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
+                              isActive
+                                ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-4 border-getmeds-blue'
+                                : 'text-ink-primary hover:bg-surface'
+                            }`;
+                          }}
+                        >
+                          <span className={`mr-3 ${isCollapsed ? 'lg:mr-0' : ''}`}>{link.icon}</span>
+                          <span className={`truncate ${hideWhenCollapsed}`}>{link.label}</span>
+                        </NavLink>
+                      )))}
+                    </React.Fragment>
                   ) : (
                     <div key={g.key}>
                       <button

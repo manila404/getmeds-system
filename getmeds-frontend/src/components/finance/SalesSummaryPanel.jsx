@@ -65,7 +65,7 @@ function DailyChart({ daily }) {
  *
  * Sep 30, 2026. Source: FINANCE_VERIFIED events, GetMeds-raised orders only.
  */
-const SalesSummaryPanel = ({ onClose }) => {
+const SalesSummaryPanel = ({ onClose, embedded = false }) => {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['finance-sales-summary'],
     queryFn: () => client.get('/api/finance/sales-summary').then((r) => r.data),
@@ -82,21 +82,23 @@ const SalesSummaryPanel = ({ onClose }) => {
     : '—';
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <TrendingUp className="w-4 h-4 text-getmeds-blue" />
-          <h2 className="text-sm font-semibold text-ink-primary">Sales Summary</h2>
+    <div className={embedded ? 'space-y-3' : 'bg-white border border-slate-200 rounded-xl shadow-sm p-5 space-y-4'}>
+      {/* Header — hidden in embedded mode; the page title acts as the label */}
+      {!embedded && (
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-getmeds-blue" />
+            <h2 className="text-sm font-semibold text-ink-primary">Sales Summary</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-md text-ink-secondary hover:text-ink-primary hover:bg-surface transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="p-1 rounded-md text-ink-secondary hover:text-ink-primary hover:bg-surface transition-colors"
-        >
-          <X className="w-4 h-4" />
-        </button>
-      </div>
+      )}
 
       {isLoading ? (
         <div className="flex items-center justify-center py-10">
@@ -135,20 +137,24 @@ const SalesSummaryPanel = ({ onClose }) => {
             </div>
           </div>
 
-          {/* Daily trend chart */}
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-secondary mb-2">
-              Daily trend — {monthLabel}
-            </p>
-            <DailyChart daily={summary?.daily} />
-            <p className="text-[10px] text-ink-secondary/50 mt-1.5">
-              Hover a bar for the day's total. Today is in dark blue.
-            </p>
-          </div>
+          {/* Daily trend chart — omitted in embedded (compact) mode */}
+          {!embedded && (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-secondary mb-2">
+                Daily trend — {monthLabel}
+              </p>
+              <DailyChart daily={summary?.daily} />
+              <p className="text-[10px] text-ink-secondary/50 mt-1.5">
+                Hover a bar for the day's total. Today is in dark blue.
+              </p>
+            </div>
+          )}
 
-          <p className="text-[10px] text-ink-secondary/40 border-t border-slate-100 pt-3">
-            GetMeds-raised orders only · Counted on Finance confirmation date
-          </p>
+          {!embedded && (
+            <p className="text-[10px] text-ink-secondary/40 border-t border-slate-100 pt-3">
+              GetMeds-raised orders only · Counted on Finance confirmation date
+            </p>
+          )}
         </>
       )}
     </div>
