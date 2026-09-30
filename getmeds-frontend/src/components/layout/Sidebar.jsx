@@ -13,12 +13,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   const location = useLocation();
   const [searchParams] = useSearchParams();
 
-  // Open when you are already looking at the Finance page, so arriving from a
-  // stage link does not hide the group that link came from.
-  const onFinancePage = location.pathname === '/finance';
-  const [financeOpen, setFinanceOpen] = useState(onFinancePage);
-  const activeStage = onFinancePage ? searchParams.get('stage') : null;
-
   // Sep 24, 2026: which nav groups the person has toggled by hand. Anything not
   // in here follows the default (open if it holds the page you're on).
   const [openGroups, setOpenGroups] = useState({});
@@ -161,12 +155,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   // Mirrors the /finance route guard in App.jsx. Showing the group to someone
   // ProtectedRoute would bounce is worse than not showing it at all.
   const canSeeFinance = ['finance', 'management', 'admin'].includes(role);
-
-  const financeStageLinks = FINANCE_STAGES.map((g) => ({
-    to: `/finance?stage=${g.key}`,
-    stage: g.key,
-    label: g.navLabel,
-  }));
 
   if (role === 'medrep') {
     // Sep 28, 2026: Create New Order first — it renders as the top CTA button
@@ -319,62 +307,27 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   // group opens when it holds the page you're on.
   const groupIsOpen = (g) => openGroups[g.key] ?? (g.key === 'operations' || g.links.some(isLinkActive));
 
-  /* Sep 12, 2026: the stages as navigation.
-     Collapsed by default unless you are already on the page — six always-open
-     items would crowd out everything else in the sidebar for the roles that
-     also do other work. */
-  const financeBlock =
-    financeStageLinks.length > 0 && canSeeFinance ? (
-      <div className={hideWhenCollapsed}>
-        <button
-          type="button"
-          onClick={() => setFinanceOpen((v) => !v)}
-          aria-expanded={financeOpen}
-          className={
-            navGroups.length
-              ? 'w-full flex items-center px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider text-ink-secondary hover:text-ink-primary transition-colors'
-              : 'w-full flex items-center px-3 py-2.5 rounded-lg text-sm font-medium text-ink-primary hover:bg-surface transition-all'
-          }
-        >
-          {!navGroups.length && <span className="mr-2.5"><ShieldCheck size={19} /></span>}
-          <span className="truncate flex-1 text-left">{navGroups.length ? 'Finance' : 'Finance Confirmation'}</span>
-          {/* Says there is work behind a group that is shut. */}
-          {!financeOpen && activeStage && (
-            <span className="mr-1.5 w-1.5 h-1.5 rounded-full bg-getmeds-blue shrink-0" />
-          )}
-          <ChevronDown
-            size={navGroups.length ? 14 : 16}
-            className={`shrink-0 transition-transform ${financeOpen ? 'rotate-180' : ''}`}
-          />
-        </button>
-
-        {financeOpen && (
-          <ul className="mt-0.5 space-y-0.5 pl-4">
-            {financeStageLinks.map((link) => {
-              // NavLink's own isActive ignores the query string, so every stage
-              // would light up at once on /finance.
-              const isActive = activeStage === link.stage;
-              return (
-                <li key={link.stage}>
-                  <NavLink
-                    to={link.to}
-                    title={link.label}
-                    onClick={handleLinkClick}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] transition-all border-l-2 ${
-                      isActive
-                        ? 'bg-getmeds-blue/10 text-ink-primary font-semibold border-getmeds-blue'
-                        : 'text-ink-secondary hover:bg-surface hover:text-ink-primary border-transparent'
-                    }`}
-                  >
-                    <span className="truncate">{link.label}</span>
-                  </NavLink>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-    ) : null;
+  // Single "Finance Confirmation" nav link for Admin's navGroups — replaces the
+  // old accordion with 6 sub-items. The stage cards on the page itself are the
+  // navigation; a duplicate sidebar sub-nav was the source of confusion.
+  const financeNavLink = canSeeFinance ? (
+    <NavLink
+      key="finance"
+      to="/finance"
+      onClick={handleLinkClick}
+      end
+      className={({ isActive }) =>
+        `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
+          isActive
+            ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-4 border-getmeds-blue'
+            : 'text-ink-primary hover:bg-surface'
+        }`
+      }
+    >
+      <span className={`mr-3 ${isCollapsed ? 'lg:mr-0' : ''}`}><ShieldCheck size={19} /></span>
+      <span className={`truncate ${hideWhenCollapsed}`}>Finance Confirmation</span>
+    </NavLink>
+  ) : null;
 
   return (
     <>
@@ -542,7 +495,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                     one of them. */}
                 {navGroups.map((g) =>
                   g.special === 'finance' ? (
-                    <React.Fragment key="finance">{financeBlock}</React.Fragment>
+                    <React.Fragment key="finance">{financeNavLink}</React.Fragment>
                   ) : (
                     <div key={g.key}>
                       <button
@@ -586,9 +539,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                   )
                 )}
 
-                {/* Sep 12, 2026: the stages as navigation, for the roles that
-                    aren't grouped (Finance). */}
-                {navGroups.length === 0 && financeBlock}
 
                 {secondaryLinks.length > 0 && (
                   <div className="pt-2 border-t border-slate-100">

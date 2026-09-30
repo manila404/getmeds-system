@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient, useIsFetching, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3 } from 'lucide-react';
+import { CheckCircle, Clock, RefreshCw, FileText, Banknote, ExternalLink, Truck, ShieldCheck, XCircle, Receipt, FileSearch, ChevronLeft, Download, BarChart3, ArrowRight } from 'lucide-react';
 import client from '../../api/client';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import MyConfirmationsPanel from '../../components/finance/MyConfirmationsPanel';
@@ -324,9 +324,9 @@ const FinanceQueuePage = () => {
       } else {
         toast.success(res?.data?.approved
           ? (res?.data?.paymentProofVerified
-              ? 'Verified with its proof of payment — the Sales Order is confirmed in Zoho.'
-              : 'Verified — the Sales Order is confirmed in Zoho.')
-          : 'Put on hold. The reason is on the order timeline.');
+              ? 'Confirmed with proof of payment ✓ — moved to Invoicing in Zoho.'
+              : 'Confirmed ✓ — moved to Invoicing in Zoho.')
+          : 'Put on hold — moved to On hold & exceptions. The reason is on the order timeline.');
       }
       setRejectingId(null);
       setRejectReason('');
@@ -661,13 +661,17 @@ const FinanceQueuePage = () => {
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         {STAGE_CARDS.map(card => {
           const Icon = card.icon;
-          const active = stage === card.key;
+          const isActionable = card.key === 'actionable';
           return (
             <button
               key={card.key}
               type="button"
               onClick={() => chooseStage(card.key)}
-              className="text-left bg-white rounded-xl border border-slate-200 p-4 transition-colors hover:border-getmeds-blue"
+              className={`group text-left rounded-xl border p-4 transition-all hover:shadow-sm ${
+                isActionable && (stats[card.key] ?? 0) > 0
+                  ? 'bg-purple-50 border-purple-200 hover:border-purple-400'
+                  : 'bg-white border-slate-200 hover:border-getmeds-blue'
+              }`}
             >
               <div className="flex items-start justify-between gap-2">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-secondary leading-tight">
@@ -677,8 +681,15 @@ const FinanceQueuePage = () => {
                   <Icon className="w-4 h-4" />
                 </div>
               </div>
-              <p className="text-2xl font-bold text-ink-primary mt-2">{stats[card.key] ?? 0}</p>
-              <p className="text-[11px] text-ink-secondary mt-0.5">{card.sub}</p>
+              <p className={`text-2xl font-bold mt-2 ${isActionable && (stats[card.key] ?? 0) > 0 ? 'text-purple-700' : 'text-ink-primary'}`}>
+                {stats[card.key] ?? 0}
+              </p>
+              <div className="flex items-center justify-between mt-0.5">
+                <p className="text-[11px] text-ink-secondary">{card.sub}</p>
+                <span className="text-[11px] font-semibold text-getmeds-blue opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+                  View <ArrowRight className="w-3 h-3" />
+                </span>
+              </div>
             </button>
           );
         })}
@@ -710,13 +721,19 @@ const FinanceQueuePage = () => {
         </button>
       )}
 
-      {/* Sep 12, 2026: the orders actually waiting on Finance, newest first.
-          Served separately from the list below so it ignores the stage filter
-          and the page — the work should not disappear because someone clicked
-          "Completed" to check something, or paged to the end of 60,948
-          imported orders. It does follow the origin tab, because an imported
-          Zoho order sitting at this status is a historical record rather than
-          a thing to do. */}
+      {/* "All clear" state — shown on the dashboard when nothing is waiting. */}
+      {!stage && !isLoading && (stats.actionable ?? 0) === 0 && (
+        <div className="bg-pharmacy-green/5 border border-pharmacy-green/20 rounded-xl px-5 py-4 flex items-center gap-3">
+          <CheckCircle className="w-5 h-5 text-pharmacy-green shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-pharmacy-green-dark">You're all clear</p>
+            <p className="text-[12px] text-ink-secondary mt-0.5">Nothing is waiting on your confirmation right now. Use the cards above to browse other stages.</p>
+          </div>
+        </div>
+      )}
+
+      {/* The orders actually waiting on Finance, newest first. Served separately
+          from the list so it ignores the stage filter and the page. */}
       {!stage && recent.length > 0 && (
         <div className="bg-white shadow rounded-lg border border-purple-200 overflow-hidden">
           <div className="px-4 py-3 border-b border-purple-100 bg-purple-50 flex items-center gap-2">
