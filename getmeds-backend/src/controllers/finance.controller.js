@@ -617,12 +617,12 @@ exports.getSalesSummary = async (req, res, next) => {
       db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count ${BASE} AND fe.created_at >= ?`).get(monthFromUtc),
       db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?`).get(todayFromUtc, todayToUtc),
       db.prepare(
-        `SELECT DATE(fe.created_at AT TIME ZONE 'Asia/Manila') AS day,
+        `SELECT TO_CHAR((fe.created_at::timestamptz) AT TIME ZONE 'Asia/Manila', 'YYYY-MM-DD') AS day,
                 COALESCE(SUM(o.total_amount), 0) AS total,
                 COUNT(*) AS count
          ${BASE}
            AND fe.created_at >= ?
-         GROUP BY DATE(fe.created_at AT TIME ZONE 'Asia/Manila')
+         GROUP BY TO_CHAR((fe.created_at::timestamptz) AT TIME ZONE 'Asia/Manila', 'YYYY-MM-DD')
          ORDER BY day`
       ).all(monthFromUtc),
     ]);
