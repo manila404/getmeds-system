@@ -462,30 +462,41 @@ exports.getMyConfirmations = async (req, res, next) => {
     const toIso = `${dateTo}T23:59:59.999Z`;
 
     const [rows, summaryRow] = await Promise.all([
+      // One row per order (some orders have multiple FINANCE_VERIFIED events
+      // when they are held and re-confirmed). Exclude cancelled/deleted orders
+      // that were voided in Zoho after Finance confirmed them.
       db
         .prepare(
           `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount,
                   o.zoho_so_number, o.zoho_invoice_number,
                   c.name AS customer_name,
-                  fe.created_at AS confirmed_at
+                  MAX(fe.created_at) AS confirmed_at
              FROM order_events fe
              JOIN orders o ON o.id = fe.order_id
              LEFT JOIN customers c ON c.id = o.customer_id
             WHERE fe.event_type = 'FINANCE_VERIFIED'
               AND fe.actor_id = ?
               AND fe.created_at >= ? AND fe.created_at <= ?
-            ORDER BY fe.created_at DESC
+              AND o.status NOT IN ('cancelled', 'deleted')
+            GROUP BY o.id, o.getmeds_order_id, o.status, o.total_amount,
+                     o.zoho_so_number, o.zoho_invoice_number, c.name
+            ORDER BY MAX(fe.created_at) DESC
             LIMIT ? OFFSET ?`
         )
         .all(req.user.id, fromIso, toIso, limit, offset),
+      // Summary counts distinct orders, not events. Voided orders are excluded.
       db
         .prepare(
-          `SELECT COUNT(*) AS n, COALESCE(SUM(o.total_amount), 0) AS total_amount
-             FROM order_events fe
-             JOIN orders o ON o.id = fe.order_id
-            WHERE fe.event_type = 'FINANCE_VERIFIED'
-              AND fe.actor_id = ?
-              AND fe.created_at >= ? AND fe.created_at <= ?`
+          `SELECT COUNT(*) AS n, COALESCE(SUM(total_amount), 0) AS total_amount
+             FROM (
+               SELECT DISTINCT o.id, o.total_amount
+                 FROM order_events fe
+                 JOIN orders o ON o.id = fe.order_id
+                WHERE fe.event_type = 'FINANCE_VERIFIED'
+                  AND fe.actor_id = ?
+                  AND fe.created_at >= ? AND fe.created_at <= ?
+                  AND o.status NOT IN ('cancelled', 'deleted')
+             ) sub`
         )
         .get(req.user.id, fromIso, toIso),
     ]);
@@ -637,21 +648,28 @@ exports.getSalesSummary = async (req, res, next) => {
     const BASE = `FROM order_events fe
                    JOIN orders o ON o.id = fe.order_id
                   WHERE fe.event_type = 'FINANCE_VERIFIED'
-                    AND NOT (${importedSql('o')})`;
+                    AND NOT (${importedSql('o')})
+                    AND o.status NOT IN ('cancelled', 'deleted')`;
+
+    // Wrap each aggregate in a DISTINCT ON (o.id) subquery so that orders
+    // confirmed multiple times (hold → re-confirm) are counted only once.
+    const distinctBase = (extraWhere = '') => `
+      SELECT COUNT(*) AS count, COALESCE(SUM(total_amount), 0) AS total
+      FROM (
+        SELECT DISTINCT ON (o.id) o.id, o.total_amount
+        ${BASE} ${extraWhere}
+        ORDER BY o.id, fe.created_at DESC
+      ) sub`;
 
     const [forecastRow, actualRow, todayRow, dailyRows] = await Promise.all([
       // Forecast: Finance-verified in range (confirmed but delivery not required yet)
-      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count
-                  ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?`)
+      db.prepare(distinctBase('AND fe.created_at >= ? AND fe.created_at <= ?'))
         .get(fromUtc, toUtc),
       // Actual sales: Finance-verified in range AND order is completed (paid + shipped)
-      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count
-                  ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?
-                    AND o.status = 'completed'`)
+      db.prepare(distinctBase("AND fe.created_at >= ? AND fe.created_at <= ? AND o.status = 'completed'"))
         .get(fromUtc, toUtc),
       // Today always refers to the current Manila day, independent of the range filter.
-      db.prepare(`SELECT COALESCE(SUM(o.total_amount), 0) AS total, COUNT(*) AS count
-                  ${BASE} AND fe.created_at >= ? AND fe.created_at <= ?`)
+      db.prepare(distinctBase('AND fe.created_at >= ? AND fe.created_at <= ?'))
         .get(todayFromUtc, todayToUtc),
       // Daily breakdown over the selected range (for trend charts).
       db.prepare(
