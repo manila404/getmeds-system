@@ -680,16 +680,20 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
     }
     if (a.type === 'rep') {
       const targets = s.c.managers.filter((m) => m.id !== a.from.id);
-      // A territory nobody holds: pick one of the MedReps that are not in a channel.
-      const assign = !r.name
+      const isVacant = !r.name;
+      const assign = isVacant
         ? <button type="button" className={linkBtn} onClick={() => setAssigning({ territory: a.territory, channel: s.c })}>Assign account</button>
         : null;
-      if (!targets.length) return assign;
+      const remove = isVacant
+        ? <button type="button" className="text-[12px] font-semibold text-red-700 hover:text-red-800" onClick={() => run(() => client.delete(`/api/admin/team-structure/territories/${a.territory.id}`), 'Slot removed.')}>Remove</button>
+        : null;
+      if (!targets.length) return assign || remove ? <span className="inline-flex gap-3">{assign}{remove}</span> : null;
       if (moving !== a.territory.id) {
         return (
           <span className="inline-flex gap-3">
             {assign}
             <button type="button" className={linkBtn} onClick={() => setMoving(a.territory.id)}>Move</button>
+            {remove}
           </span>
         );
       }
