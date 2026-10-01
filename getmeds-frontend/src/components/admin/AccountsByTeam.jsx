@@ -323,17 +323,29 @@ const AccountTable = ({ rows, onOpen, showDetail }) => (
 
 /* ── add a new person (territory) under a team lead ───────────────────────── */
 
-/**
- * Creates a new territory row directly under a team lead.
- * Required: Zoho Salesperson (the unique territory key).
- * Optional: Person Name (person_label shown in the structure), HQ/branch.
- */
-const AddPersonDialog = ({ manager, channel, onClose, onDone }) => {
+const AddPersonDialog = ({ manager, channel, candidates, onClose, onDone }) => {
+  const [userId, setUserId] = useState('');
   const [zoho, setZoho]     = useState('');
   const [name, setName]     = useState('');
   const [hq, setHq]         = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState(null);
+
+  const picked = candidates.find((u) => String(u.id) === String(userId));
+  const held = picked ? heldOf(picked) : [];
+
+  const pick = (value) => {
+    setUserId(value);
+    const u = candidates.find((x) => String(x.id) === String(value));
+    if (u) {
+      const list = heldOf(u);
+      setZoho(list[0] || '');
+      setName(displayName(u));
+    } else {
+      setZoho('');
+      setName('');
+    }
+  };
 
   const save = async (e) => {
     e.preventDefault();
@@ -342,10 +354,10 @@ const AddPersonDialog = ({ manager, channel, onClose, onDone }) => {
     setError(null);
     try {
       await client.post('/api/admin/team-structure/territories', {
-        manager_id:   manager.id,
+        manager_id:       manager.id,
         zoho_salesperson: zoho.trim(),
-        person_label: name.trim() || null,
-        hq:           hq.trim() || null,
+        person_label:     name.trim() || null,
+        hq:               hq.trim() || null,
       });
       toast.success(`${name.trim() || zoho.trim()} added under ${manager.name}.`);
       await onDone();
@@ -366,7 +378,7 @@ const AddPersonDialog = ({ manager, channel, onClose, onDone }) => {
               Add person under {manager.name}
             </h2>
             <p className="text-xs text-ink-secondary mt-0.5">
-              {chLabel(channel.name)} · Creates a new slot in the structure. To link it to an account use &quot;Assign account&quot; on the new row.
+              {chLabel(channel.name)} · Pick a MedRep account to fill in their details automatically.
             </p>
           </div>
           <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100">
@@ -375,6 +387,50 @@ const AddPersonDialog = ({ manager, channel, onClose, onDone }) => {
         </div>
 
         <div className="px-5 py-4 space-y-4">
+          {/* Account picker */}
+          <div>
+            <label htmlFor="ts-ap-account" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">
+              MedRep account
+            </label>
+            <select
+              id="ts-ap-account"
+              className={inputCls}
+              value={userId}
+              onChange={(e) => pick(e.target.value)}
+              disabled={saving}
+              autoFocus
+            >
+              <option value="">No account — fill in manually</option>
+              {candidates.map((u) => (
+                <option key={u.id} value={u.id} disabled={!heldOf(u).length}>
+                  {displayName(u)}{heldOf(u).length ? ` · ${heldOf(u).join(', ')}` : ' · no Zoho salesperson yet'}
+                </option>
+              ))}
+            </select>
+            {candidates.length === 0 && (
+              <p className="mt-1 text-[11px] text-amber-800">Every active MedRep is already placed in a channel.</p>
+            )}
+          </div>
+
+          {/* If the picked account has multiple salespersons, let user choose which */}
+          {picked && held.length > 1 && (
+            <div>
+              <label htmlFor="ts-ap-sp-pick" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">
+                Which Zoho salesperson
+              </label>
+              <select
+                id="ts-ap-sp-pick"
+                className={inputCls}
+                value={zoho}
+                onChange={(e) => setZoho(e.target.value)}
+                disabled={saving}
+              >
+                {held.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+          )}
+
+          {/* Zoho name — editable, auto-filled when account is picked */}
           <div>
             <label htmlFor="ts-ap-zoho" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">
               Zoho salesperson <span className="text-red-600">*</span>
@@ -386,11 +442,11 @@ const AddPersonDialog = ({ manager, channel, onClose, onDone }) => {
               onChange={(e) => setZoho(e.target.value)}
               placeholder="e.g. TeleSales | Ana"
               disabled={saving}
-              autoFocus
             />
-            <p className="mt-1 text-[11px] text-ink-secondary">Must match exactly the Zoho salesperson name on the account you'll assign here. Must be unique across all channels.</p>
+            <p className="mt-1 text-[11px] text-ink-secondary">Must match exactly the Zoho salesperson name. Must be unique across all channels.</p>
           </div>
 
+          {/* Person name — editable, auto-filled when account is picked */}
           <div>
             <label htmlFor="ts-ap-name" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">
               Person name <span className="font-normal">(optional)</span>
@@ -778,6 +834,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
           key={addingPerson.manager.id}
           manager={addingPerson.manager}
           channel={addingPerson.channel}
+          candidates={unplacedReps.map((r) => r.user).filter((u) => (u.is_active === 1 || u.is_active === true) && u.approval_status !== 'pending' && u.approval_status !== 'rejected')}
           onClose={() => setAddingPerson(null)}
           onDone={refresh}
         />
