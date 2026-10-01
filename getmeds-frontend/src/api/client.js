@@ -6,11 +6,7 @@ const client = axios.create({
 
 client.interceptors.request.use(
   (config) => {
-    // sessionStorage (not localStorage) is deliberate: it's scoped per browser
-    // tab, so opening several tabs of the app (e.g. one per role for a demo)
-    // lets each tab hold its own independent login instead of all tabs
-    // fighting over one shared token.
-    const token = sessionStorage.getItem('token');
+    const token = localStorage.getItem('token');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -29,7 +25,7 @@ client.interceptors.response.use(
     // global logout+redirect below and handle the error locally instead.
     const skipAuthRedirect = error.config?.skipAuthRedirect;
     if (error.response && error.response.status === 401 && !skipAuthRedirect) {
-      sessionStorage.removeItem('token');
+      localStorage.removeItem('token');
       window.location.href = '/';
     }
     return Promise.reject(error);

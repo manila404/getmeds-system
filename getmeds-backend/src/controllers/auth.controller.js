@@ -133,7 +133,7 @@ const SUB_DIVISIONS_BY_DIVISION = {
 };
 
 function issueToken(user) {
-  return jwt.sign({ id: user.id, role: user.role }, SECRET, { expiresIn: '8h' });
+  return jwt.sign({ id: user.id, role: user.role }, SECRET, { expiresIn: '24h' });
 }
 
 exports.login = async (req, res, next) => {

@@ -6,11 +6,7 @@ export const AuthContext = createContext();
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
-  // sessionStorage, not localStorage: each browser tab gets its own isolated
-  // token, so several tabs (one per role, e.g. for a live demo) can each stay
-  // logged in as a different user at the same time instead of sharing one
-  // login across every tab of the browser.
-  const [token, setToken] = useState(sessionStorage.getItem('token'));
+  const [token, setToken] = useState(localStorage.getItem('token'));
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -96,7 +92,7 @@ export const AuthProvider = ({ children }) => {
   // payload, so the session is established the same way.
   const establishSession = (data) => {
     const { token: newToken, user: userData } = data;
-    sessionStorage.setItem('token', newToken);
+    localStorage.setItem('token', newToken);
     setToken(newToken);
     setUser(userData);
     return userData;
@@ -116,7 +112,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   const logout = () => {
-    sessionStorage.removeItem('token');
+    localStorage.removeItem('token');
     setToken(null);
     setUser(null);
   };
