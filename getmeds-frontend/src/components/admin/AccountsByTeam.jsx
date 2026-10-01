@@ -321,6 +321,122 @@ const AccountTable = ({ rows, onOpen, showDetail }) => (
   )
 );
 
+/* ── add a new person (territory) under a team lead ───────────────────────── */
+
+/**
+ * Creates a new territory row directly under a team lead.
+ * Required: Zoho Salesperson (the unique territory key).
+ * Optional: Person Name (person_label shown in the structure), HQ/branch.
+ */
+const AddPersonDialog = ({ manager, channel, onClose, onDone }) => {
+  const [zoho, setZoho]     = useState('');
+  const [name, setName]     = useState('');
+  const [hq, setHq]         = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError]   = useState(null);
+
+  const save = async (e) => {
+    e.preventDefault();
+    if (!zoho.trim()) return setError('Zoho salesperson name is required — it is the unique key that links this slot to an account.');
+    setSaving(true);
+    setError(null);
+    try {
+      await client.post('/api/admin/team-structure/territories', {
+        manager_id:   manager.id,
+        zoho_salesperson: zoho.trim(),
+        person_label: name.trim() || null,
+        hq:           hq.trim() || null,
+      });
+      toast.success(`${name.trim() || zoho.trim()} added under ${manager.name}.`);
+      await onDone();
+      onClose();
+    } catch (err) {
+      setError(errorText(err, 'Could not add person.'));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:py-16" role="dialog" aria-modal="true" aria-labelledby="ts-addperson-title">
+      <div className="fixed inset-0 bg-slate-900/50" onClick={() => !saving && onClose()} aria-hidden="true" />
+      <form onSubmit={save} className="relative w-full max-w-md rounded-xl bg-white shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+          <div>
+            <h2 id="ts-addperson-title" className="text-base font-semibold text-ink-primary">
+              Add person under {manager.name}
+            </h2>
+            <p className="text-xs text-ink-secondary mt-0.5">
+              {chLabel(channel.name)} · Creates a new slot in the structure. To link it to an account use &quot;Assign account&quot; on the new row.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label htmlFor="ts-ap-zoho" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">
+              Zoho salesperson <span className="text-red-600">*</span>
+            </label>
+            <input
+              id="ts-ap-zoho"
+              className={inputCls}
+              value={zoho}
+              onChange={(e) => setZoho(e.target.value)}
+              placeholder="e.g. TeleSales | Ana"
+              disabled={saving}
+              autoFocus
+            />
+            <p className="mt-1 text-[11px] text-ink-secondary">Must match exactly the Zoho salesperson name on the account you'll assign here. Must be unique across all channels.</p>
+          </div>
+
+          <div>
+            <label htmlFor="ts-ap-name" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">
+              Person name <span className="font-normal">(optional)</span>
+            </label>
+            <input
+              id="ts-ap-name"
+              className={inputCls}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Display name shown in the structure"
+              disabled={saving}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="ts-ap-hq" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">
+              HQ / Branch <span className="font-normal">(optional)</span>
+            </label>
+            <input
+              id="ts-ap-hq"
+              className={inputCls}
+              value={hq}
+              onChange={(e) => setHq(e.target.value)}
+              placeholder="e.g. ON SITE"
+              disabled={saving}
+            />
+          </div>
+
+          {error && (
+            <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+          <button type="button" onClick={onClose} disabled={saving} className="px-3.5 py-2 rounded-md border border-slate-200 text-sm font-medium text-ink-secondary hover:bg-surface">
+            Cancel
+          </button>
+          <button type="submit" disabled={saving || !zoho.trim()} className="px-4 py-2 rounded-md text-sm font-semibold text-white bg-getmeds-blue hover:bg-getmeds-blue-hover disabled:opacity-60">
+            {saving ? 'Adding…' : 'Add person'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
 /* ── assign an account to a territory nobody holds ─────────────────────────── */
 
 const heldOf = (u) => (u.salespersons?.length ? u.salespersons.map((s) => s.salesperson) : (u.salesperson ? [u.salesperson] : []));
@@ -433,6 +549,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
   const [editor, setEditor] = useState(null);
   const [moving, setMoving] = useState(null); // territory id whose Move menu is open
   const [assigning, setAssigning] = useState(null); // { territory, channel } awaiting an account
+  const [addingPerson, setAddingPerson] = useState(null); // { manager, channel } for new territory
 
   const usersById = useMemo(() => new Map(users.map((u) => [u.id, u])), [users]);
   // A change of manager (approver) also changes what Manager Access is compared against.
@@ -485,6 +602,9 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
     if (a.type === 'lead') {
       return (
         <span className="inline-flex gap-3">
+          <button type="button" className={`${linkBtn} inline-flex items-center gap-0.5`} onClick={() => setAddingPerson({ manager: a.manager, channel: s.c })}>
+            <Plus className="w-3 h-3" />Person
+          </button>
           <button type="button" className={linkBtn} onClick={() => setEditor({ mode: 'manager-edit', channel: s.c, manager: a.manager })}>Edit</button>
           <button type="button" className="text-[12px] font-semibold text-red-700 hover:text-red-800" onClick={() => run(() => client.delete(`/api/admin/team-structure/managers/${a.manager.id}`), 'Team lead removed.')}>Remove</button>
         </span>
@@ -638,6 +758,16 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
           candidates={unplacedReps.map((r) => r.user).filter((u) => (u.is_active === 1 || u.is_active === true) && u.approval_status !== 'pending' && u.approval_status !== 'rejected')}
           onClose={() => setAssigning(null)}
           onDone={async () => { if (onUsersChanged) await onUsersChanged(); await refresh(); }}
+        />
+      )}
+
+      {addingPerson && (
+        <AddPersonDialog
+          key={addingPerson.manager.id}
+          manager={addingPerson.manager}
+          channel={addingPerson.channel}
+          onClose={() => setAddingPerson(null)}
+          onDone={refresh}
         />
       )}
 
