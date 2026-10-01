@@ -594,7 +594,19 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
   const actionsFor = (s) => (r) => {
     const a = r.act;
     if (!a) return null;
-    if (a.type === 'head') return <button type="button" className={linkBtn} onClick={() => setEditor({ mode: 'head', channel: s.c, headUser: s.h.user })}>Change head</button>;
+    if (a.type === 'head') {
+      const headManager = s.c.managers.find((m) => m.acts_as_head);
+      return (
+        <span className="inline-flex gap-3">
+          {headManager && (
+            <button type="button" className={`${linkBtn} inline-flex items-center gap-0.5`} onClick={() => setAddingPerson({ manager: headManager, channel: s.c })}>
+              <Plus className="w-3 h-3" />Person
+            </button>
+          )}
+          <button type="button" className={linkBtn} onClick={() => setEditor({ mode: 'head', channel: s.c, headUser: s.h.user })}>Change head</button>
+        </span>
+      );
+    }
     if (a.type === 'approver-add') return <button type="button" className={linkBtn} onClick={() => setEditor({ mode: 'approver-add', channel: s.c })}>Add manager</button>;
     if (a.type === 'approver') {
       return <button type="button" className="text-[12px] font-semibold text-red-700 hover:text-red-800" onClick={() => run(() => client.delete(`/api/admin/team-structure/approvers/${a.approver.id}`), 'Manager removed.')}>Remove</button>;
