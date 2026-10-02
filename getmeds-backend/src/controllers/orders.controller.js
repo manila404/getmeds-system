@@ -1501,8 +1501,12 @@ exports.create = async (req, res, next) => {
     // protect, same reasoning as Sub-division below.
     const cleanDivision = (typeof division === 'string' && division.trim()) ? division.trim() : null;
     let effectiveDivision = medrepProfile.division;
-    if (isBackOfficeOrder && cleanDivision !== null) {
-      if (!DIVISIONS.includes(cleanDivision)) {
+    // Oct 2, 2026: a MedRep may change Division for their own order too. Only
+    // this order changes (their account is untouched). An unchanged account
+    // value that is no longer in DIVISIONS is still accepted, so a legacy
+    // account is not locked out of ordering.
+    if (cleanDivision !== null) {
+      if (!DIVISIONS.includes(cleanDivision) && !(cleanDivision === medrepProfile.division && !isBackOfficeOrder)) {
         return res.status(400).json({
           success: false,
           error: { code: 'VALIDATION_ERROR', message: `division must be one of: ${DIVISIONS.join(', ')}` }

@@ -707,7 +707,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // Sub-division options below exactly like the backend's effectiveDivision
   // feeds its own Sub-division check, so the two never disagree about which
   // branch list applies.
-  const effectiveDivision = isBackOffice ? (divisionOverride || myDivision) : myDivision;
+  // Oct 2, 2026: a MedRep can change Division on THIS order too (it starts on
+  // their account's value); only this order is affected, never the account.
+  const effectiveDivision = divisionOverride || myDivision;
 
   // Sep 5, 2026 (3): Sub-division is editable ON THIS ORDER, by whoever is
   // raising it — medrep or management — unlike Division and Salesperson,
@@ -1346,7 +1348,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         // from anyone else, same belt-and-braces reasoning as medrep_id
         // above). Blank is treated the same as "not sent" server-side, so
         // there's no separate "clear it" affordance needed here either.
-        ...(isBackOffice && divisionOverride.trim() ? { division: divisionOverride.trim() } : {}),
+        // A MedRep's Division is sent only when they changed it from their account's.
+        ...(divisionOverride.trim() && (isBackOffice || divisionOverride.trim() !== myDivision) ? { division: divisionOverride.trim() } : {}),
         ...(isBackOffice && salespersonOverride.trim() ? { salesperson: salespersonOverride.trim() } : {}),
         // Sep 11, 2026: the Zoho Salesperson the form is showing — box 1.
         //
@@ -1716,28 +1719,21 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                 help={
                   isBackOffice
                     ? 'Optional — sent as Division on the Zoho Sales Order. Blank falls back to the picked MedRep\'s own Division, if any.'
-                    : myDivision ? 'Sent as Division on the Zoho Sales Order.' : 'Not set on your account — set it under Profile Settings.'
+                    : myDivision ? 'Filled from your account — you can change it for this order. Sent as Division on the Zoho Sales Order.' : 'Not set on your account — pick one for this order.'
                 }
               >
-                {isBackOffice ? (
-                  <select
-                    className={inputClass}
-                    value={divisionOverride}
-                    onChange={(e) => setDivisionOverride(e.target.value)}
-                  >
-                    <option value="">-- Not set --</option>
-                    {DIVISIONS.map((d) => (
-                      <option key={d} value={d}>{d}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <span className={readOnlyPillClass}>
-                    <Building2 size={14} className="text-ink-secondary shrink-0" />
-                    <span className={myDivision ? '' : 'text-ink-secondary'}>
-                      {myDivision || 'Not set'}
-                    </span>
-                  </span>
-                )}
+                <select
+                  className={inputClass}
+                  value={divisionOverride}
+                  onChange={(e) => setDivisionOverride(e.target.value)}
+                >
+                  <option value="">-- Not set --</option>
+                  {/* An account's own value that is no longer in the list stays selectable. */}
+                  {myDivision && !DIVISIONS.includes(myDivision) && <option value={myDivision}>{myDivision}</option>}
+                  {DIVISIONS.map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
               </Field>
 
               {/* Sep 5, 2026 (3): Sub-division, unlike Division above, is
