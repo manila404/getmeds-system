@@ -279,7 +279,7 @@ const OrderDetailPage = () => {
   const { data, isLoading, error } = useQuery({
     queryKey: ['order', id],
     queryFn: () => client.get(`/api/orders/${id}`).then(r => r.data),
-    refetchInterval: 15000
+    refetchInterval: 30000
   });
 
   // Sep 19, 2026: Zoho's own Salesperson list, for the Edit Details picker

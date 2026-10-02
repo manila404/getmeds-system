@@ -24,7 +24,7 @@ const ExceptionHubPage = () => {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['exception-orders'],
     queryFn: () => client.get('/api/orders?limit=100').then(r => r.data),
-    refetchInterval: 20000
+    refetchInterval: 30000
   });
 
   const allOrders = data?.data?.orders || [];

@@ -104,7 +104,7 @@ export const AuthProvider = ({ children }) => {
 
     const onFocus = () => recheck();
     window.addEventListener('focus', onFocus);
-    const timer = setInterval(recheck, 60_000);
+    const timer = setInterval(recheck, 5 * 60_000);
 
     return () => {
       cancelled = true;

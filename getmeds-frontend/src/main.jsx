@@ -17,6 +17,9 @@ const queryClient = new QueryClient({
     queries: {
       refetchOnWindowFocus: false,
       retry: 1,
+      // Oct 2, 2026: results count as fresh for 15s, so moving between pages
+      // does not re-ask the server for what it just sent.
+      staleTime: 15_000,
     },
   },
 })
