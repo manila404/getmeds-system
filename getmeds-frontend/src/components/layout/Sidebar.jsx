@@ -243,6 +243,10 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
         { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
         { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' },
+        // Oct 2, 2026: Management decides what happens to a customer a MedRep
+        // created that Zoho has not accepted yet (push as new, or link to the
+        // Zoho customer it duplicates). Admin has the same page under Customers.
+        ...(role === 'management' ? [{ to: '/management/pending-customers', icon: <CloudOff size={19} />, label: 'Pending Customers' }] : []),
         // Sep 24, 2026: "identify stalled Sales Orders and follow up directly
         // with the MedReps who created them". Management only: Admin already
         // has this stage in its Finance group below, and would see it twice.
