@@ -109,6 +109,9 @@ router.post('/:id/sync-from-zoho', c.syncFromZoho);
 // at a time, so failures don't spam the audit timeline while an issue is
 // being diagnosed.
 router.post('/:id/retry-zoho-sync', blockMedrepWritesOnImported, c.retryZohoSync);
+// Oct 2, 2026: Management corrects an order linked to a customer Zoho has as a
+// vendor — see relinkCustomer in orders.controller.js.
+router.post('/:id/relink-customer', requireRole('management', 'admin'), c.relinkCustomer);
 router.patch('/:id/exception', requireRole('management', 'admin'), c.setException);
 // Sep 15, 2026: take an order off Exception / On Hold so it can continue.
 router.post('/:id/resume', requireRole('management', 'admin'), c.resume);

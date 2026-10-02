@@ -1239,6 +1239,138 @@ exports.retryZohoSync = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+/**
+ * POST /api/orders/:id/relink-customer  { customer_id, note? }  — Management / Admin.
+ *
+ * Oct 2, 2026. Zoho only takes a Sales Order for a contact of type "customer".
+ * The customer sync copies every Zoho contact into `customers` with no type
+ * filter, so a business Zoho also holds as a VENDOR can be saved here, picked
+ * on an order, and rejected by Zoho with "Make sure that you have selected a
+ * contact of the correct contact type (customer/vendor)" — the order then sits
+ * at a failed sync with nothing the rep or Finance can do about it.
+ *
+ * This is the correction Management makes: point the order at the customer
+ * record that really is a customer in Zoho. Nothing is written to Zoho, and
+ * neither customer row is changed — only which one the order uses.
+ *
+ * Only while no Sales Order exists. Once Zoho has one, the customer on it is
+ * Zoho's to change, and moving the order here would leave the two disagreeing.
+ *
+ * The target is checked against Zoho first, live: it is a customer, and active.
+ * Without that this would simply let someone link an order to another vendor
+ * copy and get the same error again. If Zoho can't be reached nothing is
+ * changed, and the answer says so.
+ *
+ * Retry Zoho Sync is a separate click afterwards. The retry rebuilds its
+ * payload from the live order and customer on every attempt
+ * (zohoRetryService.processOne), so it picks up the new link by itself.
+ */
+exports.relinkCustomer = async (req, res, next) => {
+  try {
+    const targetId = parseInt(req.body?.customer_id, 10);
+    const note = String(req.body?.note || '').trim().slice(0, 500);
+    if (!targetId) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Choose the customer to link this order to.' } });
+    }
+
+    const order = await db.prepare(`
+      SELECT o.id, o.getmeds_order_id, o.status, o.customer_id, o.zoho_so_id, o.zoho_so_number,
+             c.name AS customer_name, c.zoho_contact_id AS customer_zoho_contact_id, c.type AS customer_type
+        FROM orders o
+        LEFT JOIN customers c ON c.id = o.customer_id
+       WHERE o.id = ?
+    `).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+
+    if (order.zoho_so_id) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'ALREADY_IN_ZOHO',
+          message: `This order already has Sales Order ${order.zoho_so_number || order.zoho_so_id} in Zoho, so its customer can't be changed here. Change it in Zoho.`
+        }
+      });
+    }
+    if (['cancelled', 'completed'].includes(order.status)) {
+      return res.status(409).json({ success: false, error: { code: 'ORDER_CLOSED', message: `This order is ${order.status}, so its customer can't be changed.` } });
+    }
+    if (order.customer_id === targetId) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'This order is already linked to that customer.' } });
+    }
+
+    const target = await db.prepare('SELECT id, name, type, zoho_contact_id, is_active FROM customers WHERE id = ?').get(targetId);
+    if (!target) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'That customer was not found.' } });
+    if (!target.is_active) {
+      return res.status(409).json({ success: false, error: { code: 'CUSTOMER_INACTIVE', message: `${target.name} is inactive. Choose an active customer.` } });
+    }
+    if (!target.zoho_contact_id) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_IN_ZOHO', message: `${target.name} is not in Zoho yet, so an order can't be sent to Zoho for it. Finish it in Pending Customers first.` }
+      });
+    }
+
+    let zohoContact;
+    try {
+      const result = await zoho.getContact(target.zoho_contact_id);
+      zohoContact = result && result.contact;
+    } catch (zohoErr) {
+      console.warn(`[RELINK] could not check ${target.zoho_contact_id} in Zoho:`, zohoErr.message);
+      return res.status(502).json({
+        success: false,
+        error: { code: 'ZOHO_UNREACHABLE', message: `Could not check ${target.name} in Zoho right now. Nothing was changed — try again in a moment.` }
+      });
+    }
+    if (!zohoContact) {
+      return res.status(422).json({
+        success: false,
+        error: { code: 'NOT_IN_ZOHO', message: `Zoho has no contact for ${target.name} (id ${target.zoho_contact_id}). Choose another customer.` }
+      });
+    }
+    const contactType = String(zohoContact.contact_type || '').toLowerCase();
+    if (contactType && contactType !== 'customer') {
+      return res.status(422).json({
+        success: false,
+        error: {
+          code: 'WRONG_CONTACT_TYPE',
+          message: `Zoho has "${target.name}" as a ${contactType}, not a customer, so it would be rejected the same way. Choose the customer record for this business.`
+        }
+      });
+    }
+    if (String(zohoContact.status || 'active').toLowerCase() === 'inactive') {
+      return res.status(422).json({ success: false, error: { code: 'CUSTOMER_INACTIVE', message: `${target.name} is inactive in Zoho. Choose an active customer.` } });
+    }
+
+    const now = new Date().toISOString();
+    await db.transaction(async () => {
+      await db.prepare('UPDATE orders SET customer_id = ?, updated_at = ? WHERE id = ?').run(target.id, now, order.id);
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ORDER_CUSTOMER_RELINKED',
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: req.user.id,
+        actorName: req.user.name || req.user.email,
+        actorRole: (req.user.role || '').toLowerCase(),
+        notes:
+          `Customer changed from "${order.customer_name || 'none'}" to "${target.name}" so the Zoho Sales Order goes to a customer-type contact.` +
+          (note ? ` Note: ${note}` : ''),
+        metadata: {
+          from_customer_id: order.customer_id,
+          from_zoho_contact_id: order.customer_zoho_contact_id || null,
+          to_customer_id: target.id,
+          to_zoho_contact_id: target.zoho_contact_id,
+          from_type: order.customer_type || null,
+          to_type: target.type || null
+        }
+      });
+    })();
+
+    const updated = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({ success: true, data: { order: updated, customer: { id: target.id, name: target.name } } });
+  } catch (err) { next(err); }
+};
+
 exports.getEvents = async (req, res, next) => {
   try {
     const events = await db.prepare(

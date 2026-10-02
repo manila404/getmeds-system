@@ -22,6 +22,7 @@ import AttachFileField from '../components/orders/AttachFileField';
 import { uploadOrderAttachment } from '../utils/attachmentUpload';
 import { roleLabel } from '../constants/roles';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
+import RelinkCustomerModal from '../components/orders/RelinkCustomerModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../constants/paymentTerms';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
@@ -167,6 +168,7 @@ const EVENT_LABELS = {
   DISPATCH_HOLD: 'ON HOLD BY DISPATCH',
   DISPATCH_HOLD_LIFTED: 'DISPATCH HOLD LIFTED',
   CUSTOMER_LINKED_TO_ZOHO: 'CUSTOMER LINKED TO ZOHO',
+  ORDER_CUSTOMER_RELINKED: 'CUSTOMER CHANGED BY MANAGEMENT',
   ORDER_RESUMED: 'RESUMED BY MANAGEMENT',
   STOCK_WARNING_ACKNOWLEDGED: 'RAISED DESPITE STOCK WARNING'
 };
@@ -200,7 +202,7 @@ const EVENT_ICONS = {
   DISPATCH_TRACKING_ADDED: '🚚', DISPATCH_PROOF_UPLOADED: '📸',
   DISPATCH_CATERED: '👤', DISPATCH_RELEASED: '↩️',
   DISPATCH_HOLD: '⏸️', DISPATCH_HOLD_LIFTED: '▶️',
-  CUSTOMER_LINKED_TO_ZOHO: '🔗', ORDER_RESUMED: '▶️', STOCK_WARNING_ACKNOWLEDGED: '📦⚠️'
+  CUSTOMER_LINKED_TO_ZOHO: '🔗', ORDER_CUSTOMER_RELINKED: '🔗', ORDER_RESUMED: '▶️', STOCK_WARNING_ACKNOWLEDGED: '📦⚠️'
 };
 
 /**
@@ -316,6 +318,8 @@ const OrderDetailPage = () => {
 
   // Sep 15, 2026: the whole order on one screen, like the submission review.
   const [overviewOpen, setOverviewOpen] = useState(false);
+  // Oct 2, 2026: Management's fix for an order linked to a customer Zoho holds as a vendor.
+  const [relinkOpen, setRelinkOpen] = useState(false);
   // Sep 18, 2026: reason first (moves the order off the hold/exception with
   // the MedRep's own words on the trail), then the file — attaching
   // afterwards is harmless even for a Finance hold specifically, where
@@ -421,7 +425,20 @@ const OrderDetailPage = () => {
     onSuccess: (res) => {
       const outcome = res?.data?.result?.outcome;
       if (outcome === 'succeeded') toast.success('Zoho Sales Order created — sync succeeded.');
-      else toast.error(`Still failing: ${res?.data?.result?.error || 'unknown error'}`);
+      else {
+        const why = res?.data?.result?.error || 'unknown error';
+        // Zoho's wording for a contact that is not a customer (usually a vendor).
+        if (/contact type/i.test(why)) {
+          toast.error(
+            isManagementUser
+              ? 'Zoho has this customer as a vendor, not a customer. Use "Fix customer link" to choose the right customer record.'
+              : 'Zoho has this customer as a vendor, not a customer. Ask Management to fix the customer link.',
+            { duration: 10000 }
+          );
+        } else {
+          toast.error(`Still failing: ${why}`);
+        }
+      }
       qc.invalidateQueries({ queryKey: ['order', id] });
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Retry failed')
@@ -910,6 +927,13 @@ const OrderDetailPage = () => {
             </button>
           </div>
         </div>
+        {relinkOpen && (
+          <RelinkCustomerModal
+            order={order}
+            onClose={() => setRelinkOpen(false)}
+            onDone={() => { setRelinkOpen(false); qc.invalidateQueries({ queryKey: ['order', id] }); }}
+          />
+        )}
         {overviewOpen && <OrderOverviewModal order={order} items={items} splits={splits} onClose={() => setOverviewOpen(false)} />}
         {pendingConfirm && (
           <ConfirmChangesModal
@@ -990,6 +1014,16 @@ const OrderDetailPage = () => {
                       {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
                     </button>
                   )}
+                  {isManagementUser && !order.zoho_so_id && order.zoho_sync_status === 'failed' && (
+                    <button
+                      type="button"
+                      onClick={() => setRelinkOpen(true)}
+                      title="Zoho refused this customer (often because Zoho keeps it as a vendor). Choose the correct customer record for this order."
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-300 text-ink-primary hover:bg-surface"
+                    >
+                      Fix customer link
+                    </button>
+                  )}
                   {order.zoho_so_id && order.status !== 'cancelled' && (
                     <button
                       type="button"
@@ -1027,6 +1061,16 @@ const OrderDetailPage = () => {
                   >
                     <RefreshCw className={`w-3 h-3 ${retryZohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
                     {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
+                  </button>
+                )}
+                {isManagementUser && !order.zoho_so_id && order.zoho_sync_status === 'failed' && (
+                  <button
+                    type="button"
+                    onClick={() => setRelinkOpen(true)}
+                    title="Zoho refused this customer (often because Zoho keeps it as a vendor). Choose the correct customer record for this order."
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-300 text-ink-primary hover:bg-surface"
+                  >
+                    Fix customer link
                   </button>
                 )}
                 {/* Aug 31, 2026: only 'cancelled' hides this now — 'completed'
