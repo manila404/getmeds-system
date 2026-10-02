@@ -123,7 +123,9 @@ function connectionConfig() {
   // query was slow; three lets a page's parallel calls run side by side. This is
   // only safe through Supabase's transaction pooler (port 6543), which is why the
   // warning below exists. PGPOOL_MAX overrides.
-  cfg.max = Number(process.env.PGPOOL_MAX || (process.env.VERCEL ? 3 : 10));
+  // Reverted to 1 on session mode (port 5432) the same day: 3 per instance exhausted
+  // Supabase's session pooler and took the site down. 3 only on the transaction pooler.
+  cfg.max = Number(process.env.PGPOOL_MAX || (process.env.VERCEL ? (/:6543/.test(url) ? 3 : 1) : 10));
   if (process.env.VERCEL && /:5432/.test(url)) {
     console.warn(
       '[db] DATABASE_URL uses port 5432 (session mode) on Vercel. Under load this runs out of ' +
