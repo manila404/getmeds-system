@@ -53,6 +53,9 @@ function ensureReady() {
 const handler = express();
 
 handler.use(async (req, res, next) => {
+  // Oct 2, 2026: a CORS preflight needs no database. Answering it here keeps the
+  // browser's real error visible (a 503) instead of a misleading CORS failure.
+  if (req.method === 'OPTIONS') return next();
   try {
     await ensureReady();
     next();
@@ -61,6 +64,10 @@ handler.use(async (req, res, next) => {
     // the database is not, and that distinction is what someone reading the
     // logs at 2am needs.
     console.error('[api] database init failed:', err.message);
+    // The browser hides a response without CORS headers behind a CORS error, so
+    // add them (same allowlist as the app) before answering.
+    await new Promise((resolve) => app.corsMiddleware(req, res, resolve));
+    res.set('Retry-After', '3');
     res.status(503).json({
       success: false,
       error: {

@@ -63,7 +63,9 @@ if (!configuredOrigins.length && process.env.NODE_ENV === 'production') {
   );
 }
 
-app.use(cors({
+// Oct 2, 2026: kept as a named middleware and exposed (app.corsMiddleware) so
+// api/index.js can also answer with CORS headers when the database is down.
+const corsMiddleware = cors({
   origin: (origin, callback) => {
     // No Origin header at all: same-origin, curl, Postman, and server-to-server
     // callers such as Zoho's webhook. CORS is a browser mechanism and has
@@ -83,7 +85,9 @@ app.use(cors({
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
-}));
+});
+app.use(corsMiddleware);
+app.corsMiddleware = corsMiddleware;
 app.use(express.json());
 // Zoho's older Workflow Rule webhook action posts x-www-form-urlencoded
 // (key "payload", value a JSON string) instead of raw JSON — parse that too
