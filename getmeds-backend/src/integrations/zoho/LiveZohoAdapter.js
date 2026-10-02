@@ -285,7 +285,7 @@ class LiveZohoAdapter extends ZohoAdapter {
       throw new Error('updateSalesOrder requires an existing Zoho contact id (zoho_customer_id)');
     }
 
-    const body = await this._buildSalesOrderBody(orderData);
+    const body = await this._buildSalesOrderBody(orderData, { sendLineTax: true });
     body.customer_id = contactId;
 
     const result = await this._request('PUT', `/salesorders/${salesorderId}`, { body });
@@ -298,7 +298,7 @@ class LiveZohoAdapter extends ZohoAdapter {
    * even requires it up front) and `date` (createSalesOrder's own concern —
    * see updateSalesOrder's note on why an edit must never touch it).
    */
-  async _buildSalesOrderBody(orderData) {
+  async _buildSalesOrderBody(orderData, { sendLineTax = false } = {}) {
     const lineItems = (orderData.items || []).map((item) => {
       const li = {
         name: item.name,
@@ -311,6 +311,18 @@ class LiveZohoAdapter extends ZohoAdapter {
       // never creates, edits, or activates a Zoho item, so an unmapped
       // product is sent as a plain named line rather than auto-created.
       if (item.zoho_item_id) li.item_id = item.zoho_item_id;
+      // Oct 2, 2026: the VAT chosen on an edited line used to stay local — Zoho
+      // took each line's tax from the item, so changing "VAT 12%" to "No Tax"
+      // here never reached the Sales Order. On an EDIT only, the line's own tax
+      // is sent. The app's presets map to this org's Zoho taxes: 12% -> "Vat",
+      // 0% -> "No Tax" (Zoho has no Zero-Rated/Exempt tax). Any other percent is
+      // left to Zoho, as before. Override the ids with ZOHO_TAX_ID_VAT12 /
+      // ZOHO_TAX_ID_NONE if the org's taxes ever change.
+      if (sendLineTax && item.tax_percent !== undefined && item.tax_percent !== null && item.tax_percent !== '') {
+        const pct = Number(item.tax_percent);
+        if (pct === 12) li.tax_id = process.env.ZOHO_TAX_ID_VAT12 || '2254168000000078097';
+        else if (pct === 0) li.tax_id = process.env.ZOHO_TAX_ID_NONE || '2254168000001813001';
+      }
       return li;
     });
 

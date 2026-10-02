@@ -74,6 +74,7 @@ const CLIENT_SECRET = argOf('--client-secret') || process.env.ZOHO_CLIENT_SECRET
 const SCOPES = [
   'ZohoInventory.salesorders.CREATE',
   'ZohoInventory.salesorders.READ',
+  'ZohoInventory.salesorders.UPDATE', // Oct 2, 2026 — editing an order that is already in Zoho (PUT)
   'ZohoInventory.contacts.READ',
   'ZohoInventory.contacts.CREATE', // new — create a customer from the order form
   'ZohoInventory.contacts.UPDATE', // new — updateContactTin (TIN on a business contact)
