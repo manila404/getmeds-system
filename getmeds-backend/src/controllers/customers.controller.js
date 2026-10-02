@@ -314,6 +314,7 @@ async function reconcileContacts(contacts, opts = {}) {
   const { onProgress } = opts;
 
   let skipped = 0;
+  let vendorsSkipped = 0;
 
   // Normalise first, database second. This loop is pure CPU and touches
   // nothing remote, so it costs nothing to do it up front, and it makes the
@@ -321,6 +322,19 @@ async function reconcileContacts(contacts, opts = {}) {
   const rows = [];
   for (const contact of contacts) {
     if (!contact.contact_id) { skipped++; continue; }
+
+    // Oct 2, 2026: Zoho keeps customers AND vendors as contacts, and this list
+    // used to copy both in as customers. A vendor can never take a Sales Order
+    // (Zoho refuses it), so a business that is also a vendor became a customer
+    // row an order could be raised against and then fail to sync (order
+    // GM-20261001-0044). Contacts Zoho explicitly types as something other than
+    // "customer" are no longer added. Rows already stored are left exactly as
+    // they are — nothing is deleted or deactivated here. A contact with no
+    // type at all is still treated as a customer, as before.
+    if (contact.contact_type && String(contact.contact_type).toLowerCase() !== 'customer') {
+      vendorsSkipped++;
+      continue;
+    }
 
     // Sep 2, 2026: mirror Zoho's own contact status into `is_active`.
     //
@@ -451,7 +465,7 @@ async function reconcileContacts(contacts, opts = {}) {
   });
   await txn();
 
-  return { created, updated: updated + duplicateHits, skipped };
+  return { created, updated: updated + duplicateHits, skipped, vendorsSkipped };
 }
 
 async function syncFromZoho(req, res, next) {
@@ -459,7 +473,7 @@ async function syncFromZoho(req, res, next) {
     const result = await zoho.listContacts();
     const contacts = result.contacts || [];
 
-    const { created, updated, skipped } = await reconcileContacts(contacts);
+    const { created, updated, skipped, vendorsSkipped } = await reconcileContacts(contacts);
 
     // Aug 28, 2026: listContacts' pagination loop now reports whether it
     // stopped because of its own internal safety cap rather than because
@@ -476,12 +490,13 @@ async function syncFromZoho(req, res, next) {
         'this app so the safety cap can be raised further.'
       : `Pulled ${contacts.length} contact(s) from Zoho — ${created} new, ${updated} refreshed` +
         (skipped ? `, ${skipped} skipped (no contact_id)` : '') +
+        (vendorsSkipped ? `, ${vendorsSkipped} vendor-only contact(s) not added` : '') +
         '. Nothing was written to Zoho.';
 
     res.json({
       success: true,
       message,
-      data: { total_from_zoho: contacts.length, created, updated, skipped, truncated: !!result.truncated }
+      data: { total_from_zoho: contacts.length, created, updated, skipped, vendors_skipped: vendorsSkipped, truncated: !!result.truncated }
     });
   } catch (err) { next(err); }
 }
@@ -566,7 +581,7 @@ async function startSyncJob(req, res) {
       const fetched = contacts.length;
       syncJobs.updateProgress(job.id, { processed: fetched, total: fetched * 2 });
 
-      const { created, updated, skipped } = await reconcileContacts(contacts, {
+      const { created, updated, skipped, vendorsSkipped } = await reconcileContacts(contacts, {
         onProgress: (written) => syncJobs.updateProgress(job.id, { processed: fetched + written })
       });
 
@@ -582,6 +597,7 @@ async function startSyncJob(req, res) {
         created,
         updated,
         skipped,
+        vendors_skipped: vendorsSkipped,
         truncated: !!result.truncated,
         stopped_early: !!result.stoppedEarly
       });

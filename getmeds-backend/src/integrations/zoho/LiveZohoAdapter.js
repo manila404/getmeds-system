@@ -251,7 +251,21 @@ class LiveZohoAdapter extends ZohoAdapter {
     body.customer_id = contactId;
     body.date = new Date().toISOString().slice(0, 10);
 
-    const result = await this._request('POST', '/salesorders', { body });
+    let result;
+    try {
+      result = await this._request('POST', '/salesorders', { body });
+    } catch (err) {
+      // Oct 2, 2026: Zoho's wording ("selected a contact of the correct contact
+      // type (customer/vendor)") does not say what is wrong. It means the
+      // contact is typed vendor in Zoho. Keep Zoho's own sentence (the UI keys
+      // on "contact type") and put the cause and the fix in front of it.
+      if (/correct contact type/i.test(err.message || '')) {
+        err.message =
+          'The customer on this order is a vendor in Zoho, and Zoho only accepts Sales Orders for customers. ' +
+          'Management can use "Fix customer link" on the order. Zoho said: ' + err.message;
+      }
+      throw err;
+    }
     return { code: 0, message: 'Sales order created successfully', salesorder: result.salesorder };
   }
 

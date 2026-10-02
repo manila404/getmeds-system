@@ -91,7 +91,24 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Health check
-app.get('/api/health', (req, res) => res.json({ success: true, message: 'Getmeds API is running', timestamp: new Date().toISOString() }));
+app.get('/api/health', async (req, res) => {
+  const body = { success: true, message: 'Getmeds API is running', timestamp: new Date().toISOString() };
+  // Oct 2, 2026: /api/health?deep=1 also asks the database a trivial question and
+  // times it, so an uptime monitor can tell "the app is up" from "the app is up
+  // but cannot reach Supabase" — the state that was logging people out. Plain
+  // /api/health stays instant and database-free. No secrets are reported.
+  if (req.query.deep) {
+    const started = Date.now();
+    try {
+      await require('./db/database').prepare('SELECT 1 AS ok').get();
+      body.database = { ok: true, latency_ms: Date.now() - started };
+    } catch (err) {
+      console.error('[health] database check failed:', err.code || '', err.message);
+      return res.status(503).json({ ...body, success: false, database: { ok: false, latency_ms: Date.now() - started } });
+    }
+  }
+  res.json(body);
+});
 
 const { requireAuth } = require('./middleware/auth');
 const ordersController = require('./controllers/orders.controller');
