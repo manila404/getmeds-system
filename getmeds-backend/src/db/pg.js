@@ -118,7 +118,18 @@ function connectionConfig() {
   // Serverless: each function instance gets its own pool, and a Supabase free
   // project allows a modest number of direct connections. Keep it small and
   // let the provider's pooler do the real multiplexing.
-  cfg.max = Number(process.env.PGPOOL_MAX || (process.env.VERCEL ? 1 : 10));
+  // Oct 2, 2026: 1 -> 3 on Vercel. With one connection, every concurrent request
+  // in an instance queued behind the previous one and hit the 15s timeout when a
+  // query was slow; three lets a page's parallel calls run side by side. This is
+  // only safe through Supabase's transaction pooler (port 6543), which is why the
+  // warning below exists. PGPOOL_MAX overrides.
+  cfg.max = Number(process.env.PGPOOL_MAX || (process.env.VERCEL ? 3 : 10));
+  if (process.env.VERCEL && /:5432/.test(url)) {
+    console.warn(
+      '[db] DATABASE_URL uses port 5432 (session mode) on Vercel. Under load this runs out of ' +
+        'connections and requests time out. Use the transaction pooler on port 6543.'
+    );
+  }
   cfg.idleTimeoutMillis = 10_000;
   cfg.connectionTimeoutMillis = 15_000;
   return cfg;

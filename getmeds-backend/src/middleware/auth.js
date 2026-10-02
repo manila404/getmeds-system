@@ -6,6 +6,17 @@ const { isImportedRef } = require('../services/orderOrigin');
 
 const SECRET = process.env.JWT_SECRET || 'getmeds_secret_change_in_production';
 
+// Oct 2, 2026: every API call re-read the user row. A page makes several calls
+// at once, so one screen load cost several identical queries against a database
+// that was already struggling for connections. The row is now remembered for a
+// few seconds. Only a valid, active, approved user is remembered, so a
+// deactivation or rejection takes effect within AUTH_USER_CACHE_MS (default 15s)
+// instead of instantly; 0 turns the cache off. A failed lookup is never cached.
+const USER_CACHE_MS = Number(process.env.AUTH_USER_CACHE_MS ?? (process.env.NODE_ENV === 'test' ? 0 : 15000));
+const userCache = new Map(); // id -> { user, expires }
+
+function clearUserCache() { userCache.clear(); }
+
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
@@ -37,9 +48,12 @@ async function requireAuth(req, res, next) {
     // Sales Order screen has them as their own fields beside Salesperson, so
     // the order form shows all three, and all three come from one row.
     // NULL for accounts created before sign-up collected a division.
-    const user = await db
-      .prepare('SELECT id, name, email, role, is_active, approval_status, salesperson, division, sub_division FROM users WHERE id = ?')
-      .get(decoded.id);
+    const cached = USER_CACHE_MS > 0 ? userCache.get(decoded.id) : null;
+    const user = cached && cached.expires > Date.now()
+      ? cached.user
+      : await db
+          .prepare('SELECT id, name, email, role, is_active, approval_status, salesperson, division, sub_division FROM users WHERE id = ?')
+          .get(decoded.id);
     // Sep 9, 2026: approval_status is re-read on EVERY request rather than
     // trusted from the token. A token is good for 8 hours; an admin who
     // rejects an account should not have to wait out the rest of that window
@@ -47,7 +61,11 @@ async function requireAuth(req, res, next) {
     if (!user || !user.is_active || (user.approval_status && user.approval_status !== 'approved')) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'User not found or inactive' } });
     }
-    req.user = user;
+    if (USER_CACHE_MS > 0 && user !== cached?.user) {
+      if (userCache.size > 500) userCache.clear();
+      userCache.set(decoded.id, { user, expires: Date.now() + USER_CACHE_MS });
+    }
+    req.user = { ...user };
   } catch (err) {
     console.error('[auth] user lookup failed, answering 503 (not 401):', err.code || '', err.message);
     res.set('Retry-After', '3');
@@ -229,6 +247,7 @@ function requireRole(...roles) {
 
 module.exports = { 
   requireAuth, 
+  clearUserCache, 
   verifyToken: requireAuth, 
   requireRole, 
   isAdmin,

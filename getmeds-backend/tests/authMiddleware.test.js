@@ -96,3 +96,43 @@ describe('requireAuth', () => {
     expect(res.statusCode).toBeNull();
   });
 });
+
+describe('requireAuth user cache', () => {
+  function loadWithCache(ms) {
+    process.env.AUTH_USER_CACHE_MS = String(ms);
+    let mod;
+    jest.isolateModules(() => { mod = require('../src/middleware/auth'); });
+    delete process.env.AUTH_USER_CACHE_MS;
+    return mod;
+  }
+  const row = { id: 9, name: 'Cached', role: 'finance', is_active: 1, approval_status: 'approved' };
+
+  test('a second request inside the window does not query the database again', async () => {
+    const { requireAuth: ra } = loadWithCache(60000);
+    const get = jest.fn().mockResolvedValue(row);
+    db.prepare.mockReturnValue({ get });
+    await ra(reqWith(goodToken(9)), fakeRes(), jest.fn());
+    await ra(reqWith(goodToken(9)), fakeRes(), jest.fn());
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  test('a deactivated account is never cached', async () => {
+    const { requireAuth: ra } = loadWithCache(60000);
+    const get = jest.fn().mockResolvedValue({ ...row, is_active: 0 });
+    db.prepare.mockReturnValue({ get });
+    const res = fakeRes();
+    await ra(reqWith(goodToken(9)), res, jest.fn());
+    await ra(reqWith(goodToken(9)), fakeRes(), jest.fn());
+    expect(res.statusCode).toBe(401);
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  test('a cache of 0 turns it off', async () => {
+    const { requireAuth: ra } = loadWithCache(0);
+    const get = jest.fn().mockResolvedValue(row);
+    db.prepare.mockReturnValue({ get });
+    await ra(reqWith(goodToken(9)), fakeRes(), jest.fn());
+    await ra(reqWith(goodToken(9)), fakeRes(), jest.fn());
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+});
