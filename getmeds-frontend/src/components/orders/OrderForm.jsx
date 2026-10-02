@@ -186,6 +186,27 @@ const DIVISIONS = [
   'PS',
 ];
 
+// Oct 2, 2026: what Sub-division and Headquarter are for each Division. The form
+// fills them in; everything stays editable except a fixed Sub-division.
+//   B&B / URO / STC  Sub-division MD Telesales; Headquarter is the location
+//                    (e.g. KALAW) and the Zoho Salesperson follows as "STC | KALAW".
+//   B2C              MD Telesales / B2C        HOS    Hospital / N/A
+//   CLIDP            CLIDP / ON SITE           B2B    CRR or NBD / ON SITE
+//   Patient Assistance Program order (B&B, URO, STC, HOS, B2C): Telesales / Telesales.
+// For every Division except B&B/URO/STC the Salesperson stays the rep's own.
+const TELESALES_TEAMS = ['B&B', 'URO', 'STC'];
+const PAP_DIVISIONS = ['B&B', 'URO', 'STC', 'HOS', 'B2C'];
+const PAP_PROGRAMS = ['DSWD', 'PCSO', 'Office of the President', 'Other'];
+const divisionRule = (division, pap) => {
+  if (pap && PAP_DIVISIONS.includes(division)) return { sub: 'Telesales', hq: 'Telesales' };
+  if (TELESALES_TEAMS.includes(division)) return { sub: 'MD Telesales', hq: '', hqOptions: SUB_DIVISIONS_BY_DIVISION[division] || [], salespersonFromHq: true };
+  if (division === 'B2C') return { sub: 'MD Telesales', hq: 'B2C' };
+  if (division === 'HOS') return { sub: 'Hospital', hq: 'N/A' };
+  if (division === 'CLIDP') return { sub: 'CLIDP', hq: 'ON SITE' };
+  if (division === 'B2B') return { subOptions: ['CRR', 'NBD'], hq: 'ON SITE' };
+  return null;
+};
+
 // Common delivery methods — offered as suggestions via SuggestField below
 // (a native <datalist> before Sep 5, 2026 — see that component's comment),
 // not a locked dropdown, since Zoho's own delivery_method field is free
@@ -728,10 +749,49 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
     setSubDivisionInput(mySubDivision);
   }, [mySubDivision]);
 
+  // Oct 2, 2026: Patient Assistance Program, and the Division rules above.
+  const [papOn, setPapOn] = useState(false);
+  const [papProgram, setPapProgram] = useState('');
+  const papEffective = papOn && PAP_DIVISIONS.includes(effectiveDivision);
+  const rule = divisionRule(effectiveDivision, papEffective);
+  // Re-applied when the Division, PAP or the MedRep changes — not on every
+  // keystroke, so a Headquarter the rep types is theirs to keep.
+  useEffect(() => {
+    if (!rule) return;
+    if (rule.sub) setSubDivisionInput(rule.sub);
+    else if (rule.subOptions) setSubDivisionInput((prev) => (rule.subOptions.includes(prev) ? prev : ''));
+    setHeadquarterInput(rule.hq);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveDivision, papEffective, mySubDivision]);
+
   // null when the Division in effect (see effectiveDivision above) has no
   // fixed Sub-division list — the field renders free text in that case,
   // same as Sign Up/Profile Settings.
   const subDivisionOptions = SUB_DIVISIONS_BY_DIVISION[effectiveDivision] || null;
+
+  // B&B / URO / STC: the Zoho Salesperson follows the Headquarter — "STC | KALAW"
+  // — when Zoho has that name. Only a value this effect set is ever cleared
+  // again, so a Salesperson the rep picked by hand is left alone.
+  const autoSalesperson = useRef('');
+  useEffect(() => {
+    if (!isRepChoosing && !isBackOffice) return;
+    const names = medrepPicker?.salespersons || [];
+    let cand = '';
+    if (rule?.salespersonFromHq && headquarterInput.trim()) {
+      const want = `${effectiveDivision} | ${headquarterInput.trim()}`.toLowerCase();
+      cand = names.find((n) => String(n).toLowerCase() === want) || '';
+    }
+    const current = isBackOffice ? salespersonOverride : zohoSalespersonChoice;
+    const set = isBackOffice ? setSalespersonOverride : setZohoSalespersonChoice;
+    if (cand) {
+      autoSalesperson.current = cand;
+      if (current !== cand) set(cand);
+    } else if (autoSalesperson.current && current === autoSalesperson.current) {
+      set('');
+      autoSalesperson.current = '';
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveDivision, headquarterInput, papEffective, medrepPicker]);
 
   // Doctor Name is manual free text, but pre-filled with suggestions drawn
   // from customers already tagged category='doctor' (populated by
@@ -1102,6 +1162,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // "Another MedRep" with nobody chosen would silently fall back to the
   // rep's own account — right on screen, wrong person in Zoho.
   if (isRepChoosing && orderForMode === 'other' && !actingMedrepId) missingFields.push('MedRep (who this order is for)');
+  if (papEffective && !papProgram) missingFields.push('Patient Assistance Program (which one)');
   if (!customerId) missingFields.push('Customer');
   if (!deliveryAddress.trim()) missingFields.push('Delivery Address');
   // Sep 9, 2026: the Master Form's own required set. Same standing as Source
@@ -1325,6 +1386,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         // there is no separate "clear it" affordance needed here.
         sub_division: subDivisionInput,
         headquarter: headquarterInput.trim(),
+        ...(papEffective && papProgram ? { pap_program: papProgram } : {}),
         // Only ever sent when no proof-type file was staged — staging one
         // clears these (see handleFilesSelected).
         no_payment_proof_reason: hasStagedProof ? null : (noProofReason || null),
@@ -1751,14 +1813,19 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                     : 'Sent as Sub-division on the Zoho Sales Order. Optional — blank is not sent.'
                 }
               >
-                {subDivisionOptions ? (
+                {rule?.sub ? (
+                  <span className={readOnlyPillClass}>
+                    <Building2 size={14} className="text-ink-secondary shrink-0" />
+                    {rule.sub}
+                  </span>
+                ) : (rule?.subOptions || subDivisionOptions) ? (
                   <select
                     className={inputClass}
                     value={subDivisionInput}
                     onChange={(e) => setSubDivisionInput(e.target.value)}
                   >
                     <option value="">-- Select sub-division --</option>
-                    {subDivisionOptions.map((sd) => (
+                    {(rule?.subOptions || subDivisionOptions).map((sd) => (
                       <option key={sd} value={sd}>{sd}</option>
                     ))}
                   </select>
@@ -1781,10 +1848,38 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   type="text"
                   className={inputClass}
                   placeholder="Enter headquarter"
+                  list={rule?.hqOptions ? 'hq-options' : undefined}
                   value={headquarterInput}
                   onChange={(e) => setHeadquarterInput(e.target.value)}
                 />
+                {rule?.hqOptions && (
+                  <datalist id="hq-options">
+                    {rule.hqOptions.map((h) => <option key={h} value={h} />)}
+                  </datalist>
+                )}
               </Field>
+
+              {/* Oct 2, 2026: a Patient Assistance Program order (DSWD, PCSO,
+                  Office of the President…) is filed as Telesales / Telesales. */}
+              {PAP_DIVISIONS.includes(effectiveDivision) && (
+                <div className="sm:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-surface px-3 py-2.5">
+                  <label className="inline-flex items-center gap-2 text-sm font-medium text-ink-primary">
+                    <input
+                      type="checkbox"
+                      checked={papOn}
+                      onChange={(e) => { setPapOn(e.target.checked); if (!e.target.checked) setPapProgram(''); }}
+                    />
+                    This order is from a Patient Assistance Program
+                  </label>
+                  {papOn && (
+                    <select className={`${inputClass} max-w-xs`} value={papProgram} onChange={(e) => setPapProgram(e.target.value)}>
+                      <option value="">-- Which program? --</option>
+                      {PAP_PROGRAMS.map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  )}
+                  {papEffective && <span className="text-[11px] text-ink-secondary">Sub-division and Headquarter are set to Telesales.</span>}
+                </div>
+              )}
 
             </div>
 

@@ -1433,6 +1433,9 @@ exports.create = async (req, res, next) => {
       // Sep 14, 2026: Headquarter — Zoho's cf_head_quarter, a plain text
       // field on this org's Sales Order. Optional; blank is not sent.
       headquarter,
+      // Oct 2, 2026: Patient Assistance Program name (DSWD, PCSO, ...), recorded on
+      // the order's timeline. Not a column and not sent to Zoho.
+      pap_program,
       // Sep 5, 2026 (4): Division and Salesperson, manually typed — see
       // effectiveDivision/effectiveSalesperson below. Honored ONLY when
       // req.user is Management (checked there, not here) — for a MedRep,
@@ -1553,7 +1556,20 @@ exports.create = async (req, res, next) => {
     // is now REFUSED instead: a name that is not theirs would file the order
     // under another rep in Zoho, and silently sending the primary instead
     // would send something the rep did not choose.
-    if (!isBackOfficeOrder && cleanSalesperson !== null) {
+    // Oct 2, 2026: in B&B, URO and STC reps raise orders for each other and the
+    // Salesperson follows the Headquarter ("STC | KALAW"), so any name Zoho
+    // itself recognizes is accepted there, not only the acting account's own.
+    // Every other Division keeps the own-list rule below.
+    if (!isBackOfficeOrder && cleanSalesperson !== null && ['B&B', 'URO', 'STC'].includes(effectiveDivision)) {
+      const verification = await salespersonService.verify(cleanSalesperson);
+      if (verification.checked && !verification.exists) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: `"${cleanSalesperson}" is not a Salesperson Zoho recognizes. Pick one from the list.` }
+        });
+      }
+      effectiveSalesperson = (verification.checked && verification.matchedName) ? verification.matchedName : cleanSalesperson;
+    } else if (!isBackOfficeOrder && cleanSalesperson !== null) {
       const choice = await salespersonService.resolveForUser(effectiveActor.id, cleanSalesperson);
       if (choice.error) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: choice.error } });
@@ -2145,6 +2161,17 @@ exports.create = async (req, res, next) => {
         if (canWriteRemark) values.push(ri.price_remark);
         if (canWriteItemInvoicingFrom) values.push(ri.invoicing_from);
         await insItem.run(...values);
+      }
+
+      // Oct 2, 2026: which Patient Assistance Program, kept on the timeline.
+      if (typeof pap_program === 'string' && pap_program.trim()) {
+        await logEvent({
+          orderId,
+          eventType: 'PAP_PROGRAM_SET',
+          actorId: effectiveActor.id,
+          actorName: effectiveActor.name,
+          notes: `Patient Assistance Program: ${pap_program.trim().slice(0, 80)}`
+        });
       }
 
       // 2. Evaluate Workflow Gate & Create Child Records
