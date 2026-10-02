@@ -12,8 +12,21 @@ async function requireAuth(req, res, next) {
     return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'No token provided' } });
   }
   const token = header.split(' ')[1];
+
+  // Oct 2, 2026: two different failures used to share one catch and one answer.
+  // A bad or expired token is the user's login ending (401). A database error
+  // while looking the user up is OUR problem — a timeout, a connection limit,
+  // Supabase resuming — and the browser logs the user out on every 401, so
+  // reporting it as one signed out everyone any time the database hiccuped.
+  // It is a 503 now: the browser keeps the session and tries again.
+  let decoded;
   try {
-    const decoded = jwt.verify(token, SECRET);
+    decoded = jwt.verify(token, SECRET);
+  } catch (err) {
+    return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
+  }
+
+  try {
     // Refresh user from DB to pick up role/active changes
     // Sep 2, 2026: `salesperson` joins the set every authenticated request
     // carries. It is the generated "<division> | <display name>" from
@@ -35,10 +48,20 @@ async function requireAuth(req, res, next) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'User not found or inactive' } });
     }
     req.user = user;
-    next();
   } catch (err) {
-    return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
+    console.error('[auth] user lookup failed, answering 503 (not 401):', err.code || '', err.message);
+    res.set('Retry-After', '3');
+    return res.status(503).json({
+      success: false,
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'The server is busy or the database could not be reached. Please try again in a moment.'
+      }
+    });
   }
+  // Outside the try on purpose: a problem inside the route handler must reach
+  // Express's error handler, not be reported as a login failure.
+  next();
 }
 
 /**

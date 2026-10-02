@@ -28,6 +28,7 @@ import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import InventoryPage from './pages/admin/InventoryPage';
 import TestModePage from './pages/TestModePage';
 import ProfilePage from './pages/ProfilePage';
+import SessionLoading from './components/ui/SessionLoading';
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user } = useAuth();
@@ -55,7 +56,11 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
 };
 
 function App() {
-  const { user } = useAuth();
+  const { user, isLoading, connectionError, logout } = useAuth();
+
+  // Wait for the saved login to be checked before choosing a page. Routes drawn
+  // earlier saw no user and redirected to the login screen, then to the dashboard.
+  if (isLoading) return <SessionLoading connectionError={connectionError} onSignOut={logout} />;
 
   return (
     <BrowserRouter>

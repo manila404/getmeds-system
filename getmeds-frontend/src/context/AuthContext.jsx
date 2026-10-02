@@ -8,24 +8,49 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(localStorage.getItem('token'));
   const [isLoading, setIsLoading] = useState(true);
+  // Oct 2, 2026: true while the server could not be reached to check the saved
+  // login. The session is kept and the check is retried — see below.
+  const [connectionError, setConnectionError] = useState(false);
 
   useEffect(() => {
-    const fetchUser = async () => {
-      if (!token) {
-        setIsLoading(false);
-        return;
-      }
+    if (!token) {
+      setIsLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    let timer;
+
+    // Oct 2, 2026: any failure here used to call logout(), so a brief database
+    // problem or a dropped connection at page load signed the person out.
+    // Only the server saying the login itself is invalid (401) does that now.
+    // Anything else — no connection, 503, a timeout — keeps the saved login and
+    // tries again, with the screen saying so (see SessionLoading in App.jsx).
+    const fetchUser = async (attempt = 0) => {
       try {
         const { data } = await client.get('/api/auth/me');
+        if (cancelled) return;
         setUser(data.data.user);
-      } catch (error) {
-        console.error('Failed to fetch user', error);
-        logout();
-      } finally {
+        setConnectionError(false);
         setIsLoading(false);
+      } catch (error) {
+        if (cancelled) return;
+        if (error.response?.status === 401) {
+          logout();
+          setIsLoading(false);
+          return;
+        }
+        console.error('Could not check the saved login, will retry', error.message);
+        setConnectionError(true);
+        timer = setTimeout(() => fetchUser(attempt + 1), Math.min(3000 * (attempt + 1), 15000));
       }
     };
     fetchUser();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [token]);
 
   /**
@@ -130,7 +155,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, quickLogin, logout, refreshUser, isLoading }}>
+    <AuthContext.Provider value={{ user, token, login, quickLogin, logout, refreshUser, isLoading, connectionError }}>
       {children}
     </AuthContext.Provider>
   );
