@@ -293,6 +293,10 @@ exports.attach = async (req, res, next) => {
         now
       );
 
+    // Oct 3, 2026: move the staged upload into Sanity. Best-effort; see
+    // paymentProofStorage.moveToSanityQuietly.
+    await proofStorage.moveToSanityQuietly(storagePath, { contentType, fileName });
+
     await logEvent({
       orderId: order.id,
       eventType: fileType === 'payment_proof'

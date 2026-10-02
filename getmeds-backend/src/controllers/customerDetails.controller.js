@@ -176,6 +176,9 @@ const attachDocument = async (req, res, next) => {
       )
       .run(customer.id, storagePath, body.file_name.trim(), body.content_type, Math.round(Number(body.file_size)), req.user.id);
 
+    // Oct 3, 2026: move the staged upload into Sanity (best-effort).
+    await storage.moveToSanityQuietly(storagePath, { contentType: body.content_type, fileName: body.file_name });
+
     const doc = await db
       .prepare(
         `SELECT d.id, d.file_name, d.content_type, d.file_size, d.created_at, u.name AS uploaded_by_name

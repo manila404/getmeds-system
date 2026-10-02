@@ -36,6 +36,8 @@
  */
 
 const { createClient } = require('@supabase/supabase-js');
+const db = require('../db/database');
+const sanity = require('./sanityStorage');
 
 // The bucket created on Sep 4 is still literally named `pod`. Supabase cannot
 // rename a bucket, so this is an env override rather than a hard-coded change:
@@ -156,7 +158,23 @@ async function createUploadUrl(storagePath) {
   return { signedUrl: data.signedUrl, token: data.token, path: data.path };
 }
 
+/**
+ * Oct 3, 2026: the Sanity copy of a stored file, or null when it is still only in
+ * Supabase. One primary-key lookup. A failed lookup counts as "not in Sanity", so
+ * the old Supabase path keeps working if this table is unreachable or missing.
+ */
+async function sanityAssetFor(storagePath) {
+  try {
+    return (await db.prepare('SELECT sanity_asset_id, sanity_url, is_image FROM attachment_assets WHERE storage_path = ?').get(storagePath)) || null;
+  } catch (err) {
+    console.warn(`[ATTACHMENTS] Sanity lookup failed for ${storagePath}: ${err.message}`);
+    return null;
+  }
+}
+
 async function createViewUrl(storagePath, expiresIn = VIEW_URL_TTL_SECONDS) {
+  const asset = await sanityAssetFor(storagePath);
+  if (asset) return asset.sanity_url;
   const { data, error } = await client().storage.from(BUCKET).createSignedUrl(storagePath, expiresIn);
   if (error) throw error;
   return data.signedUrl;
@@ -172,6 +190,8 @@ async function createViewUrl(storagePath, expiresIn = VIEW_URL_TTL_SECONDS) {
  * control.
  */
 async function createDownloadUrl(storagePath, fileName, expiresIn = VIEW_URL_TTL_SECONDS) {
+  const asset = await sanityAssetFor(storagePath);
+  if (asset) return sanity.downloadUrl(asset.sanity_url, fileName);
   const { data, error } = await client()
     .storage.from(BUCKET)
     .createSignedUrl(storagePath, expiresIn, { download: fileName || true });
@@ -186,6 +206,17 @@ async function createDownloadUrl(storagePath, fileName, expiresIn = VIEW_URL_TTL
  */
 async function removeQuietly(storagePath) {
   if (!storagePath) return false;
+  // The Sanity copy first, then the Supabase object (which only exists for files
+  // not moved yet, or whose move failed). Each is best-effort on its own.
+  const asset = await sanityAssetFor(storagePath);
+  if (asset) {
+    try {
+      if (sanity.isEnabled()) await sanity.deleteAsset(asset.sanity_asset_id);
+      await db.prepare('DELETE FROM attachment_assets WHERE storage_path = ?').run(storagePath);
+    } catch (err) {
+      console.warn(`[ATTACHMENTS] Could not remove Sanity asset for ${storagePath}: ${err.message}`);
+    }
+  }
   try {
     const { error } = await client().storage.from(BUCKET).remove([storagePath]);
     if (error) throw error;
@@ -221,12 +252,54 @@ async function removeQuietly(storagePath) {
  * a transform for rows already known to be images (see viewAttachment).
  */
 async function downloadFile(storagePath, transform) {
+  const asset = await sanityAssetFor(storagePath);
+  if (asset) {
+    // Only IMAGE assets can be resized by Sanity; any other file is sent whole.
+    const useResize = transform && asset.is_image;
+    return sanity.fetchBytes(useResize
+      ? sanity.resizedUrl(asset.sanity_url, { width: transform.width, height: transform.height, quality: transform.quality })
+      : asset.sanity_url);
+  }
   const { data, error } = await client().storage.from(BUCKET).download(storagePath, transform ? { transform } : undefined);
   if (error) throw error;
   return Buffer.from(await data.arrayBuffer());
 }
 
+/**
+ * Oct 3, 2026: "stage, then move". The browser still uploads to Supabase (a
+ * Vercel request is capped at 4.5 MB, so the file cannot pass through this API).
+ * Once the upload is confirmed this copies it into Sanity, records the mapping and
+ * removes the Supabase object. NEVER throws and never blocks the request: if
+ * anything fails the file simply stays in Supabase, where reads still find it.
+ * Returns true when the file is now in Sanity.
+ */
+async function moveToSanityQuietly(storagePath, { contentType, fileName } = {}) {
+  if (!sanity.isEnabled() || !storagePath) return false;
+  try {
+    if (await sanityAssetFor(storagePath)) return true;
+    const buffer = await downloadFileFromSupabase(storagePath);
+    const up = await sanity.upload(buffer, fileName || storagePath.split('/').pop(), contentType);
+    await db
+      .prepare('INSERT INTO attachment_assets (storage_path, sanity_asset_id, sanity_url, is_image) VALUES (?, ?, ?, ?)')
+      .run(storagePath, up.assetId, up.url, up.isImage);
+    // Only after the mapping is saved, so there is never a moment with no copy.
+    const { error } = await client().storage.from(BUCKET).remove([storagePath]);
+    if (error) console.warn(`[ATTACHMENTS] Moved ${storagePath} to Sanity but could not remove the Supabase copy: ${error.message}`);
+    return true;
+  } catch (err) {
+    console.warn(`[ATTACHMENTS] Could not move ${storagePath} to Sanity (kept in Supabase): ${err.message}`);
+    return false;
+  }
+}
+
+async function downloadFileFromSupabase(storagePath) {
+  const { data, error } = await client().storage.from(BUCKET).download(storagePath);
+  if (error) throw error;
+  return Buffer.from(await data.arrayBuffer());
+}
+
 module.exports = {
+  moveToSanityQuietly,
   BUCKET,
   MAX_BYTES,
   ALLOWED_TYPES,
