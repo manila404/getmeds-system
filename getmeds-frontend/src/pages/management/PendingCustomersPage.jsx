@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { CloudOff, RefreshCw, AlertTriangle, Clock, Building2, Info, Copy, Trash2, Link2, Check, PencilLine } from 'lucide-react';
@@ -265,6 +265,83 @@ const CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd', 'patient'];
  * from. Only fields that end up different from Zoho are sent, and an empty
  * field is never sent — so clearing a box keeps what Zoho has.
  */
+/**
+ * Oct 2, 2026. For a customer Zoho refused (e.g. "already exists" on a
+ * licence): Management searches the customers already in Zoho and picks the
+ * one this really is. Same /link endpoint as the duplicate review, so its
+ * orders move across and the waiting copy is removed. Nothing is written to
+ * Zoho. The other choice, creating it as new, is "Put back in the queue".
+ */
+const LinkExistingModal = ({ customer, onClose, onPick, saving }) => {
+  const [text, setText] = useState(customer.name || '');
+  const [search, setSearch] = useState('');
+  const [picked, setPicked] = useState(null);
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(text.trim()), 300);
+    return () => clearTimeout(t);
+  }, [text]);
+  const results = useQuery({
+    queryKey: ['link-existing-search', search],
+    queryFn: () =>
+      client.get('/api/customers', { params: { search, limit: 8, status: 'active' } }).then((r) => r.data?.data?.customers || []),
+    enabled: search.length >= 3,
+    staleTime: 30_000
+  });
+  const candidates = (results.data || []).filter((c) => c.id !== customer.id && c.zoho_contact_id);
+  return (
+    <Modal isOpen onClose={onClose} title="Link to an existing customer">
+      <p className="text-[12px] text-ink-secondary mb-3">
+        Zoho refused <strong>{customer.name}</strong>. If this business is already in Zoho, pick it here:
+        {customer.order_count > 0 ? ' its orders move to that customer, ' : ' '}and this waiting copy is removed.
+        Nothing is changed in Zoho.
+      </p>
+      <input
+        autoFocus
+        value={text}
+        onChange={(e) => { setText(e.target.value); setPicked(null); }}
+        placeholder="Type at least 3 letters of the name"
+        className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
+      />
+      {search.length >= 3 && (
+        <div className="mt-2 border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-56 overflow-y-auto">
+          {results.isLoading ? (
+            <p className="px-3 py-3 text-xs text-ink-secondary">Searching…</p>
+          ) : candidates.length === 0 ? (
+            <p className="px-3 py-3 text-xs text-ink-secondary">No customer in Zoho matches “{search}”.</p>
+          ) : (
+            candidates.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => setPicked(c)}
+                className={`w-full text-left px-3 py-2 text-[13px] hover:bg-surface ${picked?.id === c.id ? 'bg-blue-50' : ''}`}
+              >
+                <span className="font-semibold text-ink-primary">{c.name}</span>
+                <span className="block text-[11px] text-ink-secondary">
+                  {c.tin ? `TIN ${c.tin} · ` : ''}Zoho id …{String(c.zoho_contact_id).slice(-6)}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+      <div className="flex justify-end gap-2 mt-4">
+        <button type="button" onClick={onClose} disabled={saving} className="px-3.5 py-2 rounded-md border border-slate-200 text-sm font-medium text-ink-secondary">
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={!picked || saving}
+          onClick={() => onPick(picked)}
+          className="px-4 py-2 rounded-md bg-getmeds-blue text-white text-sm font-semibold disabled:opacity-50"
+        >
+          {saving ? 'Linking…' : 'Use this customer'}
+        </button>
+      </div>
+    </Modal>
+  );
+};
+
 const UpdateCustomerModal = ({ customer, match, cmp, onClose, onSave, saving }) => {
   const [form, setForm] = useState(() => {
     const init = {};
@@ -378,6 +455,7 @@ const PendingCustomersPage = () => {
   const qc = useQueryClient();
   const [ask, setAsk] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [linking, setLinking] = useState(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['pending-customers'],
@@ -547,7 +625,15 @@ const PendingCustomersPage = () => {
                             disabled={retry.isPending}
                             className="mt-1.5 text-[11px] font-semibold text-getmeds-blue hover:text-getmeds-blue-dark disabled:opacity-60"
                           >
-                            Put back in the queue
+                            Create as a new customer (put back in the queue)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setLinking(c)}
+                            disabled={act.isPending}
+                            className="mt-1.5 ml-3 text-[11px] font-semibold text-getmeds-blue hover:text-getmeds-blue-dark disabled:opacity-60"
+                          >
+                            Link to an existing customer
                           </button>
                         </>
                       )}
@@ -635,6 +721,15 @@ const PendingCustomersPage = () => {
         confirmText={ask?.confirmText}
         variant={ask?.variant}
       />
+
+      {linking && (
+        <LinkExistingModal
+          customer={linking}
+          saving={act.isPending}
+          onClose={() => setLinking(null)}
+          onPick={(t) => act.mutate({ kind: 'link', id: linking.id, target_id: t.id }, { onSuccess: () => setLinking(null) })}
+        />
+      )}
 
       {editing && (
         <UpdateCustomerModal
