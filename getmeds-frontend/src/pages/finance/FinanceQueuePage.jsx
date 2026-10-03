@@ -218,7 +218,7 @@ const FinanceQueuePage = () => {
         params: { date_from: summaryDates.from, date_to: summaryDates.to },
       }).then((r) => r.data),
     staleTime: 60_000,
-    refetchInterval: 60_000,
+    refetchInterval: 120_000, // was 60_000 (Oct 3, 2026: lighter polling)
   });
 
   const orders     = data?.data?.orders     || [];

@@ -178,7 +178,7 @@ const ManagementDashboardPage = () => {
   const { data: summaryRes, isLoading: loadingStats, refetch } = useQuery({
     queryKey: ['management-summary', source],
     queryFn: () => client.get(`/api/management/summary?source=${source}`).then((r) => r.data),
-    refetchInterval: 60000
+    refetchInterval: 120000 // was 60000 (Oct 3, 2026: lighter polling)
   });
   const stats = summaryRes?.data || {};
   const groups = stats.status_groups || {};

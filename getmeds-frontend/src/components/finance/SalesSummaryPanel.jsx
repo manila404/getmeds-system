@@ -69,7 +69,7 @@ const SalesSummaryPanel = ({ onClose, embedded = false }) => {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['finance-sales-summary'],
     queryFn: () => client.get('/api/finance/sales-summary').then((r) => r.data),
-    refetchInterval: 60_000,
+    refetchInterval: 120_000, // was 60_000 (Oct 3, 2026: lighter polling)
     staleTime: 30_000,
   });
 

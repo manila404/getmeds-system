@@ -29,7 +29,7 @@ const PaymentHistoryPage = () => {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['finance-orders-all'],
     queryFn: () => client.get('/api/orders?customer_type=direct&limit=100').then(r => r.data),
-    refetchInterval: 30000
+    refetchInterval: 60000 // was 30000 (Oct 3, 2026: lighter polling)
   });
 
   const orders = data?.data?.orders || [];

@@ -35,7 +35,7 @@ export const useStockAnnouncements = (enabled = true) =>
     queryFn: fetchAnnouncements,
     select: (res) => res.announcements || [],
     enabled,
-    refetchInterval: 60000,
+    refetchInterval: 120000, // was 60000 (Oct 3, 2026: lighter polling)
     staleTime: 30000
   });
 
@@ -51,7 +51,7 @@ export const useUnseenAnnouncementsCount = (enabled = true) => {
     queryFn: fetchAnnouncements,
     select: (res) => res.unseen_count || 0,
     enabled,
-    refetchInterval: 60000,
+    refetchInterval: 120000, // was 60000 (Oct 3, 2026: lighter polling)
     staleTime: 30000
   });
   return data || 0;

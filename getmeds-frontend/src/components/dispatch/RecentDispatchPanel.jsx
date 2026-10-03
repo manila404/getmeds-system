@@ -172,7 +172,7 @@ const RecentDispatchPanel = ({
     queryKey: ['dispatch-on-hold', warehouse],
     queryFn: () => client.get('/api/dispatch/on-hold', { params: { warehouse: warehouse || undefined } }).then((r) => r.data?.data?.orders || []),
     enabled: heldView,
-    refetchInterval: 30000
+    refetchInterval: 60000 // was 30000 (Oct 3, 2026: lighter polling)
   });
   // Sep 28, 2026: Confirmed Orders (was "Confirmed Today") is its own page —
   // it no longer stops at today, so it only ever grows. Reset to page 1
@@ -196,7 +196,7 @@ const RecentDispatchPanel = ({
         .get('/api/dispatch/recent', { params: { warehouse: warehouse || undefined, period: period || undefined, confirmedPage, ...(confirmedSearch ? { confirmedSearch } : {}) } })
         .then((r) => r.data?.data),
     placeholderData: keepPreviousData,
-    refetchInterval: 30000
+    refetchInterval: 60000 // was 30000 (Oct 3, 2026: lighter polling)
   });
   const drafts = data?.new_draft_sos || [];
   const confirmed = data?.finance_confirmed || [];

@@ -33,7 +33,7 @@ const RecentActivity = () => {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['management-activity'],
     queryFn: () => client.get('/api/management/activity?limit=8').then((r) => r.data?.data?.events || []),
-    refetchInterval: 60000,
+    refetchInterval: 120000, // was 60000 (Oct 3, 2026: lighter polling)
     staleTime: 30000
   });
   const events = data || [];

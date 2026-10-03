@@ -10,7 +10,9 @@ export const useNotifications = () => {
       const { data } = await client.get('/api/notifications');
       return data.data.notifications;
     },
-    refetchInterval: 30000,
+    // Oct 3, 2026: the list was 30s; the unread COUNT below stays at 30s, which is
+    // what staff notice. The list refreshes at 60s and whenever the bell is opened.
+    refetchInterval: 60000,
   });
 
   const unreadCountQuery = useQuery({
