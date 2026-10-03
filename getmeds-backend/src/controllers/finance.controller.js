@@ -185,7 +185,9 @@ exports.getQueue = async (req, res, next) => {
     // unchanged.
     const scope = await loadScope(req.user);
     const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
-    const scopeAnd = scopeClause ? ` AND ${scopeClause}` : '';
+    // Oct 3, 2026: drafts cancelled by Management are left out of every count and
+    // list on this page (they are not Finance's, and not a Zoho void).
+    const scopeAnd = (scopeClause ? ` AND ${scopeClause}` : '') + ' AND o.draft_cancelled_at IS NULL';
 
     /**
      * Sep 12, 2026: imported Zoho orders are separated from orders raised

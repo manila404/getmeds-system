@@ -112,6 +112,8 @@ router.post('/:id/retry-zoho-sync', blockMedrepWritesOnImported, c.retryZohoSync
 // Oct 2, 2026: Management corrects an order linked to a customer Zoho has as a
 // vendor — see relinkCustomer in orders.controller.js.
 router.post('/:id/relink-customer', requireRole('management', 'admin'), c.relinkCustomer);
+// Oct 3, 2026: Management/Admin cancel a draft (reason required); hidden from the back office.
+router.post('/:id/cancel-draft', requireRole('management', 'admin'), c.cancelDraft);
 router.patch('/:id/exception', requireRole('management', 'admin'), c.setException);
 // Sep 15, 2026: take an order off Exception / On Hold so it can continue.
 router.post('/:id/resume', requireRole('management', 'admin'), c.resume);

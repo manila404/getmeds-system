@@ -81,6 +81,8 @@ exports.getSummary = async (req, res, next) => {
     const scoped = (where = '', params = []) => {
       const parts = [];
       if (where) parts.push(`(${where})`);
+      // Oct 3, 2026: drafts cancelled by Management do not count anywhere here.
+      parts.push('draft_cancelled_at IS NULL');
       if (sourceClause) parts.push(sourceClause);
       if (scopeClause) parts.push(scopeClause);
       const clause = parts.length ? ` WHERE ${parts.join(' AND ')}` : '';
@@ -314,6 +316,8 @@ exports.getAllOrders = async (req, res, next) => {
       }
     }
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
+    // Oct 3, 2026: a draft cancelled by Management disappears from this list.
+    where.push('o.draft_cancelled_at IS NULL');
 
     // Sep 24, 2026: native vs Zoho-imported. Omitted = everything, as before —
     // the approval queue and other callers rely on that.

@@ -678,6 +678,9 @@ exports.getAll = async (req, res, next) => {
       where.push('(o.medrep_id = ? OR o.raised_by_id = ?)');
       params.push(req.user.id, req.user.id);
     }
+    // Oct 3, 2026: a draft cancelled by Management is hidden from the back office;
+    // only the people who raise orders (and see it as Cancelled) still list it.
+    if (!['medrep', 'team_lead'].includes(req.user.role)) where.push('o.draft_cancelled_at IS NULL');
     if (status) { where.push('o.status = ?'); params.push(status); }
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
     // Sep 15, 2026: Dispatch's "My orders" — the ones they cater. See
@@ -1265,6 +1268,67 @@ exports.retryZohoSync = async (req, res, next) => {
  * payload from the live order and customer on every attempt
  * (zohoRetryService.processOne), so it picks up the new link by itself.
  */
+/**
+ * POST /api/orders/:id/cancel-draft — Management or Admin cancels a DRAFT.
+ *
+ * Oct 3, 2026. A draft that should never go through (a duplicate, a mistake, a
+ * test) used to sit in Finance's "Not yet with Finance" and in every total.
+ * Cancelling it marks it (draft_cancelled_at), which every back-office list and
+ * count leaves out, while the owning MedRep still sees it as Cancelled with the
+ * reason. Any draft can be cancelled, including one the MedRep is still editing.
+ * A reason is required. An order that already has a Zoho Sales Order is refused:
+ * that is a Zoho process, not a draft.
+ */
+exports.cancelDraft = async (req, res, next) => {
+  try {
+    const reason = String((req.body || {}).reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'A reason is required — the MedRep sees it.' } });
+    }
+    const order = await db.prepare(`
+      SELECT o.*, u.email AS medrep_email, c.name AS customer_name
+      FROM orders o LEFT JOIN users u ON o.medrep_id = u.id LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = ?`).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    if (order.status !== 'draft') {
+      return res.status(409).json({ success: false, error: { code: 'NOT_A_DRAFT', message: `Only a draft can be cancelled this way. This order is "${order.status}".` } });
+    }
+    if (order.zoho_so_id) {
+      return res.status(409).json({ success: false, error: { code: 'ALREADY_IN_ZOHO', message: 'This order already has a Zoho Sales Order, so it cannot be cancelled here.' } });
+    }
+    if (!stateMachine.canTransition(order.status, 'cancelled')) {
+      return res.status(409).json({ success: false, error: { code: 'INVALID_TRANSITION', message: 'Cannot cancel this order.' } });
+    }
+
+    const actor = await resolveActor(req.user, 'management');
+    const now = new Date().toISOString();
+    await db.transaction(async () => {
+      await setOrderStatus(order.id, order.status, 'cancelled', now);
+      await db.prepare('UPDATE orders SET draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, updated_at = ? WHERE id = ?')
+        .run(now, actor.id, reason, now, order.id);
+      await logEvent({
+        orderId: order.id,
+        eventType: 'DRAFT_CANCELLED',
+        oldStatus: 'draft',
+        newStatus: 'cancelled',
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Draft cancelled by ${actor.name}: ${reason}`,
+        metadata: { reason }
+      });
+      await notify({
+        orderId: order.id,
+        recipientIds: [order.medrep_id, order.raised_by_id].filter(Boolean),
+        message: `Draft ${order.getmeds_order_id} was cancelled: ${reason}. You can copy it to create a new order.`,
+        eventType: 'DRAFT_CANCELLED',
+        orderData: { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: 'cancelled', medrep_email: order.medrep_email }
+      });
+    })();
+    const updated = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({ success: true, data: { order: updated } });
+  } catch (err) { next(err); }
+};
+
 exports.relinkCustomer = async (req, res, next) => {
   try {
     const targetId = parseInt(req.body?.customer_id, 10);

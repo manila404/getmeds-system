@@ -150,6 +150,8 @@ exports.getQueue = async (req, res, next) => {
           WHERE NOT (${importedSql('o')})
             AND o.created_at >= ?
             AND NOT (o.status = ANY(?))
+            -- Oct 3, 2026: a draft cancelled by Management is not Pharmacy's to see.
+            AND o.draft_cancelled_at IS NULL
             AND o.division = ANY(?)${channelAnd}${dateAnd}${scopeAnd}`;
     const allOrdersParams = [ALL_ORDERS_SINCE, ALL_ORDERS_EXCLUDED_STATUSES, ALL_ORDERS_DIVISIONS, ...channelParams, ...dateParams, ...scopeParams];
     const allOrdersCount = Number(

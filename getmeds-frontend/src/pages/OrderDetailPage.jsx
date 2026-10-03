@@ -23,6 +23,7 @@ import { uploadOrderAttachment } from '../utils/attachmentUpload';
 import { roleLabel } from '../constants/roles';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import RelinkCustomerModal from '../components/orders/RelinkCustomerModal';
+import CancelDraftModal from '../components/orders/CancelDraftModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../constants/paymentTerms';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
@@ -169,6 +170,7 @@ const EVENT_LABELS = {
   DISPATCH_HOLD_LIFTED: 'DISPATCH HOLD LIFTED',
   CUSTOMER_LINKED_TO_ZOHO: 'CUSTOMER LINKED TO ZOHO',
   ORDER_CUSTOMER_RELINKED: 'CUSTOMER CHANGED BY MANAGEMENT',
+  DRAFT_CANCELLED: 'DRAFT CANCELLED',
   PAP_PROGRAM_SET: 'PATIENT ASSISTANCE PROGRAM',
   ORDER_RESUMED: 'RESUMED BY MANAGEMENT',
   STOCK_WARNING_ACKNOWLEDGED: 'RAISED DESPITE STOCK WARNING'
@@ -321,6 +323,7 @@ const OrderDetailPage = () => {
   const [overviewOpen, setOverviewOpen] = useState(false);
   // Oct 2, 2026: Management's fix for an order linked to a customer Zoho holds as a vendor.
   const [relinkOpen, setRelinkOpen] = useState(false);
+  const [cancelOpen, setCancelOpen] = useState(false);
   // Sep 18, 2026: reason first (moves the order off the hold/exception with
   // the MedRep's own words on the trail), then the file — attaching
   // afterwards is harmless even for a Finance hold specifically, where
@@ -539,6 +542,18 @@ const OrderDetailPage = () => {
       qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not approve this order')
+  });
+
+  // Oct 3, 2026: Management/Admin cancel a draft; the reason is required.
+  const cancelDraftMutation = useMutation({
+    mutationFn: (reason) => client.post(`/api/orders/${id}/cancel-draft`, { reason }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Draft cancelled. The MedRep has been told.');
+      setCancelOpen(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries();
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not cancel this draft')
   });
 
   const sendBackMutation = useMutation({
@@ -928,6 +943,23 @@ const OrderDetailPage = () => {
             </button>
           </div>
         </div>
+        {order.draft_cancelled_at && (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-900">
+            <p className="font-semibold">This draft was cancelled</p>
+            <p className="mt-0.5">Reason: {order.draft_cancel_reason || '—'}</p>
+            <p className="mt-1 text-[12px] text-red-800/80">
+              It is removed automatically on {new Date(new Date(order.draft_cancelled_at).getTime() + 3 * 24 * 60 * 60 * 1000).toLocaleDateString()}.
+            </p>
+          </div>
+        )}
+        {cancelOpen && (
+          <CancelDraftModal
+            order={order}
+            saving={cancelDraftMutation.isPending}
+            onClose={() => setCancelOpen(false)}
+            onConfirm={(reason) => cancelDraftMutation.mutate(reason)}
+          />
+        )}
         {relinkOpen && (
           <RelinkCustomerModal
             order={order}
@@ -1470,6 +1502,12 @@ const OrderDetailPage = () => {
                 onClick={() => setResumeOpen(true)}
                 className="px-3 py-1.5 text-xs font-semibold bg-pharmacy-green text-white rounded hover:opacity-90"
               >▶ Resume order</button>
+            )}
+            {order.status === 'draft' && !order.zoho_so_id && (
+              <button
+                onClick={() => setCancelOpen(true)}
+                className="px-3 py-1.5 text-xs border border-red-300 text-red-700 rounded hover:bg-red-50"
+              >🚫 Cancel draft</button>
             )}
             <button
               onClick={() => { const r = prompt('Reason for hold?'); if (r) exceptionMutation.mutate({ status: 'on_hold', reason: r }); }}
