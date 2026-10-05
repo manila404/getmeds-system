@@ -14,6 +14,7 @@
  *
  * Output (default <repo>/../getmeds-documents/kpi/<month>/):
  *   01-people.csv  02-teams.csv  03-heads.csv  04-channels.csv  05-routing.csv  06-checks.csv
+ *   07-unplaced-people.csv  (people with no territory in the sales structure)
  * Targets are read from <kpi folder>/targets.csv (email, month, target_php). They live in
  * a spreadsheet file, not in the database.
  *
@@ -27,6 +28,10 @@
  *    others" columns and 05-routing.csv keep the field rep's part visible, WITHOUT crediting it.
  *  - Team lead / head / channel rows are always the SUM of the people under them. A person who
  *    holds territories in more than one channel is counted once, under their primary channel.
+ *  - A person NOT placed in any channel through the sales structure (no territory) is placed by the
+ *    DIVISION OF THEIR OWN ORDERS (the division carrying most of their booked pesos). The people
+ *    file says which way each person was placed (channel_source) and 07-unplaced-people.csv lists
+ *    everyone placed this way, so the team can map them into the structure properly later.
  *  - New customers and follow-ups on time: "Not tracked yet" (the live system has no data for them).
  *
  * SAFETY: one connection, a READ ONLY transaction (any write fails), a statement time limit,
@@ -119,8 +124,8 @@ async function buildExport(client, month, targetRows = []) {
 
   // BOOKED — one row per order, by its latest FINANCE_VERIFIED event in the month
   const booked = await q(
-    `SELECT id, medrep_id, raised_by_id, total_amount, status FROM (
-        SELECT DISTINCT ON (o.id) o.id, o.medrep_id, o.raised_by_id, o.total_amount, o.status
+    `SELECT id, medrep_id, raised_by_id, total_amount, status, division FROM (
+        SELECT DISTINCT ON (o.id) o.id, o.medrep_id, o.raised_by_id, o.total_amount, o.status, o.division
           FROM order_events fe JOIN orders o ON o.id = fe.order_id
          WHERE fe.event_type = 'FINANCE_VERIFIED' AND ${notImported}
            AND o.status NOT IN ('cancelled', 'deleted')
@@ -129,7 +134,7 @@ async function buildExport(client, month, targetRows = []) {
     [fromUtc, toUtc]
   );
   const raised = await q(
-    `SELECT o.id, o.medrep_id FROM orders o
+    `SELECT o.id, o.medrep_id, o.division FROM orders o
       WHERE o.created_at >= $1 AND o.created_at < $2 AND ${notImported}
         AND o.status NOT IN ('draft', 'cancelled', 'deleted')`,
     [fromUtc, toUtc]
@@ -160,7 +165,29 @@ async function buildExport(client, month, targetRows = []) {
     if (!p || !p.hqs.length) return 'Unplaced';
     return p.hqs.includes('ON SITE') ? 'On-site' : 'Field';
   };
-  const channelOf = (uid) => { const p = place.get(uid); return p && p.channelIds.length ? chById.get(p.channelIds[0]) : null; };
+  const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/^rx/, '');
+  const chByNorm = new Map(channels.map((c) => [norm(c.name), c]));
+  const chForDivision = (div) => {
+    const d = norm(div);
+    if (!d) return null;
+    if (chByNorm.has(d)) return chByNorm.get(d);
+    if (d === 'hos' && chByNorm.has('hosp')) return chByNorm.get('hosp');
+    if ((d.startsWith('telesales') || d.startsWith('mdtelesales')) && chByNorm.has('telesales')) return chByNorm.get('telesales');
+    return null;
+  };
+  const territoryChannel = (uid) => { const p = place.get(uid); return p && p.channelIds.length ? chById.get(p.channelIds[0]) : null; };
+  // the division carrying most of a person's booked pesos (else most of their orders this month)
+  const divAmt = new Map(), divCnt = new Map();
+  const bump = (m, uid, div, n) => { if (!uid || !div) return; const d = m.get(uid) || new Map(); d.set(div, (d.get(div) || 0) + n); m.set(uid, d); };
+  for (const o of booked) bump(divAmt, o.medrep_id, o.division, Number(o.total_amount) || 0);
+  for (const o of raised) bump(divCnt, o.medrep_id, o.division, 1);
+  const topDivision = (uid) => {
+    const m = divAmt.get(uid) && divAmt.get(uid).size ? divAmt.get(uid) : divCnt.get(uid);
+    if (!m) return null;
+    return [...m.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  };
+  const channelOf = (uid) => territoryChannel(uid) || chForDivision(topDivision(uid));
+  const channelSource = (uid) => (territoryChannel(uid) ? 'territory' : chForDivision(topDivision(uid)) ? 'order division (fallback)' : 'none');
 
   // ── per-owner tallies ──
   const T = new Map();
@@ -195,7 +222,8 @@ async function buildExport(client, month, targetRows = []) {
     const target = targets.get(String(u.email).toLowerCase());
     return {
       user_id: u.id, person: u.name, email: u.email, role: u.role, active: u.is_active ? 'yes' : 'no',
-      rep_type: repType(u.id), team_lead: lead ? lead.name : '(none)', channel: ch ? ch.name : '(unplaced)',
+      rep_type: repType(u.id), team_lead: lead ? lead.name : '(none)', channel: ch ? ch.name : '(unplaced)', channel_source: channelSource(u.id),
+      order_divisions: [...((divAmt.get(u.id) || divCnt.get(u.id)) || new Map()).entries()].sort((a, b) => b[1] - a[1]).map(([d]) => d).join(' / '),
       head: ch ? ch.head_name : '(none)',
       target_php: target === undefined ? '' : target,
       booked_php: peso(t.booked), booked_orders: t.bookedN, pct_of_target: target ? pct(t.booked, target) : '',
@@ -222,6 +250,14 @@ async function buildExport(client, month, targetRows = []) {
       pct_of_target: a.target_php ? pct(a.booked_php, a.target_php) : '', new_customers: NOT_TRACKED, followups_on_time: NOT_TRACKED
     }));
   };
+  // everyone with NO territory in the sales structure (placed by order division, or still unplaced)
+  const unplaced = people.filter((p) => p.channel_source !== 'territory')
+    .map((p) => ({
+      person: p.person, email: p.email, role: p.role, active: p.active, team_lead: p.team_lead,
+      booked_php: p.booked_php, booked_orders: p.booked_orders, orders: p.orders,
+      order_divisions: p.order_divisions, placed_in_export_as: p.channel, how_placed: p.channel_source,
+      suggested_territory_to_map: ''
+    })).sort((a, b) => b.booked_php - a.booked_php || String(a.person).localeCompare(String(b.person)));
   const teams = sumRows(people, ['team_lead']);
   const channelRows = sumRows(people, ['channel']);
   const heads = sumRows(people, ['head']);
@@ -246,17 +282,21 @@ async function buildExport(client, month, targetRows = []) {
     { check: 'Booked orders with no owner', value: noOwner, note: noOwner ? 'Not credited to anyone' : 'OK' },
     { check: 'Orders raised by someone other than the owner (booked)', value: booked.filter((o) => o.raised_by_id && o.raised_by_id !== o.medrep_id).length, note: 'Credited to the owner; see 05-routing.csv' },
     { check: 'People counted under more than one channel', value: multi.length, note: multi.length ? `Counted once, under their primary channel: ${multi.join('; ')}` : 'OK' },
+    { check: 'People with no territory in the sales structure', value: unplaced.length, note: `placed by order division: ${unplaced.filter((p) => p.how_placed !== 'none').length}; still unplaced: ${unplaced.filter((p) => p.how_placed === 'none').length}. Listed in 07-unplaced-people.csv` },
+    { check: 'Booked pesos of people with no territory', value: peso(unplaced.reduce((a, p) => a + p.booked_php, 0)), note: 'Included in channel and head totals through the order-division fallback' },
+    { check: 'Booked pesos still in no channel', value: peso(people.filter((p) => p.channel === '(unplaced)').reduce((a, p) => a + p.booked_php, 0)), note: 'Their orders carry no division that matches a channel' },
     { check: 'Active people with no target for this month', value: missingTargets, note: missingTargets ? 'Fill targets.csv, or use --copy-targets' : 'OK' },
     { check: 'New customers / follow-ups on time', value: NOT_TRACKED, note: 'The live system has no customer owner or follow-up dates yet' }
   ];
-  return { month, people, teams, heads, channels: channelRows, routing: routingRows, checks, totalBooked, exportedBooked };
+  return { month, people, teams, heads, channels: channelRows, routing: routingRows, unplaced, checks, totalBooked, exportedBooked };
 }
 
 const COLS = {
-  people: ['person', 'email', 'role', 'active', 'rep_type', 'team_lead', 'channel', 'head', 'target_php', 'booked_php', 'pct_of_target', 'booked_orders', 'delivered_php', 'orders', 'orders_held', 'booked_raised_by_others_php', 'booked_raised_by_others_orders', 'raised_for_others_info_php', 'new_customers', 'followups_on_time'],
+  people: ['person', 'email', 'role', 'active', 'rep_type', 'team_lead', 'channel', 'channel_source', 'order_divisions', 'head', 'target_php', 'booked_php', 'pct_of_target', 'booked_orders', 'delivered_php', 'orders', 'orders_held', 'booked_raised_by_others_php', 'booked_raised_by_others_orders', 'raised_for_others_info_php', 'new_customers', 'followups_on_time'],
   group: (label) => [label, 'people', 'target_php', 'targets_missing', 'booked_php', 'pct_of_target', 'booked_orders', 'delivered_php', 'orders', 'orders_held', 'booked_raised_by_others_php', 'raised_for_others_info_php', 'new_customers', 'followups_on_time'],
   routing: ['owner_credited', 'owner_rep_type', 'raised_by', 'raiser_rep_type', 'booked_orders', 'booked_php'],
-  checks: ['check', 'value', 'note']
+  checks: ['check', 'value', 'note'],
+  unplaced: ['person', 'email', 'role', 'active', 'team_lead', 'booked_php', 'booked_orders', 'orders', 'order_divisions', 'placed_in_export_as', 'how_placed', 'suggested_territory_to_map']
 };
 
 function writeFiles(result, dir) {
@@ -268,6 +308,7 @@ function writeFiles(result, dir) {
   w('04-channels.csv', COLS.group('channel'), result.channels);
   w('05-routing.csv', COLS.routing, result.routing);
   w('06-checks.csv', COLS.checks, result.checks);
+  w('07-unplaced-people.csv', COLS.unplaced, result.unplaced);
 }
 
 /** Runs the export inside a READ ONLY transaction with a time limit. */

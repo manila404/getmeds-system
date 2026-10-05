@@ -30,13 +30,13 @@ const mkUser = async (key, role) => {
 };
 const ev = (orderId, type, at, oldS = null, newS = null) =>
   db.prepare('INSERT INTO order_events (order_id, event_type, old_status, new_status, created_at) VALUES (?, ?, ?, ?, ?)').run(orderId, type, oldS, newS, at);
-async function mkOrder(ref, owner, { raisedBy = null, total, status = 'ready_for_dispatch', created = '2026-07-10T02:00:00.000Z', imported = false }) {
+async function mkOrder(ref, owner, { raisedBy = null, total, status = 'ready_for_dispatch', created = '2026-07-10T02:00:00.000Z', imported = false, division = null }) {
   const refId = imported ? `ZOHO-${stamp}-${ref}` : `GM-KPI-${stamp}-${ref}`;
   await db.prepare(
     `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, raised_by_id, status, customer_type, total_amount,
-                         delivery_address, submitted_at, created_at)
-     VALUES (?, ?, ?, ?, ?, 'credit', ?, '1 Test St', ?, ?)`
-  ).run(refId, customerId, owner.id, raisedBy ? raisedBy.id : null, status, total, created, created);
+                         delivery_address, submitted_at, created_at, division)
+     VALUES (?, ?, ?, ?, ?, 'credit', ?, '1 Test St', ?, ?, ?)`
+  ).run(refId, customerId, owner.id, raisedBy ? raisedBy.id : null, status, total, created, created, division);
   const row = await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(refId);
   ids.orders.push(row.id);
   return row.id;
@@ -199,5 +199,51 @@ describe('targets file helpers', () => {
     const csv = kpi.toCsv(['email', 'name'], [{ email: 'a@x', name: 'Doe, "Jo"' }]);
     expect(csv.charCodeAt(0)).toBe(0xfeff);
     expect(kpi.parseCsv(csv)).toEqual([{ email: 'a@x', name: 'Doe, "Jo"' }]);
+  });
+});
+
+describe('people with no territory are placed by the division of their orders', () => {
+  const M2 = '2026-05';
+  let orphan, lost;
+  const run2 = () => kpi.runReadOnly(process.env.DATABASE_URL, M2, []);
+
+  beforeAll(async () => {
+    orphan = await mkUser('orphan', 'medrep');     // no territory
+    lost = await mkUser('lost', 'medrep');         // no territory, division matches nothing
+    const a = await mkOrder('O1', orphan, { total: 400, created: '2026-05-10T02:00:00.000Z', division: `KPI CH ${stamp}` });
+    await ev(a, 'FINANCE_VERIFIED', '2026-05-12T03:00:00.000Z');
+    const b = await mkOrder('O2', orphan, { total: 50, created: '2026-05-11T02:00:00.000Z', division: 'SOMETHING ELSE' });
+    await ev(b, 'FINANCE_VERIFIED', '2026-05-13T03:00:00.000Z');
+    const c = await mkOrder('L1', lost, { total: 100, created: '2026-05-10T02:00:00.000Z', division: 'ZZ NO SUCH CHANNEL' });
+    await ev(c, 'FINANCE_VERIFIED', '2026-05-14T03:00:00.000Z');
+  });
+
+  test('placed under the channel their biggest division matches, and counted once', async () => {
+    const r = await run2();
+    const p = r.people.find((x) => x.user_id === orphan.id);
+    expect(p.channel).toBe(`KPI CH ${stamp}`);
+    expect(p.channel_source).toBe('order division (fallback)');
+    expect(p.order_divisions).toBe(`KPI CH ${stamp} / SOMETHING ELSE`);
+    expect(r.channels.find((c) => c.channel === `KPI CH ${stamp}`).booked_php).toBe(450);
+  });
+
+  test('a person whose division matches no channel stays unplaced, and the totals still add up', async () => {
+    const r = await run2();
+    const p = r.people.find((x) => x.user_id === lost.id);
+    expect(p.channel).toBe('(unplaced)');
+    expect(p.channel_source).toBe('none');
+    expect(r.channels.reduce((a, c) => a + c.booked_php, 0)).toBe(r.totalBooked);   // 450 + 100 = 550
+    expect(r.exportedBooked).toBe(r.totalBooked);
+  });
+
+  test('both appear in the separate unplaced list, biggest first, with their booked pesos', async () => {
+    const r = await run2();
+    const mine = r.unplaced.filter((x) => [orphan.email, lost.email].includes(x.email));
+    expect(mine.map((x) => `${x.booked_php}:${x.how_placed}`)).toEqual(['450:order division (fallback)', '100:none']);
+  });
+
+  test('a person with a territory is not on the unplaced list', async () => {
+    const r = await run();
+    expect(r.unplaced.some((x) => x.email === u.onsite.email)).toBe(false);
   });
 });
