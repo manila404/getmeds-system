@@ -23,6 +23,7 @@ import ExceptionHubPage from './pages/management/ExceptionHubPage';
 import ClientsPage from './pages/management/ClientsPage';
 import SalespersonMappingPage from './pages/management/SalespersonMappingPage';
 import PendingCustomersPage from './pages/management/PendingCustomersPage';
+import RefundsPage from './pages/finance/RefundsPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import InventoryPage from './pages/admin/InventoryPage';
@@ -262,6 +263,16 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['management', 'admin']}>
                 <PendingCustomersPage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Oct 5, 2026: refunds owed on paid drafts that were cancelled and kept on record.
+              Finance and Admin record them; Management reads the list. */}
+          <Route
+            path="/finance/refunds"
+            element={
+              <ProtectedRoute allowedRoles={['finance', 'admin', 'management']}>
+                <RefundsPage />
               </ProtectedRoute>
             }
           />

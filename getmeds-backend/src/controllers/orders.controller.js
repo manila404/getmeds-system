@@ -1,5 +1,6 @@
 const db = require('../db/database');
 const stateMachine = require('../workflow/stateMachine');
+const { paymentOnRecord } = require('../services/paymentOnRecord');
 const { generateOrderId } = require('../services/orderIdService');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
@@ -1300,12 +1301,25 @@ exports.cancelDraft = async (req, res, next) => {
       return res.status(409).json({ success: false, error: { code: 'INVALID_TRANSITION', message: 'Cannot cancel this order.' } });
     }
 
+    // Oct 5, 2026: two kinds of cancel. 'discard' = no money involved (it will be deleted later);
+    // 'keep_record' = paid in advance, never deleted, Finance tracks the refund. A draft with any
+    // payment on record can ONLY be kept: refused here, not just hidden in the dialog.
+    const money = await paymentOnRecord(order.id, order);
+    const asked = (req.body || {}).kind;
+    if (asked !== undefined && !['discard', 'keep_record'].includes(asked)) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Cancel kind must be discard or keep_record.' } });
+    }
+    const kind = asked || (money.has ? 'keep_record' : 'discard');
+    if (kind === 'discard' && money.has) {
+      return res.status(409).json({ success: false, error: { code: 'PAYMENT_ON_RECORD', message: `This draft has a payment on record (${money.reasons.join('; ')}), so it can only be cancelled and kept on record, for a refund to be arranged.` } });
+    }
+
     const actor = await resolveActor(req.user, 'management');
     const now = new Date().toISOString();
     await db.transaction(async () => {
       await setOrderStatus(order.id, order.status, 'cancelled', now);
-      await db.prepare('UPDATE orders SET draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, updated_at = ? WHERE id = ?')
-        .run(now, actor.id, reason, now, order.id);
+      await db.prepare('UPDATE orders SET draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, draft_cancel_kind = ?, refund_status = ?, updated_at = ? WHERE id = ?')
+        .run(now, actor.id, reason, kind, kind === 'keep_record' ? 'pending' : null, now, order.id);
       await logEvent({
         orderId: order.id,
         eventType: 'DRAFT_CANCELLED',
@@ -1313,19 +1327,40 @@ exports.cancelDraft = async (req, res, next) => {
         newStatus: 'cancelled',
         actorId: actor.id,
         actorName: actor.name,
-        notes: `Draft cancelled by ${actor.name}: ${reason}`,
-        metadata: { reason }
+        notes: `Draft cancelled by ${actor.name}${kind === 'keep_record' ? ' (kept on record — refund to be arranged)' : ''}: ${reason}`,
+        metadata: { reason, kind, payment_reasons: money.reasons }
       });
+      if (kind === 'keep_record') {
+        const finance = (await getUserIdsByRole('finance', 'admin')).filter((id) => id !== actor.id);
+        await notify({
+          orderId: order.id,
+          recipientIds: finance,
+          message: `Paid draft ${order.getmeds_order_id} (₱${Number(order.total_amount).toLocaleString('en-PH')}) was cancelled — a refund may be due. Reason: ${reason}`,
+          eventType: 'DRAFT_CANCELLED_PAID',
+          orderData: { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: 'cancelled', medrep_email: order.medrep_email }
+        });
+      }
       await notify({
         orderId: order.id,
         recipientIds: [order.medrep_id, order.raised_by_id].filter(Boolean),
-        message: `Draft ${order.getmeds_order_id} was cancelled: ${reason}. You can copy it to create a new order.`,
+        message: kind === 'keep_record'
+          ? `Draft ${order.getmeds_order_id} was cancelled: ${reason}. Payment is on record — Finance will arrange the refund; you will see the status on the order.`
+          : `Draft ${order.getmeds_order_id} was cancelled: ${reason}.`,
         eventType: 'DRAFT_CANCELLED',
         orderData: { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: 'cancelled', medrep_email: order.medrep_email }
       });
     })();
     const updated = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
     res.json({ success: true, data: { order: updated } });
+  } catch (err) { next(err); }
+};
+
+/** GET /api/orders/:id/payment-on-record — the Cancel dialog asks this to default and disable its options. */
+exports.paymentOnRecord = async (req, res, next) => {
+  try {
+    const order = await db.prepare('SELECT id, intake_payment_terms FROM orders WHERE id = ?').get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    res.json({ success: true, data: await paymentOnRecord(order.id, order) });
   } catch (err) { next(err); }
 };
 

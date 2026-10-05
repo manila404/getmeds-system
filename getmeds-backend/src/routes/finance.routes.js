@@ -31,6 +31,11 @@ router.get('/my-confirmations', c.getMyConfirmations);
 router.get('/reports/sales-by-salesperson', c.getSalesBySalesperson);
 // Sep 30, 2026: high-level monthly + today sales totals for the Sales Summary panel.
 router.get('/sales-summary', c.getSalesSummary);
+// Oct 5, 2026: refunds for paid drafts that were cancelled and kept on record. Read by Finance, Admin and
+// Management (money owed to customers is visible); recording one is POST /api/orders/:id/refund (Finance/Admin).
+const refunds = require('../controllers/refunds.controller');
+router.get('/refunds', refunds.list);
+router.get('/refunds/summary', refunds.summary);
 router.get('/orders/:id/payment', c.getPayment);
 
 // Sep 1, 2026 (8): the exception to the read-only rule above. Finance

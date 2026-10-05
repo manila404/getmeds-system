@@ -1383,7 +1383,19 @@ async function reconcileDraftCancelColumns(client) {
   await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS draft_cancelled_by INTEGER REFERENCES users(id)');
   await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS draft_cancel_reason TEXT');
   await client.query('CREATE INDEX IF NOT EXISTS idx_orders_draft_cancelled_at ON orders(draft_cancelled_at) WHERE draft_cancelled_at IS NOT NULL');
-  console.log('  ✔ orders.draft_cancel* present');
+  // Oct 5, 2026: a draft that was paid in advance is cancelled "keep record": it is never
+  // deleted and Finance tracks the refund. All nullable and additive.
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS draft_cancel_kind TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_status TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_received_amount DOUBLE PRECISION');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_amount DOUBLE PRECISION');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_reference TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_at TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_by INTEGER REFERENCES users(id)');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_note TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_updated_at TEXT');
+  await client.query("CREATE INDEX IF NOT EXISTS idx_orders_refund_status ON orders(refund_status) WHERE draft_cancel_kind = 'keep_record'");
+  console.log('  ✔ orders.draft_cancel* and refund_* present');
 }
 
 /**

@@ -12,6 +12,7 @@ import SalesBySalespersonPanel from '../../components/finance/SalesBySalesperson
 import { useSearchParams } from 'react-router-dom';
 import { FINANCE_STAGES } from '../../constants/financeStages';
 import { formatPHT } from '../../utils/dateUtils';
+import RefundsBadge from '../../components/finance/RefundsBadge';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -389,6 +390,7 @@ const FinanceQueuePage = () => {
           ) : (
             <>
               <h1 className="text-2xl font-semibold text-ink-primary">Orders</h1>
+              <RefundsBadge />
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
                 <div className="flex items-center gap-1.5">
                   <select

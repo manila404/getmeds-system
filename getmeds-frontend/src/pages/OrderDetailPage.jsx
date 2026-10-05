@@ -24,6 +24,7 @@ import { roleLabel } from '../constants/roles';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import RelinkCustomerModal from '../components/orders/RelinkCustomerModal';
 import CancelDraftModal from '../components/orders/CancelDraftModal';
+import RefundModal from '../components/orders/RefundModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../constants/paymentTerms';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
@@ -171,6 +172,7 @@ const EVENT_LABELS = {
   CUSTOMER_LINKED_TO_ZOHO: 'CUSTOMER LINKED TO ZOHO',
   ORDER_CUSTOMER_RELINKED: 'CUSTOMER CHANGED BY MANAGEMENT',
   DRAFT_CANCELLED: 'DRAFT CANCELLED',
+  REFUND_RECORDED: 'REFUND RECORDED',
   PAP_PROGRAM_SET: 'PATIENT ASSISTANCE PROGRAM',
   ORDER_RESUMED: 'RESUMED BY MANAGEMENT',
   STOCK_WARNING_ACKNOWLEDGED: 'RAISED DESPITE STOCK WARNING'
@@ -324,6 +326,7 @@ const OrderDetailPage = () => {
   // Oct 2, 2026: Management's fix for an order linked to a customer Zoho holds as a vendor.
   const [relinkOpen, setRelinkOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [refundOpen, setRefundOpen] = useState(false);
   // Sep 18, 2026: reason first (moves the order off the hold/exception with
   // the MedRep's own words on the trail), then the file — attaching
   // afterwards is harmless even for a Finance hold specifically, where
@@ -546,9 +549,10 @@ const OrderDetailPage = () => {
 
   // Oct 3, 2026: Management/Admin cancel a draft; the reason is required.
   const cancelDraftMutation = useMutation({
-    mutationFn: (reason) => client.post(`/api/orders/${id}/cancel-draft`, { reason }).then(r => r.data),
+    mutationFn: ({ reason, kind }) => client.post(`/api/orders/${id}/cancel-draft`, { reason, kind }).then(r => r.data),
     onSuccess: () => {
       toast.success('Draft cancelled. The MedRep has been told.');
+      qc.invalidateQueries({ queryKey: ['refund-summary'] });
       setCancelOpen(false);
       qc.invalidateQueries({ queryKey: ['order', id] });
       qc.invalidateQueries();
@@ -945,19 +949,50 @@ const OrderDetailPage = () => {
         </div>
         {order.draft_cancelled_at && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-900">
-            <p className="font-semibold">This draft was cancelled</p>
-            <p className="mt-0.5">Reason: {order.draft_cancel_reason || '—'}</p>
-            <p className="mt-1 text-[12px] text-red-800/80">
-              It is removed automatically on {new Date(new Date(order.draft_cancelled_at).getTime() + 3 * 24 * 60 * 60 * 1000).toLocaleDateString()}.
+            <p className="font-semibold">
+              This draft was cancelled{order.draft_cancel_kind === 'keep_record' ? ' — kept on record' : ''}
             </p>
+            <p className="mt-0.5">Reason: {order.draft_cancel_reason || '—'}</p>
+            {order.draft_cancel_kind === 'keep_record' && (
+              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
+                  order.refund_status === 'done' ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                  : order.refund_status === 'not_due' ? 'bg-slate-100 text-slate-700 border-slate-300'
+                  : 'bg-amber-100 text-amber-900 border-amber-300'}`}>
+                  {order.refund_status === 'done' ? 'Refund done' : order.refund_status === 'not_due' ? 'No refund due' : 'Refund pending'}
+                </span>
+                {order.refund_status === 'done' && (
+                  <span className="text-[12px]">
+                    ₱{Number(order.refund_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })} refunded
+                    {order.refund_at ? ` on ${order.refund_at}` : ''}{order.refund_reference ? ` · ref ${order.refund_reference}` : ''}
+                  </span>
+                )}
+                {order.refund_status === 'not_due' && order.refund_note && <span className="text-[12px]">{order.refund_note}</span>}
+                {order.refund_status === 'pending' && (
+                  <span className="text-[12px]">Finance has been told and will arrange the refund. You can tell the customer it is being processed.</span>
+                )}
+                {['finance', 'admin'].includes(user?.role) && (
+                  <button type="button" onClick={() => setRefundOpen(true)} className="text-xs font-semibold text-getmeds-blue hover:underline">
+                    {order.refund_status === 'pending' ? 'Record refund' : 'Edit refund'}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
+        )}
+        {refundOpen && (
+          <RefundModal
+            order={order}
+            onClose={() => setRefundOpen(false)}
+            onDone={() => { setRefundOpen(false); qc.invalidateQueries({ queryKey: ['order', id] }); qc.invalidateQueries({ queryKey: ['refund-summary'] }); qc.invalidateQueries({ queryKey: ['refunds'] }); }}
+          />
         )}
         {cancelOpen && (
           <CancelDraftModal
             order={order}
             saving={cancelDraftMutation.isPending}
             onClose={() => setCancelOpen(false)}
-            onConfirm={(reason) => cancelDraftMutation.mutate(reason)}
+            onConfirm={(reason, kind) => cancelDraftMutation.mutate({ reason, kind })}
           />
         )}
         {relinkOpen && (

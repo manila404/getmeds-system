@@ -296,6 +296,11 @@ const MyOrdersPage = () => {
                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${STATUS_COLORS[order.status] || 'bg-slate-100 text-slate-700'}`}>
                       {order.status?.replace(/_/g, ' ')}
                     </span>
+                    {order.draft_cancel_kind === 'keep_record' && (
+                      <span className="block mt-1 text-[11px] font-semibold text-ink-secondary">
+                        {order.refund_status === 'done' ? 'Refund done' : order.refund_status === 'not_due' ? 'No refund due' : 'Refund pending'}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-sm font-semibold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
                   <td className="px-4 py-3">
