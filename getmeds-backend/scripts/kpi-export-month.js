@@ -289,7 +289,7 @@ async function runReadOnly(connectionString, month, targetRows) {
 async function main() {
   require('dotenv').config();
   const args = process.argv.slice(2);
-  const kpiDir = path.resolve(__dirname, '../../getmeds-documents/kpi');
+  const kpiDir = path.resolve(__dirname, '../../../getmeds-documents/kpi');
   const targetsFile = path.join(kpiDir, 'targets.csv');
   const TCOLS = ['email', 'month', 'target_php', 'name'];
 
