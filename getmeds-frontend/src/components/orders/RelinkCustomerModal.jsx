@@ -16,12 +16,18 @@ import client from '../../api/client';
  * The backend checks the chosen customer against Zoho before anything changes,
  * so picking another vendor copy is refused with the reason. Nothing is written
  * to Zoho, and neither customer record is edited.
+ *
+ * Oct 5, 2026: when there is no customer record because the business is new to
+ * Zoho as a customer, Management picks "This is a new customer". It is created in
+ * Zoho as a customer, this customer record points at it, and the sync is retried.
  */
 const RelinkCustomerModal = ({ order, onClose, onDone }) => {
+  const [mode, setMode] = useState('existing'); // 'existing' | 'new'
   const [text, setText] = useState('');
   const [search, setSearch] = useState('');
   const [picked, setPicked] = useState(null);
   const [note, setNote] = useState('');
+  const [contactNo, setContactNo] = useState(order.contact_number || order.intake_contact_no || '');
 
   // Typing is debounced so each keystroke is not a request.
   useEffect(() => {
@@ -39,18 +45,27 @@ const RelinkCustomerModal = ({ order, onClose, onDone }) => {
 
   const candidates = (results.data || []).filter((c) => c.id !== order.customer_id && c.zoho_contact_id);
 
+  const isNew = mode === 'new';
+  const targetName = isNew ? order.customer_name : picked?.name;
+  const canSubmit = isNew ? contactNo.trim().length > 0 : !!picked;
+
   const relink = useMutation({
     mutationFn: async () => {
-      await client.post(`/api/orders/${order.id}/relink-customer`, { customer_id: picked.id, note: note.trim() || undefined });
+      if (isNew) {
+        await client.post(`/api/orders/${order.id}/relink-customer/new`, { contact_number: contactNo.trim(), note: note.trim() || undefined });
+      } else {
+        await client.post(`/api/orders/${order.id}/relink-customer`, { customer_id: picked.id, note: note.trim() || undefined });
+      }
       // The retry rebuilds its payload from the live order, so it uses the new link.
       const retried = await client.post(`/api/orders/${order.id}/retry-zoho-sync`).then((r) => r.data);
       return retried?.data?.result;
     },
     onSuccess: (result) => {
+      const done = isNew ? `${targetName} created in Zoho as a customer.` : `Linked to ${targetName}.`;
       if (result?.outcome === 'succeeded') {
-        toast.success(`Linked to ${picked.name}. Zoho Sales Order created.`);
+        toast.success(`${done} Zoho Sales Order created.`);
       } else {
-        toast(`Linked to ${picked.name}. Zoho still said: ${result?.error || 'unknown error'}`, { icon: '⚠️', duration: 9000 });
+        toast(`${done} Zoho still said: ${result?.error || 'unknown error'}`, { icon: '⚠️', duration: 9000 });
       }
       onDone();
     },
@@ -82,6 +97,45 @@ const RelinkCustomerModal = ({ order, onClose, onDone }) => {
             </span>
           </div>
 
+          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Which fix">
+            {[
+              ['existing', 'Link to an existing customer', 'Zoho already has this business as a customer'],
+              ['new', 'This is a new customer', 'Create it in Zoho as a customer'],
+            ].map(([key, label, hint]) => (
+              <button
+                key={key}
+                type="button"
+                role="radio"
+                aria-checked={mode === key}
+                onClick={() => setMode(key)}
+                className={`text-left rounded-lg border px-3 py-2 ${mode === key ? 'border-getmeds-blue bg-blue-50' : 'border-slate-200 hover:bg-surface'}`}
+              >
+                <span className="block text-[13px] font-semibold text-ink-primary">{label}</span>
+                <span className="block text-[11px] text-ink-secondary">{hint}</span>
+              </button>
+            ))}
+          </div>
+
+          {isNew ? (
+            <div className="space-y-3">
+              <p className="text-[12.5px] text-ink-secondary">
+                <strong>{order.customer_name}</strong> will be created in Zoho as a new <strong>customer</strong> with the same name.
+                This customer record will use it from now on, so later orders sync too. The vendor in Zoho is not changed.
+              </p>
+              <div>
+                <label className="block text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-1" htmlFor="relink-contact">
+                  Contact number (Zoho requires one)
+                </label>
+                <input
+                  id="relink-contact"
+                  value={contactNo}
+                  onChange={(e) => setContactNo(e.target.value)}
+                  maxLength={40}
+                  className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-getmeds-blue focus:border-transparent"
+                />
+              </div>
+            </div>
+          ) : (
           <div>
             <label className="block text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-1" htmlFor="relink-search">
               Find the customer
@@ -122,8 +176,9 @@ const RelinkCustomerModal = ({ order, onClose, onDone }) => {
               </div>
             )}
           </div>
+          )}
 
-          {picked && (
+          {(isNew || picked) && (
             <div>
               <label className="block text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-1" htmlFor="relink-note">
                 Note (optional)
@@ -133,12 +188,14 @@ const RelinkCustomerModal = ({ order, onClose, onDone }) => {
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 maxLength={500}
-                placeholder="e.g. Zoho had the old record as a vendor"
+                placeholder={isNew ? 'e.g. New hospital account' : 'e.g. Zoho had the old record as a vendor'}
                 className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-getmeds-blue focus:border-transparent"
               />
               <p className="mt-2 text-[12px] text-ink-secondary">
-                The order will move to <strong>{picked.name}</strong>, and the Zoho Sales Order will be sent straight away.
-                The change is recorded in the order’s timeline.
+                {isNew
+                  ? <>The customer will be created in Zoho, then the Zoho Sales Order will be sent straight away.</>
+                  : <>The order will move to <strong>{picked.name}</strong>, and the Zoho Sales Order will be sent straight away.</>}
+                {' '}The change is recorded in the order’s timeline.
               </p>
             </div>
           )}
@@ -151,11 +208,11 @@ const RelinkCustomerModal = ({ order, onClose, onDone }) => {
           <button
             type="button"
             onClick={() => relink.mutate()}
-            disabled={!picked || relink.isPending}
+            disabled={!canSubmit || relink.isPending}
             className="px-4 py-2 rounded-md bg-getmeds-blue text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
           >
             {relink.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            {relink.isPending ? 'Linking…' : 'Link and retry Zoho sync'}
+            {relink.isPending ? (isNew ? 'Creating…' : 'Linking…') : (isNew ? 'Create customer and retry Zoho sync' : 'Link and retry Zoho sync')}
           </button>
         </div>
       </div>

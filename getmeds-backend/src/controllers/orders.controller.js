@@ -1470,6 +1470,82 @@ exports.relinkCustomer = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+/**
+ * POST /api/orders/:id/relink-customer/new — "this is a NEW customer". Oct 5, 2026.
+ *
+ * Fix customer link could only point an order at a customer record that already
+ * exists. When the business is genuinely new to Zoho as a CUSTOMER (Zoho only has it
+ * as a vendor, e.g. a hospital we also buy from), Management needs to say so. This
+ * creates a new Zoho contact typed "customer" with the same name and points this
+ * customer record at it, so this order — and every later order for the same customer
+ * — syncs. Nothing in Zoho is edited or deleted: the vendor contact stays as it is.
+ *
+ * Refused when the order already has a Sales Order, is closed, or when Zoho says the
+ * current contact is already a customer (then the normal relink applies).
+ */
+exports.relinkToNewZohoCustomer = async (req, res, next) => {
+  try {
+    const bad = (http, code, message) => res.status(http).json({ success: false, error: { code, message } });
+    const note = String(req.body?.note || '').trim().slice(0, 500);
+    const order = await db.prepare(
+      `SELECT o.*, c.name AS customer_name, c.zoho_contact_id AS customer_zoho_contact_id, c.contact_number AS customer_contact_number,
+              c.email AS customer_email, c.tin AS customer_tin, c.address AS customer_address
+         FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = ?`
+    ).get(req.params.id);
+    if (!order) return bad(404, 'NOT_FOUND', 'Order not found');
+    if (order.zoho_so_id) return bad(409, 'ALREADY_IN_ZOHO', 'This order already has a Zoho Sales Order, so its customer cannot be changed here.');
+    if (['cancelled', 'completed', 'deleted'].includes(order.status)) return bad(409, 'ORDER_CLOSED', `This order is ${order.status}.`);
+
+    const contactNumber = String(req.body?.contact_number || order.customer_contact_number || order.intake_contact_no || '').trim();
+    if (!contactNumber) return bad(400, 'VALIDATION_ERROR', 'Enter a contact number for the new customer (Zoho requires one).');
+
+    // What does Zoho have now? Only replace a link that is NOT already a customer.
+    if (order.customer_zoho_contact_id) {
+      let current = null;
+      try { current = (await zoho.getContact(order.customer_zoho_contact_id))?.contact || null; }
+      catch (err) { return bad(502, 'ZOHO_UNREACHABLE', `Could not check this customer in Zoho right now. Nothing was changed — try again. (${err.message})`); }
+      if (current && String(current.contact_type || 'customer').toLowerCase() === 'customer') {
+        return bad(409, 'ALREADY_A_CUSTOMER', 'Zoho already has this contact as a customer, so a new one is not needed. Use Retry Zoho Sync, or pick another customer.');
+      }
+    }
+
+    let created;
+    try {
+      const out = await zoho.createContact({
+        display_name: order.customer_name,
+        contact_number: contactNumber,
+        customer_sub_type: 'business',
+        email: order.customer_email || undefined,
+        tin: order.customer_tin || undefined,
+        billing_address: order.customer_address ? { address: order.customer_address } : undefined
+      });
+      created = out?.contact;
+    } catch (err) {
+      return bad(502, 'ZOHO_CREATE_FAILED', `Zoho did not create the customer: ${err.message}. Nothing was changed.`);
+    }
+    if (!created?.contact_id) return bad(502, 'ZOHO_CREATE_FAILED', 'Zoho did not return the new customer. Nothing was changed.');
+
+    const actorRole = (req.user.role || '').toLowerCase();
+    const now = new Date().toISOString();
+    await db.transaction(async () => {
+      await db.prepare(
+        `UPDATE customers SET zoho_contact_id = ?, contact_number = COALESCE(NULLIF(contact_number, ''), ?), source = 'zoho', last_synced_at = ? WHERE id = ?`
+      ).run(created.contact_id, contactNumber, now, order.customer_id);
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ORDER_CUSTOMER_RELINKED',
+        actorId: req.user.id,
+        actorName: req.user.name || req.user.email,
+        actorRole,
+        notes: `${order.customer_name} created in Zoho as a NEW customer by ${req.user.name || req.user.email} (Zoho had it only as a vendor).${note ? ' ' + note : ''}`,
+        metadata: { customer_id: order.customer_id, from_zoho_contact_id: order.customer_zoho_contact_id, to_zoho_contact_id: created.contact_id, created_new: true }
+      });
+    })();
+
+    res.json({ success: true, data: { customer: { id: order.customer_id, name: order.customer_name, zoho_contact_id: created.contact_id } } });
+  } catch (err) { next(err); }
+};
+
 exports.getEvents = async (req, res, next) => {
   try {
     const events = await db.prepare(
