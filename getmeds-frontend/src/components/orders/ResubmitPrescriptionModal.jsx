@@ -15,12 +15,19 @@ const ResubmitPrescriptionModal = ({ order, onClose, onSubmit, saving }) => {
   const [note, setNote] = useState('');
   const [file, setFile] = useState(null);
   const rejection = order.rx?.rejection;
+  // Oct 5, 2026: Pharmacy asked for a prescription on an order that has none.
+  const requested = !rejection && order.rx?.state === 'none' ? order.rx?.requested : null;
 
   return (
-    <Modal isOpen onClose={onClose} title={`Re-submit the prescription for ${order.getmeds_order_id}`}>
+    <Modal isOpen onClose={onClose} title={`${requested ? 'Send the prescription' : 'Re-submit the prescription'} for ${order.getmeds_order_id}`}>
       {rejection && (
         <p className="text-[13px] text-red-900 bg-red-50 border border-red-200 rounded px-3 py-2 mb-3">
           <span className="font-semibold">Pharmacy rejected it:</span> {rejection.reason || 'No reason given.'}
+        </p>
+      )}
+      {requested && (
+        <p className="text-[13px] text-red-900 bg-red-50 border border-red-200 rounded px-3 py-2 mb-3">
+          <span className="font-semibold">Pharmacy asked:</span> {requested.reason || 'Please upload the prescription.'}
         </p>
       )}
       <p className="text-[13px] text-ink-secondary mb-3">
@@ -35,7 +42,7 @@ const ResubmitPrescriptionModal = ({ order, onClose, onSubmit, saving }) => {
           value={note}
           onChange={(e) => setNote(e.target.value)}
           maxLength={490}
-          placeholder="e.g. New prescription with the quantity attached"
+          placeholder={requested ? 'e.g. Prescription attached / It is the 2nd attachment, labelled as payment' : 'e.g. New prescription with the quantity attached'}
           className="w-full border border-slate-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
         />
       </label>
@@ -48,7 +55,7 @@ const ResubmitPrescriptionModal = ({ order, onClose, onSubmit, saving }) => {
           onFileChange={(f, error) => { if (error) toast.error(error); else setFile(f); }}
           onTypeChange={() => {}}
           disabled={saving}
-          label="Replacement prescription (optional)"
+          label={requested ? 'Prescription' : 'Replacement prescription (optional)'}
         />
       </div>
 

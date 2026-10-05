@@ -1658,6 +1658,33 @@ const OrderDetailPage = () => {
             </p>
           </div>
         )}
+        {/* Oct 5, 2026: Pharmacy asked for a prescription on an order that has none.
+            Same answer path as a rejection: upload it (or explain), back to Pharmacy only.
+            The order cannot go out until it is verified or Pharmacy marks it not required. */}
+        {order.rx?.requested && order.rx?.state === 'none' &&
+          (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+          <div className="mt-3 bg-red-50 border border-red-200 rounded p-3 text-xs text-red-950 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p>
+                <span className="font-semibold">💊 Pharmacy needs a prescription{order.rx.requested.by ? ` (${order.rx.requested.by})` : ''}:</span>{' '}
+                {order.rx.requested.reason || 'Please upload the prescription.'}
+              </p>
+              {order.rx.can_resubmit && (
+                <button
+                  type="button"
+                  onClick={() => setRxResubmitOpen(true)}
+                  className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
+                >
+                  ⬆ Upload prescription for Pharmacy
+                </button>
+              )}
+            </div>
+            <p className="text-red-900/80">
+              Dispatch cannot send this order out until Pharmacy has the prescription. If it is already attached under another label, say so in the note.
+              This goes to Pharmacy only; it does not change anything with Finance.
+            </p>
+          </div>
+        )}
         {rxResubmitOpen && (
           <ResubmitPrescriptionModal
             order={order}

@@ -8,7 +8,7 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const notificationService = require('../services/notificationService');
 const { CATERED_SUBQUERY } = require('../services/dispatchCater');
 const { warehouseOf, warehouseSql } = require('../services/dispatchWarehouses');
-const { rxSummaries, rxBadge } = require('../services/prescriptionService');
+const { rxSummaries, rxBadge, rxBlocks } = require('../services/prescriptionService');
 
 // ─── Confirmed for delivery (Sep 15, 2026) ─────────────────────────────────
 // Dispatch prints the delivery slip, checks the address, and confirms the
@@ -452,12 +452,14 @@ exports.getRecent = async (req, res, next) => {
 
     const rx = await rxSummaries([...drafts, ...confirmed, ...confirmedOrdersRows].map((o) => o.id));
     const withRx = (financeCleared) => (o) => {
-      const state = rx.get(o.id).state;
+      const s = rx.get(o.id);
       return {
         ...withConfirmation(o),
-        rx_state: state,
-        rx_badge: rxBadge(state, financeCleared),
-        rx_blocking: state === 'pending' || state === 'rejected'
+        rx_state: s.state,
+        // Oct 5, 2026: Pharmacy asked the MedRep for a prescription — blocks like a rejected one.
+        rx_requested: s.requested || null,
+        rx_badge: rxBadge(s.state, financeCleared, s.requested),
+        rx_blocking: rxBlocks(s)
       };
     };
 

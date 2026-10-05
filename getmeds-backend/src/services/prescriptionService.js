@@ -146,13 +146,41 @@ async function notRequiredMap(ids) {
 }
 
 /**
- * Map of orderId -> { state, prescriptions, not_required? } for every id
- * asked about.
+ * Oct 5, 2026: Pharmacy's latest "Request prescription" per order (the
+ * RX_REQUESTED event noRxDecision logs) — who, when, what they asked for.
+ */
+async function requestedMap(ids) {
+  if (!ids.length) return new Map();
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT ON (order_id) order_id, actor_name, created_at, metadata
+         FROM order_events
+        WHERE event_type = 'RX_REQUESTED' AND order_id = ANY(?)
+        ORDER BY order_id, id DESC`
+    )
+    .all([ids]);
+  return new Map(rows.map((r) => {
+    let reason = null;
+    try { reason = JSON.parse(r.metadata || '{}').reason || null; } catch { reason = null; }
+    return [r.order_id, { at: r.created_at, by: r.actor_name || null, reason }];
+  }));
+}
+
+/**
+ * Map of orderId -> { state, prescriptions, not_required?, requested? } for
+ * every id asked about.
  *
  * Sep 28, 2026: `state` can also be 'not_required' — zero prescription rows,
  * and Pharmacy has said none is needed. Only while there is still no file on
  * the order: the moment a MedRep uploads one, the ordinary pending/rejected/
  * verified rules take over on their own, with no separate reset needed.
+ *
+ * Oct 5, 2026: `requested` — zero prescription rows, not marked "not required",
+ * and Pharmacy has asked the MedRep for one. `state` stays 'none' (so the
+ * Pharmacy tabs are unchanged), but the order is blocked from going out like a
+ * rejected one (requireRxCleared) until a file is uploaded and verified, or
+ * Pharmacy marks it not required. A "not required" call clears it, and a new
+ * request clears "not required" (noRxDecision), so the latest call wins.
  */
 async function rxSummaries(orderIds) {
   const rows = await prescriptionRows(orderIds);
@@ -163,14 +191,23 @@ async function rxSummaries(orderIds) {
   }
   const ids = [...new Set((orderIds || []).map(Number))];
   const notRequired = await notRequiredMap(ids);
+  // Only orders with no file can have an open request; skip the lookup otherwise.
+  const requested = await requestedMap(ids.filter((id) => !byOrder.has(id) && !notRequired.has(id)));
 
   const out = new Map();
   for (const id of ids) {
     const orderRows = byOrder.get(id) || [];
     const nr = !orderRows.length ? notRequired.get(id) : null;
-    out.set(id, nr ? { state: 'not_required', prescriptions: [], not_required: nr } : summarize(orderRows));
+    if (nr) out.set(id, { state: 'not_required', prescriptions: [], not_required: nr });
+    else if (!orderRows.length && requested.has(id)) out.set(id, { state: 'none', prescriptions: [], requested: requested.get(id) });
+    else out.set(id, summarize(orderRows));
   }
   return out;
+}
+
+/** Oct 5, 2026: true while the order must not go out for prescription reasons. */
+function rxBlocks(summary) {
+  return !!summary && (summary.state === 'pending' || summary.state === 'rejected' || !!summary.requested);
 }
 
 /**
@@ -178,7 +215,11 @@ async function rxSummaries(orderIds) {
  * where Finance is. null when there is no prescription (nothing to say).
  * `tone` is for the badge colour: ok / wait / block.
  */
-function rxBadge(rxState, financeCleared) {
+function rxBadge(rxState, financeCleared, requested = null) {
+  // Oct 5, 2026: Pharmacy asked the MedRep for a prescription and none is on file yet.
+  if (requested && (!rxState || rxState === 'none')) {
+    return { tone: 'block', label: financeCleared ? 'Finance Confirmed — Rx Requested from MedRep' : 'Rx Requested from MedRep' };
+  }
   if (!rxState || rxState === 'none') return null;
   if (rxState === 'not_required') {
     return financeCleared
@@ -207,20 +248,22 @@ function rxBadge(rxState, financeCleared) {
 const NOT_CLEARED_MESSAGE = {
   pending: 'This order has a prescription the pharmacist has not verified yet. It cannot go out until they do.',
   rejected: 'The prescription on this order was rejected and has not been replaced yet. It cannot go out until a new one is verified.',
+  requested: 'Pharmacy asked the MedRep for a prescription on this order and none has been uploaded yet. It cannot go out until one is verified, or Pharmacy marks it not required.',
 };
 
-/** Express middleware: 409 while the order's prescription is pending or rejected. */
+/** Express middleware: 409 while the order's prescription is pending, rejected, or requested by Pharmacy. */
 function requireRxCleared(req, res, next) {
   (async () => {
     const id = parseInt(req.params.id, 10);
     if (!Number.isInteger(id)) return next();
     const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(id);
     if (!order || !PRE_SHIP_STATUSES.includes(order.status)) return next();
-    const { state } = (await rxSummaries([id])).get(id);
-    if (state === 'pending' || state === 'rejected') {
+    const summary = (await rxSummaries([id])).get(id);
+    if (rxBlocks(summary)) {
+      const key = summary.requested ? 'requested' : summary.state;
       return res.status(409).json({
         success: false,
-        error: { code: 'RX_NOT_VERIFIED', message: NOT_CLEARED_MESSAGE[state], rx_state: state },
+        error: { code: 'RX_NOT_VERIFIED', message: NOT_CLEARED_MESSAGE[key], rx_state: summary.state, rx_requested: !!summary.requested },
       });
     }
     return next();
@@ -260,21 +303,23 @@ async function isPharmacyReviewable(order) {
 }
 
 /**
- * What the MedRep needs to see when Pharmacy rejected the prescription:
- * { state, rejection: { reason, at, file_name } | null, can_resubmit }.
+ * What the MedRep needs to see when Pharmacy rejected the prescription, or
+ * (Oct 5, 2026) asked for one on an order that has none:
+ * { state, rejection: { reason, at, file_name } | null, requested: { reason, at, by } | null, can_resubmit }.
  */
 async function rxStatusForOrder(order) {
-  const { state, prescriptions } = (await rxSummaries([order.id])).get(order.id);
+  const { state, prescriptions, requested } = (await rxSummaries([order.id])).get(order.id);
   const live = prescriptions.filter((p) => !p.superseded && p.status === 'rejected');
   const last = live.sort((a, b) => String(b.verified_at || '').localeCompare(String(a.verified_at || '')))[0] || null;
   return {
     state,
     rejection: last ? { reason: last.rejection_reason, at: last.verified_at, file_name: last.file_name } : null,
-    can_resubmit: state === 'rejected' && (await isPharmacyReviewable(order)),
+    requested: requested || null,
+    can_resubmit: (state === 'rejected' || !!requested) && (await isPharmacyReviewable(order)),
   };
 }
 
 module.exports = {
-  RX_FILE_TYPE, PRE_SHIP_STATUSES, summarize, rxSummaries, rxBadge, requireRxCleared,
+  RX_FILE_TYPE, PRE_SHIP_STATUSES, summarize, rxSummaries, rxBadge, rxBlocks, requireRxCleared,
   heldFromStage, isPharmacyReviewable, rxStatusForOrder, prescriptionRows, supersededIds,
 };

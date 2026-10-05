@@ -586,6 +586,16 @@ const PharmacyQueuePage = () => {
                     <p className="text-sm font-bold text-ink-primary shrink-0">{peso(o.total_amount)}</p>
                   </div>
 
+                  {/* Oct 5, 2026: Pharmacy already asked the MedRep; Dispatch is blocked until it arrives. */}
+                  {o.requested && o.prescriptions.length === 0 && (
+                    <p className="rounded-md bg-red-50 border border-red-200 px-3 py-1.5 text-xs text-red-900">
+                      <span className="font-semibold">⏳ Prescription requested from MedRep</span>
+                      {o.requested.by ? ` by ${o.requested.by}` : ''}
+                      {o.requested.at ? ` · ${new Date(o.requested.at).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}
+                      {o.requested.reason ? `: ${o.requested.reason}` : ''}
+                      <span className="block text-red-900/80">Dispatch cannot send it out until the prescription is verified or you mark it not required.</span>
+                    </p>
+                  )}
                   {o.resubmitted && (
                     <p className="rounded-md bg-blue-50 border border-blue-200 px-3 py-1.5 text-xs text-blue-950">
                       <span className="font-semibold">↩ Re-submitted{o.resubmitted.by ? ` by ${o.resubmitted.by}` : ''}:</span> {o.resubmitted.note || 'No note.'}

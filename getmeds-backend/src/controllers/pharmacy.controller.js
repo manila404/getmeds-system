@@ -224,9 +224,12 @@ exports.getQueue = async (req, res, next) => {
         reviewable: PHARMACY_STATUSES.includes(o.status) || (o.status === 'on_hold' && PHARMACY_STATUSES.includes(o.held_from)),
         rx_state: s.state,
         prescriptions: s.prescriptions,
-        resubmitted: s.state === 'pending' ? resubmits.get(o.id) || null : null,
+        // Oct 5, 2026: also the MedRep's answer to an open "Request prescription".
+        resubmitted: s.state === 'pending' || s.requested ? resubmits.get(o.id) || null : null,
         // Sep 28, 2026: Pharmacy's own "no prescription needed" call — who, when, why.
         not_required: s.not_required || null,
+        // Oct 5, 2026: Pharmacy asked the MedRep for a prescription and none is on file yet.
+        requested: s.requested || null,
         // Sep 29, 2026: order has non-prescription attachments but zero prescription
         // rows — the MedRep may have uploaded the prescription under the wrong type.
         // Only meaningful when rx_state === 'none' (no prescription rows at all).
@@ -419,8 +422,14 @@ exports.resubmitPrescription = async (req, res, next) => {
     const { state, prescriptions } = summarize(rows);
     const rejectedLive = prescriptions.filter((p) => p.status === 'rejected' && !p.superseded).map((p) => p.id);
     const everRejected = rows.some((r) => r.status === 'rejected');
-    if (state !== 'rejected' && !(state === 'pending' && everRejected)) {
-      return fail(res, 409, 'NOTHING_TO_RESUBMIT', 'Pharmacy has not rejected a prescription on this order, so there is nothing to re-submit.');
+    // Oct 5, 2026: also the answer to Pharmacy's "Request prescription" — with a
+    // file just uploaded (now pending), or a note only ("it is the 2nd attachment").
+    const current = (await rxSummaries([order.id])).get(order.id);
+    const wasRequested = !!current.requested || (state === 'pending' && !!(await db
+      .prepare("SELECT 1 FROM order_events WHERE order_id = ? AND event_type = 'RX_REQUESTED' LIMIT 1")
+      .get(order.id)));
+    if (state !== 'rejected' && !(state === 'pending' && everRejected) && !wasRequested) {
+      return fail(res, 409, 'NOTHING_TO_RESUBMIT', 'Pharmacy has not rejected or asked for a prescription on this order, so there is nothing to re-submit.');
     }
 
     const actor = await resolveActor(req.user, role === 'medrep' ? 'medrep' : 'management');

@@ -108,6 +108,7 @@ describe('rxBadge — what the Dispatch board says', () => {
     expect(rxBadge('verified', true).tone).toBe('ok');
     expect(rxBadge('rejected', true).tone).toBe('block');
     expect(rxBadge('none', true)).toBeNull();
+    expect(rxBadge('none', true, { reason: 'x' })).toEqual({ tone: 'block', label: 'Finance Confirmed — Rx Requested from MedRep' });
   });
 });
 
@@ -388,6 +389,65 @@ describe('Pharmacy queue, verification and the gate', () => {
       const row = await db.prepare('SELECT rx_not_required_at FROM orders WHERE id = ?').get(o.id);
       expect(row.rx_not_required_at).toBeNull();
       expect(idsOf(await queue('verified'))).not.toContain(o.id);
+    });
+
+    // Oct 5, 2026: a request used to only notify — the order went on to Dispatch
+    // and the MedRep's order page showed nothing (GM-20261005-0027).
+    describe('an open request goes back to the MedRep and holds Dispatch', () => {
+      const resubmit = (id, body, token = medrepToken) =>
+        request(app).post(`/api/orders/${id}/resubmit-prescription`).set(auth(token)).send(body);
+      const detail = async (id) => (await request(app).get(`/api/orders/${id}`).set(auth(medrepToken))).body.data.order;
+
+      test('blocks confirming for delivery, and the MedRep sees what was asked', async () => {
+        const o = await orderAt('ready_for_draft_invoice');
+        await noRx(o.id, { action: 'request', reason: 'Needs prescription' });
+
+        const blocked = await confirm(o.id);
+        expect(blocked.status).toBe(409);
+        expect(blocked.body.error.code).toBe('RX_NOT_VERIFIED');
+        expect(blocked.body.error.rx_requested).toBe(true);
+
+        const rx = (await detail(o.id)).rx;
+        expect(rx.state).toBe('none');
+        expect(rx.requested.reason).toBe('Needs prescription');
+        expect(rx.can_resubmit).toBe(true);
+
+        const card = (await queue('needs_attention')).orders.find((x) => x.id === o.id);
+        if (card) expect(card.requested.reason).toBe('Needs prescription');
+        // The order's status is not touched (Finance unaffected).
+        expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(o.id)).status).toBe('ready_for_draft_invoice');
+      });
+
+      test('the MedRep uploads one and sends it; once verified the order can go out', async () => {
+        const o = await orderAt('ready_for_draft_invoice');
+        await noRx(o.id, { action: 'request', reason: 'Needs prescription' });
+        await addRx(o.id);
+        const res = await resubmit(o.id, { note: 'Prescription attached' });
+        expect(res.status).toBe(200);
+        expect(res.body.data.rx_state).toBe('pending');
+        expect((await confirm(o.id)).status).toBe(409);
+        await verify(o.id);
+        expect((await confirm(o.id)).status).toBe(200);
+      });
+
+      test('a note-only answer reaches Pharmacy; the hold stays until Pharmacy marks it not required', async () => {
+        const o = await orderAt('ready_for_draft_invoice');
+        await noRx(o.id, { action: 'request', reason: 'Needs prescription' });
+        expect((await resubmit(o.id, { note: 'It is the 2nd attachment, labelled payment' })).status).toBe(200);
+        const ev = await db.prepare("SELECT 1 AS x FROM order_events WHERE order_id = ? AND event_type = 'RX_RESUBMITTED'").get(o.id);
+        expect(ev).toBeTruthy();
+        expect((await confirm(o.id)).status).toBe(409);
+        await noRx(o.id, { action: 'not_required', reason: 'Retagged / not needed' });
+        expect((await confirm(o.id)).status).toBe(200);
+      });
+
+      test('with no request and no rejection there is still nothing to re-submit', async () => {
+        const o = await orderAt('ready_for_draft_invoice');
+        const res = await resubmit(o.id, { note: 'hello' });
+        expect(res.status).toBe(409);
+        expect(res.body.error.code).toBe('NOTHING_TO_RESUBMIT');
+        expect((await confirm(o.id)).status).toBe(200);
+      });
     });
 
     test('refused once the order already has a prescription on file', async () => {
