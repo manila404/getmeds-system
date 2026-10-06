@@ -26,6 +26,7 @@ import PendingCustomersPage from './pages/management/PendingCustomersPage';
 import RefundsPage from './pages/finance/RefundsPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
+import KpiPage from './pages/admin/KpiPage';
 import InventoryPage from './pages/admin/InventoryPage';
 import TestModePage from './pages/TestModePage';
 import ProfilePage from './pages/ProfilePage';
@@ -306,6 +307,16 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['admin']}>
                 <ZohoSyncHealthPage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Oct 5, 2026: Sales KPIs and targets (Aaron sheet 13.1.2). The API is off
+              unless GETMEDS_KPI_PAGE=true; the page then says it is switched off. */}
+          <Route
+            path="/admin/kpi"
+            element={
+              <ProtectedRoute allowedRoles={['admin']}>
+                <KpiPage />
               </ProtectedRoute>
             }
           />

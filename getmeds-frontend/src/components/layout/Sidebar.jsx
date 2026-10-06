@@ -2,10 +2,11 @@ import React, { useState } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, ShieldCheck, Clock, Pill, Megaphone, Banknote } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, ShieldCheck, Clock, Pill, Megaphone, Banknote, Target } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 import { FINANCE_STAGES } from '../../constants/financeStages';
 import { useUnseenAnnouncementsCount } from '../stock/StockAnnouncements';
+import { useKpiStatus } from '../../hooks/useKpiStatus';
 
 const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollapse }) => {
   const { user } = useAuth();
@@ -23,6 +24,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   const roleForAnnouncements = (user?.role || '').toLowerCase();
   const seesAnnouncements = ['medrep', 'management'].includes(roleForAnnouncements);
   const unseenAnnouncements = useUnseenAnnouncementsCount(seesAnnouncements);
+  // Oct 5, 2026: the KPI page's menu item shows only while the page is switched on
+  // (GETMEDS_KPI_PAGE) — see hooks/useKpiStatus.js.
+  const kpi = useKpiStatus(roleForAnnouncements);
 
   if (!user) return null;
 
@@ -290,6 +294,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         links: [
           // (User Management was sharing the Users icon with Clients Directory.)
           { to: '/admin/users', icon: <UserCog size={19} />, label: 'User Management' },
+          ...(kpi.enabled ? [{ to: '/admin/kpi', icon: <Target size={19} />, label: 'Sales KPIs' }] : []),
           { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
           // Sep 9, 2026: the Zoho sync retry outbox — see ZohoSyncHealthPage.jsx.
           { to: '/finance/refunds', icon: <Banknote size={19} />, label: 'Refunds' },

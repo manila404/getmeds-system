@@ -145,6 +145,8 @@ app.use('/api/cron', cronRoutes);
 app.use('/api/salesperson-mappings', salespersonMappingRoutes);
 app.use('/api/manager-scopes', managerScopeRoutes);
 app.use('/api/search', searchRoutes);
+// Oct 5, 2026: the KPI page — off unless GETMEDS_KPI_PAGE=true (see routes/kpi.routes.js).
+app.use('/api/kpi', require('./routes/kpi.routes'));
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } }));
