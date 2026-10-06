@@ -1042,13 +1042,12 @@ exports.viewAttachment = async (req, res, next) => {
     const transform = (w || h) && isImage && !alreadySmall ? { width: w || undefined, height: h || undefined, resize: 'cover', quality: 75 } : null;
 
     if (transform) {
-      // Thumbnails always come from Supabase — we still hold the local
-      // copy regardless of Zoho push status (nothing in this app deletes
-      // it; that would be a later phase, not built), and Zoho has no
-      // resize capability of its own to route this to even for an
-      // otherwise Zoho-eligible row.
-      const buffer = await proofStorage.downloadFile(attachment.storage_path, transform);
-      res.setHeader('Content-Type', 'image/jpeg'); // Supabase's transform re-encodes to JPEG regardless of source type
+      // Thumbnails come from storage, not Zoho (Zoho cannot resize). Oct 6, 2026:
+      // only Sanity resizes; a file with no Sanity copy comes back whole, in its own
+      // type, because Supabase bills every distinct image it resizes — see
+      // paymentProofStorage.js's downloadRendition.
+      const { buffer, resized } = await proofStorage.downloadRendition(attachment.storage_path, transform);
+      res.setHeader('Content-Type', resized ? 'image/jpeg' : contentType); // a resized rendition is always a JPEG
       res.setHeader('Content-Disposition', `inline; filename="${name}"`);
       res.setHeader('Cache-Control', `private, max-age=${attachmentLink.LONG_TTL_SECONDS}`);
       return res.send(buffer);

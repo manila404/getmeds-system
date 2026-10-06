@@ -63,6 +63,27 @@ test('thumbnails of a Sanity image are asked for resized; other files are sent w
   expect(fetchSpy.mock.calls[1][0]).not.toMatch(/\?/);
 });
 
+test('a file with no Sanity copy is sent whole: Supabase is never asked to resize (Oct 6, 2026)', async () => {
+  // Supabase bills Image Transformations per distinct original image (100 on Pro).
+  mockDownload.mockResolvedValue({ data: { arrayBuffer: async () => new Uint8Array([7, 7]).buffer }, error: null });
+  const r = await storage.downloadRendition(P(20), { width: 300, height: 300, quality: 75 });
+  expect(r.resized).toBe(false);
+  expect([...r.buffer]).toEqual([7, 7]);
+  expect(mockDownload).toHaveBeenCalledTimes(1);
+  expect(mockDownload.mock.calls[0]).toHaveLength(1); // no { transform } option
+  expect(fetchSpy).not.toHaveBeenCalled();
+  await storage.downloadFile(P(20), { width: 1000 });
+  expect(mockDownload.mock.calls[1]).toHaveLength(1);
+});
+
+test('the rendition says whether it was resized, so the page gets the right file type', async () => {
+  const img = P(21), pdf = P(22); await mapping(img, true); await mapping(pdf, false);
+  expect((await storage.downloadRendition(img, { width: 300, height: 300 })).resized).toBe(true);
+  expect((await storage.downloadRendition(img)).resized).toBe(false);
+  expect((await storage.downloadRendition(pdf, { width: 300 })).resized).toBe(false);
+  expect(mockDownload).not.toHaveBeenCalled();
+});
+
 test('a staged upload is copied to Sanity, mapped, and then removed from Supabase', async () => {
   const p = P(5); paths.push(p);
   mockDownload.mockResolvedValue({ data: { arrayBuffer: async () => new Uint8Array([9]).buffer }, error: null });

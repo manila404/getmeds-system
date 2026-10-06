@@ -252,17 +252,29 @@ async function removeQuietly(storagePath) {
  * a transform for rows already known to be images (see viewAttachment).
  */
 async function downloadFile(storagePath, transform) {
+  return (await downloadRendition(storagePath, transform)).buffer;
+}
+
+/**
+ * The file's bytes, resized when that is possible, plus whether it was resized (a
+ * resized rendition is always a JPEG; the original keeps its own type).
+ *
+ * Oct 6, 2026: only Sanity resizes. A file with no Sanity copy is sent whole from
+ * Supabase and never resized there: Supabase bills Image Transformations per distinct
+ * original image (100 included on Pro), and the Sep 23 – Oct 3 thumbnails, when every
+ * opened image was resized by Supabase, took the project over that limit.
+ */
+async function downloadRendition(storagePath, transform) {
   const asset = await sanityAssetFor(storagePath);
   if (asset) {
     // Only IMAGE assets can be resized by Sanity; any other file is sent whole.
-    const useResize = transform && asset.is_image;
-    return sanity.fetchBytes(useResize
+    const useResize = Boolean(transform && asset.is_image);
+    const buffer = await sanity.fetchBytes(useResize
       ? sanity.resizedUrl(asset.sanity_url, { width: transform.width, height: transform.height, quality: transform.quality })
       : asset.sanity_url);
+    return { buffer, resized: useResize };
   }
-  const { data, error } = await client().storage.from(BUCKET).download(storagePath, transform ? { transform } : undefined);
-  if (error) throw error;
-  return Buffer.from(await data.arrayBuffer());
+  return { buffer: await downloadFileFromSupabase(storagePath), resized: false };
 }
 
 /**
@@ -312,5 +324,6 @@ module.exports = {
   createDownloadUrl,
   removeQuietly,
   downloadFile,
+  downloadRendition,
   _resetClient,
 };
