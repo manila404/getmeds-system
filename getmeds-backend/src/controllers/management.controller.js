@@ -4,7 +4,13 @@ const { loadScope, scopeSql } = require('../services/orderScopeService');
 // (their assigned MedReps) rather than division-scoped. See
 // services/teamScopeService.js. Both branches feed the exact same
 // scopeClause/scopeParams pair everything below already consumes.
-const { teamScopeSql, teamMedrepIds } = require('../services/teamScopeService');
+const { teamScopeSql, teamMedrepIds, teamGroups } = require('../services/teamScopeService');
+
+// Oct 6, 2026: the My Team tab the viewer picked (see teamScopeService.teamGroups), or null for All.
+const teamGroupOf = (req) => {
+  const g = typeof req.query.team_group === 'string' ? req.query.team_group.trim() : '';
+  return g && g.length <= 120 ? g : null;
+};
 
 /** The names on this Team Lead's team, for the dashboard's "what am I seeing" line. */
 async function teamMemberNames(teamLeadUserId) {
@@ -72,7 +78,7 @@ exports.getSummary = async (req, res, next) => {
     // orderScopeService.
     const scope = isTeamLead ? null : await loadScope(req.user);
     const { sql: scopeClause, params: scopeParams } = isTeamLead
-      ? await teamScopeSql(req.user.id, 'orders')
+      ? await teamScopeSql(req.user.id, 'orders', teamGroupOf(req))
       : scopeSql(scope, 'orders');
 
     // Compose each query's own WHERE with the viewer's scope. Returns the SQL
@@ -186,7 +192,7 @@ exports.getSummary = async (req, res, next) => {
     // names, not a division list — same purpose as the block below, different
     // shape of scope.
     const scopeMeta = isTeamLead
-      ? { mode: 'team', team: await teamMemberNames(req.user.id) }
+      ? { mode: 'team', team: await teamMemberNames(req.user.id), groups: (await teamGroups(req.user.id)).map(({ key, label, title, ids }) => ({ key, label, title, people: ids.length })) }
       : {
           mode: scope.mode,
           divisions: scope.rules.map((r) =>
@@ -250,7 +256,7 @@ exports.getRecentActivity = async (req, res, next) => {
     const limit = Number.isFinite(requested) && requested > 0 ? Math.min(20, requested) : 8;
 
     const { sql: scopeClause, params: scopeParams } = req.user.role === 'team_lead'
-      ? await teamScopeSql(req.user.id, 'o')
+      ? await teamScopeSql(req.user.id, 'o', teamGroupOf(req))
       : scopeSql(await loadScope(req.user), 'o');
 
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -395,7 +401,7 @@ exports.getAllOrders = async (req, res, next) => {
     // shape, scoped to their assigned MedReps rather than a division. See
     // teamScopeService.js.
     const { sql: scopeClause, params: scopeParams } = req.user.role === 'team_lead'
-      ? await teamScopeSql(req.user.id, 'o')
+      ? await teamScopeSql(req.user.id, 'o', teamGroupOf(req))
       : scopeSql(await loadScope(req.user), 'o');
     if (scopeClause) {
       where.push(scopeClause);

@@ -29,10 +29,11 @@ const EVENTS = {
 };
 const DOT = { ok: 'bg-pharmacy-green', bad: 'bg-state-error', warn: 'bg-state-warning', neutral: 'bg-state-neutral' };
 
-const RecentActivity = () => {
+// Oct 6, 2026: teamGroup = the My Team tab picked (sales structure); omitted = everything the viewer sees.
+const RecentActivity = ({ teamGroup = '' }) => {
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['management-activity'],
-    queryFn: () => client.get('/api/management/activity?limit=8').then((r) => r.data?.data?.events || []),
+    queryKey: ['management-activity', teamGroup],
+    queryFn: () => client.get(`/api/management/activity?limit=8${teamGroup ? `&team_group=${encodeURIComponent(teamGroup)}` : ''}`).then((r) => r.data?.data?.events || []),
     refetchInterval: 120000, // was 60000 (Oct 3, 2026: lighter polling)
     staleTime: 30000
   });

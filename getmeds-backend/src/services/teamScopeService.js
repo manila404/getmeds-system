@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../db/database');
+const { hasColumn } = require('./schemaColumns');
 
 /**
  * Which orders — and, as of Sep 22, 2026, which MedReps — a 'team_lead'
@@ -69,27 +70,108 @@ const db = require('../db/database');
  *      chain the Admin org-chart shows without requiring any schema change.
  *
  * Both sets are merged and deduplicated before return.
+ *
+ * Oct 6, 2026: the whole chain, not one level (sales structure update, Aaron sheet
+ * 12.13). The structure now has four levels: Manager > Team Leader > Leader > MedRep
+ * (Javed > Honey > Shiela > Marwin Dy), all through users.team_lead_id. Everyone below
+ * this user is on their team, at any depth, whatever their role, so Honey sees her
+ * Leaders' MedReps and can raise an order for a Leader. Nobody beside or above is
+ * included, so Shiela never sees Benjie's team. A loop in the settings (A leads B,
+ * B leads A) cannot hang it: each person is visited once, and the walk stops after
+ * MAX_DEPTH levels. The whole users table is read in one query (about 100 rows), so
+ * this is one round trip whatever the depth.
  */
+const MAX_DEPTH = 6;
+
 async function teamMedrepIds(teamLeadUserId) {
   if (!teamLeadUserId) return [];
 
-  // 1. Direct reports
-  const directRows = await db
-    .prepare('SELECT id FROM users WHERE team_lead_id = ?')
-    .all(teamLeadUserId);
-  const directIds = directRows.map((r) => r.id);
+  const rows = await db.prepare('SELECT id, team_lead_id FROM users WHERE team_lead_id IS NOT NULL').all();
+  const below = new Map();
+  for (const r of rows) {
+    if (!below.has(r.team_lead_id)) below.set(r.team_lead_id, []);
+    below.get(r.team_lead_id).push(r.id);
+  }
 
-  // 2. Reports-of-reports via channel headship
-  const subRows = await db.prepare(`
+  // Channel headship (Sep 29): people whose Team Lead is a manager in a channel this user heads.
+  const headRows = await db.prepare(`
     SELECT DISTINCT u.id
     FROM users u
     JOIN sales_managers sm ON sm.user_id = u.team_lead_id
     JOIN sales_channels sc ON sc.id = sm.channel_id
     WHERE sc.head_user_id = ?
   `).all(teamLeadUserId);
-  const subIds = subRows.map((r) => r.id);
 
-  return [...new Set([...directIds, ...subIds])];
+  const team = new Set();
+  let level = [...(below.get(teamLeadUserId) || []), ...headRows.map((r) => r.id)];
+  for (let depth = 0; depth < MAX_DEPTH && level.length; depth++) {
+    const next = [];
+    for (const id of level) {
+      if (id === teamLeadUserId || team.has(id)) continue; // loop guard
+      team.add(id);
+      next.push(...(below.get(id) || []));
+    }
+    level = next;
+  }
+  return [...team];
+}
+
+/**
+ * Oct 6, 2026 (sales structure, sheet 12.13): the tabs on My Team.
+ *
+ * One group per person directly under this user who has a team of their own
+ * ("Shiela's team": Shiela plus everyone under her), and the people directly under
+ * this user with no team, split by the channel of their territory ("My team: HOS",
+ * "My team: Telesales"). So Vanessa, who leads Telesales and a HOS group herself and
+ * has HOS Leaders under her, gets Telesales, HOS, and one tab per Leader; Honey gets
+ * one tab per Leader plus her B2C reps. Every group is inside teamMedrepIds, so a tab
+ * can only ever narrow what this user may see, never widen it.
+ * Returns [] when there is nothing to split (one group would just repeat "All").
+ */
+// One label per channel, whether it comes from a territory ("RX · B&B", "HOSP") or, for
+// someone with no territory, from their account's division ("TeleSales Anesthesia").
+const channelLabel = (name) => {
+  const n = String(name || '').replace(/^RX\s*\u00b7\s*/i, '').trim();
+  if (/^hos(p(ital)?)?\b/i.test(n)) return 'HOS';
+  if (/^(md\s*)?tele\s*sales/i.test(n)) return 'Telesales';
+  return n;
+};
+
+async function teamGroups(teamLeadUserId) {
+  if (!teamLeadUserId) return [];
+  const team = new Set(await teamMedrepIds(teamLeadUserId));
+  if (!team.size) return [];
+  const titled = await hasColumn('users', 'sales_title');
+  const users = await db.prepare(`SELECT id, name, team_lead_id, division${titled ? ', sales_title' : ''} FROM users WHERE team_lead_id IS NOT NULL`).all();
+  const direct = users.filter((u) => u.team_lead_id === teamLeadUserId && team.has(u.id));
+  // Each direct report's own channel, from the territory their primary Zoho Salesperson holds.
+  const channels = await db.prepare(`
+    SELECT us.user_id, c.name AS channel
+      FROM user_salespersons us
+      JOIN sales_territories t ON LOWER(TRIM(t.zoho_salesperson)) = LOWER(TRIM(us.salesperson))
+                               OR LOWER(TRIM(COALESCE(t.zoho_alias, ''))) = LOWER(TRIM(us.salesperson))
+      JOIN sales_managers m ON m.id = t.manager_id
+      JOIN sales_channels c ON c.id = m.channel_id
+     ORDER BY us.is_primary DESC`).all();
+  const channelOf = new Map();
+  for (const r of channels) if (!channelOf.has(r.user_id)) channelOf.set(r.user_id, channelLabel(r.channel));
+
+  const groups = [];
+  const mine = new Map();
+  for (const u of direct) {
+    const theirs = await teamMedrepIds(u.id);
+    if (theirs.length) {
+      groups.push({ key: `lead:${u.id}`, label: `${u.name}'s team`, title: u.sales_title || null, ids: [u.id, ...theirs.filter((id) => team.has(id))] });
+    } else {
+      const label = channelOf.get(u.id) || (u.division ? channelLabel(u.division) : 'Others');
+      if (!mine.has(label)) mine.set(label, []);
+      mine.get(label).push(u.id);
+    }
+  }
+  const myGroups = [...mine.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([label, ids]) => ({ key: `mine:${label}`, label: mine.size > 1 || groups.length ? `My team: ${label}` : 'My team', ids }));
+  const all = [...myGroups, ...groups.sort((a, b) => a.label.localeCompare(b.label))];
+  return all.length > 1 ? all : [];
 }
 
 /**
@@ -99,7 +181,14 @@ async function teamMedrepIds(teamLeadUserId) {
  *
  * `alias` is the orders table's alias in the calling query.
  */
-async function teamScopeSql(teamLeadUserId, alias = 'o') {
+async function teamScopeSql(teamLeadUserId, alias = 'o', groupKey = null) {
+  // Oct 6, 2026: a My Team tab narrows the team to one group (see teamGroups); an unknown
+  // key matches nothing rather than falling back to the whole team.
+  if (groupKey) {
+    const group = (await teamGroups(teamLeadUserId)).find((g) => g.key === groupKey);
+    if (!group || !group.ids.length) return { sql: '1 = 0', params: [] };
+    return { sql: `${alias}.medrep_id IN (${group.ids.map(() => '?').join(', ')})`, params: group.ids };
+  }
   const ids = await teamMedrepIds(teamLeadUserId);
   // Fails closed: no user id at all means no orders, not all orders.
   if (!teamLeadUserId) return { sql: '1 = 0', params: [] };
@@ -129,6 +218,7 @@ async function canAccessOrder(user, order) {
 
 module.exports = {
   teamMedrepIds,
+  teamGroups,
   teamScopeSql,
   canAccessOrder
 };

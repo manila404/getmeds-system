@@ -224,7 +224,14 @@ async function resolveOrderMedrep(user, requestedMedrepId) {
     .prepare('SELECT id, name, email, role, salesperson FROM users WHERE id = ? AND is_active = 1')
     .get(requestedMedrepId);
 
-  if (!target || (target.role || '').toLowerCase() !== 'medrep') {
+  // Oct 6, 2026 (sales structure, sheet 12.13): an order may also be FOR a Leader or
+  // Team Leader (role team_lead), when the person raising it is above them (Honey for
+  // Shiela) or is Management/Admin. A MedRep still raises only for MedReps, and a
+  // team lead never for someone beside or above them: the team check below only
+  // contains people under them.
+  const targetRole = (target && target.role || '').toLowerCase();
+  const targetAllowed = targetRole === 'medrep' || (targetRole === 'team_lead' && (isTeamLead || isManagement || isAdmin));
+  if (!target || !targetAllowed) {
     return {
       error: {
         code: 'INVALID_MEDREP',
@@ -239,6 +246,8 @@ async function resolveOrderMedrep(user, requestedMedrepId) {
   // is the single source of truth for "whose team is this" (also used by
   // requireOrderScope for VIEWING), so a team lead can never raise for
   // someone outside their team, whatever the client sends.
+  if (isTeamLead && target.id === user.id) return { actor: target, onBehalf: false }; // their own order
+
   if (isTeamLead) {
     const teamIds = await teamScopeService.teamMedrepIds(user.id);
     if (!teamIds.includes(target.id)) {
@@ -508,11 +517,13 @@ exports.getMedreps = async (req, res, next) => {
     if (teamFilterIds && !teamFilterIds.length) {
       return res.json({ success: true, data: { enabled: true, medreps: [], salespersons: [] } });
     }
+    // Oct 6, 2026: Leaders below a team lead (and, for Management/Admin, any Leader) can be
+    // picked too — see resolveOrderMedrep. A MedRep's picker stays MedReps only.
     const medrepRows = await db
       .prepare(
-        `SELECT id, name, email, display_name, division, sub_division, salesperson
+        `SELECT id, name, email, display_name, division, sub_division, salesperson, role
          FROM users
-         WHERE LOWER(role) = 'medrep' AND is_active = 1
+         WHERE ${isMedrep ? "LOWER(role) = 'medrep'" : "LOWER(role) IN ('medrep', 'team_lead')"} AND is_active = 1
            ${teamFilterIds ? `AND id IN (${teamFilterIds.map(() => '?').join(', ')})` : ''}
          ORDER BY COALESCE(NULLIF(TRIM(display_name), ''), name)`
       )

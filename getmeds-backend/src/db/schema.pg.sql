@@ -139,7 +139,11 @@ CREATE TABLE IF NOT EXISTS users (
   -- stockAnnouncements.controller.js's markSeen. NULL means "never", so every
   -- currently-open announcement counts as unseen for an account that predates
   -- this column, rather than silently hiding them.
-  stock_announcements_seen_at TEXT
+  stock_announcements_seen_at TEXT,
+  -- Oct 6, 2026: the title shown for a sales account (sales structure, sheet 12.13):
+  -- 'Manager', 'Team Leader' or 'Leader'. Display only: what someone can see or do
+  -- still comes from their role and the Team Lead chain. NULL = no title (MedReps).
+  sales_title TEXT CHECK (sales_title IN ('Manager', 'Team Leader', 'Leader'))
 );
 
 CREATE TABLE IF NOT EXISTS customers (
@@ -1235,7 +1239,8 @@ CREATE TABLE IF NOT EXISTS kpi_target_changes (
   month TEXT NOT NULL,
   old_target_php DOUBLE PRECISION,
   new_target_php DOUBLE PRECISION,
-  source TEXT NOT NULL CHECK (source IN ('set', 'clear', 'copy')),
+  -- 'structure' (Oct 8, 2026): pre-filled once from the sales sheet's per-territory targets
+  source TEXT NOT NULL CHECK (source IN ('set', 'clear', 'copy', 'structure')),
   changed_by INTEGER REFERENCES users(id),
   changed_by_name TEXT,
   changed_at TEXT DEFAULT iso_now()

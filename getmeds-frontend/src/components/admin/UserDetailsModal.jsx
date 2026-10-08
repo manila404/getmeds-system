@@ -5,6 +5,11 @@ import toast from 'react-hot-toast';
 import { ROLES, roleLabel, roleCan } from '../../constants/roles';
 import { useAuth } from '../../hooks/useAuth';
 
+// Oct 6, 2026 (sales structure, sheet 12.13): Leaders and Team Leaders report to someone too
+// (Shiela to Honey, Honey to Javed), and team leads carry a display title.
+const HAS_TEAM_LEAD = ['medrep', 'team_lead'];
+const SALES_TITLES = ['Manager', 'Team Leader', 'Leader'];
+
 /**
  * User Details — Sep 24, 2026.
  *
@@ -135,6 +140,7 @@ const UserDetailsModal = ({
     email: user.email || '',
     role: roleKey,
     team_lead_id: user.team_lead_id ? String(user.team_lead_id) : '',
+    sales_title: user.sales_title || '',
     salespersons: held.map((s) => s.salesperson),
     primary: (held.find((s) => s.is_primary) || held[0] || {}).salesperson || null,
   });
@@ -216,9 +222,10 @@ const UserDetailsModal = ({
     if (draft.username.trim() !== usernameOf(user)) body.username = draft.username.trim();
     if (draft.email.trim().toLowerCase() !== String(user.email || '').toLowerCase()) body.email = draft.email.trim();
     if (roleChanged) body.role = draft.role;
-    if (draft.role === 'medrep' && draft.team_lead_id !== (user.team_lead_id ? String(user.team_lead_id) : '')) {
+    if (HAS_TEAM_LEAD.includes(draft.role) && draft.team_lead_id !== (user.team_lead_id ? String(user.team_lead_id) : '')) {
       body.team_lead_id = draft.team_lead_id ? parseInt(draft.team_lead_id, 10) : null;
     }
+    if (draft.role === 'team_lead' && draft.sales_title !== (user.sales_title || '')) body.sales_title = draft.sales_title || null;
     const before = held.map((s) => s.salesperson).join('\u0000');
     const primaryBefore = (held.find((s) => s.is_primary) || held[0] || {}).salesperson || null;
     if (draft.salespersons.join('\u0000') !== before || (draft.primary || null) !== primaryBefore) {
@@ -339,17 +346,30 @@ const UserDetailsModal = ({
             )}
           </Field>
 
-          <Field label="Team Lead" htmlFor="ud-teamlead" hint={editing && draft.role === 'medrep' ? 'Decides whose team dashboard shows this MedRep’s orders.' : undefined}>
-            {editing && draft.role === 'medrep' ? (
+          {(editing ? draft.role : roleKey) === 'team_lead' && (
+            <Field label="Sales title" htmlFor="ud-salestitle" hint={editing ? 'The title shown for this person. Display only: access comes from the Team Lead chain.' : undefined}>
+              {editing ? (
+                <select id="ud-salestitle" className={inputClass} value={draft.sales_title} disabled={inputsDisabled} onChange={(e) => set({ sales_title: e.target.value })}>
+                  <option value="">— None —</option>
+                  {SALES_TITLES.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              ) : (
+                <p className="text-sm text-ink-primary">{user.sales_title || 'None'}</p>
+              )}
+            </Field>
+          )}
+
+          <Field label="Team Lead" htmlFor="ud-teamlead" hint={editing && HAS_TEAM_LEAD.includes(draft.role) ? 'Who this person reports to. Their orders show on that person’s team dashboard, and on everyone above them.' : undefined}>
+            {editing && HAS_TEAM_LEAD.includes(draft.role) ? (
               <select id="ud-teamlead" className={inputClass} value={draft.team_lead_id} disabled={inputsDisabled} onChange={(e) => set({ team_lead_id: e.target.value })}>
                 <option value="">— None —</option>
-                {teamLeads.map((tl) => (
+                {teamLeads.filter((tl) => tl.id !== user.id).map((tl) => (
                   <option key={tl.id} value={tl.id}>{[tl.first_name, tl.last_name].filter(Boolean).join(' ') || tl.name}</option>
                 ))}
               </select>
             ) : (
               <p className="text-sm text-ink-primary">
-                {roleKey === 'medrep' ? user.team_lead_name || 'None' : <span className="text-ink-secondary">Only MedReps have a Team Lead</span>}
+                {HAS_TEAM_LEAD.includes(roleKey) ? user.team_lead_name || 'None' : <span className="text-ink-secondary">Only MedReps and Team Leads have a Team Lead</span>}
               </p>
             )}
           </Field>

@@ -13,6 +13,8 @@ const zohoSalespersonSync = require('../services/zohoSalespersonSync');
 // before Sep 5).
 const { DIVISIONS, SUB_DIVISIONS_BY_DIVISION, MIN_PASSWORD_LENGTH } = require('./auth.controller');
 const { ROLES, isValidRole } = require('../constants/roles');
+const { hasColumn } = require('../services/schemaColumns');
+const SALES_TITLES = ['Manager', 'Team Leader', 'Leader'];
 
 // Get all users with their roles
 const getAllUsers = async (req, res, next) => {
@@ -30,7 +32,7 @@ const getAllUsers = async (req, res, next) => {
                 u.display_name, u.division, u.sub_division, u.salesperson,
                 u.first_name AS stored_first_name, u.last_name AS stored_last_name,
                 u.updated_at, u.username AS stored_username,
-                u.team_lead_id, tl.name AS team_lead_name
+                u.team_lead_id, tl.name AS team_lead_name${(await hasColumn('users', 'sales_title')) ? ', u.sales_title' : ''}
            FROM users u
            LEFT JOIN users tl ON tl.id = u.team_lead_id
           -- Sep 24, 2026: admins first, always (the Users screen keeps them there
@@ -526,8 +528,32 @@ const update = async (req, res, next) => {
             error: { code: 'INVALID_TEAM_LEAD', message: 'team_lead_id must be the id of an existing Team Lead account.' }
           });
         }
+        // Oct 6, 2026: no loops. The Team Lead chain is now followed to any depth
+        // (teamScopeService.teamMedrepIds), so a person cannot report to themselves or
+        // to anyone already under them (Shiela under one of her own MedReps).
+        const below = await require('../services/teamScopeService').teamMedrepIds(user.id);
+        if (candidate.id === user.id || below.includes(candidate.id)) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'TEAM_LEAD_LOOP', message: 'That Team Lead reports to this person already, so this would make a loop.' }
+          });
+        }
         teamLeadId = candidate.id;
       }
+    }
+
+    // Oct 6, 2026: the sales title shown for the account ('Manager', 'Team Leader', 'Leader';
+    // null clears it). Display only — see schema.pg.sql. Skipped if the column is not there yet.
+    let salesTitle = undefined;
+    if (req.body.sales_title !== undefined && (await hasColumn('users', 'sales_title'))) {
+      const t = req.body.sales_title === null || req.body.sales_title === '' ? null : String(req.body.sales_title);
+      if (t !== null && !SALES_TITLES.includes(t)) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: `sales_title must be one of: ${SALES_TITLES.join(', ')}` }
+        });
+      }
+      salesTitle = t;
     }
 
     // Sep 11, 2026: the Salespersons an admin picked from Zoho's list.
@@ -580,6 +606,7 @@ const update = async (req, res, next) => {
     if (role !== undefined) await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role.toLowerCase(), user.id);
     if (is_active !== undefined) await db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, user.id);
     if (teamLeadId !== undefined) await db.prepare('UPDATE users SET team_lead_id = ? WHERE id = ?').run(teamLeadId, user.id);
+    if (salesTitle !== undefined) await db.prepare('UPDATE users SET sales_title = ? WHERE id = ?').run(salesTitle, user.id);
     if (nameChange) {
       await db
         .prepare('UPDATE users SET name = ?, display_name = ?, first_name = ?, last_name = ? WHERE id = ?')
@@ -594,7 +621,7 @@ const update = async (req, res, next) => {
       });
     }
 
-    const updated = await db.prepare('SELECT id, name, email, role, is_active, approval_status, created_at, salesperson, team_lead_id, first_name, last_name, username FROM users WHERE id = ?').get(user.id);
+    const updated = await db.prepare(`SELECT id, name, email, role, is_active, approval_status, created_at, salesperson, team_lead_id, first_name, last_name, username${(await hasColumn('users', 'sales_title')) ? ', sales_title' : ''} FROM users WHERE id = ?`).get(user.id);
     const salespersons = await salespersonService.listForUser(user.id);
     res.json({ success: true, data: { user: { ...updated, salespersons } } });
   } catch (err) {

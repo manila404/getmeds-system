@@ -86,8 +86,11 @@ async function buildZohoSalesOrderPayload(orderId, { items: itemsOverride, invoi
     salesperson_name: order.salesperson || order.medrep_salesperson || null,
     // Same row, same reason as salesperson above — a division corrected
     // after a failed sync is picked up by the retry.
-    division: order.medrep_division || null,
-    sub_division: order.medrep_sub_division || null,
+    // Oct 6, 2026: the order's own Division and Sub-division first, the account's only as a
+    // fallback, exactly as approval sends them (orders.controller.js). A resent order used to
+    // take the MedRep's account values, so a retry could send something the order never had.
+    division: order.division || order.medrep_division || null,
+    sub_division: order.sub_division || order.medrep_sub_division || null,
     // Sep 14, 2026: Headquarter, from the order row (absent before the
     // migration adds the column, and then simply not sent).
     headquarter: order.headquarter || null,
