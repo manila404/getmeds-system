@@ -27,7 +27,7 @@ const TABS = [
   { key: 'pending', label: 'Awaiting review', hint: 'Prescriptions nobody has reviewed yet, including replacements.' },
   { key: 'needs_attention', label: 'Needs attention', hint: 'Orders with attachments but no prescription labeled (may be mislabeled), or where the MedRep noted they have no prescription. Resolves automatically once retagged or a decision is made.' },
   { key: 'rejected', label: 'Rejected', hint: 'Sent back to the MedRep. They come back under "Awaiting review" once replaced.' },
-  { key: 'verified', label: 'Verified', hint: 'Cleared by the pharmacy, and not yet packed.' },
+  { key: 'verified', label: 'Verified', hint: 'Every order the pharmacy cleared (prescription verified, or no prescription needed), including orders already dispatched or completed. Newest first.' },
   { key: 'all_orders', label: 'All orders', hint: 'Every order of the six channels since Sep 12, 2026, with or without a prescription attached.' },
 ];
 
@@ -543,7 +543,7 @@ const PharmacyQueuePage = () => {
           <div className="text-center py-12 text-ink-secondary">
             <CheckCircle2 className="w-10 h-10 mx-auto mb-2 text-pharmacy-green" />
             <p className="text-sm">
-              {tab === 'pending' ? 'No prescription is waiting for review.' : tab === 'needs_attention' ? 'Nothing needs attention right now.' : tab === 'rejected' ? 'No rejected prescription is waiting on a MedRep.' : tab === 'verified' ? 'Nothing verified is waiting to be packed.' : 'No orders match.'}
+              {tab === 'pending' ? 'No prescription is waiting for review.' : tab === 'needs_attention' ? 'Nothing needs attention right now.' : tab === 'rejected' ? 'No rejected prescription is waiting on a MedRep.' : tab === 'verified' ? 'Nothing verified yet for these filters.' : 'No orders match.'}
             </p>
           </div>
         ) : (
