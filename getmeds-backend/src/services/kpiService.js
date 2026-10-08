@@ -98,7 +98,7 @@ async function buildExport(client, month, targetRows) {
   // structure: channels, managers (team leads / heads), territories, accounts' salespersons
   const channels = await q('SELECT id, name, head_name, head_user_id FROM sales_channels ORDER BY sort_order, id');
   const managers = await q('SELECT id, channel_id, name, user_id, acts_as_head FROM sales_managers');
-  const terrs = await q('SELECT id, manager_id, zoho_salesperson, hq FROM sales_territories');
+  const terrs = await q('SELECT id, manager_id, zoho_salesperson, zoho_alias, hq FROM sales_territories');
   const accts = await q('SELECT user_id, salesperson, is_primary FROM user_salespersons ORDER BY is_primary DESC, id');
 
   // BOOKED — one row per order, by its latest FINANCE_VERIFIED event in the month
@@ -140,12 +140,19 @@ async function buildExport(client, month, targetRows) {
   );
 
   // ── who sits where ──
-  const terrBySp = new Map(terrs.map((t) => [String(t.zoho_salesperson || '').toLowerCase(), t]));
+  // Oct 9, 2026: a territory also matches by its alias, the person's real Zoho name when Zoho
+  // spells it differently (e.g. HOS I PALAWAN for HOS | PALAWAN). Without it those people were
+  // listed as having no territory even after the alias was set.
+  const terrBySp = new Map();
+  for (const t of terrs) {
+    terrBySp.set(String(t.zoho_salesperson || '').toLowerCase().trim(), t);
+    if (t.zoho_alias) terrBySp.set(String(t.zoho_alias).toLowerCase().trim(), t);
+  }
   const mgrById = new Map(managers.map((m) => [m.id, m]));
   const chById = new Map(channels.map((c) => [c.id, c]));
   const place = new Map(); // user_id -> { channelIds:Set, primaryChannel, hqs:Set }
   for (const a of accts) {
-    const t = terrBySp.get(String(a.salesperson || '').toLowerCase());
+    const t = terrBySp.get(String(a.salesperson || '').toLowerCase().trim());
     if (!t) continue;
     const m = mgrById.get(t.manager_id);
     const p = place.get(a.user_id) || { channelIds: [], hqs: [] };

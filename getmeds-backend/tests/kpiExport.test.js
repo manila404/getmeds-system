@@ -314,3 +314,15 @@ describe('people with no territory are placed by the division of their orders', 
     expect(r.unplaced.some((x) => x.email === u.onsite.email)).toBe(false);
   });
 });
+
+test("a person is placed by a territory's alias too (the real Zoho name when Zoho spells it differently)", async () => {
+  // Oct 9, 2026: e.g. HOS | PALAWAN with alias HOS I PALAWAN, held as HOS I PALAWAN.
+  const rep = await mkUser('alias', 'medrep');
+  await db.prepare('INSERT INTO sales_territories (manager_id, zoho_salesperson, zoho_alias, hq) VALUES (?, ?, ?, ?)').run(ids.manager, `KPI | ALIASED ${stamp}`, `KPI I ALIASED ${stamp}`, 'PALAWAN');
+  await db.prepare('INSERT INTO user_salespersons (user_id, salesperson, is_primary) VALUES (?, ?, 1)').run(rep.id, `KPI I ALIASED ${stamp}`);
+  const r = await run();
+  const p = person(r, rep);
+  expect(p.channel_source).toBe('territory');
+  expect(p.channel).toBe(`KPI CH ${stamp}`);
+  expect(r.unplaced.find((x) => x.email === rep.email)).toBeUndefined();
+});
