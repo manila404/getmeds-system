@@ -362,6 +362,76 @@ async function checkDuplicates(input) {
   });
 }
 
+/**
+ * Oct 8, 2026: Management completes or corrects a waiting customer, as on the New Customer
+ * form. `details` uses the form's field names; only these are taken. The saved payload (what
+ * the push replays) and the row are both updated, and the customer goes back to 'pending'.
+ * Returns { ok, lacking } or { ok: false, status, reason }.
+ */
+const EDITABLE = [
+  'category', 'display_name', 'salutation', 'first_name', 'last_name', 'email', 'phone',
+  'tin', 'license_owner', 'lto_license_number', 'lto_type', 'license_issuance_date', 'license_expiry_date',
+  'billing_address', 'shipping_address', 'shipping_same_as_billing'
+];
+const ADDRESS_KEYS = ['attention', 'address', 'street2', 'city', 'state', 'zip', 'country', 'phone'];
+
+async function updateHeldCustomer(id, details, actor) {
+  const held = await getHeldCustomer(id);
+  if (!held) return { ok: false, status: 404, reason: 'No customer waiting for Zoho has that id.' };
+
+  let before = {};
+  try { before = JSON.parse(held.zoho_pending_payload || '{}') || {}; } catch { before = {}; }
+
+  const next = { ...before };
+  for (const key of EDITABLE) {
+    if (!(key in (details || {}))) continue;
+    const v = details[key];
+    if (key === 'billing_address' || key === 'shipping_address') {
+      const a = {};
+      for (const k of ADDRESS_KEYS) if (v && v[k] !== undefined) a[k] = String(v[k] ?? '').trim();
+      next[key] = { ...(before[key] || {}), ...a };
+    } else if (key === 'shipping_same_as_billing') {
+      next[key] = v !== false;
+    } else {
+      next[key] = String(v ?? '').trim();
+    }
+  }
+  const business = next.category === 'hospital' || next.category === 'distributor';
+  next.customer_sub_type = business ? 'business' : 'individual';
+  next.is_doctor = next.category === 'doctor';
+  if (business) next.company_name = next.display_name;
+  next.contact_number = next.phone || next.contact_number;
+  if (next.shipping_same_as_billing !== false) next.shipping_address = next.billing_address;
+
+  const problems = validate(next);
+  if (problems.length) return { ok: false, status: 400, reason: problems.join(' ') };
+
+  const billing = next.billing_address || {};
+  const addressLine = [billing.address, billing.street2, billing.city, billing.state, billing.zip].filter(Boolean).join(', ');
+  await db
+    .prepare(
+      `UPDATE customers
+          SET name = ?, category = ?, contact_person = ?, contact_number = ?, email = ?, address = ?,
+              tin = ?, lto_license_number = ?, zoho_pending_payload = ?,
+              zoho_sync_status = 'pending', zoho_sync_error = NULL
+        WHERE id = ? AND zoho_contact_id IS NULL`
+    )
+    .run(
+      next.display_name,
+      next.category || null,
+      [next.first_name, next.last_name].filter(Boolean).join(' ') || null,
+      next.contact_number,
+      isEmail(next.email) ? next.email : null,
+      addressLine || held.address || 'See Zoho',
+      next.tin || null,
+      next.lto_license_number || null,
+      JSON.stringify(next),
+      id
+    );
+  console.info(`[CUSTOMER_EDIT] ${actor?.name || actor?.email || 'unknown'} edited waiting customer ${id} "${next.display_name}"`);
+  return { ok: true, name: next.display_name, lacking: lackingDetails(next) };
+}
+
 /** A customer still waiting for Zoho, or null. */
 function getHeldCustomer(id) {
   return db
@@ -531,6 +601,34 @@ async function discardHeldCustomer(heldId, actor) {
   return { ok: true, name: held.name };
 }
 
+// Oct 8, 2026: Zoho refuses anything in Email Address that is not an email ("Invalid
+// value passed for Email Address"). A rep with no email typed "n/A" to get past the
+// required field, and the customer was stuck. Deliberately loose: something@something.tld.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isEmail = (v) => EMAIL_RE.test(String(v || '').trim());
+
+// Oct 8, 2026: details a MedRep may leave out. The customer is still saved, but held for
+// Management, who see what is missing and choose: push as new anyway, link to a customer
+// Zoho already has, or delete it. Never pushed automatically while anything here is missing.
+const LACKABLE_BUSINESS = [
+  ['email', 'Email'],
+  ['tin', 'TIN'],
+  ['license_owner', 'License Owner'],
+  ['lto_license_number', 'LTO Number'],
+  ['lto_type', 'LTO Type'],
+  ['license_issuance_date', 'License Issuance Date'],
+  ['license_expiry_date', 'License Expiry Date']
+];
+const LACKABLE = { doctor: [['email', 'Email']], hospital: LACKABLE_BUSINESS, distributor: LACKABLE_BUSINESS };
+
+/** Labels of the reviewable details missing from a customer (form input or stored payload). */
+function lackingDetails(c) {
+  const x = c || {};
+  return (LACKABLE[x.category] || [])
+    .filter(([key]) => (key === 'email' ? !isEmail(x.email) : !String(x[key] || '').trim()))
+    .map(([, label]) => label);
+}
+
 /** What the caller must provide, checked before anything is written anywhere. */
 function validate(input) {
   const c = input || {};
@@ -552,18 +650,15 @@ function validate(input) {
   if (isIndividual) {
     if (!String(c.first_name || '').trim()) problems.push('First Name is required.');
     if (!String(c.last_name  || '').trim()) problems.push('Last Name is required.');
-    if (c.category === 'doctor' && !String(c.email || '').trim()) problems.push('Email Address is required for Doctors.');
   }
 
   if (isBusiness) {
     if (!String(c.display_name || '').trim()) problems.push('Display Name is required.');
-    if (!String(c.email        || '').trim()) problems.push('Email Address is required.');
-    // All license fields are mandatory for hospitals and distributors
-    if (!String(c.license_owner      || '').trim()) problems.push('License Owner is required.');
-    if (!String(c.lto_license_number || '').trim()) problems.push('LTO License Number is required.');
-    if (!String(c.lto_type           || '').trim()) problems.push('LTO Type is required.');
-    if (!String(c.license_issuance_date || '').trim()) problems.push('License Issuance Date is required.');
-    if (!String(c.license_expiry_date   || '').trim()) problems.push('License Expiry Date is required.');
+    // Oct 8, 2026: email, TIN and the license fields may be left out; see lackingDetails().
+  }
+
+  if (String(c.email || '').trim() && !isEmail(c.email)) {
+    problems.push('Email Address must be a real email address, like name@example.com. If the customer has none, leave it blank: Management will review the customer before it goes to Zoho.');
   }
 
   // contact_number is the Zoho cf_contact_number — the frontend derives it from phone, so accept either
@@ -617,6 +712,14 @@ async function createCustomer(input, actor) {
     customer_sub_type: input.customer_sub_type === 'individual' ? 'individual' : 'business',
     shipping_address: shippingSame ? input.billing_address : input.shipping_address
   };
+
+  // Oct 8, 2026: details missing -> saved and held for Management, not sent to Zoho.
+  const lacking = lackingDetails(input);
+  if (lacking.length) {
+    // No sync error recorded: nothing was refused. What is missing is read from the payload.
+    const held = await holdCustomer(input, payload, null);
+    return { ...held, lacking };
+  }
 
   let contact;
   try {
@@ -792,7 +895,7 @@ async function holdCustomer(input, payload, reason) {
  * timer: the reason these are held is a missing OAuth scope, and a background
  * retry would produce thousands of guaranteed failures and a log nobody reads.
  */
-async function syncHeldCustomer(customerId, { allowMatches = false } = {}) {
+async function syncHeldCustomer(customerId, { allowMatches = false, allowLacking = false } = {}) {
   const row = await db
     .prepare("SELECT * FROM customers WHERE id = ? AND zoho_sync_status = 'pending'").get(customerId);
   if (!row) return { ok: false, reason: 'Not a pending customer.' };
@@ -803,7 +906,9 @@ async function syncHeldCustomer(customerId, { allowMatches = false } = {}) {
   if (!allowMatches) {
     const matches = await findZohoMatches(row);
     if (matches.length) {
-      return { ok: false, needsReview: true, matches, reason: 'Looks like a customer Zoho already has.' };
+      let lacking = [];
+      try { lacking = lackingDetails(JSON.parse(row.zoho_pending_payload || '{}')); } catch { lacking = []; }
+      return { ok: false, needsReview: true, matches, lacking, reason: 'Looks like a customer Zoho already has.' };
     }
   }
 
@@ -812,6 +917,15 @@ async function syncHeldCustomer(customerId, { allowMatches = false } = {}) {
     payload = JSON.parse(row.zoho_pending_payload || '{}');
   } catch {
     return { ok: false, reason: 'The stored payload is unreadable.' };
+  }
+
+  // Oct 8, 2026: missing details are Management's call, never an automatic push.
+  // `allowLacking` is Management having looked and chosen "push as new anyway".
+  if (!allowLacking) {
+    const lacking = lackingDetails(payload);
+    if (lacking.length) {
+      return { ok: false, needsReview: true, matches: [], lacking, reason: `Missing details: ${lacking.join(', ')}` };
+    }
   }
 
   try {
@@ -854,7 +968,7 @@ async function listHeldCustomers() {
   return db
     .prepare(
       `SELECT id, name, contact_person, contact_number, email, tin, lto_license_number, category, type,
-              address, created_at, zoho_sync_status, zoho_sync_error,
+              address, created_at, zoho_sync_status, zoho_sync_error, zoho_pending_payload,
               (SELECT COUNT(*) FROM orders o WHERE o.customer_id = customers.id) AS order_count
          FROM customers
         WHERE zoho_sync_status IN ('pending','failed')
@@ -867,6 +981,8 @@ module.exports = {
   createCustomer,
   findDuplicates,
   validate,
+  isEmail,
+  lackingDetails,
   normalise,
   CATEGORIES,
   holdCustomer,
@@ -878,6 +994,7 @@ module.exports = {
   HARD_MATCH_REASONS,
   compareNames,
   getHeldCustomer,
+  updateHeldCustomer,
   linkHeldToExisting,
   discardHeldCustomer
 };

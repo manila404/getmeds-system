@@ -185,6 +185,30 @@ describe('Pharmacy queue, verification and the gate', () => {
     expect((await verify(o.id)).status).toBe(404);
   });
 
+  // Oct 8, 2026: Verified is the history of every order Pharmacy cleared, not only the
+  // ones still waiting to be packed. It used to show 20 of ~390 on live.
+  test('a verified order stays under Verified after it ships, and is counted', async () => {
+    const o = await orderAt('ready_for_finance_verified');
+    await addRx(o.id);
+    expect((await verify(o.id)).status).toBe(200);
+    const before = (await queue('verified')).counts.verified;
+    await db.prepare("UPDATE orders SET status = 'tracking_shared' WHERE id = ?").run(o.id);
+
+    const data = await queue('verified');
+    expect(idsOf(data)).toContain(o.id);
+    expect(data.counts.verified).toBe(before);
+    expect(data.pagination.total).toBe(data.counts.verified);
+    // Still out of the working queue once shipped.
+    expect(idsOf(await queue('all'))).not.toContain(o.id);
+  });
+
+  test('a shipped order whose prescription was rejected is not under Verified', async () => {
+    const o = await orderAt('tracking_shared');
+    await addRx(o.id, { status: 'verified', verifiedAt: new Date().toISOString() });
+    await addRx(o.id, { status: 'rejected', reason: 'Expired' });
+    expect(idsOf(await queue('verified'))).not.toContain(o.id);
+  });
+
   test('reject needs a reason, tells the MedRep, and a replacement puts it back in the queue', async () => {
     const o = await orderAt('ready_for_draft_invoice');
     await addRx(o.id);

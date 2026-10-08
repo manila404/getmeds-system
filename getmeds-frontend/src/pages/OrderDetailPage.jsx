@@ -560,6 +560,19 @@ const OrderDetailPage = () => {
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not cancel this draft')
   });
 
+  // Oct 8, 2026: Management/Admin permanently delete an unpaid draft that never reached Zoho.
+  const deleteDraftMutation = useMutation({
+    mutationFn: ({ reason, confirm }) => client.post(`/api/orders/${id}/delete-draft`, { reason, confirm }).then(r => r.data),
+    onSuccess: (res) => {
+      toast.success(`Draft ${res.data?.deleted || ''} was permanently deleted. The MedRep has been told.`);
+      setCancelOpen(false);
+      qc.removeQueries({ queryKey: ['order', id] });
+      navigate(-1);
+      qc.invalidateQueries();
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not delete this draft')
+  });
+
   const sendBackMutation = useMutation({
     mutationFn: (reason) => client.post(`/api/orders/${id}/send-back`, { reason }).then(r => r.data),
     onSuccess: () => {
@@ -950,9 +963,23 @@ const OrderDetailPage = () => {
         {order.draft_cancelled_at && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-900">
             <p className="font-semibold">
-              This draft was cancelled{order.draft_cancel_kind === 'keep_record' ? ' — kept on record' : ''}
+              {order.draft_cancel_kind === 'deleted'
+                ? 'This draft was deleted'
+                : `This draft was cancelled${order.draft_cancel_kind === 'keep_record' ? ' — kept on record' : ''}`}
             </p>
             <p className="mt-0.5">Reason: {order.draft_cancel_reason || '—'}</p>
+            {order.draft_cancel_kind === 'deleted' && (
+              <p className="mt-0.5 text-[12px]">
+                It is erased for good when the MedRep reads the notice, or one day after{order.draft_cancelled_at ? ` (${new Date(order.draft_cancelled_at).toLocaleString('en-PH')})` : ''}.
+              </p>
+            )}
+            {order.draft_cancel_kind === 'discard' && !order.zoho_so_id && ['management', 'admin'].includes(user?.role) && (
+              <button
+                type="button"
+                onClick={() => setCancelOpen(true)}
+                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-red-300 text-red-700 bg-white rounded hover:bg-red-100"
+              >🗑 Delete permanently</button>
+            )}
             {order.draft_cancel_kind === 'keep_record' && (
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
@@ -990,9 +1017,12 @@ const OrderDetailPage = () => {
         {cancelOpen && (
           <CancelDraftModal
             order={order}
-            saving={cancelDraftMutation.isPending}
+            deleteOnly={order.status === 'cancelled'}
+            saving={cancelDraftMutation.isPending || deleteDraftMutation.isPending}
             onClose={() => setCancelOpen(false)}
-            onConfirm={(reason, kind) => cancelDraftMutation.mutate({ reason, kind })}
+            onConfirm={(reason, kind, confirm) => (kind === 'delete'
+              ? deleteDraftMutation.mutate({ reason, confirm })
+              : cancelDraftMutation.mutate({ reason, kind }))}
           />
         )}
         {relinkOpen && (
@@ -1530,7 +1560,7 @@ const OrderDetailPage = () => {
         )}
 
         {/* Management actions */}
-        {['management', 'admin'].includes(user?.role) && !['completed', 'cancelled'].includes(order.status) && (
+        {['management', 'admin'].includes(user?.role) && !['completed', 'cancelled', 'deleted'].includes(order.status) && (
           <div className="mt-4 pt-4 border-t border-gray-100 flex flex-wrap gap-2">
             {['on_hold', 'exception'].includes(order.status) && (
               <button

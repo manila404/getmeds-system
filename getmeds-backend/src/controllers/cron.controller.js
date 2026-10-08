@@ -21,6 +21,7 @@
 const zohoAutoSyncService = require('../services/zohoAutoSyncService');
 const zohoRetryService = require('../services/zohoRetryService');
 const notificationRetentionService = require('../services/notificationRetentionService');
+const deletedDraftPurge = require('../services/deletedDraftPurge');
 const { withLock } = require('../services/cronLock');
 
 /**
@@ -81,6 +82,14 @@ exports.autoSync = async (req, res, next) => {
     } catch (err) {
       console.error('[CRON] notification retention failed:', err.message);
       retention = { ran: false, reason: err.message };
+    }
+
+    // Oct 8, 2026: deleted drafts past their one day are erased on this same tick, for
+    // the same reason. See services/deletedDraftPurge.js.
+    try {
+      retention.deleted_drafts_purged = await deletedDraftPurge.purgeExpired();
+    } catch (err) {
+      console.error('[CRON] deleted-draft purge failed:', err.message);
     }
 
     if (!zohoAutoSyncService.isEnabled()) {

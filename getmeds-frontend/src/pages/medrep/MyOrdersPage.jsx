@@ -23,7 +23,12 @@ const STATUS_COLORS = {
   on_hold: 'bg-state-error-light text-red-800 border border-state-error/30',
   exception: 'bg-state-error-light text-red-950 border border-state-error font-bold',
   cancelled: 'bg-state-error-light text-red-700 border border-state-error/30',
+  deleted: 'bg-slate-200 text-slate-600 border border-slate-400',
 };
+
+// Oct 8, 2026: a draft Management deleted stays here for one day (see deletedDraftPurge.js).
+const removedBy = (at) => new Date(new Date(at).getTime() + 24 * 60 * 60 * 1000)
+  .toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 const PAGE_SIZE = 15;
 
@@ -296,6 +301,11 @@ const MyOrdersPage = () => {
                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${STATUS_COLORS[order.status] || 'bg-slate-100 text-slate-700'}`}>
                       {order.status?.replace(/_/g, ' ')}
                     </span>
+                    {order.draft_cancel_kind === 'deleted' && (
+                      <span className="block mt-1 text-[11px] text-ink-secondary" title={order.draft_cancel_reason || ''}>
+                        Removed when you read the notice, or {removedBy(order.draft_cancelled_at)}
+                      </span>
+                    )}
                     {order.draft_cancel_kind === 'keep_record' && (
                       <span className="block mt-1 text-[11px] font-semibold text-ink-secondary">
                         {order.refund_status === 'done' ? 'Refund done' : order.refund_status === 'not_due' ? 'No refund due' : 'Refund pending'}

@@ -37,6 +37,8 @@ router.get('/pending', requireAuth, requireRole('admin', 'management'), c.listPe
 router.post('/pending/sync', requireAuth, requireRole('admin', 'management'), c.syncPendingCustomers);
 // Put a customer wrongly marked 'Needs attention' back in the queue.
 router.post('/:id/retry', requireAuth, requireRole('admin', 'management'), c.retryPendingCustomer);
+// Oct 8, 2026: correct the email of a waiting customer (Zoho refuses "n/A") and requeue it.
+router.post('/:id/pending-email', requireAuth, requireRole('admin', 'management'), c.updatePendingEmail);
 // Sep 14, 2026: a waiting customer that looks like one Zoho already has is
 // held back from the push. Push it as new anyway, use the Zoho customer
 // instead (its orders move across), or delete the waiting copy. Nothing here
@@ -47,6 +49,9 @@ router.post('/:id/link', requireAuth, requireRole('admin', 'management'), c.link
 // lacks its TIN, licence and address. Read-only.
 router.get('/:id/zoho-compare', requireAuth, requireRole('admin', 'management'), c.getZohoComparison);
 router.delete('/:id/pending', requireAuth, requireRole('admin', 'management'), c.discardPendingCustomer);
+// Oct 8, 2026: open a waiting customer in Management's edit form, and save the corrections.
+router.get('/:id/pending', requireAuth, requireRole('admin', 'management'), c.getPendingCustomer);
+router.patch('/:id/pending', requireAuth, requireRole('admin', 'management'), c.updatePendingCustomer);
 
 // Sep 24, 2026: the Clients Directory's detail modal — the customer read live
 // from Zoho, plus its documents (up to 10, 10 MB each). See

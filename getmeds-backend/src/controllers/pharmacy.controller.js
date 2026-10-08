@@ -72,6 +72,8 @@ const ALL_ORDERS_SINCE = '2026-09-11T16:00:00.000Z';
 // Never a live order yet, or already discarded: nothing for a pharmacist to audit.
 const ALL_ORDERS_EXCLUDED_STATUSES = ['draft', 'deleted'];
 const QUEUE_CAP = 500;
+// Oct 8, 2026: the Verified tab's history reaches back this many cleared orders at most.
+const VERIFIED_CAP = 3000;
 
 const fail = (res, status, code, message) => res.status(status).json({ success: false, error: { code, message } });
 
@@ -164,17 +166,56 @@ exports.getQueue = async (req, res, next) => {
     const wanted = String(req.query.state || 'pending').toLowerCase();
     const wantAllOrders = wanted === 'all_orders';
     const wantNeedsAttention = wanted === 'needs_attention';
+    const wantVerified = wanted === 'verified';
 
-    // Pagination — only for the two large paginated tabs.
+    // Pagination — for the large paginated tabs.
     const PER_PAGE = 25;
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const offset = (page - 1) * PER_PAGE;
+
+    // Oct 8, 2026: Verified is Pharmacy's record of every order it cleared (a verified
+    // prescription, or "no prescription needed"), including orders already dispatched or
+    // completed. It used to be drawn from the working queue above, which drops an order
+    // once it is packed, so it only ever showed the handful not yet shipped (20 of ~390).
+    // Candidates come from SQL; the state itself comes from rxSummaries, the same rules
+    // as every other tab (a newer rejected upload un-verifies an order).
+    const bucketOf = (state) => (state === 'not_required' ? 'verified' : state);
+    const verifiedCandidates = await db
+      .prepare(
+        `SELECT o.id FROM orders o
+          WHERE NOT (${importedSql('o')})
+            AND NOT (o.status = ANY(?))
+            AND o.draft_cancelled_at IS NULL
+            AND (o.rx_not_required_at IS NOT NULL
+                 OR EXISTS (SELECT 1 FROM payment_proofs p
+                             WHERE p.order_id = o.id AND p.file_type = '${RX_FILE_TYPE}' AND p.status = 'verified'${excludeDeleted}))${channelAnd}${dateAnd}${scopeAnd}
+          ORDER BY COALESCE((SELECT MAX(p.verified_at) FROM payment_proofs p
+                              WHERE p.order_id = o.id AND p.file_type = '${RX_FILE_TYPE}'${excludeDeleted}),
+                            o.rx_not_required_at, o.updated_at) DESC
+          LIMIT ${VERIFIED_CAP}`
+      )
+      .all([ALL_ORDERS_EXCLUDED_STATUSES, ...channelParams, ...dateParams, ...scopeParams]);
+    const candidateIds = verifiedCandidates.map((r) => r.id);
+    const candidateStates = await rxSummaries(candidateIds);
+    const verifiedIds = candidateIds.filter((id) => bucketOf(candidateStates.get(id)?.state) === 'verified');
+
+    let verifiedPage = [];
+    if (wantVerified) {
+      const pageIds = verifiedIds.slice(offset, offset + PER_PAGE);
+      const rows = pageIds.length
+        ? await db.prepare(`SELECT ${columns} ${joins} WHERE o.id = ANY(?)`).all([pageIds])
+        : [];
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      verifiedPage = pageIds.map((id) => byId.get(id)).filter(Boolean);
+    }
 
     const listed = wantAllOrders
       ? await db.prepare(`SELECT ${columns} ${allOrdersSql} ORDER BY o.created_at DESC LIMIT ${PER_PAGE} OFFSET ${offset}`).all(allOrdersParams)
       : wantNeedsAttention
         ? await db.prepare(`SELECT ${columns} ${allOrdersSql}${needsAttentionAnd} ORDER BY o.created_at DESC LIMIT ${PER_PAGE} OFFSET ${offset}`).all(allOrdersParams)
-        : orders;
+        : wantVerified
+          ? verifiedPage
+          : orders;
 
     const listedIds = [...new Set([...orders, ...listed].map((o) => o.id))];
     const summaries = await rxSummaries(listedIds);
@@ -243,21 +284,22 @@ exports.getQueue = async (req, res, next) => {
     // Sep 28, 2026: 'not_required' is its own state (rxSummaries), but it is
     // Pharmacy's decision the same as an actual verify, so it counts and
     // filters as part of the Verified tab rather than needing a fourth tab.
-    const bucketOf = (state) => (state === 'not_required' ? 'verified' : state);
     const counts = { pending: 0, rejected: 0, verified: 0, all: rxRows.length, all_orders: allOrdersCount, needs_attention: needsAttentionCount };
     for (const r of rxRows) {
       const bucket = bucketOf(r.rx_state);
       if (STATES.includes(bucket)) counts[bucket] += 1;
     }
+    // Oct 8, 2026: the whole history, not only the cleared orders still in the queue.
+    counts.verified = verifiedIds.length;
 
-    const shown = (wantAllOrders || wantNeedsAttention)
+    const shown = (wantAllOrders || wantNeedsAttention || wantVerified)
       ? listed.map(shape)
       : wanted === 'all'
         ? rxRows
         : rxRows.filter((r) => bucketOf(r.rx_state) === wanted);
 
     // Pagination metadata for the two large tabs.
-    const paginatedTotal = wantAllOrders ? allOrdersCount : wantNeedsAttention ? needsAttentionCount : null;
+    const paginatedTotal = wantAllOrders ? allOrdersCount : wantNeedsAttention ? needsAttentionCount : wantVerified ? verifiedIds.length : null;
     const pagination = paginatedTotal !== null
       ? { page, per_page: PER_PAGE, total: paginatedTotal, pages: Math.max(1, Math.ceil(paginatedTotal / PER_PAGE)) }
       : null;

@@ -30,6 +30,8 @@ export const useNotifications = () => {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      // Oct 8, 2026: reading a "draft deleted" notice erases that draft; refresh the list.
+      queryClient.invalidateQueries({ queryKey: ['my-orders'] });
       queryClient.invalidateQueries({ queryKey: ['notifications', 'unread-count'] });
     },
   });
@@ -40,6 +42,7 @@ export const useNotifications = () => {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      queryClient.invalidateQueries({ queryKey: ['my-orders'] });
       queryClient.invalidateQueries({ queryKey: ['notifications', 'unread-count'] });
     },
   });

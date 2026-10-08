@@ -117,6 +117,8 @@ router.post('/:id/relink-customer/new', requireRole('management', 'admin'), c.re
 // Oct 3, 2026: Management/Admin cancel a draft (reason required); hidden from the back office.
 router.post('/:id/cancel-draft', requireRole('management', 'admin'), c.cancelDraft);
 router.get('/:id/payment-on-record', requireRole('management', 'admin'), c.paymentOnRecord);
+// Oct 8, 2026: Management/Admin permanently delete an unpaid draft that never reached Zoho.
+router.post('/:id/delete-draft', requireRole('management', 'admin'), c.deleteDraft);
 // Oct 5, 2026: Finance/Admin record the refund for a paid draft that was cancelled and kept on record.
 router.post('/:id/refund', requireRole('finance', 'admin'), require('../controllers/refunds.controller').record);
 router.patch('/:id/exception', requireRole('management', 'admin'), c.setException);
