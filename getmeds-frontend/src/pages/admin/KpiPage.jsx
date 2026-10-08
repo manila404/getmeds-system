@@ -64,13 +64,20 @@ const Table = ({ minWidth = 900, head, children }) => (
   </table>
 );
 
-function GroupTable({ rows, label }) {
-  const sorted = [...rows].sort((a, b) => b.booked_php - a.booked_php);
+// Oct 8, 2026: `tree` keeps the server's top-down order (Manager > Team Leader > Leader) and
+// indents each team by its level, with the title underneath.
+function GroupTable({ rows, label, tree = false }) {
+  const sorted = tree ? rows : [...rows].sort((a, b) => b.booked_php - a.booked_php);
   return (
-    <Table head={<><Th>{label}</Th><Th right>People</Th><Th right>Target</Th><Th right>Booked</Th><Th>% of target</Th><Th right>Booked orders</Th><Th right>Delivered</Th><Th right>Orders</Th><Th right>Held</Th><Th right>Raised by others</Th></>}>
+    <Table head={<><Th>{label}</Th><Th right>People</Th><Th right>Target</Th><Th right>Booked</Th><Th>% of target</Th><Th right>Booked orders</Th><Th right>Delivered</Th><Th right>Orders</Th><Th right>Held</Th><Th right>Raised by others</Th><Th right>New customers</Th></>}>
       {sorted.map((r) => (
         <tr key={r[Object.keys(r)[0]]} className="hover:bg-slate-50">
-          <Td className="font-medium text-ink-primary">{r[Object.keys(r)[0]]}</Td>
+          <Td className="font-medium text-ink-primary">
+            <span style={tree ? { paddingLeft: `${(r.level || 0) * 18}px` } : undefined} className="inline-block">
+              {tree && r.level ? <span className="text-slate-400 mr-1">└</span> : null}{r[Object.keys(r)[0]]}
+              {tree && (r.title || r.reports_to) ? <span className="block text-[11px] font-normal text-ink-secondary">{[r.title, r.reports_to && `reports to ${r.reports_to}`].filter(Boolean).join(' · ')}</span> : null}
+            </span>
+          </Td>
           <Td right>{r.people}</Td>
           <Td right>{r.target_php ? peso(r.target_php) : '—'}{r.targets_missing ? <div className="text-[11px] text-state-warning">{r.targets_missing} without target</div> : null}</Td>
           <Td right className="font-semibold">{peso(r.booked_php)}</Td>
@@ -80,6 +87,7 @@ function GroupTable({ rows, label }) {
           <Td right>{int(r.orders)}</Td>
           <Td right>{int(r.orders_held)}</Td>
           <Td right>{peso(r.booked_raised_by_others_php)}</Td>
+          <Td right>{int(r.new_customers)}</Td>
         </tr>
       ))}
     </Table>
@@ -112,6 +120,19 @@ function TargetsPanel({ month }) {
       setMsg(e.response?.data?.error?.message || 'Could not save the targets.');
     } finally { setBusy(false); }
   };
+  // Oct 8, 2026: one-time pre-fill from the sales sheet's per-territory targets. Preview first;
+  // Apply fills only people with no target for this month and never overwrites.
+  const [preview, setPreview] = useState(null);
+  const fromStructure = async (apply) => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = (await client.post(`/api/kpi/targets/${month}/from-structure`, { apply })).data.data;
+      if (apply) { setPreview(null); await after(`Pre-filled ${r.added} target(s) from the sales sheet. Targets already set were left as they are.`); }
+      else setPreview(r);
+    } catch (e) {
+      setMsg(e.response?.data?.error?.message || 'Could not read the sales sheet targets.');
+    } finally { setBusy(false); }
+  };
   const copy = async () => {
     setBusy(true); setMsg(null);
     try {
@@ -133,6 +154,10 @@ function TargetsPanel({ month }) {
           One monthly target per person, in pesos booked. Team, head and channel targets are the sum of their people.
           Leave a box empty to remove a target. {missing ? <b className="text-state-warning">{missing} active people have no target for {monthLabel(month)}.</b> : null}
         </p>
+        <button type="button" onClick={() => fromStructure(false)} disabled={busy}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 text-sm font-semibold text-ink-primary bg-white disabled:opacity-50">
+          Pre-fill from sales sheet
+        </button>
         <button type="button" onClick={copy} disabled={busy}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 text-sm font-semibold text-ink-primary bg-white disabled:opacity-50">
           <Copy className="w-4 h-4" />Copy {monthLabel(data.prevMonth)}'s targets
@@ -143,6 +168,33 @@ function TargetsPanel({ month }) {
         </button>
       </div>
       {msg && <p className="px-4 py-2 text-sm bg-slate-50 border-b border-slate-200">{msg}</p>}
+      {preview && (
+        <div className="p-4 border-b border-slate-200 bg-amber-50/60 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm">
+              <b>Preview — nothing saved yet.</b> {preview.to_add} people would get a target for {monthLabel(month)} from the sales sheet
+              {preview.proposals.length - preview.to_add ? `; ${preview.proposals.length - preview.to_add} already have one and are left as they are` : ''}.
+            </p>
+            <span className="flex gap-2">
+              <button type="button" onClick={() => setPreview(null)} disabled={busy} className="px-3 py-1.5 rounded-lg border border-slate-300 text-sm font-semibold bg-white">Cancel</button>
+              <button type="button" onClick={() => fromStructure(true)} disabled={busy || !preview.to_add} className="px-3 py-1.5 rounded-lg bg-getmeds-blue text-white text-sm font-semibold disabled:opacity-50">Apply {preview.to_add} target{preview.to_add === 1 ? '' : 's'}</button>
+            </span>
+          </div>
+          <div className="max-h-72 overflow-auto rounded-lg border border-slate-200 bg-white">
+            <Table minWidth={640} head={<><Th>Person</Th><Th>Territories</Th><Th right>From sheet</Th><Th right>Already set</Th><Th>Will</Th></>}>
+              {preview.proposals.map((p) => (
+                <tr key={p.user_id}><Td className="font-medium">{p.name}</Td><Td className="text-xs text-ink-secondary">{p.territories.join(', ')}</Td><Td right>{peso(p.target_php)}</Td><Td right>{p.current_target_php === null ? '—' : peso(p.current_target_php)}</Td><Td>{p.action === 'add' ? 'Add' : 'Keep current'}</Td></tr>
+              ))}
+            </Table>
+          </div>
+          {(preview.skipped.length > 0 || preview.vacant.territories > 0) && (
+            <p className="text-xs text-ink-secondary">
+              Not assigned: {preview.vacant.territories} vacant territories ({peso(preview.vacant.target_php)})
+              {preview.skipped.length ? `; ${preview.skipped.map((s) => `${s.territory} (${s.reason})`).join('; ')}` : ''}.
+            </p>
+          )}
+        </div>
+      )}
       <Table minWidth={760} head={<><Th>Person</Th><Th>Role</Th><Th right>{monthLabel(data.prevMonth)}</Th><Th right>Target for {monthLabel(month)}</Th><Th>Last set</Th></>}>
         {people.map((p) => {
           const value = p.user_id in edits ? edits[p.user_id] : (p.target_php ?? '');
@@ -182,7 +234,7 @@ function HistoryPanel({ month }) {
   if (isError) return <p className="p-6 text-sm text-red-700">Could not load the changes. <button className="underline" onClick={() => refetch()}>Try again</button></p>;
   const rows = data?.changes || [];
   if (!rows.length) return <p className="p-6 text-sm text-ink-secondary">No target changes for {monthLabel(month)}.</p>;
-  const how = { set: 'Set', clear: 'Removed', copy: 'Copied from last month' };
+  const how = { set: 'Set', clear: 'Removed', copy: 'Copied from last month', structure: 'From sales sheet' };
   return (
     <Table minWidth={720} head={<><Th>When</Th><Th>Person</Th><Th right>Before</Th><Th right>After</Th><Th>How</Th><Th>Changed by</Th></>}>
       {rows.map((c) => (
@@ -251,7 +303,7 @@ const KpiPage = () => {
           <h1 className="text-2xl font-semibold text-ink-primary">Sales KPIs</h1>
           <p className="text-sm text-ink-secondary mt-1 max-w-3xl">
             Booked sales against monthly targets for every salesperson, team lead, head and channel. Booked follows the Finance Sales Summary rule;
-            an order counts for the MedRep who owns it. New customers and follow-ups on time are not tracked yet.
+            an order counts for the MedRep who owns it. A new customer is one whose first-ever order is booked this month. Follow-ups on time are not tracked yet.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -319,7 +371,7 @@ const KpiPage = () => {
                     className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-300 text-sm" />
                 </label>
               </div>
-              <Table minWidth={1250} head={<><Th>Person</Th><Th>Team lead</Th><Th>Channel</Th><Th right>Target</Th><Th right>Booked</Th><Th>% of target</Th><Th right>Booked orders</Th><Th right>Delivered</Th><Th right>Orders</Th><Th right>Held</Th><Th right>Raised by others</Th><Th>New customers</Th><Th>Follow-ups</Th></>}>
+              <Table minWidth={1250} head={<><Th>Person</Th><Th>Team lead</Th><Th>Channel</Th><Th right>Target</Th><Th right>Booked</Th><Th>% of target</Th><Th right>Booked orders</Th><Th right>Delivered</Th><Th right>Orders</Th><Th right>Held</Th><Th right>Raised by others</Th><Th right>New customers</Th><Th>Follow-ups</Th></>}>
                 {people.map((p) => (
                   <tr key={p.email} className="hover:bg-slate-50">
                     <Td className="font-medium text-ink-primary">{p.person}<div className="text-[11px] text-ink-secondary">{p.rep_type}{p.active === 'no' ? ' · inactive' : ''}</div></Td>
@@ -333,14 +385,21 @@ const KpiPage = () => {
                     <Td right>{int(p.orders)}</Td>
                     <Td right>{int(p.orders_held)}</Td>
                     <Td right>{p.booked_raised_by_others_php ? <>{peso(p.booked_raised_by_others_php)}<div className="text-[11px] text-ink-secondary">{p.booked_raised_by_others_orders} orders</div></> : '—'}</Td>
-                    <Td><NotTracked /></Td>
+                    <Td right>{int(p.new_customers)}</Td>
                     <Td><NotTracked /></Td>
                   </tr>
                 ))}
               </Table>
             </>
           )
-          : tab === 'teams' ? <GroupTable rows={data.teams} label="Team lead" />
+          : tab === 'teams' ? (
+            <>
+              <p className="p-4 text-sm text-ink-secondary border-b border-slate-200">
+                Each row is a team lead plus everyone below them (the same as their My Team KPI), shown top-down. A Team Leader's row includes their Leaders' teams, so rows overlap and should not be added together.
+              </p>
+              <GroupTable rows={data.teams} label="Team lead" tree />
+            </>
+          )
           : tab === 'heads' ? <GroupTable rows={data.heads} label="Head" />
           : tab === 'channels' ? <GroupTable rows={data.channels} label="Channel" />
           : tab === 'routing' ? (

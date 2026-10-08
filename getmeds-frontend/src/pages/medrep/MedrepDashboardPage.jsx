@@ -17,6 +17,7 @@ import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import OrderStatusBadge from '../../components/ui/OrderStatusBadge';
 import StockAnnouncementsBanner from '../../components/stock/StockAnnouncements';
+import MyKpiPanel from '../../components/dashboard/MyKpiPanel';
 
 const MedrepDashboardPage = () => {
   const { user } = useAuth();
@@ -105,6 +106,9 @@ const MedrepDashboardPage = () => {
           </button>
         </div>
       </div>
+
+      {/* Oct 6, 2026: My Own KPI (nothing shows unless KPIs are switched on). */}
+      <MyKpiPanel />
 
       {/* Exception Banner if any orders need attention */}
       {exceptionOrders > 0 && (

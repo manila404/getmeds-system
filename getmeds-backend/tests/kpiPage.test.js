@@ -207,3 +207,56 @@ describe('targets', () => {
     expect(file.people.find((p) => p.email === rep2.email).target_php).toBe(3000);
   });
 });
+
+describe('pre-fill targets from the sales sheet (Oct 8, 2026)', () => {
+  const M = '2026-03';
+  let ch, mg, repA, repB;
+  beforeAll(async () => {
+    repA = await mkUser('sheetA', 'medrep');
+    repB = await mkUser('sheetB', 'medrep');
+    await db.prepare("INSERT INTO sales_channels (name, head_name) VALUES (?, 'H')").run(`SHEET CH ${stamp}`);
+    ch = (await db.prepare('SELECT id FROM sales_channels WHERE name = ?').get(`SHEET CH ${stamp}`)).id;
+    await db.prepare('INSERT INTO sales_managers (channel_id, name) VALUES (?, ?)').run(ch, 'Sheet lead');
+    mg = (await db.prepare('SELECT id FROM sales_managers WHERE channel_id = ?').get(ch)).id;
+    const terr = (sp, amount, vacant = false) => db.prepare('INSERT INTO sales_territories (manager_id, zoho_salesperson, person_label, is_vacant, target_amount) VALUES (?, ?, ?, ?, ?)').run(mg, `${sp} ${stamp}`, sp, vacant, amount);
+    const link = (u, sp, primary) => db.prepare('INSERT INTO user_salespersons (user_id, salesperson, is_primary) VALUES (?, ?, ?)').run(u.id, `${sp} ${stamp}`, primary ? 1 : 0);
+    await terr('STC | ONE', 300000); await terr('URO | ONE', 200000); await terr('B&B | TWO', 150000); await terr('STC | VACANT', 500000, true);
+    await link(repA, 'STC | ONE', true); await link(repA, 'URO | ONE', false); await link(repB, 'B&B | TWO', true);
+  });
+  afterAll(async () => {
+    for (const u of [repA, repB]) await db.prepare('DELETE FROM user_salespersons WHERE user_id = ?').run(u.id);
+    await db.prepare('DELETE FROM sales_territories WHERE manager_id = ?').run(mg);
+    await db.prepare('DELETE FROM sales_managers WHERE id = ?').run(mg);
+    await db.prepare('DELETE FROM sales_channels WHERE id = ?').run(ch);
+  });
+  const call = (apply, token = adminToken) => request(app).post(`/api/kpi/targets/${M}/from-structure`).set(auth(token)).send({ apply });
+  const mine = (r) => r.body.data.proposals.filter((p) => [repA.id, repB.id].includes(p.user_id));
+
+  test('the preview sums each person’s territories, leaves vacant ones out, and saves nothing', async () => {
+    on();
+    const r = await call(false);
+    expect(r.status).toBe(200);
+    expect(mine(r).find((p) => p.user_id === repA.id)).toMatchObject({ target_php: 500000, action: 'add' });
+    expect(mine(r).find((p) => p.user_id === repB.id)).toMatchObject({ target_php: 150000, action: 'add' });
+    expect(r.body.data.vacant.target_php).toBeGreaterThanOrEqual(500000);
+    expect(await db.prepare('SELECT 1 FROM kpi_targets WHERE user_id = ? AND month = ?').get(repA.id, M)).toBeFalsy();
+  });
+
+  test('apply fills only people with no target, never overwrites, and logs it as from the sales sheet', async () => {
+    on();
+    await request(app).put(`/api/kpi/targets/${M}`).set(auth(adminToken)).send({ targets: [{ user_id: repB.id, target_php: 99000 }] });
+    const r = await call(true);
+    expect(r.status).toBe(200);
+    const got = async (u) => Number((await db.prepare('SELECT target_php FROM kpi_targets WHERE user_id = ? AND month = ?').get(u.id, M)).target_php);
+    expect(await got(repA)).toBe(500000);
+    expect(await got(repB)).toBe(99000);
+    const log = await db.prepare("SELECT source FROM kpi_target_changes WHERE user_id = ? AND month = ?").all(repA.id, M);
+    expect(log.map((x) => x.source)).toEqual(['structure']);
+    expect((await call(true)).body.data.added).toBe(0);
+  });
+
+  test('only Admin may use it', async () => {
+    on();
+    expect((await call(false, managerToken)).status).toBe(403);
+  });
+});

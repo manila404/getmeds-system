@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
-const { isKpiPageEnabled, canViewAllKpis, canSetAnyTarget } = require('../services/kpiPermissions');
+const { isKpiPageEnabled, canViewAllKpis, canViewOwnKpis, canSetAnyTarget } = require('../services/kpiPermissions');
 const c = require('../controllers/kpi.controller');
 
 /**
@@ -20,11 +20,15 @@ router.use(requireAuth);
 const allow = (check) => (req, res, next) =>
   check(req.user) ? next() : res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'You do not have access to KPIs' } });
 
-router.get('/status', allow(canViewAllKpis), c.getStatus);
+router.get('/status', allow((u) => canViewAllKpis(u) || canViewOwnKpis(u)), c.getStatus);
+// Oct 6, 2026: My Own KPI and My Team KPI for every salesperson and team lead (sheet 12.13).
+router.get('/me', allow(canViewOwnKpis), c.getMyKpis);
 router.get('/', allow(canViewAllKpis), c.getKpis);
 router.get('/targets', allow(canSetAnyTarget), c.getTargets);
 router.put('/targets/:month', allow(canSetAnyTarget), c.putTargets);
 router.post('/targets/:month/copy', allow(canSetAnyTarget), c.copyTargets);
+// Oct 8, 2026: pre-fill from the sales sheet's per-territory targets (preview first, then apply)
+router.post('/targets/:month/from-structure', allow(canSetAnyTarget), c.targetsFromStructure);
 router.get('/target-changes', allow(canSetAnyTarget), c.getTargetChanges);
 
 module.exports = router;

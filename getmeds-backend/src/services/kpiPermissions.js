@@ -24,6 +24,14 @@ function canViewAllKpis(user) {
   return roleOf(user) === 'admin';
 }
 
+/**
+ * Sees their own KPIs (My Own KPI) and, for anyone with people under them, their team's
+ * (My Team KPI). Oct 6, 2026: every salesperson, Leader, Team Leader and Manager (sheet 12.13).
+ */
+function canViewOwnKpis(user) {
+  return ['medrep', 'team_lead'].includes(roleOf(user));
+}
+
 /** May set targets for anyone at all (decides whether the Set targets panel shows). */
 function canSetAnyTarget(user) {
   return roleOf(user) === 'admin';
@@ -41,4 +49,4 @@ function canSetTarget(actor, person) {
 /** Roles that carry a sales target. */
 const TARGET_ROLES = ['medrep', 'team_lead'];
 
-module.exports = { isKpiPageEnabled, canViewAllKpis, canSetAnyTarget, canSetTarget, TARGET_ROLES };
+module.exports = { isKpiPageEnabled, canViewAllKpis, canViewOwnKpis, canSetAnyTarget, canSetTarget, TARGET_ROLES };

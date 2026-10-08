@@ -26,7 +26,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   const unseenAnnouncements = useUnseenAnnouncementsCount(seesAnnouncements);
   // Oct 5, 2026: the KPI page's menu item shows only while the page is switched on
   // (GETMEDS_KPI_PAGE) — see hooks/useKpiStatus.js.
-  const kpi = useKpiStatus(roleForAnnouncements);
+  const kpi = useKpiStatus(roleForAnnouncements, user?.id);
 
   if (!user) return null;
 
@@ -294,7 +294,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         links: [
           // (User Management was sharing the Users icon with Clients Directory.)
           { to: '/admin/users', icon: <UserCog size={19} />, label: 'User Management' },
-          ...(kpi.enabled ? [{ to: '/admin/kpi', icon: <Target size={19} />, label: 'Sales KPIs' }] : []),
+          ...(kpi.canViewAll ? [{ to: '/admin/kpi', icon: <Target size={19} />, label: 'Sales KPIs' }] : []),
           { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
           // Sep 9, 2026: the Zoho sync retry outbox — see ZohoSyncHealthPage.jsx.
           { to: '/finance/refunds', icon: <Banknote size={19} />, label: 'Refunds' },

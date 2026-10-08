@@ -91,7 +91,8 @@ async function buildExport(client, month, targetRows) {
 
   const q = async (sql, params = []) => (await client.query(sql, params)).rows;
 
-  const users = await q(`SELECT id, name, email, role, is_active, team_lead_id FROM users`);
+  const titled = (await q(`SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'users' AND column_name = 'sales_title'`)).length > 0;
+  const users = await q(`SELECT id, name, email, role, is_active, team_lead_id${titled ? ', sales_title' : ''} FROM users`);
   const byId = new Map(users.map((u) => [u.id, u]));
 
   // structure: channels, managers (team leads / heads), territories, accounts' salespersons
@@ -111,6 +112,20 @@ async function buildExport(client, month, targetRows) {
          ORDER BY o.id, fe.created_at DESC) b`,
     [fromUtc, toUtc]
   );
+  // NEW CUSTOMERS (Oct 8, 2026, Aaron): a booked order that is its customer's FIRST-EVER order.
+  // Any earlier order for the customer (Zoho history included; drafts, cancelled and deleted
+  // not) means it is not new. Credited to that order's owner, in the month Finance confirmed it.
+  // One index lookup per booked order (orders.customer_id is indexed).
+  const firstOrders = booked.length ? await q(
+    `SELECT o.id, o.medrep_id FROM orders o
+      WHERE o.id = ANY($1) AND o.customer_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM orders e
+           WHERE e.customer_id = o.customer_id AND e.id <> o.id
+             AND e.status NOT IN ('draft', 'cancelled', 'deleted')
+             AND (e.created_at < o.created_at OR (e.created_at = o.created_at AND e.id < o.id)))`,
+    [booked.map((b) => b.id)]
+  ) : [];
   const raised = await q(
     `SELECT o.id, o.medrep_id, o.division FROM orders o
       WHERE o.created_at >= $1 AND o.created_at < $2 AND ${notImported}
@@ -169,7 +184,7 @@ async function buildExport(client, month, targetRows) {
 
   // ── per-owner tallies ──
   const T = new Map();
-  const tally = (id) => { if (!T.has(id)) T.set(id, { booked: 0, bookedN: 0, completed: 0, byOthersN: 0, byOthers: 0, raisedForOthersN: 0, raisedForOthers: 0, orders: 0, held: 0 }); return T.get(id); };
+  const tally = (id) => { if (!T.has(id)) T.set(id, { booked: 0, bookedN: 0, completed: 0, byOthersN: 0, byOthers: 0, raisedForOthersN: 0, raisedForOthers: 0, orders: 0, held: 0, newCustomers: 0 }); return T.get(id); };
   const routing = new Map();
   for (const o of booked) {
     const amt = Number(o.total_amount) || 0;
@@ -186,6 +201,7 @@ async function buildExport(client, month, targetRows) {
   }
   for (const o of raised) tally(o.medrep_id).orders += 1;
   for (const o of held) tally(o.medrep_id).held += 1;
+  for (const o of firstOrders) if (o.medrep_id) tally(o.medrep_id).newCustomers += 1;
 
   const fileMode = Array.isArray(targetRows);
   const targets = fileMode ? targetsFor(targetRows, month) : await dbTargets(q, month);
@@ -210,7 +226,7 @@ async function buildExport(client, month, targetRows) {
       delivered_php: peso(t.completed), orders: t.orders, orders_held: t.held,
       booked_raised_by_others_php: peso(t.byOthers), booked_raised_by_others_orders: t.byOthersN,
       raised_for_others_info_php: peso(t.raisedForOthers),
-      new_customers: NOT_TRACKED, followups_on_time: NOT_TRACKED
+      new_customers: t.newCustomers, followups_on_time: NOT_TRACKED
     };
   });
 
@@ -218,16 +234,17 @@ async function buildExport(client, month, targetRows) {
     const g = new Map();
     for (const r of rows) {
       const key = labelCols.map((c) => r[c]).join('|');
-      if (!g.has(key)) g.set(key, { ...Object.fromEntries(labelCols.map((c) => [c, r[c]])), people: 0, target_php: 0, targets_missing: 0, booked_php: 0, booked_orders: 0, delivered_php: 0, orders: 0, orders_held: 0, booked_raised_by_others_php: 0, raised_for_others_info_php: 0 });
+      if (!g.has(key)) g.set(key, { ...Object.fromEntries(labelCols.map((c) => [c, r[c]])), people: 0, target_php: 0, targets_missing: 0, booked_php: 0, booked_orders: 0, delivered_php: 0, orders: 0, orders_held: 0, booked_raised_by_others_php: 0, raised_for_others_info_php: 0, new_customers: 0 });
       const a = g.get(key);
       a.people += 1; a.booked_php += r.booked_php; a.booked_orders += r.booked_orders; a.delivered_php += r.delivered_php;
+      a.new_customers += Number(r.new_customers) || 0;
       a.orders += r.orders; a.orders_held += r.orders_held; a.booked_raised_by_others_php += r.booked_raised_by_others_php; a.raised_for_others_info_php += r.raised_for_others_info_php;
       if (r.target_php === '') a.targets_missing += 1; else a.target_php += r.target_php;
     }
     return [...g.values()].map((a) => ({
       ...a, target_php: peso(a.target_php), booked_php: peso(a.booked_php), delivered_php: peso(a.delivered_php),
       booked_raised_by_others_php: peso(a.booked_raised_by_others_php), raised_for_others_info_php: peso(a.raised_for_others_info_php),
-      pct_of_target: a.target_php ? pct(a.booked_php, a.target_php) : '', new_customers: NOT_TRACKED, followups_on_time: NOT_TRACKED
+      pct_of_target: a.target_php ? pct(a.booked_php, a.target_php) : '', followups_on_time: NOT_TRACKED
     }));
   };
   // everyone with NO territory in the sales structure (placed by order division, or still unplaced)
@@ -238,7 +255,43 @@ async function buildExport(client, month, targetRows) {
       order_divisions: p.order_divisions, placed_in_export_as: p.channel, how_placed: p.channel_source,
       suggested_territory_to_map: ''
     })).sort((a, b) => b.booked_php - a.booked_php || String(a.person).localeCompare(String(b.person)));
-  const teams = sumRows(people, ['team_lead']);
+  // Oct 8, 2026: a team lead's row is the lead PLUS everyone below them in the Team Lead chain
+  // (Manager > Team Leader > Leader > MedRep), the same rule as My Team KPI, so Honey's row
+  // includes her Leaders' MedReps. Rows therefore overlap (Honey's contains Sheila's) and are
+  // not meant to be added up; '(none)' holds the people who are on nobody's team.
+  const below = new Map();
+  for (const u of users) if (u.team_lead_id) { if (!below.has(u.team_lead_id)) below.set(u.team_lead_id, []); below.get(u.team_lead_id).push(u.id); }
+  const teamOf = (id) => {
+    const seen = new Set();
+    let level = [...(below.get(id) || [])];
+    for (let d = 0; d < 6 && level.length; d++) {
+      const next = [];
+      for (const x of level) { if (x === id || seen.has(x)) continue; seen.add(x); next.push(...(below.get(x) || [])); }
+      level = next;
+    }
+    return seen;
+  };
+  const chainOf = (u) => { // names from the top of the tree down to u, for ordering and indenting
+    const names = [u.name]; let cur = u, guard = 0;
+    while (cur.team_lead_id && guard++ < 6) { cur = byId.get(cur.team_lead_id); if (!cur || names.includes(cur.name)) break; names.unshift(cur.name); }
+    return names;
+  };
+  const peopleById = new Map(people.map((p) => [p.user_id, p]));
+  const inSomeTeam = new Set();
+  const teams = users
+    .filter((u) => u.role === 'team_lead' && below.has(u.id) && (u.is_active || T.has(u.id)))
+    .map((lead) => {
+      const ids = [lead.id, ...teamOf(lead.id)];
+      ids.forEach((id) => inSomeTeam.add(id));
+      const rows = ids.map((id) => peopleById.get(id)).filter(Boolean).map((p) => ({ ...p, team_lead: lead.name }));
+      const [sum] = sumRows(rows.length ? rows : [{ team_lead: lead.name, booked_php: 0, booked_orders: 0, delivered_php: 0, orders: 0, orders_held: 0, booked_raised_by_others_php: 0, raised_for_others_info_php: 0, target_php: '' }], ['team_lead']);
+      const chain = chainOf(lead);
+      return { ...sum, people: rows.length, title: lead.sales_title || '', reports_to: chain.length > 1 ? chain[chain.length - 2] : '', level: chain.length - 1, _order: chain.join(' > ') };
+    })
+    .sort((a, b) => a._order.localeCompare(b._order))
+    .map(({ _order, ...t }) => t);
+  const loners = people.filter((p) => !inSomeTeam.has(p.user_id));
+  if (loners.length) teams.push({ ...sumRows(loners.map((p) => ({ ...p, team_lead: '(none)' })), ['team_lead'])[0], title: '', reports_to: '', level: 0 });
   const channelRows = sumRows(people, ['channel']);
   const heads = sumRows(people, ['head']);
 
@@ -267,7 +320,8 @@ async function buildExport(client, month, targetRows) {
     { check: 'Booked pesos of people with no territory', value: peso(unplaced.reduce((a, p) => a + p.booked_php, 0)), note: 'Included in channel and head totals through the order-division fallback' },
     { check: 'Booked pesos still in no channel', value: peso(people.filter((p) => p.channel === '(unplaced)').reduce((a, p) => a + p.booked_php, 0)), note: 'Their orders carry no division that matches a channel' },
     { check: 'Active people with no target for this month', value: missingTargets, note: missingTargets ? (fileMode ? 'Fill targets.csv, or use --copy-targets' : 'Set them in KPI > Set targets, or copy last month') : 'OK' },
-    { check: 'New customers / follow-ups on time', value: NOT_TRACKED, note: 'The live system has no customer owner or follow-up dates yet' }
+    { check: 'New customers', value: firstOrders.length, note: "Booked orders that are their customer's first-ever order (Zoho history counts as earlier), credited to the order's owner" },
+    { check: 'Follow-ups on time', value: NOT_TRACKED, note: 'The live system has no follow-up dates yet' }
   ];
   return { month, fromUtc, toUtc, partial, people, teams, heads, channels: channelRows, routing: routingRows, unplaced, checks, totalBooked, exportedBooked };
 }
@@ -275,6 +329,8 @@ async function buildExport(client, month, targetRows) {
 const COLS = {
   people: ['person', 'email', 'role', 'active', 'rep_type', 'team_lead', 'channel', 'channel_source', 'order_divisions', 'head', 'target_php', 'booked_php', 'pct_of_target', 'booked_orders', 'delivered_php', 'orders', 'orders_held', 'booked_raised_by_others_php', 'booked_raised_by_others_orders', 'raised_for_others_info_php', 'new_customers', 'followups_on_time'],
   group: (label) => [label, 'people', 'target_php', 'targets_missing', 'booked_php', 'pct_of_target', 'booked_orders', 'delivered_php', 'orders', 'orders_held', 'booked_raised_by_others_php', 'raised_for_others_info_php', 'new_customers', 'followups_on_time'],
+  // Oct 8, 2026: team rows cover the whole chain below the lead, so they carry where they sit
+  teams: ['team_lead', 'title', 'reports_to', 'level', 'people', 'target_php', 'targets_missing', 'booked_php', 'pct_of_target', 'booked_orders', 'delivered_php', 'orders', 'orders_held', 'booked_raised_by_others_php', 'raised_for_others_info_php', 'new_customers', 'followups_on_time'],
   routing: ['owner_credited', 'owner_rep_type', 'raised_by', 'raiser_rep_type', 'booked_orders', 'booked_php'],
   checks: ['check', 'value', 'note'],
   unplaced: ['person', 'email', 'role', 'active', 'team_lead', 'booked_php', 'booked_orders', 'orders', 'order_divisions', 'placed_in_export_as', 'how_placed', 'suggested_territory_to_map']

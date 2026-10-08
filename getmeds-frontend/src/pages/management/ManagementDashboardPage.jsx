@@ -19,6 +19,7 @@ import KpiCard, { KpiCardSkeleton } from '../../components/dashboard/KpiCard';
 import ActionNeededStrip, { ActionNeededSkeleton } from '../../components/dashboard/ActionNeededStrip';
 import ZohoSyncStatus from '../../components/dashboard/ZohoSyncStatus';
 import RecentActivity from '../../components/dashboard/RecentActivity';
+import MyKpiPanel from '../../components/dashboard/MyKpiPanel';
 
 /**
  * Sep 24, 2026: the Management/Admin dashboard, restructured.
@@ -116,6 +117,8 @@ const ManagementDashboardPage = () => {
   const staleHours = parseInt(sp.get('stale'), 10) || 0;
   const searchQ = sp.get('q') || '';
   const page = Math.max(1, parseInt(sp.get('page'), 10) || 1);
+  // Oct 6, 2026: the My Team tab (sales structure, sheet 12.13). '' = All.
+  const teamGroup = isTeamLead ? sp.get('team') || '' : '';
 
   // Every filter change resets to page 1 (unless it IS a page change) — narrowing
   // a filter while on page 12 would otherwise leave you on an empty page that
@@ -155,6 +158,7 @@ const ManagementDashboardPage = () => {
     else if (medrepFilter) p.set('medrep_id', medrepFilter);
     if (searchQ) p.set('search', searchQ);
     if (staleHours) p.set('stale_hours', String(staleHours));
+    if (teamGroup) p.set('team_group', teamGroup);
     return p;
   };
 
@@ -176,15 +180,16 @@ const ManagementDashboardPage = () => {
 
   // ── Data ────────────────────────────────────────────────────────────────
   const { data: summaryRes, isLoading: loadingStats, refetch } = useQuery({
-    queryKey: ['management-summary', source],
-    queryFn: () => client.get(`/api/management/summary?source=${source}`).then((r) => r.data),
+    queryKey: ['management-summary', source, teamGroup],
+    queryFn: () => client.get(`/api/management/summary?source=${source}${teamGroup ? `&team_group=${encodeURIComponent(teamGroup)}` : ''}`).then((r) => r.data),
     refetchInterval: 120000 // was 60000 (Oct 3, 2026: lighter polling)
   });
   const stats = summaryRes?.data || {};
+  const teamTabs = stats.scope?.groups || [];
   const groups = stats.status_groups || {};
 
   const { data: ordersRes, isLoading: loadingOrders, isFetching: fetchingOrders } = useQuery({
-    queryKey: ['management-orders', source, statusFilter, dateFrom, dateTo, medrepFilter, searchQ, staleHours, page],
+    queryKey: ['management-orders', source, statusFilter, dateFrom, dateTo, medrepFilter, searchQ, staleHours, page, teamGroup],
     queryFn: () => {
       const p = orderParams();
       p.set('page', String(page));
@@ -345,6 +350,22 @@ const ManagementDashboardPage = () => {
           />
         )}
       </div>
+
+      {/* Oct 6, 2026: My Team tabs — All, then one per group (see teamScopeService.teamGroups). */}
+      {isTeamLead && teamTabs.length > 0 && (
+        <div className="flex flex-wrap gap-2" role="tablist" aria-label="Team">
+          {[{ key: '', label: 'All', people: null }, ...teamTabs].map((g) => (
+            <button key={g.key || 'all'} type="button" role="tab" aria-selected={teamGroup === g.key}
+              onClick={() => update({ team: g.key, medrep: '' })}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${teamGroup === g.key ? 'bg-getmeds-blue text-white border-getmeds-blue' : 'border-slate-300 text-ink-secondary bg-white hover:bg-slate-50'}`}>
+              {g.label}{g.title ? ` · ${g.title}` : ''}{g.people ? <span className="ml-1 opacity-70">({g.people})</span> : null}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Oct 6, 2026: My Own KPI and My Team KPI, following the tab that is open. */}
+      {isTeamLead && <MyKpiPanel teamGroup={teamGroup} />}
 
       {/* ── Needs attention ──────────────────────────────────────────────── */}
       {loadingStats ? (
@@ -611,7 +632,7 @@ const ManagementDashboardPage = () => {
             itself to its own page — see StockAnnouncements.jsx) + activity. */}
         <aside className="space-y-4 min-w-0">
           <StockAnnouncementsBanner />
-          <RecentActivity />
+          <RecentActivity teamGroup={teamGroup} />
         </aside>
       </div>
     </div>

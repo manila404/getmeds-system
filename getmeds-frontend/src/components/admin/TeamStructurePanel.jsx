@@ -329,6 +329,8 @@ const TeamStructurePanel = () => {
         <p className="text-sm text-ink-secondary max-w-3xl">
           Who leads what, from the September sales sheet. Each dot is a territory: blue when an active account holds it, red and dashed when it is vacant,
           amber when the sheet names a person but no account holds it. Select a manager to jump to their territories.
+          {/* Oct 8, 2026: per-person monthly targets on the Sales KPIs page are the official ones. */}
+          {' '}The targets here are the September sheet's, kept for reference only; official monthly targets are set per person in Administration › Sales KPIs › Set targets.
         </p>
         <button type="button" onClick={() => refetch()} className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-md text-sm text-ink-secondary bg-white hover:bg-surface shrink-0">
           <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
@@ -340,8 +342,8 @@ const TeamStructurePanel = () => {
         <Stat label="With an account" value={s.covered} />
         <Stat label="Vacant" value={s.vacant} tone={s.vacant ? 'red' : undefined} />
         <Stat label="No account" value={s.no_account} tone={s.no_account ? 'amber' : undefined} />
-        <Stat label="Sep target" value={peso(s.total_target)} />
-        <Stat label="Vacant target" value={peso(s.vacant_target)} tone={s.vacant_target ? 'red' : undefined} />
+        <Stat label="Sep sheet target (reference)" value={peso(s.total_target)} />
+        <Stat label="Vacant, sheet (reference)" value={peso(s.vacant_target)} tone={s.vacant_target ? 'red' : undefined} />
       </div>
 
       <section className="bg-white border border-slate-200 rounded-xl p-4">

@@ -49,7 +49,7 @@ function writeFiles(result, dir) {
   fs.mkdirSync(dir, { recursive: true });
   const w = (name, cols, rows) => fs.writeFileSync(path.join(dir, name), toCsv(cols, rows));
   w('01-people.csv', COLS.people, result.people);
-  w('02-teams.csv', COLS.group('team_lead'), result.teams);
+  w('02-teams.csv', COLS.teams, result.teams);
   w('03-heads.csv', COLS.group('head'), result.heads);
   w('04-channels.csv', COLS.group('channel'), result.channels);
   w('05-routing.csv', COLS.routing, result.routing);

@@ -159,17 +159,84 @@ describe('roll-ups are the sum of the people', () => {
     const team = r.teams.find((t) => t.team_lead.includes(stamp));
     expect(team.booked_php).toBe(2000);
     expect(team.target_php).toBe(3000);
-    expect(team.targets_missing).toBe(1);                        // field2 has no target
+    // Oct 8, 2026: a team row is the lead plus everyone below (like My Team KPI), so the lead
+    // counts too: field2 and the lead have no target.
+    expect(team.targets_missing).toBe(2);
+    expect(team.people).toBe(4);
     const ch = r.channels.find((c) => c.channel === `KPI CH ${stamp}`);
     expect(ch.booked_php).toBe(2000);
     expect(r.heads.find((h) => h.head === 'Head Person').booked_php).toBeGreaterThanOrEqual(2000);
     expect(person(r, u.onsite).pct_of_target).toBe(75);
   });
 
-  test('the two untracked metrics say so', async () => {
+  test("a team row follows the whole chain: a Leader's MedRep counts for the Team Leader above too", async () => {
+    // Oct 8, 2026. lead > sub (a Leader) > field3; one order for field3 in August.
+    const sub = await mkUser('sub', 'team_lead');
+    const field3 = await mkUser('field3', 'medrep');
+    let orderId;
+    try {
+      await db.prepare('UPDATE users SET team_lead_id = ? WHERE id = ?').run(u.lead.id, sub.id);
+      await db.prepare('UPDATE users SET team_lead_id = ? WHERE id = ?').run(sub.id, field3.id);
+      orderId = await mkOrder('CHAIN', field3, { total: 700, created: '2026-08-10T02:00:00.000Z' });
+      await ev(orderId, 'FINANCE_VERIFIED', '2026-08-12T03:00:00.000Z');
+      const r = await kpi.runReadOnly(process.env.DATABASE_URL, '2026-08', []);
+      const top = r.teams.find((t) => t.team_lead === u.lead.name);
+      const mid = r.teams.find((t) => t.team_lead === sub.name);
+      // the Team Leader's row = everyone in the chain (other fixtures also book in August)
+      const chainIds = [u.lead, u.onsite, u.field1, u.field2, sub, field3].map((x) => x.id);
+      const expected = r.people.filter((p) => chainIds.includes(p.user_id)).reduce((a, p) => a + p.booked_php, 0);
+      expect(top.booked_php).toBe(expected);
+      expect(top.booked_php).toBeGreaterThanOrEqual(700);
+      expect(mid.booked_php).toBe(700);            // the Leader's own team: just field3's order
+      expect(mid).toMatchObject({ reports_to: u.lead.name, level: top.level + 1, people: 2 });
+      expect(r.teams.indexOf(top)).toBeLessThan(r.teams.indexOf(mid)); // listed top-down
+    } finally {
+      if (orderId) { await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(orderId); await db.prepare('DELETE FROM orders WHERE id = ?').run(orderId); ids.orders = ids.orders.filter((x) => x !== orderId); }
+      await db.prepare('UPDATE users SET team_lead_id = NULL WHERE id IN (?, ?)').run(sub.id, field3.id);
+    }
+  });
+
+  test('follow-ups are still not tracked; new customers are counted (Oct 8, 2026)', async () => {
     const r = await run();
-    expect(person(r, u.onsite).new_customers).toBe('Not tracked yet');
-    expect(r.checks.find((c) => c.check.startsWith('New customers')).value).toBe('Not tracked yet');
+    expect(person(r, u.onsite).followups_on_time).toBe('Not tracked yet');
+    // every July fixture shares one customer; its first order (A) is the on-site rep's
+    expect(person(r, u.onsite).new_customers).toBe(1);
+    expect(person(r, u.field1).new_customers).toBe(0);
+    expect(r.checks.find((c) => c.check === 'New customers').value).toBe(1);
+  });
+
+  test("a new customer is one whose FIRST-EVER order is booked; Zoho history counts as earlier; once per customer", async () => {
+    const S = '2026-09';
+    const made = { customers: [], orders: [] };
+    const cust = async (k) => {
+      await db.prepare("INSERT INTO customers (name, type, zoho_contact_id, is_active) VALUES (?, 'credit', ?, 1)").run(`NC ${k} ${stamp}`, `NC-${k}-${stamp}`);
+      const id = (await db.prepare('SELECT id FROM customers WHERE name = ?').get(`NC ${k} ${stamp}`)).id;
+      made.customers.push(id); return id;
+    };
+    const order = async (ref, cid, owner, created, verified, imported = false) => {
+      const gm = `${imported ? 'ZOHO' : 'GM-NC'}-${stamp}-${ref}`;
+      await db.prepare(`INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount, delivery_address, submitted_at, created_at)
+                        VALUES (?, ?, ?, 'ready_for_dispatch', 'credit', 100, 'x', ?, ?)`).run(gm, cid, owner.id, created, created);
+      const id = (await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(gm)).id;
+      made.orders.push(id);
+      if (verified) await ev(id, 'FINANCE_VERIFIED', verified);
+    };
+    try {
+      const x = await cust('X'), y = await cust('Y'), z = await cust('Z');
+      await order('X1', x, u.field2, '2026-09-02T02:00:00.000Z', '2026-09-03T02:00:00.000Z');               // first ever -> new for field2
+      await order('Y0', y, u.field1, '2026-06-01T02:00:00.000Z', null, true);                                 // Zoho history
+      await order('Y1', y, u.field2, '2026-09-04T02:00:00.000Z', '2026-09-05T02:00:00.000Z');               // not new
+      await order('Z1', z, u.field1, '2026-09-06T02:00:00.000Z', '2026-09-07T02:00:00.000Z');               // new for field1
+      await order('Z2', z, u.field2, '2026-09-08T02:00:00.000Z', '2026-09-09T02:00:00.000Z');               // same customer again: not new
+      const r = await kpi.runReadOnly(process.env.DATABASE_URL, S, []);
+      expect(person(r, u.field2).new_customers).toBe(1);
+      expect(person(r, u.field1).new_customers).toBe(1);
+      const team = r.teams.find((t) => t.team_lead === u.lead.name);
+      expect(team.new_customers).toBe(2);
+    } finally {
+      for (const id of made.orders) { await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id); await db.prepare('DELETE FROM orders WHERE id = ?').run(id); }
+      for (const id of made.customers) await db.prepare('DELETE FROM customers WHERE id = ?').run(id);
+    }
   });
 });
 
