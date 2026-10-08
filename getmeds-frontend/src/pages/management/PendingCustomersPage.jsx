@@ -5,6 +5,7 @@ import { CloudOff, RefreshCw, AlertTriangle, Clock, Building2, Info, Copy, Trash
 import client from '../../api/client';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
 import Modal from '../../components/ui/Modal';
+import HeldCustomerModal from '../../components/customers/HeldCustomerModal';
 
 /**
  * Customers saved here that Zoho has not accepted yet.
@@ -456,6 +457,8 @@ const PendingCustomersPage = () => {
   const [ask, setAsk] = useState(null);
   const [editing, setEditing] = useState(null);
   const [linking, setLinking] = useState(null);
+  // Oct 8, 2026: the waiting customer open in the edit form (HeldCustomerModal).
+  const [opened, setOpened] = useState(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['pending-customers'],
@@ -471,18 +474,6 @@ const PendingCustomersPage = () => {
   // Sep 11, 2026: a customer can be marked "Needs attention" for a reason that
   // was never about the customer — a push attempted during a token outage did
   // exactly that. Without a way back, the only remedies were SQL or re-typing.
-  // Oct 8, 2026: correct a waiting customer's email (Zoho refuses "n/A") and requeue it.
-  const [emailFix, setEmailFix] = useState(null);
-  const saveEmail = useMutation({
-    mutationFn: ({ id, email }) => client.post(`/api/customers/${id}/pending-email`, { email }).then((r) => r.data?.data),
-    onSuccess: (res) => {
-      toast.success(res.message);
-      setEmailFix(null);
-      refresh();
-    },
-    onError: (err) => toast.error(errorMessage(err, 'Could not save the email.'))
-  });
-
   const retry = useMutation({
     mutationFn: (id) => client.post(`/api/customers/${id}/retry`).then((r) => r.data?.data),
     onSuccess: (res) => {
@@ -533,8 +524,10 @@ const PendingCustomersPage = () => {
   const pending = data?.pending || 0;
   const failed = data?.failed || 0;
   // What the button will actually push: a likely duplicate is held back.
-  const pushable = customers.filter((c) => c.zoho_sync_status === 'pending' && !(c.matches || []).length).length;
-  const lastError = customers.find((c) => c.zoho_sync_status === 'pending' && c.zoho_sync_error)?.zoho_sync_error;
+  const pushable = customers.filter((c) => c.zoho_sync_status === 'pending' && !(c.matches || []).length && !(c.lacking || []).length).length;
+  const lastError = customers.find(
+    (c) => c.zoho_sync_status === 'pending' && c.zoho_sync_error && !/^Missing details/i.test(c.zoho_sync_error)
+  )?.zoho_sync_error;
 
   const askDelete = (c) =>
     setAsk({
@@ -609,7 +602,14 @@ const PendingCustomersPage = () => {
                     <div className="min-w-0">
                       <p className="text-sm font-semibold text-ink-primary flex items-center gap-2">
                         <Building2 className="w-3.5 h-3.5 text-ink-secondary shrink-0" />
-                        {c.name}
+                        <button
+                          type="button"
+                          onClick={() => setOpened(c.id)}
+                          className="text-left hover:text-getmeds-blue hover:underline"
+                          title="Open and edit this customer"
+                        >
+                          {c.name}
+                        </button>
                         {c.category === 'hospital' && (
                           <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 border border-indigo-200">
                             Hospital
@@ -622,33 +622,13 @@ const PendingCustomersPage = () => {
                         {c.order_count > 0 && <span> · {c.order_count} order{c.order_count === 1 ? '' : 's'}</span>}
                       </p>
 
-                      {emailFix?.id === c.id ? (
-                        <form
-                          className="mt-1.5 flex flex-wrap items-center gap-2"
-                          onSubmit={(e) => { e.preventDefault(); saveEmail.mutate({ id: c.id, email: emailFix.value.trim() }); }}
-                        >
-                          <input
-                            type="email"
-                            autoFocus
-                            value={emailFix.value}
-                            onChange={(e) => setEmailFix({ id: c.id, value: e.target.value })}
-                            placeholder="name@example.com, or blank for none"
-                            className="w-64 text-[12px] border border-slate-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
-                          />
-                          <button type="submit" disabled={saveEmail.isPending} className="text-[11px] font-semibold text-white bg-getmeds-blue rounded px-2.5 py-1 disabled:opacity-60">
-                            {saveEmail.isPending ? 'Saving…' : emailFix.value.trim() ? 'Save email' : 'Remove email'}
-                          </button>
-                          <button type="button" onClick={() => setEmailFix(null)} className="text-[11px] font-semibold text-ink-secondary">Cancel</button>
-                        </form>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setEmailFix({ id: c.id, value: /@/.test(c.email || '') ? c.email : '' })}
-                          className="mt-1 text-[11px] font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
-                        >
-                          {c.email ? 'Change email' : 'Add email'}
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => setOpened(c.id)}
+                        className="mt-1 text-[11px] font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
+                      >
+                        Open &amp; edit details
+                      </button>
 
                       {/* Only shown for a 'failed' row. A pending row's error is
                           the one already stated above, and repeating it per row
@@ -694,6 +674,11 @@ const PendingCustomersPage = () => {
                             <Copy className="w-3 h-3" />
                             Check duplicate
                           </>
+                        ) : (c.lacking || []).length && c.zoho_sync_status !== 'failed' ? (
+                          <>
+                            <AlertTriangle className="w-3 h-3" />
+                            Missing details
+                          </>
                         ) : c.zoho_sync_status === 'failed' ? (
                           <>
                             <AlertTriangle className="w-3 h-3" />
@@ -726,6 +711,54 @@ const PendingCustomersPage = () => {
                     </div>
                   </div>
 
+                  {/* Oct 8, 2026: what the MedRep left out, and Management's three choices.
+                      A likely duplicate is answered in DuplicateReview below instead. */}
+                  {(c.lacking || []).length > 0 && c.zoho_sync_status !== 'failed' && !matches.length && (
+                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+                      <p className="text-[12px] text-amber-900">
+                        <strong>Missing:</strong> {c.lacking.join(', ')}
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-amber-900/80">
+                        Not pushed automatically. Check the details with the MedRep, then choose.
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setOpened(c.id)}
+                          className="px-3 py-1.5 rounded-md border border-getmeds-blue/40 bg-white text-[12px] font-semibold text-getmeds-blue"
+                        >
+                          Open &amp; complete details
+                        </button>
+                        <button
+                          type="button"
+                          disabled={act.isPending}
+                          onClick={() =>
+                            setAsk({
+                              title: `Push ${c.name} without these details?`,
+                              message: `Zoho will get ${c.name} as a NEW customer, missing: ${c.lacking.join(', ')}. They can be added in Zoho later.`,
+                              confirmText: 'Push as new customer',
+                              variant: 'info',
+                              run: { kind: 'push', id: c.id }
+                            })
+                          }
+                          className="px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-[12px] font-semibold disabled:opacity-60"
+                        >
+                          Push as new customer anyway
+                        </button>
+                        <button
+                          type="button"
+                          disabled={act.isPending}
+                          onClick={() => setLinking(c)}
+                          className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-[12px] font-semibold text-ink-primary disabled:opacity-60"
+                        >
+                          Link to an existing customer
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {matches.length > 0 && (c.lacking || []).length > 0 && (
+                    <p className="mt-3 text-[12px] text-amber-900"><strong>Also missing:</strong> {c.lacking.join(', ')}</p>
+                  )}
                   {matches.length > 0 && (
                     <DuplicateReview customer={c} onAsk={setAsk} onUpdate={setEditing} busy={act.isPending} />
                   )}
@@ -761,6 +794,37 @@ const PendingCustomersPage = () => {
         confirmText={ask?.confirmText}
         variant={ask?.variant}
       />
+
+      {opened && (
+        <HeldCustomerModal
+          customerId={opened}
+          busy={act.isPending}
+          onClose={() => setOpened(null)}
+          onChanged={refresh}
+          onLink={() => {
+            const c = customers.find((x) => x.id === opened);
+            setOpened(null);
+            if (c) setLinking(c);
+          }}
+          onDelete={() => {
+            const c = customers.find((x) => x.id === opened);
+            setOpened(null);
+            if (c) askDelete(c);
+          }}
+          onPush={({ id, name, lacking }) => {
+            setOpened(null);
+            setAsk({
+              title: `Push ${name} to Zoho as a new customer?`,
+              message: lacking.length
+                ? `Zoho will get ${name} as a NEW customer, still missing: ${lacking.join(', ')}. They can be added in Zoho later.`
+                : `Zoho will get ${name} as a NEW customer.`,
+              confirmText: 'Push as new customer',
+              variant: 'info',
+              run: { kind: 'push', id }
+            });
+          }}
+        />
+      )}
 
       {linking && (
         <LinkExistingModal

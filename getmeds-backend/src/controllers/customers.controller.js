@@ -746,7 +746,11 @@ const createCustomer = async (req, res, next) => {
       data: {
         customer: result.customer,
         held: !!result.held,
-        message: result.held
+        lacking: result.lacking || [],
+        message: result.lacking?.length
+          ? `Saved here, with details missing (${result.lacking.join(', ')}). Management will review this ` +
+            'customer before it goes to Zoho. Orders for them can be raised and approved in the meantime.'
+          : result.held
           ? 'Saved here. This customer is not in Zoho yet — an admin will push them once the ' +
             'Zoho connection is fixed. Orders for them can be raised and approved in the meantime.'
           : null
@@ -795,9 +799,15 @@ const listPendingCustomers = async (req, res, next) => {
     // pushed. A handful of rows, each a few indexed lookups.
     const customers = [];
     for (const r of rows) {
+      // Oct 8, 2026: what the MedRep left out, read from the payload the push replays.
+      // The payload itself is not sent to the browser.
+      const { zoho_pending_payload: raw, ...rest } = r;
+      let payload = null;
+      try { payload = raw ? JSON.parse(raw) : null; } catch { payload = null; }
       customers.push({
-        ...r,
+        ...rest,
         order_count: Number(r.order_count) || 0,
+        lacking: payload ? customerCreate.lackingDetails(payload) : [],
         matches: await customerCreate.findZohoMatches(r)
       });
     }
@@ -841,7 +851,7 @@ const syncPendingCustomers = async (req, res, next) => {
         continue;
       }
       if (out.needsReview) {
-        results.needs_review.push({ id: row.id, name: row.name, matches: out.matches.map((m) => m.name) });
+        results.needs_review.push({ id: row.id, name: row.name, matches: out.matches.map((m) => m.name), lacking: out.lacking || [] });
         continue;
       }
       if (out.stillBlocked) {
@@ -853,7 +863,7 @@ const syncPendingCustomers = async (req, res, next) => {
 
     const review = results.needs_review.length;
     const reviewNote = review
-      ? `${review} held back — already looks like a customer in Zoho; choose what to do with ${review === 1 ? 'it' : 'them'} below.`
+      ? `${review} held back — missing details or already looks like a customer in Zoho; choose what to do with ${review === 1 ? 'it' : 'them'} below.`
       : '';
     const parts = [];
     if (results.synced.length) parts.push(`${results.synced.length} customer(s) pushed to Zoho.`);
@@ -930,6 +940,66 @@ const retryPendingCustomer = async (req, res, next) => {
 };
 
 /**
+ * GET /api/customers/:id/pending — everything the MedRep entered for a waiting customer, for
+ * Management's edit form. PATCH saves Management's corrections. Oct 8, 2026.
+ */
+const getPendingCustomer = async (req, res, next) => {
+  try {
+    const held = await customerCreate.getHeldCustomer(parseInt(req.params.id, 10));
+    if (!held) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'No customer waiting for Zoho has that id.' } });
+    }
+    let details = {};
+    try { details = JSON.parse(held.zoho_pending_payload || '{}') || {}; } catch { details = {}; }
+    // An older row may have no payload, or a thin one: fill the basics from the row.
+    details = {
+      display_name: held.name,
+      category: held.category || '',
+      phone: held.contact_number || '',
+      email: held.email || '',
+      tin: held.tin || '',
+      lto_license_number: held.lto_license_number || '',
+      billing_address: { address: held.address && held.address !== 'See Zoho' ? held.address : '' },
+      ...details
+    };
+    const orders = await db.prepare('SELECT COUNT(*) AS n FROM orders WHERE customer_id = ?').get(held.id);
+    res.json({
+      success: true,
+      data: {
+        id: held.id,
+        name: held.name,
+        zoho_sync_status: held.zoho_sync_status,
+        zoho_sync_error: held.zoho_sync_error,
+        order_count: Number(orders?.n) || 0,
+        details,
+        lacking: customerCreate.lackingDetails(details)
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const updatePendingCustomer = async (req, res, next) => {
+  try {
+    const out = await customerCreate.updateHeldCustomer(parseInt(req.params.id, 10), (req.body || {}).details, req.user);
+    if (!out.ok) {
+      return res.status(out.status || 400).json({ success: false, error: { code: out.status === 404 ? 'NOT_FOUND' : 'VALIDATION_ERROR', message: out.reason } });
+    }
+    res.json({
+      success: true,
+      data: {
+        name: out.name,
+        lacking: out.lacking,
+        message: out.lacking.length ? `Saved. Still missing: ${out.lacking.join(', ')}.` : 'Saved. Nothing is missing now.'
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
  * POST /api/customers/:id/pending-email — Management corrects the email of a customer
  * still waiting for Zoho, and puts it back in the queue.
  *
@@ -999,7 +1069,8 @@ const sendOutcome = (res, out, okData) => {
 const pushPendingCustomer = async (req, res, next) => {
   try {
     const id = parseInt(req.params.id, 10);
-    const out = await customerCreate.syncHeldCustomer(id, { allowMatches: req.body?.confirm_new === true });
+    const confirmed = req.body?.confirm_new === true;
+    const out = await customerCreate.syncHeldCustomer(id, { allowMatches: confirmed, allowLacking: confirmed });
     if (out.ok) {
       return res.json({
         success: true,
@@ -1104,6 +1175,8 @@ module.exports = {
   checkDuplicates,
   retryPendingCustomer,
   updatePendingEmail,
+  getPendingCustomer,
+  updatePendingCustomer,
   pushPendingCustomer,
   linkPendingCustomer,
   getZohoComparison,

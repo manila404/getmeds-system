@@ -55,13 +55,22 @@ const MATCH_LABEL = {
  */
 
 // Sep 29, 2026: per-type required fields. Patient/Doctor are Zoho Individuals;
-// Hospital/Distributor are Zoho Business contacts with mandatory license data.
+// Hospital/Distributor are Zoho Business contacts.
+// Oct 8, 2026: email, TIN and the license fields are no longer required. Left out, the
+// customer is saved and held for Management to review (push as new, link, or delete)
+// before it goes to Zoho. Mirrors lackingDetails() in customerCreateService.js.
 const TYPE_REQUIRED = {
   patient:     ['first_name', 'last_name', 'phone'],
-  doctor:      ['first_name', 'last_name', 'email', 'phone'],
-  hospital:    ['display_name', 'email', 'phone', 'license_owner', 'lto_license_number', 'lto_type', 'license_issuance_date', 'license_expiry_date'],
-  distributor: ['display_name', 'email', 'phone', 'license_owner', 'lto_license_number', 'lto_type', 'license_issuance_date', 'license_expiry_date'],
+  doctor:      ['first_name', 'last_name', 'phone'],
+  hospital:    ['display_name', 'phone'],
+  distributor: ['display_name', 'phone'],
 };
+const LACKABLE_BUSINESS = [
+  ['email', 'Email'], ['tin', 'TIN'], ['license_owner', 'License Owner'], ['lto_license_number', 'LTO Number'],
+  ['lto_type', 'LTO Type'], ['license_issuance_date', 'License Issuance Date'], ['license_expiry_date', 'License Expiry Date'],
+];
+const LACKABLE = { doctor: [['email', 'Email']], hospital: LACKABLE_BUSINESS, distributor: LACKABLE_BUSINESS };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // customer_sub_type sent to Zoho — 'individual' for Patient/Doctor, 'business' for Hospital/Distributor
 const SUB_TYPE = { patient: 'individual', doctor: 'individual', hospital: 'business', distributor: 'business' };
@@ -177,6 +186,32 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   const setAddr = (which, k, v) =>
     setForm((f) => ({ ...f, [which]: { ...f[which], [k]: v } }));
 
+  // Oct 8, 2026: quick-fill for mock testing. import.meta.env.DEV is true only under the
+  // local `npm run dev` server; the production build (Vercel) drops this and the buttons.
+  // A fresh name and phone each time, so the duplicate check does not trip on the last test.
+  const devFill = (complete) => {
+    const n = String(Date.now()).slice(-6);
+    const phone = `+63917${n}${Math.floor(Math.random() * 10)}`;
+    const cat = form.category;
+    const business = cat === 'hospital' || cat === 'distributor';
+    const name = business ? `Test ${cat === 'hospital' ? 'Hospital' : 'Distributor'} ${n}` : null;
+    setForm((f) => ({
+      ...f,
+      first_name: business ? 'Juan' : 'Test',
+      last_name: business ? 'Dela Cruz' : `${cat === 'doctor' ? 'Doctor' : 'Patient'} ${n}`,
+      display_name: name || f.display_name,
+      email: complete ? `test${n}@example.com` : '',
+      phone,
+      tin: business && complete ? `000-${n.slice(0, 3)}-${n.slice(3)}-000` : '',
+      license_owner: business && complete ? 'Juan Dela Cruz' : '',
+      lto_license_number: business && complete ? `LTO-TEST-${n}` : '',
+      lto_type: business && complete ? (cat === 'hospital' ? 'Hospital' : 'Distributor') : '',
+      license_issuance_date: business && complete ? '2026-01-01' : '',
+      license_expiry_date: business && complete ? '2027-12-31' : '',
+      billing_address: { ...f.billing_address, address: `${n} Test Street`, city: 'Manila' }
+    }));
+  };
+
   // Auto-fill display_name / salutation / license_owner from name fields
   useEffect(() => {
     const cat = form.category;
@@ -213,6 +248,7 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
       // exists here and is queued", and the rep has to be told which.
       setOutcome({
         held: !!res.data.held,
+        lacking: res.data.lacking || [],
         customer: res.data.customer,
         message: res.data.message
       });
@@ -249,6 +285,11 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   const shippingOk = sameAsBilling || !!form.shipping_address.address.trim();
   const checking = checkMutation.isPending;
   const canSubmit = missing.length === 0 && displayNameOk && billingOk && shippingOk && !create.isPending && !checking;
+  const emailTyped = String(form.email || '').trim();
+  const emailBad = !!emailTyped && !EMAIL_RE.test(emailTyped);
+  const lacking = (LACKABLE[form.category] || [])
+    .filter(([k]) => (k === 'email' ? !EMAIL_RE.test(emailTyped) : !String(form[k] || '').trim()))
+    .map(([, label]) => label);
 
   const doCreate = () => {
     const phone = form.phone;
@@ -430,8 +471,10 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 </p>
                 <p className="mt-2 text-[13px] text-ink-primary">
                   <strong>{outcome.customer.name}</strong> is saved in GetMeds and selected for this
-                  order. Zoho could not be reached, so the customer has been queued and an admin
-                  will push them through.
+                  order.{' '}
+                  {outcome.lacking?.length
+                    ? <>Details are missing ({outcome.lacking.join(', ')}), so Management will review the customer before it goes to Zoho.</>
+                    : <>Zoho could not be reached, so the customer has been queued and an admin will push them through.</>}
                 </p>
 
                 <ul className="mt-3 space-y-1.5 text-[12px] text-ink-secondary">
@@ -505,6 +548,17 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                   {c.label}
                 </button>
               ))}
+              {import.meta.env.DEV && (
+                <span className="ml-auto flex items-center gap-1.5 rounded-md border border-dashed border-purple-300 bg-purple-50 px-2 py-1">
+                  <span className="text-[10px] font-bold uppercase text-purple-700">Test fill</span>
+                  <button type="button" onClick={() => devFill(true)} className="px-2 py-0.5 rounded bg-white border border-purple-300 text-[11px] font-semibold text-purple-800 hover:bg-purple-100">
+                    Complete
+                  </button>
+                  <button type="button" onClick={() => devFill(false)} className="px-2 py-0.5 rounded bg-white border border-purple-300 text-[11px] font-semibold text-purple-800 hover:bg-purple-100">
+                    Missing email/TIN/LTO
+                  </button>
+                </span>
+              )}
             </div>
             {CATEGORIES.find((c) => c.value === form.category)?.hint && (
               <p className="mt-2 text-[11px] text-ink-secondary">
@@ -569,7 +623,7 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 </Field>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                <Field label="Email Address" required>
+                <Field label="Email Address" help="Leave blank if they have none: Management reviews the customer before it goes to Zoho.">
                   <input type="email" className={input} value={form.email} onChange={(e) => set('email', e.target.value)} />
                 </Field>
                 <Field label="Phone Number" required>
@@ -608,7 +662,7 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 </Field>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                <Field label="Email Address" required>
+                <Field label="Email Address" help="Leave blank if they have none: Management reviews the customer before it goes to Zoho.">
                   <input type="email" className={input} value={form.email} onChange={(e) => set('email', e.target.value)} />
                 </Field>
                 <Field label="Phone Number" required>
@@ -632,28 +686,28 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 </div>
               </div>
 
-              {/* Additional Info — license fields all required + file uploads */}
+              {/* Additional Info — Oct 8, 2026: not required; anything left out is reviewed by Management */}
               <div className="mt-4 border-t border-slate-100 pt-3">
                 <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">
-                  Additional Info <span className="text-state-error">*</span>
+                  Additional Info <span className="font-normal normal-case">(fill in all you have — anything missing is reviewed by Management before Zoho)</span>
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <Field label="TIN">
                     <input className={input} value={form.tin} onChange={(e) => set('tin', e.target.value)} />
                   </Field>
-                  <Field label="License Owner" required help="Auto-filled from contact name. Edit if needed.">
+                  <Field label="License Owner" help="Auto-filled from contact name. Edit if needed.">
                     <input className={input} value={form.license_owner} onChange={(e) => set('license_owner', e.target.value)} />
                   </Field>
-                  <Field label="LTO Number" required help="Unique in Zoho.">
+                  <Field label="LTO Number" help="Unique in Zoho.">
                     <input className={input} value={form.lto_license_number} onChange={(e) => set('lto_license_number', e.target.value)} />
                   </Field>
-                  <Field label="LTO Type" required>
+                  <Field label="LTO Type">
                     <input className={input} value={form.lto_type} onChange={(e) => set('lto_type', e.target.value)} />
                   </Field>
-                  <Field label="License Issuance Date" required>
+                  <Field label="License Issuance Date">
                     <input type="date" className={input} value={form.license_issuance_date} onChange={(e) => set('license_issuance_date', e.target.value)} />
                   </Field>
-                  <Field label="License Expiry Date" required>
+                  <Field label="License Expiry Date">
                     <input type="date" className={input} value={form.license_expiry_date} onChange={(e) => set('license_expiry_date', e.target.value)} />
                   </Field>
                 </div>
@@ -727,6 +781,18 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
             )}
           </Section>
 
+          {emailBad && (
+            <p className="mt-4 text-[12px] text-red-800 bg-red-50 border border-red-200 rounded px-3 py-2">
+              "{emailTyped}" is not an email address. Type the customer's real email, or leave it blank if they have none.
+            </p>
+          )}
+          {lacking.length > 0 && !emailBad && (
+            <p className="mt-4 text-[12px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+              <strong>Missing: {lacking.join(', ')}.</strong> You can still create this customer and raise the order,
+              but it goes to Management for review before it reaches Zoho. Fill in what you have.
+            </p>
+          )}
+
           {/* ── Footer ─────────────────────────────────────────────────────── */}
           <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-4 mt-5">
             <p className="text-[11px] text-ink-secondary">
@@ -741,7 +807,7 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
               <button
                 type="button"
                 onClick={submit}
-                disabled={!canSubmit}
+                disabled={!canSubmit || emailBad}
                 className="px-4 py-2 rounded-md bg-getmeds-blue text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {create.isPending ? (

@@ -1239,6 +1239,15 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // that verified test. Receiver Name/Contact No. are left to
   // handleCustomerChange below, which already pulls them from the
   // customer's own Zoho contact person — no need to hardcode those here.
+  // Oct 8, 2026: the proof-of-payment and prescription questions became required after
+  // these fills were written, so a filled form still could not be submitted. Answered
+  // here with "no file, here is why"; attach real files instead to test uploads.
+  const fillTestReasons = () => {
+    setNoProofReason('payment_to_follow');
+    setNoProofNote('');
+    setNoRxReason('Test order — Pharmacy will follow up.');
+  };
+
   const handleAutoFillCredit = () => {
     if (!customers.length || !products.length) {
       toast.error('Master data is still loading from server...');
@@ -1271,6 +1280,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
     }] : [];
 
     setItems(sampleItems);
+    fillTestReasons();
     toast.success(`⚡ Auto-filled Credit Order (${creditCust.name})`, { icon: '🚀', duration: 3000 });
   };
 
@@ -1311,6 +1321,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
     }
 
     setItems(sampleItems);
+    fillTestReasons();
     toast.success(`⚡ Auto-filled Direct Order (${directCust.name})`, { icon: '💳', duration: 3000 });
   };
 
@@ -1545,7 +1556,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {import.meta.env.VITE_TEST_MODE === 'true' && (
+          {/* Oct 8, 2026: also shown under the local `npm run dev` server (import.meta.env.DEV),
+              for mock testing. The production build on Vercel has neither, so live never shows them. */}
+          {(import.meta.env.DEV || import.meta.env.VITE_TEST_MODE === 'true') && (
             <>
               {/* Auto-Fill Credit Button */}
               <button
