@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
-const { isKpiPageEnabled, canViewAllKpis, canViewOwnKpis, canSetAnyTarget } = require('../services/kpiPermissions');
+const { isKpiPageEnabled, canViewAllKpis, canViewOwnKpis, canSeeOwnKpisNow, canSetAnyTarget } = require('../services/kpiPermissions');
 const c = require('../controllers/kpi.controller');
 
 /**
@@ -22,7 +22,17 @@ const allow = (check) => (req, res, next) =>
 
 router.get('/status', allow((u) => canViewAllKpis(u) || canViewOwnKpis(u)), c.getStatus);
 // Oct 6, 2026: My Own KPI and My Team KPI for every salesperson and team lead (sheet 12.13).
-router.get('/me', allow(canViewOwnKpis), c.getMyKpis);
+// Oct 9, 2026: only once Admin has turned KPIs on for the sales teams (see kpiPermissions).
+const allowAsync = (check) => async (req, res, next) => {
+  try {
+    if (await check(req.user)) return next();
+    return res.status(403).json({ success: false, error: { code: 'KPI_NOT_OPEN', message: 'KPIs are not open to sales teams yet' } });
+  } catch (err) { return next(err); }
+};
+router.get('/me', allowAsync(canSeeOwnKpisNow), c.getMyKpis);
+// Oct 9, 2026: Admin decides when the sales teams see their KPIs ("In progress" until then)
+router.get('/settings', allow(canViewAllKpis), c.getSettings);
+router.put('/settings', allow(canViewAllKpis), c.putSettings);
 router.get('/', allow(canViewAllKpis), c.getKpis);
 router.get('/targets', allow(canSetAnyTarget), c.getTargets);
 router.put('/targets/:month', allow(canSetAnyTarget), c.putTargets);

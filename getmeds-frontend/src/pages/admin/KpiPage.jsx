@@ -251,6 +251,52 @@ function HistoryPanel({ month }) {
   );
 }
 
+/**
+ * Oct 9, 2026 (Aaron): whether the sales teams see My KPIs yet. "In progress" (Admin only) while
+ * the company admins review the numbers; Admin turns it on here. Reaches everyone within about
+ * half a minute, on their next page load.
+ */
+function SalesVisibility() {
+  const { data, refetch } = useQuery({
+    queryKey: ['kpi-settings'],
+    queryFn: () => client.get('/api/kpi/settings').then((r) => r.data?.data),
+    staleTime: 30_000,
+    retry: false
+  });
+  const [busy, setBusy] = useState(false);
+  if (!data) return null;
+  const on = data.sales_visibility === 'everyone';
+  const flip = async () => {
+    const ask = on
+      ? 'Hide My KPIs from the sales teams again ("In progress")? Only Admin will see KPIs.'
+      : 'Show My KPIs to every MedRep, Leader, Team Leader and Manager now?';
+    if (!window.confirm(ask)) return;
+    setBusy(true);
+    try { await client.put('/api/kpi/settings', { sales_visibility: on ? 'admin_only' : 'everyone' }); await refetch(); }
+    finally { setBusy(false); }
+  };
+  const last = data.last_change;
+  return (
+    <div className={`mt-4 rounded-xl border p-4 flex flex-wrap items-center justify-between gap-3 ${on ? 'border-emerald-300 bg-emerald-50' : 'border-amber-300 bg-amber-50'}`}>
+      <div className="min-w-[240px] flex-1">
+        <p className="text-sm font-semibold text-ink-primary">
+          Sales teams' KPIs: <span className={on ? 'text-emerald-700' : 'text-amber-800'}>{on ? 'On' : 'In progress'}</span>
+        </p>
+        <p className="text-xs text-ink-secondary mt-0.5">
+          {on
+            ? 'Every MedRep, Leader, Team Leader and Manager sees My KPIs on their dashboard.'
+            : 'Only Admin sees KPIs. My KPIs stays hidden from the sales teams until it is turned on here.'}
+          {last?.at ? ` Last changed by ${last.by || 'someone'} on ${new Date(last.at).toLocaleString('en-PH')}.` : ''}
+        </p>
+      </div>
+      <button type="button" onClick={flip} disabled={busy}
+        className={`px-3 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50 ${on ? 'border border-slate-300 bg-white text-ink-primary' : 'bg-getmeds-blue text-white'}`}>
+        {busy ? 'Saving…' : on ? 'Set back to In progress' : 'Turn on for sales teams'}
+      </button>
+    </div>
+  );
+}
+
 const KpiPage = () => {
   const [month, setMonth] = useState(manilaMonth());
   const [tab, setTab] = useState('people');
@@ -331,6 +377,8 @@ const KpiPage = () => {
           </button>
         ) : null}
       </div>
+
+      <SalesVisibility />
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mt-4">
         {[

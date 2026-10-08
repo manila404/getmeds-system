@@ -32,6 +32,44 @@ function canViewOwnKpis(user) {
   return ['medrep', 'team_lead'].includes(roleOf(user));
 }
 
+/**
+ * Oct 9, 2026 (Aaron): what the SALES TEAMS see is a separate switch that Admin flips on the
+ * Sales KPIs page, so the company admins can review the numbers first.
+ *   'admin_only' = "In progress": only Admin sees KPIs; My KPIs is hidden for everyone else.
+ *   'everyone'   = MedReps, Leaders, Team Leaders and Managers see My KPIs.
+ * Stored in the existing sync_state key/value table (no database change). Missing = 'admin_only',
+ * so it starts hidden. Each server instance keeps the value 30 seconds, so a change reaches
+ * everyone within about half a minute (they see it on their next page load).
+ */
+const { getSyncState, setSyncState } = require('./syncState');
+const VISIBILITY_KEY = 'kpi_sales_visibility';
+const VISIBILITY_LOG_KEY = 'kpi_sales_visibility_changed';
+const VISIBILITY = ['admin_only', 'everyone'];
+let visCache = { at: 0, value: null };
+
+async function salesVisibility() {
+  if (visCache.value && Date.now() - visCache.at < 30000) return visCache.value;
+  const v = await getSyncState(VISIBILITY_KEY);
+  visCache = { at: Date.now(), value: v === 'everyone' ? 'everyone' : 'admin_only' };
+  return visCache.value;
+}
+
+async function setSalesVisibility(value, actor) {
+  if (!VISIBILITY.includes(value)) throw new Error(`visibility must be one of: ${VISIBILITY.join(', ')}`);
+  await setSyncState(VISIBILITY_KEY, value);
+  await setSyncState(VISIBILITY_LOG_KEY, JSON.stringify({ value, by: actor?.name || actor?.email || null, at: new Date().toISOString() }));
+  visCache = { at: Date.now(), value };
+}
+
+async function salesVisibilityChange() {
+  try { return JSON.parse((await getSyncState(VISIBILITY_LOG_KEY)) || 'null'); } catch { return null; }
+}
+
+/** Sees My KPIs right now: a salesperson or team lead, AND Admin has turned KPIs on for them. */
+async function canSeeOwnKpisNow(user) {
+  return canViewOwnKpis(user) && (await salesVisibility()) === 'everyone';
+}
+
 /** May set targets for anyone at all (decides whether the Set targets panel shows). */
 function canSetAnyTarget(user) {
   return roleOf(user) === 'admin';
@@ -49,4 +87,8 @@ function canSetTarget(actor, person) {
 /** Roles that carry a sales target. */
 const TARGET_ROLES = ['medrep', 'team_lead'];
 
-module.exports = { isKpiPageEnabled, canViewAllKpis, canViewOwnKpis, canSetAnyTarget, canSetTarget, TARGET_ROLES };
+module.exports = {
+  isKpiPageEnabled, canViewAllKpis, canViewOwnKpis, canSeeOwnKpisNow, canSetAnyTarget, canSetTarget, TARGET_ROLES,
+  salesVisibility, setSalesVisibility, salesVisibilityChange, VISIBILITY,
+  _resetVisibilityCache: () => { visCache = { at: 0, value: null }; }
+};

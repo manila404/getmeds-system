@@ -14,7 +14,10 @@
 
 const db = require('../db/database');
 const { buildExport, monthRange, currentMonth, prevMonth } = require('../services/kpiService');
-const { canSetTarget, canSetAnyTarget, canViewAllKpis, canViewOwnKpis, TARGET_ROLES } = require('../services/kpiPermissions');
+const {
+  canSetTarget, canSetAnyTarget, canViewAllKpis, canSeeOwnKpisNow, TARGET_ROLES,
+  salesVisibility, setSalesVisibility, salesVisibilityChange, VISIBILITY
+} = require('../services/kpiPermissions');
 const { teamMedrepIds, teamGroups } = require('../services/teamScopeService');
 
 const MAX_TARGET = 1e11; // ₱100 billion — anything larger is a typo
@@ -367,11 +370,35 @@ async function getTargetChanges(req, res, next) {
 }
 
 /** GET /api/kpi/status — lets the menu know the page is on (404 from the router when it is off). */
-function getStatus(req, res) {
-  res.json({
-    success: true,
-    data: { enabled: true, canViewAll: canViewAllKpis(req.user), canViewOwn: canViewOwnKpis(req.user), canSetTargets: canSetAnyTarget(req.user), currentMonth: currentMonth() }
-  });
+async function getStatus(req, res, next) {
+  try {
+    res.json({
+      success: true,
+      data: {
+        enabled: true, canViewAll: canViewAllKpis(req.user), canViewOwn: await canSeeOwnKpisNow(req.user),
+        canSetTargets: canSetAnyTarget(req.user), currentMonth: currentMonth()
+      }
+    });
+  } catch (err) { next(err); }
 }
 
-module.exports = { getKpis, getMyKpis, getTargets, putTargets, copyTargets, targetsFromStructure, getTargetChanges, getStatus, _test: { parseTarget, parseMonth, clearKpiCache } };
+/**
+ * GET /api/kpi/settings — Admin: is My KPIs shown to the sales teams yet?
+ * PUT /api/kpi/settings { sales_visibility: 'admin_only' | 'everyone' } — Admin turns it on/off.
+ * Oct 9, 2026 (Aaron): 'admin_only' ("In progress") while the company admins review.
+ */
+async function getSettings(req, res, next) {
+  try {
+    res.json({ success: true, data: { sales_visibility: await salesVisibility(), last_change: await salesVisibilityChange() } });
+  } catch (err) { next(err); }
+}
+async function putSettings(req, res, next) {
+  try {
+    const v = req.body?.sales_visibility;
+    if (!VISIBILITY.includes(v)) return bad(res, `sales_visibility must be one of: ${VISIBILITY.join(', ')}`);
+    await setSalesVisibility(v, req.user);
+    res.json({ success: true, data: { sales_visibility: v, last_change: await salesVisibilityChange() } });
+  } catch (err) { next(err); }
+}
+
+module.exports = { getKpis, getMyKpis, getTargets, putTargets, copyTargets, targetsFromStructure, getTargetChanges, getStatus, getSettings, putSettings, _test: { parseTarget, parseMonth, clearKpiCache } };

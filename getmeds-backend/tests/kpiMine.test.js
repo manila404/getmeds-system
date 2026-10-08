@@ -64,8 +64,39 @@ beforeAll(async () => {
   await booked('C', 'lead', 200);
   await booked('D', 'outsider', 999);
   on();
+  // Oct 9, 2026: the sales teams see My KPIs only once Admin turns it on (starts "In progress")
+  await request(app).put('/api/kpi/settings').set(auth(adminToken)).send({ sales_visibility: 'everyone' });
   const put = (targets) => request(app).put(`/api/kpi/targets/${MONTH}`).set(auth(adminToken)).send({ targets });
   await put([{ user_id: P.rep1, target_php: 2000 }, { user_id: P.lead, target_php: 1000 }]);
+});
+
+describe('Admin decides when the sales teams see My KPIs (Oct 9, 2026)', () => {
+  const settings = (body, token = adminToken) => (body
+    ? request(app).put('/api/kpi/settings').set(auth(token)).send(body)
+    : request(app).get('/api/kpi/settings').set(auth(token)));
+
+  test('"In progress" hides My KPIs from the sales teams; Admin still sees everything', async () => {
+    expect((await settings({ sales_visibility: 'admin_only' })).status).toBe(200);
+    expect((await me('rep1')).status).toBe(403);
+    expect((await me('lead')).status).toBe(403);
+    expect((await request(app).get('/api/kpi/status').set(auth(T.rep1))).body.data.canViewOwn).toBe(false);
+    expect((await request(app).get(`/api/kpi?month=${MONTH}`).set(auth(adminToken))).status).toBe(200);
+  });
+
+  test('turning it on shows My KPIs again, and records who changed it', async () => {
+    const r = await settings({ sales_visibility: 'everyone' });
+    expect(r.body.data.sales_visibility).toBe('everyone');
+    expect(r.body.data.last_change).toMatchObject({ value: 'everyone', by: expect.any(String) });
+    expect((await me('rep1')).status).toBe(200);
+    expect((await request(app).get('/api/kpi/status').set(auth(T.rep1))).body.data.canViewOwn).toBe(true);
+  });
+
+  test('only Admin may read or change it, and only to a known value', async () => {
+    expect((await settings({ sales_visibility: 'everyone' }, T.lead)).status).toBe(403);
+    expect((await settings(null, T.rep1)).status).toBe(403);
+    expect((await settings({ sales_visibility: 'maybe' })).status).toBe(400);
+    expect((await settings(null)).body.data.sales_visibility).toBe('everyone');
+  });
 });
 
 afterEach(off);
