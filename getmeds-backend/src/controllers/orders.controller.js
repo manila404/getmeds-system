@@ -1,6 +1,7 @@
 const db = require('../db/database');
 const stateMachine = require('../workflow/stateMachine');
 const { paymentOnRecord } = require('../services/paymentOnRecord');
+const deletedDraftPurge = require('../services/deletedDraftPurge');
 const { generateOrderId } = require('../services/orderIdService');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
@@ -682,6 +683,9 @@ exports.getAll = async (req, res, next) => {
     // Oct 3, 2026: a draft cancelled by Management is hidden from the back office;
     // only the people who raise orders (and see it as Cancelled) still list it.
     if (!['medrep', 'team_lead'].includes(req.user.role)) where.push('o.draft_cancelled_at IS NULL');
+    // Oct 8, 2026: a deleted draft stays in their list for one day at most, even if the
+    // daily cron has not erased it yet.
+    else { where.push(`NOT ${deletedDraftPurge.EXPIRED_SQL}`); params.push(deletedDraftPurge.cutoff()); }
     if (status) { where.push('o.status = ?'); params.push(status); }
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
     // Sep 15, 2026: Dispatch's "My orders" — the ones they cater. See
@@ -1361,6 +1365,91 @@ exports.paymentOnRecord = async (req, res, next) => {
     const order = await db.prepare('SELECT id, intake_payment_terms FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     res.json({ success: true, data: await paymentOnRecord(order.id, order) });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/orders/:id/delete-draft — Management or Admin permanently deletes a draft.
+ *
+ * Oct 8, 2026. Replaces "Cancel and discard" in the Cancel dialog: a draft with no
+ * money involved that never reached Zoho is deleted. A draft already cancelled as
+ * 'discard' can be deleted the same way. A paid draft is never deleted: it can only be
+ * cancelled and kept on record so Finance can refund it.
+ *
+ * Two steps. This marks the draft Deleted: the back office stops seeing it at once, and
+ * the MedRep keeps it in My Orders until they read the notification, or for one day.
+ * Then services/deletedDraftPurge.js erases it with its items, attachment rows, history
+ * and notifications (every child table cascades).
+ *
+ * The caller must type the order id to confirm, and give a reason (the MedRep is told).
+ * The order's history goes with it, so the deletion is written to the server log.
+ * Attachment files in Sanity / Supabase are left in place; nothing links to them after.
+ */
+exports.deleteDraft = async (req, res, next) => {
+  try {
+    const reason = String((req.body || {}).reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'A reason is required — the MedRep sees it.' } });
+    }
+    const order = await db.prepare(`
+      SELECT o.*, u.email AS medrep_email, c.name AS customer_name
+      FROM orders o LEFT JOIN users u ON o.medrep_id = u.id LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = ?`).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    if (String((req.body || {}).confirm || '').trim() !== order.getmeds_order_id) {
+      return res.status(400).json({ success: false, error: { code: 'CONFIRM_MISMATCH', message: `Type ${order.getmeds_order_id} exactly to confirm the deletion.` } });
+    }
+    const deletable = order.status === 'draft' || (order.status === 'cancelled' && order.draft_cancel_kind === 'discard');
+    if (!deletable) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_DELETABLE', message: `Only a draft, or a draft cancelled as discard, can be deleted. This order is "${order.status}".` } });
+    }
+    if (order.zoho_so_id) {
+      return res.status(409).json({ success: false, error: { code: 'ALREADY_IN_ZOHO', message: 'This order already has a Zoho Sales Order, so it cannot be deleted here.' } });
+    }
+    const split = await db.prepare('SELECT COUNT(*) AS n FROM order_split_sales_orders WHERE order_id = ? AND zoho_so_id IS NOT NULL').get(order.id);
+    if (Number(split?.n) > 0) {
+      return res.status(409).json({ success: false, error: { code: 'ALREADY_IN_ZOHO', message: 'Part of this order already has a Zoho Sales Order, so it cannot be deleted here.' } });
+    }
+    const queued = await db.prepare("SELECT COUNT(*) AS n FROM zoho_sync_queue WHERE order_id = ? AND status = 'pending'").get(order.id);
+    if (Number(queued?.n) > 0) {
+      return res.status(409).json({ success: false, error: { code: 'ZOHO_SYNC_PENDING', message: 'This order is waiting to be sent to Zoho, so it cannot be deleted.' } });
+    }
+    const money = await paymentOnRecord(order.id, order);
+    if (money.has) {
+      return res.status(409).json({ success: false, error: { code: 'PAYMENT_ON_RECORD', message: `This draft has a payment on record (${money.reasons.join('; ')}), so it cannot be deleted. Cancel it and keep the record, for a refund to be arranged.` } });
+    }
+
+    const actor = await resolveActor(req.user, 'management');
+    const now = new Date().toISOString();
+    // The same conditions again in the UPDATE itself, so an order submitted or sent to
+    // Zoho between the checks above and this line is left alone.
+    const marked = await db.prepare(`
+      UPDATE orders
+         SET status = 'deleted', draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?,
+             draft_cancel_kind = 'deleted', refund_status = NULL, updated_at = ?
+       WHERE id = ? AND zoho_so_id IS NULL
+         AND (status = 'draft' OR (status = 'cancelled' AND draft_cancel_kind = 'discard'))`)
+      .run(now, actor.id, reason, now, order.id);
+    if (!marked.changes) {
+      return res.status(409).json({ success: false, error: { code: 'ORDER_CHANGED', message: 'This order changed while you were deleting it. Reload and check it.' } });
+    }
+    console.log(`[ORDERS] draft ${order.getmeds_order_id} (#${order.id}, ₱${order.total_amount}) permanently deleted by ${actor.name} (#${actor.id}): ${reason}`);
+
+    // No orderId: the notification must outlive the order. Its payload names the order,
+    // so reading it erases the order (notifications.controller.js).
+    const recipients = [order.medrep_id, order.raised_by_id].filter((rid) => rid && rid !== actor.id);
+    await notify({
+      orderId: null,
+      recipientIds: recipients,
+      message: `Draft ${order.getmeds_order_id}${order.customer_name ? ` (${order.customer_name})` : ''} was deleted by ${actor.name}: ${reason}. ` +
+        'It leaves your list when you mark this as read, or after one day.',
+      eventType: 'DRAFT_DELETED',
+      payload: { deleted_order_id: order.id },
+      orderData: { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: 'deleted', medrep_email: order.medrep_email }
+    });
+    // Nobody else to tell (the person deleting is the MedRep on it): nothing to wait for.
+    if (!recipients.length) await deletedDraftPurge.purgeOrder(order.id);
+    res.json({ success: true, data: { deleted: order.getmeds_order_id } });
   } catch (err) { next(err); }
 };
 

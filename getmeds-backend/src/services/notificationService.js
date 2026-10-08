@@ -99,7 +99,8 @@ async function sendRealGoogleChat(chatPayload) {
 
 // ─── notify() ────────────────────────────────────────────────────────────────
 
-async function notify({ orderId, recipientIds, message, eventType, orderData = {} }) {
+// payload (Oct 8, 2026): optional JSON stored on the in-app row, e.g. { deleted_order_id }.
+async function notify({ orderId, recipientIds, message, eventType, orderData = {}, payload = null }) {
   const now = new Date().toISOString();
 
   // 1. In-App notification (stored in DB for each recipient)
@@ -109,7 +110,7 @@ async function notify({ orderId, recipientIds, message, eventType, orderData = {
       VALUES (?, ?, 'in_app', ?, ?, ?)
     `);
     for (const rid of recipientIds) {
-      if (rid) await ins.run(orderId || null, rid, message, null, now);
+      if (rid) await ins.run(orderId || null, rid, message, payload ? JSON.stringify(payload) : null, now);
     }
   }
 
