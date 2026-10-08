@@ -157,7 +157,7 @@ async function plan(c) {
     const lead = acct(leaderKey);
     if (!lead) { changes.missing.push(`${u.name} should report to ${leaderKey}, who has no account (left as is)`); return; }
     if (lead.id === u.id) return;
-    if (u.team_lead_id !== lead.id) changes.teamLeads.push({ id: u.id, person: u.name, email: u.email, from: byId.get(u.team_lead_id)?.name || '(none)', to: lead.name, why });
+    if (u.team_lead_id !== lead.id) changes.teamLeads.push({ id: u.id, person: u.name, email: u.email, from: byId.get(u.team_lead_id)?.name || '(none)', to: lead.name, toId: lead.id, why });
   };
   for (const [k, to] of Object.entries(LEADER_REPORTS_TO)) {
     const u = acct(k);
@@ -210,19 +210,29 @@ async function apply(c, ch) {
   for (const r of ch.roles) await c.query("UPDATE users SET role = 'team_lead', updated_at = $1 WHERE id = $2", [new Date().toISOString(), r.id]);
   for (const r of ch.titles) await c.query('UPDATE users SET sales_title = $1, updated_at = $2 WHERE id = $3', [r.to, new Date().toISOString(), r.id]);
   for (const r of ch.teamLeads) {
-    const lead = (await c.query('SELECT id FROM users WHERE name = $1 AND is_active = 1 LIMIT 1', [r.to])).rows[0];
-    await c.query('UPDATE users SET team_lead_id = $1, updated_at = $2 WHERE id = $3', [lead.id, new Date().toISOString(), r.id]);
+    await c.query('UPDATE users SET team_lead_id = $1, updated_at = $2 WHERE id = $3', [r.toId, new Date().toISOString(), r.id]);
   }
 }
 
+/**
+ * Oct 9, 2026: --live runs against the live database (DATABASE_URL in .env), for step 5 of the
+ * plan, with Aaron's explicit OK. Without --apply it is a dry run inside a READ ONLY transaction,
+ * so it cannot change anything; with --apply every change is made in one transaction (all or
+ * nothing). The local test database stays the default.
+ */
 async function main() {
   const doApply = process.argv.includes('--apply');
-  const pool = new Pool({ connectionString: DEV_URL, max: 1 });
+  const live = process.argv.includes('--live');
+  if (live) require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+  const url = live ? process.env.DATABASE_URL : DEV_URL;
+  if (live && (!url || /localhost|127\.0\.0\.1/.test(url))) throw new Error('--live needs the live DATABASE_URL in .env');
+  const pool = new Pool({ connectionString: url, max: 1, ssl: live ? { rejectUnauthorized: false } : false, connectionTimeoutMillis: 20000 });
   const c = await pool.connect();
   try {
     const { rows: [db] } = await c.query('SELECT current_database() AS d');
-    if (db.d !== 'getmeds_dev') throw new Error(`Refusing: connected to ${db.d}, not getmeds_dev`);
-    await c.query('BEGIN');
+    if (!live && db.d !== 'getmeds_dev') throw new Error(`Refusing: connected to ${db.d}, not getmeds_dev`);
+    await c.query(live && !doApply ? 'BEGIN READ ONLY' : 'BEGIN');
+    await c.query('SET LOCAL statement_timeout = 15000');
     const ch = await plan(c);
     const lines = [];
     lines.push(`Territories to update: ${ch.territories.length}`);
@@ -237,9 +247,10 @@ async function main() {
     for (const m of [...new Set(ch.missing)]) lines.push(`  ${m}`);
     for (const n of ch.notes) lines.push(`  note: ${n}`);
     console.log(lines.join('\n'));
-    fs.writeFileSync(path.join(OUT, `structure-apply-${doApply ? 'applied' : 'dry-run'}-local.txt`), lines.join('\n'));
-    if (doApply) { await apply(c, ch); await c.query('COMMIT'); console.log('\nApplied to getmeds_dev.'); }
-    else { await c.query('ROLLBACK'); console.log('\nDry run only: nothing changed. Add --apply to apply to getmeds_dev.'); }
+    const where = live ? 'LIVE' : 'getmeds_dev';
+    fs.writeFileSync(path.join(OUT, `structure-apply-${doApply ? 'applied' : 'dry-run'}-${live ? 'live' : 'local'}.txt`), lines.join('\n'));
+    if (doApply) { await apply(c, ch); await c.query('COMMIT'); console.log(`\nApplied to ${where}.`); }
+    else { await c.query('ROLLBACK'); console.log(`\nDry run only (${where}): nothing changed. Add --apply to apply.`); }
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); await pool.end(); }
 }
 
