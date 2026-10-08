@@ -531,6 +531,12 @@ async function discardHeldCustomer(heldId, actor) {
   return { ok: true, name: held.name };
 }
 
+// Oct 8, 2026: Zoho refuses anything in Email Address that is not an email ("Invalid
+// value passed for Email Address"). A rep with no email typed "n/A" to get past the
+// required field, and the customer was stuck. Deliberately loose: something@something.tld.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isEmail = (v) => EMAIL_RE.test(String(v || '').trim());
+
 /** What the caller must provide, checked before anything is written anywhere. */
 function validate(input) {
   const c = input || {};
@@ -564,6 +570,10 @@ function validate(input) {
     if (!String(c.lto_type           || '').trim()) problems.push('LTO Type is required.');
     if (!String(c.license_issuance_date || '').trim()) problems.push('License Issuance Date is required.');
     if (!String(c.license_expiry_date   || '').trim()) problems.push('License Expiry Date is required.');
+  }
+
+  if (String(c.email || '').trim() && !isEmail(c.email)) {
+    problems.push('Email Address must be a real email address, like name@example.com. Zoho does not accept "N/A".');
   }
 
   // contact_number is the Zoho cf_contact_number — the frontend derives it from phone, so accept either
@@ -867,6 +877,7 @@ module.exports = {
   createCustomer,
   findDuplicates,
   validate,
+  isEmail,
   normalise,
   CATEGORIES,
   holdCustomer,

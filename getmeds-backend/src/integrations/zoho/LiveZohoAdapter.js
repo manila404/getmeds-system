@@ -1006,18 +1006,24 @@ class LiveZohoAdapter extends ZohoAdapter {
       contact_type: 'customer'
     };
 
+    // Oct 8, 2026: Zoho refuses the whole contact for an email it cannot parse
+    // ("Invalid value passed for Email Address"), and reps type "n/A" when a business
+    // has none. Anything that is not an email is left out, so the customer is still
+    // created, without one.
+    const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(c.email || '').trim()) ? String(c.email).trim() : null;
+
     if (c.company_name) body.company_name = c.company_name;
-    if (c.email) body.email = c.email;
+    if (email) body.email = email;
     if (c.phone) body.phone = c.phone;
 
     // Zoho's "Primary Contact" is the first entry in contact_persons.
-    if (c.first_name || c.last_name || c.email) {
+    if (c.first_name || c.last_name || email) {
       body.contact_persons = [
         {
           salutation: c.salutation || undefined,
           first_name: c.first_name || undefined,
           last_name: c.last_name || undefined,
-          email: c.email || undefined,
+          email: email || undefined,
           phone: c.phone || undefined,
           is_primary_contact: true
         }

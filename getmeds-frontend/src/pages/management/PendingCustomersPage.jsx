@@ -471,6 +471,18 @@ const PendingCustomersPage = () => {
   // Sep 11, 2026: a customer can be marked "Needs attention" for a reason that
   // was never about the customer — a push attempted during a token outage did
   // exactly that. Without a way back, the only remedies were SQL or re-typing.
+  // Oct 8, 2026: correct a waiting customer's email (Zoho refuses "n/A") and requeue it.
+  const [emailFix, setEmailFix] = useState(null);
+  const saveEmail = useMutation({
+    mutationFn: ({ id, email }) => client.post(`/api/customers/${id}/pending-email`, { email }).then((r) => r.data?.data),
+    onSuccess: (res) => {
+      toast.success(res.message);
+      setEmailFix(null);
+      refresh();
+    },
+    onError: (err) => toast.error(errorMessage(err, 'Could not save the email.'))
+  });
+
   const retry = useMutation({
     mutationFn: (id) => client.post(`/api/customers/${id}/retry`).then((r) => r.data?.data),
     onSuccess: (res) => {
@@ -609,6 +621,34 @@ const PendingCustomersPage = () => {
                         {c.created_at && <span> · added {timeAgo(c.created_at)}</span>}
                         {c.order_count > 0 && <span> · {c.order_count} order{c.order_count === 1 ? '' : 's'}</span>}
                       </p>
+
+                      {emailFix?.id === c.id ? (
+                        <form
+                          className="mt-1.5 flex flex-wrap items-center gap-2"
+                          onSubmit={(e) => { e.preventDefault(); saveEmail.mutate({ id: c.id, email: emailFix.value.trim() }); }}
+                        >
+                          <input
+                            type="email"
+                            autoFocus
+                            value={emailFix.value}
+                            onChange={(e) => setEmailFix({ id: c.id, value: e.target.value })}
+                            placeholder="name@example.com, or blank for none"
+                            className="w-64 text-[12px] border border-slate-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
+                          />
+                          <button type="submit" disabled={saveEmail.isPending} className="text-[11px] font-semibold text-white bg-getmeds-blue rounded px-2.5 py-1 disabled:opacity-60">
+                            {saveEmail.isPending ? 'Saving…' : emailFix.value.trim() ? 'Save email' : 'Remove email'}
+                          </button>
+                          <button type="button" onClick={() => setEmailFix(null)} className="text-[11px] font-semibold text-ink-secondary">Cancel</button>
+                        </form>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setEmailFix({ id: c.id, value: /@/.test(c.email || '') ? c.email : '' })}
+                          className="mt-1 text-[11px] font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
+                        >
+                          {c.email ? 'Change email' : 'Add email'}
+                        </button>
+                      )}
 
                       {/* Only shown for a 'failed' row. A pending row's error is
                           the one already stated above, and repeating it per row

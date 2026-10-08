@@ -930,6 +930,57 @@ const retryPendingCustomer = async (req, res, next) => {
 };
 
 /**
+ * POST /api/customers/:id/pending-email — Management corrects the email of a customer
+ * still waiting for Zoho, and puts it back in the queue.
+ *
+ * Oct 8, 2026. Zoho refused "Saint Dominic General Hospital Inc." with "Invalid value
+ * passed for Email Address": the rep had typed "n/A". The push replays
+ * zoho_pending_payload, not the customer row, so both are corrected here. A blank email
+ * removes it: the customer is then pushed without one.
+ */
+const updatePendingEmail = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const email = String((req.body || {}).email || '').trim();
+    if (email && !customerCreate.isEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Enter a real email address, like name@example.com, or leave it blank to push without one.' }
+      });
+    }
+    const held = await customerCreate.getHeldCustomer(id);
+    if (!held) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'No customer waiting for Zoho has that id.' }
+      });
+    }
+    let payload = null;
+    if (held.zoho_pending_payload) {
+      try { payload = JSON.parse(held.zoho_pending_payload); } catch { payload = null; }
+    }
+    if (payload) payload.email = email || '';
+
+    await db
+      .prepare(
+        `UPDATE customers
+            SET email = ?, zoho_pending_payload = COALESCE(?, zoho_pending_payload),
+                zoho_sync_status = 'pending', zoho_sync_error = NULL
+          WHERE id = ? AND zoho_contact_id IS NULL`
+      )
+      .run(email || null, payload ? JSON.stringify(payload) : null, id);
+
+    console.info(`[CUSTOMER_EMAIL] ${req.user?.name || req.user?.email} ${email ? 'set' : 'removed'} the email of waiting customer ${id} "${held.name}"`);
+    res.json({
+      success: true,
+      data: { id, name: held.name, message: `${email ? 'Email saved' : 'Email removed'}. ${held.name} is queued again — press Push to Zoho.` }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
  * The three answers to "this waiting customer looks like one Zoho already has".
  *
  * Sep 14, 2026. The push holds a likely duplicate back (see findZohoMatches in
@@ -1052,6 +1103,7 @@ module.exports = {
   createCustomer,
   checkDuplicates,
   retryPendingCustomer,
+  updatePendingEmail,
   pushPendingCustomer,
   linkPendingCustomer,
   getZohoComparison,

@@ -37,6 +37,8 @@ router.get('/pending', requireAuth, requireRole('admin', 'management'), c.listPe
 router.post('/pending/sync', requireAuth, requireRole('admin', 'management'), c.syncPendingCustomers);
 // Put a customer wrongly marked 'Needs attention' back in the queue.
 router.post('/:id/retry', requireAuth, requireRole('admin', 'management'), c.retryPendingCustomer);
+// Oct 8, 2026: correct the email of a waiting customer (Zoho refuses "n/A") and requeue it.
+router.post('/:id/pending-email', requireAuth, requireRole('admin', 'management'), c.updatePendingEmail);
 // Sep 14, 2026: a waiting customer that looks like one Zoho already has is
 // held back from the push. Push it as new anyway, use the Zoho customer
 // instead (its orders move across), or delete the waiting copy. Nothing here
