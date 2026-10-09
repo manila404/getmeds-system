@@ -234,6 +234,12 @@ const facadeMethods = [
   // through the one module every controller actually imports.
   'updateSalesOrder',
   'getSalesOrder',
+  // Oct 9, 2026: added HERE. getItemWarehouses and getItemBatches existed on LiveZohoAdapter
+  // (feature 10.8, the Inventory page's warehouse breakdown) but were never listed, so
+  // through this facade they were `undefined` and the breakdown could not work. The same
+  // lesson as every entry below. Management's stock check uses getItemWarehouses too.
+  'getItemWarehouses',
+  'getItemBatches',
   'listSalesOrders',
   'listRecentSalesOrders',
   // Sep 9, 2026: added HERE at the same time as the adapters, rather than

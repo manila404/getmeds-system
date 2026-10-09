@@ -393,6 +393,9 @@ CREATE TABLE IF NOT EXISTS orders (
   -- noRxDecision, never by the order form.
   rx_not_required_by INTEGER REFERENCES users(id),
   rx_not_required_at TEXT,
+  -- Oct 9, 2026: the warehouse Management chose at approval (NULL = Zoho's main warehouse).
+  fulfil_warehouse_id TEXT,
+  fulfil_warehouse_name TEXT,
   rx_not_required_reason TEXT,
   -- Sep 5, 2026 (3): THIS order's Sub-division — editable at order creation
   -- by whoever raises it (medrep or management), unlike Division (which
@@ -454,6 +457,9 @@ CREATE TABLE IF NOT EXISTS order_items (
   -- than a question. Free text, nullable, no CHECK: same reasoning as every
   -- other optional descriptive field in this app (delivery_notes and so on).
   price_remark TEXT,
+  -- Oct 9, 2026: this line's own warehouse (NULL = the order's, else Zoho's main one).
+  fulfil_warehouse_id TEXT,
+  fulfil_warehouse_name TEXT,
   -- Sep 22, 2026: a per-line override of the order's own `invoicing_from`.
   -- NULL (the default, and every pre-existing row) means "follow the
   -- order" — nothing about a normal order changes. Set on a line to the

@@ -170,6 +170,20 @@ class ZohoAdapter {
   }
 
   /**
+   * Read-only: one item's stock in every warehouse (on hand, committed, available for sale).
+   * Oct 9, 2026: also used by Management's stock check before approving an order.
+   * @returns {Promise<{code:number, message:string, warehouses:object[]}>}
+   */
+  async getItemWarehouses(zohoItemId) {
+    throw new Error('Not implemented');
+  }
+
+  /** Read-only: batch details for one item (empty when batch tracking is off). */
+  async getItemBatches(zohoItemId) {
+    throw new Error('Not implemented');
+  }
+
+  /**
    * Read-only: EVERY Sales Order in the org, walking Zoho's pages until it
    * says there are no more.
    *

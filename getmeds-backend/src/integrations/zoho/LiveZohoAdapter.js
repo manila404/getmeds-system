@@ -311,6 +311,11 @@ class LiveZohoAdapter extends ZohoAdapter {
       // never creates, edits, or activates a Zoho item, so an unmapped
       // product is sent as a plain named line rather than auto-created.
       if (item.zoho_item_id) li.item_id = item.zoho_item_id;
+      // Oct 9, 2026: the warehouse Management chose at approval. Absent -> Zoho uses the
+      // main warehouse, exactly as before this existed.
+      // A line's own warehouse (Edit Items) wins over the order's.
+      const lineWarehouse = item.fulfil_warehouse_id || orderData.warehouse_id;
+      if (lineWarehouse) li.warehouse_id = lineWarehouse;
       // Oct 2, 2026: the VAT chosen on an edited line used to stay local — Zoho
       // took each line's tax from the item, so changing "VAT 12%" to "No Tax"
       // here never reached the Sales Order. On an EDIT only, the line's own tax

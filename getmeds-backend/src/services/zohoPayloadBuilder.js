@@ -110,7 +110,10 @@ async function buildZohoSalesOrderPayload(orderId, { items: itemsOverride, invoi
     // orders.controller.js's gmLeadId note) and simply read back here,
     // like everything else in this rebuild — `SELECT o.*` above already
     // picks it up now that it's a real column.
-    gm_lead_id: order.gm_lead_id || null
+    gm_lead_id: order.gm_lead_id || null,
+    // Oct 9, 2026: the warehouse Management picked at approval (orders.fulfil_warehouse_id).
+    // Read fresh like everything else, so a retry or an edit sends the same one.
+    warehouse_id: order.fulfil_warehouse_id || null
   };
 }
 

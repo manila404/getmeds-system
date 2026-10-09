@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { CheckCircle, Clock, RefreshCw, ShieldCheck, XCircle, Undo2, ExternalLink } from 'lucide-react';
 import client from '../../api/client';
+import ApproveOrderModal from '../../components/orders/ApproveOrderModal';
 
 // Sep 7, 2026: "When medrep creates an order, the order will not sync to
 // zoho unless the management checks it." A MedRep-submitted order now stops
@@ -36,17 +37,16 @@ const ApprovalQueuePage = () => {
   const [actionTarget, setActionTarget] = useState(null);
   const [actionReason, setActionReason] = useState('');
 
-  const approveMutation = useMutation({
-    mutationFn: (id) => client.post(`/api/orders/${id}/approve`).then(r => r.data),
-    onSuccess: (res) => {
-      const synced = res?.data?.zoho_sync_status === 'synced' || res?.data?.zoho_sync_status === 'skipped';
-      toast.success(synced
-        ? 'Approved — Sales Order created in Zoho.'
-        : 'Approved — Zoho sync failed and was queued for automatic retry (see the order for details).');
-      qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
-    },
-    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not approve that order')
-  });
+  // Oct 9, 2026: Approve opens ApproveOrderModal (stock check + warehouse); the modal does the approving.
+  const [approving, setApproving] = useState(null); // { id, ref } | null
+  const onApproved = (res) => {
+    const synced = res?.data?.zoho_sync_status === 'synced' || res?.data?.zoho_sync_status === 'skipped';
+    toast.success(synced
+      ? 'Approved — Sales Order created in Zoho.'
+      : 'Approved — Zoho sync failed and was queued for automatic retry (see the order for details).');
+    setApproving(null);
+    qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
+  };
 
   const rejectMutation = useMutation({
     mutationFn: ({ id, reason }) => client.post(`/api/orders/${id}/reject`, { reason }).then(r => r.data),
@@ -110,7 +110,7 @@ const ApprovalQueuePage = () => {
         ) : (
           <ul className="divide-y divide-slate-100">
             {orders.map(order => {
-              const approveBusy = approveMutation.isPending && approveMutation.variables === order.id;
+              const approveBusy = approving?.id === order.id;
               const rejectBusy = rejectMutation.isPending && rejectMutation.variables?.id === order.id;
               const sendBackBusy = sendBackMutation.isPending && sendBackMutation.variables?.id === order.id;
               const isActing = actionTarget?.id === order.id;
@@ -191,7 +191,7 @@ const ApprovalQueuePage = () => {
                       <div className="flex flex-wrap gap-2">
                         <button
                           disabled={approveBusy}
-                          onClick={() => approveMutation.mutate(order.id)}
+                          onClick={() => setApproving({ id: order.id, ref: order.getmeds_order_id })}
                           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pharmacy-green text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50"
                         >
                           <ShieldCheck className="w-3.5 h-3.5" />
@@ -228,6 +228,15 @@ const ApprovalQueuePage = () => {
           so it can be fixed and resubmitted. Rejecting puts the order on hold with your reason attached instead
           — either way, nothing is ever sent to Zoho until Approve is clicked.</p>
       </div>
+
+      {approving && (
+        <ApproveOrderModal
+          orderId={approving.id}
+          orderRef={approving.ref}
+          onClose={() => setApproving(null)}
+          onApproved={onApproved}
+        />
+      )}
     </div>
   );
 };

@@ -2,6 +2,7 @@ const db = require('../db/database');
 const stateMachine = require('../workflow/stateMachine');
 const { paymentOnRecord } = require('../services/paymentOnRecord');
 const deletedDraftPurge = require('../services/deletedDraftPurge');
+const stockCheckService = require('../services/stockCheckService');
 const { generateOrderId } = require('../services/orderIdService');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
@@ -2425,6 +2426,8 @@ exports.create = async (req, res, next) => {
       const itemColumns = ['order_id', 'product_id', 'quantity', 'unit_price', 'subtotal', 'discount_amount', 'tax_percent', 'tax_label', 'line_total'];
       if (canWriteRemark) itemColumns.push('price_remark');
       if (canWriteItemInvoicingFrom) itemColumns.push('invoicing_from');
+      const canWriteLineWarehouse = await hasColumn('order_items', 'fulfil_warehouse_id');
+      if (canWriteLineWarehouse) itemColumns.push('fulfil_warehouse_id', 'fulfil_warehouse_name');
       const insItem = db.prepare(
         `INSERT INTO order_items (${itemColumns.join(', ')}) VALUES (${itemColumns.map(() => '?').join(', ')})`
       );
@@ -2840,7 +2843,9 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     // Sep 8, 2026 (3): GM Lead ID — set once at create() time (see the
     // gmLeadId note there) and simply carried through here, not
     // re-derived from whoever is submitting/approving now.
-    gm_lead_id: order.gm_lead_id || null
+    gm_lead_id: order.gm_lead_id || null,
+    // Oct 9, 2026: the warehouse Management chose at approval; absent = Zoho's main one.
+    warehouse_id: order.fulfil_warehouse_id || null
   };
   let zohoResult = null;
   let zohoSyncStatus = 'pending';
@@ -3213,6 +3218,20 @@ exports.submit = async (req, res, next) => {
 // names who decided and why. Orders Management/admin submitted themselves
 // never reach this status, so these two actions only ever act on a
 // MedRep-raised order.
+/**
+ * GET /api/orders/:id/stock-check?warehouse_id= — Management / Admin: stock of each line in each
+ * Zoho warehouse, measured against the chosen one. Read-only and advisory (never blocks).
+ * Oct 9, 2026. See services/stockCheckService.js.
+ */
+exports.stockCheck = async (req, res, next) => {
+  try {
+    const order = await db.prepare('SELECT id FROM orders WHERE id = ?').get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    const data = await stockCheckService.checkOrderStock(order.id, req.query.warehouse_id || null);
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+};
+
 exports.approve = async (req, res, next) => {
   try {
     const order = await db.prepare(`
@@ -3238,6 +3257,41 @@ exports.approve = async (req, res, next) => {
 
     const approver = await resolveActor(req.user, 'management');
 
+    // Oct 9, 2026: Management may choose the warehouse the order is sent from. The server
+    // re-checks the stock itself (a screen can be stale), refuses a warehouse Zoho does not
+    // list, and refuses one that cannot fill the order unless Management acknowledged it.
+    // Without a warehouse_id this is exactly the approval it always was.
+    const wantedWarehouse = String((req.body || {}).warehouse_id || '').trim();
+    let warehouseNote = '';
+    if (wantedWarehouse) {
+      const check = await stockCheckService.checkOrderStock(order.id, wantedWarehouse);
+      if (!check.available) {
+        return res.status(503).json({
+          success: false,
+          error: { code: 'STOCK_CHECK_UNAVAILABLE', message: `${check.reason} Try again, or approve without choosing a warehouse.` }
+        });
+      }
+      const chosen = check.warehouses.find((w) => w.id === wantedWarehouse);
+      if (!chosen) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_WAREHOUSE', message: 'That warehouse is not one Zoho lists for these items.' } });
+      }
+      const shortLines = check.lines.filter((l) => l.status === 'short');
+      if (shortLines.length && (req.body || {}).stock_ack !== true) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'STOCK_SHORT',
+            message: `${chosen.name} cannot fill ${shortLines.length} line${shortLines.length === 1 ? '' : 's'} of this order (${shortLines.map((l) => l.name).join(', ')}). Choose another warehouse, or approve anyway after acknowledging it.`
+          },
+          data: { warehouse: chosen.name, short: shortLines.map((l) => ({ name: l.name, needed: l.needed_total, short_by: l.short_by })) }
+        });
+      }
+      await db.prepare('UPDATE orders SET fulfil_warehouse_id = ?, fulfil_warehouse_name = ? WHERE id = ?').run(chosen.id, chosen.name, order.id);
+      order.fulfil_warehouse_id = chosen.id;
+      order.fulfil_warehouse_name = chosen.name;
+      warehouseNote = ` Warehouse: ${chosen.name}` + (shortLines.length ? ` (short on ${shortLines.map((l) => l.name).join(', ')}; acknowledged).` : '.');
+    }
+
     // Logged BEFORE the Zoho-sync pipeline runs, and separately from its own
     // STATUS_CHANGE hops — this is the record of WHO approved it, distinct
     // from the pipeline hops that follow (attributed to the order's own
@@ -3250,7 +3304,7 @@ exports.approve = async (req, res, next) => {
       newStatus: order.status,
       actorId: approver.id,
       actorName: approver.name,
-      notes: 'Approved by Management — syncing to Zoho.'
+      notes: 'Approved by Management — syncing to Zoho.' + warehouseNote
     });
 
     const pipelineActor = { id: order.medrep_id, name: order.medrep_name };
@@ -4033,9 +4087,31 @@ exports.updateItems = async (req, res, next) => {
     // (a database that has not run the migration) it reads as inclusive, the
     // default — and only an order not yet in Zoho can be edited at all, which
     // in practice means a new one.
-    const isInclusiveTax = order.is_inclusive_tax == null ? true : Boolean(Number(order.is_inclusive_tax));
+    let isInclusiveTax = order.is_inclusive_tax == null ? true : Boolean(Number(order.is_inclusive_tax));
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'At least one order item is required' } });
+    }
+
+    // Oct 9, 2026: the tax preference (Exclusive / Inclusive) can be changed from Edit Items,
+    // but only before the order reaches Zoho: on an existing Sales Order it changes how Zoho
+    // prices every line. Lines are re-priced under the new preference.
+    let taxPreferenceChanged = false;
+    if (typeof req.body.is_inclusive_tax === 'boolean' && req.body.is_inclusive_tax !== isInclusiveTax) {
+      if (wasAlreadySynced) {
+        return res.status(409).json({
+          success: false,
+          error: { code: 'TAX_PREFERENCE_LOCKED', message: 'This order already has a Zoho Sales Order, so its Tax Inclusive / Exclusive setting cannot be changed here.' }
+        });
+      }
+      isInclusiveTax = req.body.is_inclusive_tax;
+      taxPreferenceChanged = true;
+    }
+
+    // Oct 9, 2026: a line's own warehouse. Only Management / Admin can set it; for anyone else
+    // an existing choice on the same product is kept rather than wiped by this save.
+    const keptWarehouse = new Map();
+    for (const old of await db.prepare('SELECT product_id, fulfil_warehouse_id, fulfil_warehouse_name FROM order_items WHERE order_id = ?').all(order.id)) {
+      if (!keptWarehouse.has(old.product_id)) keptWarehouse.set(old.product_id, old);
     }
 
     // Same per-line validation/pricing as `create` above, kept in lockstep
@@ -4106,8 +4182,25 @@ exports.updateItems = async (req, res, next) => {
         line_total: lineTotal,
         name: product.name,
         price_remark: priceRemark,
-        invoicing_from: (typeof item.invoicing_from === 'string' && item.invoicing_from.trim()) ? item.invoicing_from.trim() : null
+        invoicing_from: (typeof item.invoicing_from === 'string' && item.invoicing_from.trim()) ? item.invoicing_from.trim() : null,
+        zoho_item_id: product.zoho_item_id || null,
+        fulfil_warehouse_id: isManagementCaller
+          ? ((typeof item.warehouse_id === 'string' && item.warehouse_id.trim()) ? item.warehouse_id.trim() : null)
+          : (keptWarehouse.get(item.product_id)?.fulfil_warehouse_id || null),
+        fulfil_warehouse_name: isManagementCaller
+          ? ((typeof item.warehouse_name === 'string' && item.warehouse_name.trim()) ? item.warehouse_name.trim().slice(0, 120) : null)
+          : (keptWarehouse.get(item.product_id)?.fulfil_warehouse_name || null)
       });
+    }
+
+    if (isManagementCaller) {
+      const verdict = await stockCheckService.validateLineWarehouses(resolvedItems.map((r) => ({ zoho_item_id: r.zoho_item_id, warehouse_id: r.fulfil_warehouse_id, name: r.name })));
+      if (!verdict.ok && verdict.unavailable) {
+        return res.status(503).json({ success: false, error: { code: 'STOCK_CHECK_UNAVAILABLE', message: verdict.unavailable } });
+      }
+      if (!verdict.ok) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_WAREHOUSE', message: `That warehouse is not one Zoho lists for: ${verdict.bad.join(', ')}.` } });
+      }
     }
 
     const oldItemsSummary = (await db.prepare(`
@@ -4131,6 +4224,8 @@ exports.updateItems = async (req, res, next) => {
       const itemColumns = ['order_id', 'product_id', 'quantity', 'unit_price', 'subtotal', 'discount_amount', 'tax_percent', 'tax_label', 'line_total'];
       if (canWriteRemark) itemColumns.push('price_remark');
       if (canWriteItemInvoicingFrom) itemColumns.push('invoicing_from');
+      const canWriteLineWarehouse = await hasColumn('order_items', 'fulfil_warehouse_id');
+      if (canWriteLineWarehouse) itemColumns.push('fulfil_warehouse_id', 'fulfil_warehouse_name');
       const insertItem = db.prepare(
         `INSERT INTO order_items (${itemColumns.join(', ')}) VALUES (${itemColumns.map(() => '?').join(', ')})`
       );
@@ -4138,9 +4233,11 @@ exports.updateItems = async (req, res, next) => {
         const values = [order.id, it.product_id, it.quantity, it.unit_price, it.subtotal, it.discount_amount, it.tax_percent, it.tax_label, it.line_total];
         if (canWriteRemark) values.push(it.price_remark);
         if (canWriteItemInvoicingFrom) values.push(it.invoicing_from);
+        if (canWriteLineWarehouse) values.push(it.fulfil_warehouse_id, it.fulfil_warehouse_name);
         await insertItem.run(...values);
       }
       await db.prepare('UPDATE orders SET total_amount = ?, updated_at = ? WHERE id = ?').run(total_amount, now, order.id);
+      if (taxPreferenceChanged) await db.prepare('UPDATE orders SET is_inclusive_tax = ? WHERE id = ?').run(isInclusiveTax ? 1 : 0, order.id);
     })();
 
     // Sep 19, 2026: Management editing items on an order Zoho already has —

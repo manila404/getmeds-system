@@ -128,7 +128,7 @@ class MockZohoAdapter extends ZohoAdapter {
       reference_number: orderData.getmeds_order_id,
       // Mirrors Zoho: an order that states no preference is VAT-inclusive.
       is_inclusive_tax: typeof orderData.is_inclusive_tax === 'boolean' ? orderData.is_inclusive_tax : true,
-      line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity }))
+      line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity, warehouse_id: i.fulfil_warehouse_id || orderData.warehouse_id || null }))
     });
 
     const salesorder = {
@@ -139,6 +139,7 @@ class MockZohoAdapter extends ZohoAdapter {
       customer_name: contact.contact_name || orderData.customer_name,
       date: new Date().toISOString().slice(0, 10),
       ...(await this._buildSalesOrderFields(orderData)),
+      warehouse_id: orderData.warehouse_id || null,
       created_time: new Date().toISOString(),
       _mock: true
     };
@@ -172,7 +173,7 @@ class MockZohoAdapter extends ZohoAdapter {
 
     this._log('[ZOHO_MOCK] Would PUT /inventory/v1/salesorders/' + salesorderId, {
       customer_id: contact.contact_id,
-      line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity }))
+      line_items: (orderData.items || []).map((i) => ({ sku: i.sku, quantity: i.quantity, warehouse_id: i.fulfil_warehouse_id || orderData.warehouse_id || null }))
     });
 
     const salesorder = {
@@ -265,6 +266,52 @@ class MockZohoAdapter extends ZohoAdapter {
         ? { template_id: TEMPLATE_ID_BY_INVOICING_FROM[orderData.invoicing_from], template_name: orderData.invoicing_from === '2mg Incorporated' ? '2MG Template' : 'Standard Template' }
         : {})
     };
+  }
+
+  /**
+   * Oct 9, 2026: per-warehouse stock, shaped like Zoho's item.warehouses. Deterministic so a
+   * mock test is repeatable:
+   *   MOCK-ITEM-P1: plenty in the main warehouse, 50 in Cebu
+   *   MOCK-ITEM-P2: only 3 in the main warehouse (short for most orders), 500 in Cebu, 200 in Davao
+   *   anything else: 5,000 in the main warehouse
+   * The warehouse names are the real ones; the ids are made up (W-...).
+   */
+  async getItemWarehouses(zohoItemId) {
+    if (this._simulatedOutage) throw new Error('Simulated Zoho API outage (Test Mode) — getItemWarehouses rejected on purpose.');
+    const table = {
+      'MOCK-ITEM-P1': { 'W-MAIN': [1000, 40], 'W-CEBU': [50, 0] },
+      'MOCK-ITEM-P2': { 'W-MAIN': [3, 0], 'W-CEBU': [500, 20], 'W-DAVAO': [200, 0] }
+    };
+    const stock = table[zohoItemId] || { 'W-MAIN': [5000, 0] };
+    const warehouses = [
+      { id: 'W-MAIN', name: 'Getmeds Philippines Inc.', primary: true, status: 'active' },
+      { id: 'W-CEBU', name: 'CEBU WAREHOUSE', primary: false, status: 'active' },
+      { id: 'W-DAVAO', name: 'DAVAO WAREHOUSE', primary: false, status: 'active' },
+      { id: 'W-CONSIGN', name: 'CONSIGNMENT WAREHOUSE', primary: false, status: 'active' },
+      { id: 'W-EXPIRED', name: 'EXPIRED STOCKS', primary: false, status: 'active' },
+      { id: 'W-OLD', name: 'HOMESTOCKS- NASHRINA', primary: false, status: 'inactive' }
+    ].map((w) => {
+      const [onHand, committed] = stock[w.id] || [0, 0];
+      return {
+        warehouse_id: w.id,
+        warehouse_name: w.name,
+        status: w.status,
+        is_primary: w.primary,
+        warehouse_stock_on_hand: onHand,
+        warehouse_committed_stock: committed,
+        warehouse_available_for_sale_stock: onHand - committed,
+        warehouse_actual_available_stock: onHand,
+        warehouse_actual_committed_stock: committed,
+        warehouse_actual_available_for_sale_stock: onHand - committed,
+        warehouse_quantity_in_transit: 0,
+        batches: []
+      };
+    });
+    return { code: 0, message: 'success [MOCK MODE]', warehouses };
+  }
+
+  async getItemBatches() {
+    return { code: 0, message: 'success [MOCK MODE]', batches: [] };
   }
 
   async getSalesOrder(salesorderId) {

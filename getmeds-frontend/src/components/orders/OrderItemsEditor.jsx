@@ -1,6 +1,7 @@
-import React from 'react';
-import { Trash2, AlertCircle } from 'lucide-react';
+import React, { useState } from 'react';
+import { Trash2, AlertCircle, Building2 } from 'lucide-react';
 import ProductAutocomplete from './ProductAutocomplete';
+import WarehouseStockModal from './WarehouseStockModal';
 import { TAX_OPTIONS, computeLineAmounts } from '../../utils/orderLines';
 
 // Sep 22, 2026: mirrors OrderForm.jsx's own copy exactly — same two
@@ -54,8 +55,23 @@ const OrderItemsEditor = ({
   // Sep 22, 2026: the order's own top-level Invoicing From — needed to
   // know what "follow the order" means for the per-row override below,
   // and to label the split banner. See services/orderSplitService.js.
-  orderInvoicingFrom
+  orderInvoicingFrom,
+  // Oct 9, 2026: Tax Exclusive / Inclusive is chosen here (default Exclusive),
+  // but only until the order has a Zoho Sales Order (taxLocked).
+  onInclusiveChange,
+  taxLocked,
+  // Oct 9, 2026: each line's own Zoho warehouse. Management picks from the
+  // warehouses Zoho lists; everyone else sees the choice read-only.
+  canPickWarehouse,
+  warehouses,
+  orderWarehouseName,
+  // Oct 9, 2026: Zoho's per-warehouse stock for each product here (stock-check `lines`), and the
+  // warehouse an unset line falls back to — for the Zoho-style "Warehouses" popup.
+  stockLines,
+  defaultWarehouseId
 }) => {
+  const [stockRow, setStockRow] = useState(null);
+  const stockFor = (row) => (stockLines || []).find((l) => String(l.product_id) === String(row.product_id));
   const lines = rows.map((r) =>
     computeLineAmounts({ quantity: r.quantity, rate: r.rate, discount: r.discount, taxPercent: r.tax_percent }, inclusive)
   );
@@ -109,19 +125,24 @@ const OrderItemsEditor = ({
         />
       </div>
 
-      {/* The order's tax preference, shown rather than offered: an edit is
-          re-priced under the preference the order was raised with. */}
+      {/* Oct 9, 2026: Item tax preference, as in Zoho. Re-prices every line
+          here; locked once the order is in Zoho (the server refuses it too). */}
       <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
         <span className="text-[11px] text-ink-secondary">
           {inclusive ? 'Rates already include VAT.' : 'VAT is added on top of the rates.'}
         </span>
-        <span className="text-xs font-semibold text-ink-secondary">Item tax preference</span>
-        <span
-          title="Set when the order was raised"
-          className="border border-slate-200 bg-surface rounded-md py-1 px-2 text-xs font-semibold text-ink-primary"
+        <label htmlFor="item-tax-preference" className="text-xs font-semibold text-ink-secondary">Item tax preference</label>
+        <select
+          id="item-tax-preference"
+          value={inclusive ? 'inclusive' : 'exclusive'}
+          disabled={taxLocked || !onInclusiveChange}
+          onChange={(e) => onInclusiveChange && onInclusiveChange(e.target.value === 'inclusive')}
+          title={taxLocked ? 'This order already has a Zoho Sales Order, so this cannot be changed' : 'Whether the rates below already include VAT'}
+          className="border border-slate-300 rounded-md py-1 px-2 text-xs font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue disabled:bg-surface disabled:text-ink-secondary"
         >
-          {inclusive ? 'Tax Inclusive' : 'Tax Exclusive'}
-        </span>
+          <option value="exclusive">Tax Exclusive</option>
+          <option value="inclusive">Tax Inclusive</option>
+        </select>
       </div>
 
       {rows.length === 0 ? (
@@ -133,7 +154,7 @@ const OrderItemsEditor = ({
           <table className="min-w-full divide-y divide-slate-200 text-xs sm:text-sm">
             <thead className="bg-surface">
               <tr>
-                <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Item Details</th>
+                <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Product</th>
                 <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Qty</th>
                 <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Price</th>
                 <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Discount</th>
@@ -143,6 +164,7 @@ const OrderItemsEditor = ({
                 >
                   Tax <span className="text-[9px] normal-case font-medium text-ink-secondary/70">(this order only)</span>
                 </th>
+                <th className="px-3 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Warehouse</th>
                 <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Amount</th>
                 <th className="px-3 py-3 w-12"></th>
               </tr>
@@ -262,6 +284,41 @@ const OrderItemsEditor = ({
                         );
                       })()}
                     </td>
+                    <td className="px-3 py-3 min-w-[10rem]">
+                      {(() => {
+                        const st = canPickWarehouse ? stockFor(row) : null;
+                        // Zoho's own cell: stock on hand in the line's warehouse, and the warehouse
+                        // name as a link that opens the Warehouses popup (the numbers live there).
+                        if (st) {
+                          const effective = row.warehouse_id || defaultWarehouseId;
+                          const here = st.per_warehouse.find((p) => p.warehouse_id === effective);
+                          return (
+                            <div className="text-[11px] leading-snug">
+                              {here && (
+                                <p className="text-ink-secondary">
+                                  Stock on Hand: <span className="font-bold text-ink-primary">{Number(here.on_hand).toLocaleString('en-PH')} pcs</span>
+                                </p>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setStockRow(idx)}
+                                title="Click to see the stock in every warehouse and choose one"
+                                className="inline-flex items-center gap-1 font-semibold uppercase text-getmeds-blue hover:underline text-left"
+                              >
+                                <Building2 className="w-3 h-3 shrink-0" />
+                                {here ? here.warehouse_name : (row.warehouse_name || orderWarehouseName || 'Main (Zoho default)')}
+                              </button>
+                            </div>
+                          );
+                        }
+                        // Fallback (stock not loaded, or someone who cannot choose): just the name.
+                        return (
+                          <span className="text-[11px] font-semibold text-ink-primary" title={canPickWarehouse ? 'Stock could not be loaded from Zoho' : 'Management chooses the warehouse'}>
+                            {row.warehouse_name || orderWarehouseName || 'Main (Zoho default)'}
+                          </span>
+                        );
+                      })()}
+                    </td>
                     <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">
                       {peso(lines[idx].amount)}
                     </td>
@@ -281,18 +338,18 @@ const OrderItemsEditor = ({
             </tbody>
             <tfoot className="bg-surface/80 border-t-2 border-slate-200">
               <tr>
-                <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Subtotal</td>
+                <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Subtotal</td>
                 <td colSpan={2} className="px-4 py-2 text-right font-semibold text-ink-primary font-mono text-xs">{peso(totals.subtotal)}</td>
               </tr>
               {totals.discount > 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Total Discount</td>
+                  <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Total Discount</td>
                   <td colSpan={2} className="px-4 py-2 text-right font-semibold text-state-error font-mono text-xs">-{peso(totals.discount)}</td>
                 </tr>
               )}
               {totals.tax > 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">
+                  <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">
                     {inclusive ? 'Tax (included in the rates above)' : 'Total Tax'}
                   </td>
                   <td colSpan={2} className={`px-4 py-2 text-right font-semibold font-mono text-xs ${inclusive ? 'text-ink-secondary' : 'text-ink-primary'}`}>
@@ -301,12 +358,26 @@ const OrderItemsEditor = ({
                 </tr>
               )}
               <tr>
-                <td colSpan={5} className="px-4 py-3.5 text-right font-bold text-ink-primary uppercase tracking-wider text-xs">Grand Total:</td>
+                <td colSpan={6} className="px-4 py-3.5 text-right font-bold text-ink-primary uppercase tracking-wider text-xs">Grand Total:</td>
                 <td colSpan={2} className="px-4 py-3.5 text-right font-extrabold text-getmeds-blue text-base font-mono">{peso(totals.grand)}</td>
               </tr>
             </tfoot>
           </table>
         </div>
+      )}
+
+      {stockRow != null && rows[stockRow] && stockFor(rows[stockRow]) && (
+        <WarehouseStockModal
+          itemName={rows[stockRow].name}
+          needed={Number(rows[stockRow].quantity) || null}
+          perWarehouse={stockFor(rows[stockRow]).per_warehouse.map((p) => ({
+            ...p,
+            enough: p.available >= (Number(rows[stockRow].quantity) || 0)
+          }))}
+          selectedId={rows[stockRow].warehouse_id || defaultWarehouseId}
+          onSelect={(id, name) => onChange(stockRow, 'warehouse', { id, name })}
+          onClose={() => setStockRow(null)}
+        />
       )}
 
       <div className="flex justify-end gap-2">

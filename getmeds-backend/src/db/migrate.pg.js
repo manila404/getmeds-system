@@ -1373,6 +1373,20 @@ async function reconcileNoRxReasonColumn(client) {
 }
 
 /**
+ * Oct 9, 2026: the warehouse Management chose when approving an order (its stock is checked
+ * against it, and every Sales Order line is sent with it). Nullable and additive: NULL means
+ * "Zoho's default (main) warehouse", exactly as before.
+ */
+async function reconcileFulfilWarehouseColumns(client) {
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfil_warehouse_id TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfil_warehouse_name TEXT');
+  // Per line too: a line may come from a different warehouse than the rest of its order.
+  await client.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS fulfil_warehouse_id TEXT');
+  await client.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS fulfil_warehouse_name TEXT');
+  console.log('  ✔ orders / order_items.fulfil_warehouse_id / fulfil_warehouse_name present');
+}
+
+/**
  * Oct 3, 2026: a draft cancelled by Management/Admin. draft_cancelled_at is the
  * marker every back-office list and count filters on (an ordinary 'cancelled'
  * status is a Zoho void and keeps counting under Needs attention); the reason is
@@ -1528,6 +1542,7 @@ async function main() {
     await reconcileRxNotRequiredColumns(client);
     await reconcileNoRxReasonColumn(client);
     await reconcileDraftCancelColumns(client);
+    await reconcileFulfilWarehouseColumns(client);
     await reconcileSalesTitleColumn(client);
     await reconcileKpiTargetSourceCheck(client);
     await reconcileIdentitySequences(client);

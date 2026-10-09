@@ -81,6 +81,8 @@ router.post('/:id/submit', requireRole('medrep', 'management', 'admin', 'team_le
 // order Management/admin submitted themselves never reaches this status, so
 // these only ever act on a MedRep-raised order.
 router.post('/:id/approve', requireRole('management', 'admin'), c.approve);
+// Oct 9, 2026: stock of each line in each Zoho warehouse, for Management's approval screen.
+router.get('/:id/stock-check', requireRole('management', 'admin'), c.stockCheck);
 router.post('/:id/reject', requireRole('management', 'admin'), c.reject);
 // Sep 7, 2026 (2): a third outcome — send it back to 'draft' (reason
 // required) instead of on hold, so the MedRep (or Management) can fix it

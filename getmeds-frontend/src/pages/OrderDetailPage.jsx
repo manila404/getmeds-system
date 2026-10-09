@@ -24,6 +24,7 @@ import { roleLabel } from '../constants/roles';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import RelinkCustomerModal from '../components/orders/RelinkCustomerModal';
 import CancelDraftModal from '../components/orders/CancelDraftModal';
+import ApproveOrderModal from '../components/orders/ApproveOrderModal';
 import RefundModal from '../components/orders/RefundModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
 import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../constants/paymentTerms';
@@ -269,6 +270,8 @@ const OrderDetailPage = () => {
   // Sales Order exists yet.
   const [isEditingItems, setIsEditingItems] = useState(false);
   const [draftItems, setDraftItems] = useState([]);
+  // Oct 9, 2026: the order's Tax Exclusive / Inclusive while editing items (default Exclusive).
+  const [draftInclusive, setDraftInclusive] = useState(false);
   // Sep 7, 2026 (2): the order-level counterpart to isEditingItems/draftItems
   // above — same "only before Zoho exists" gate, everything except the line
   // items. See updateDetails on the backend.
@@ -294,6 +297,17 @@ const OrderDetailPage = () => {
   // Management/admin session can edit Salesperson here, and only while the
   // details panel is open, so there's no reason to fetch it otherwise.
   const isManagementUser = ['management', 'admin'].includes(user?.role);
+  // Oct 9, 2026: Tax Exclusive is the default; the order's own setting wins.
+  const orderIsInclusive = data?.data?.order?.is_inclusive_tax == null ? false : Boolean(Number(data.data.order.is_inclusive_tax));
+  // The warehouses Zoho lists for this order's items, for the per-line picker in Edit Items.
+  const { data: stockWarehouseData } = useQuery({
+    queryKey: ['order-warehouses', id],
+    queryFn: () => client.get(`/api/orders/${id}/stock-check`).then((r) => r.data?.data),
+    enabled: isEditingItems && isManagementUser && !!data?.data?.order,
+    staleTime: 60 * 1000,
+    retry: false
+  });
+  const stockWarehouses = stockWarehouseData?.available ? stockWarehouseData.warehouses : [];
   const { data: medrepMeta } = useQuery({
     queryKey: ['orders-meta-medreps'],
     queryFn: () => client.get('/api/orders/meta/medreps').then(r => r.data),
@@ -458,7 +472,8 @@ const OrderDetailPage = () => {
   // Sep 19, 2026: Management is the exception — the backend now pushes the
   // corrected items to the real Sales Order for them instead of refusing.
   const updateItemsMutation = useMutation({
-    mutationFn: (payloadItems) => client.patch(`/api/orders/${id}/items`, { items: payloadItems }).then(r => r.data),
+    mutationFn: ({ items: payloadItems, is_inclusive_tax }) =>
+      client.patch(`/api/orders/${id}/items`, { items: payloadItems, ...(typeof is_inclusive_tax === 'boolean' ? { is_inclusive_tax } : {}) }).then(r => r.data),
     onSuccess: (res) => {
       if (res.data?.zoho_pushed) {
         toast.success('Order items updated, and pushed to the Zoho Sales Order.');
@@ -534,18 +549,17 @@ const OrderDetailPage = () => {
   // Sep 7, 2026 (2): Approve / Send Back / Reject — mirrors
   // ApprovalQueuePage.jsx's Approve/Reject exactly, plus the new Send Back
   // action, so acting from here or from the queue behaves identically.
-  const approveMutation = useMutation({
-    mutationFn: () => client.post(`/api/orders/${id}/approve`).then(r => r.data),
-    onSuccess: (res) => {
-      const synced = res?.data?.zoho_sync_status === 'synced' || res?.data?.zoho_sync_status === 'skipped';
-      toast.success(synced
-        ? 'Approved — Sales Order created in Zoho.'
-        : 'Approved — Zoho sync failed and was queued for automatic retry.');
-      qc.invalidateQueries({ queryKey: ['order', id] });
-      qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
-    },
-    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not approve this order')
-  });
+  // Oct 9, 2026: Approve opens ApproveOrderModal (stock check + warehouse); the modal does the approving.
+  const [approveOpen, setApproveOpen] = useState(false);
+  const onApproved = (res) => {
+    const synced = res?.data?.zoho_sync_status === 'synced' || res?.data?.zoho_sync_status === 'skipped';
+    toast.success(synced
+      ? 'Approved — Sales Order created in Zoho.'
+      : 'Approved — Zoho sync failed and was queued for automatic retry.');
+    setApproveOpen(false);
+    qc.invalidateQueries({ queryKey: ['order', id] });
+    qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
+  };
 
   // Oct 3, 2026: Management/Admin cancel a draft; the reason is required.
   const cancelDraftMutation = useMutation({
@@ -613,8 +627,12 @@ const OrderDetailPage = () => {
       // and saving the editor on a split order would silently erase every
       // line's tag back to "follow the order" the moment someone touched
       // Save, even if they never went near the new control.
-      invoicing_from: it.invoicing_from || null
+      invoicing_from: it.invoicing_from || null,
+      // Oct 9, 2026: the line's own warehouse (null = the order's / Zoho's main one).
+      warehouse_id: it.fulfil_warehouse_id || null,
+      warehouse_name: it.fulfil_warehouse_name || null
     })));
+    setDraftInclusive(orderIsInclusive);
     setIsEditingItems(true);
   };
 
@@ -688,6 +706,11 @@ const OrderDetailPage = () => {
       setDraftItems((rows) => rows.map((row, i) => (i === index ? { ...row, invoicing_from: value || null } : row)));
       return undefined;
     }
+    // Oct 9, 2026: this line's own Zoho warehouse ({id, name}; id null = the order's).
+    if (field === 'warehouse') {
+      setDraftItems((rows) => rows.map((row, i) => (i === index ? { ...row, warehouse_id: value?.id || null, warehouse_name: value?.name || null } : row)));
+      return undefined;
+    }
     return undefined;
   };
   const blurDraftField = (index, field) =>
@@ -710,7 +733,8 @@ const OrderDetailPage = () => {
       price_remark: '',
       // Sep 22, 2026: null = follows the order's own Invoicing From, every
       // item's default. See services/orderSplitService.js.
-      invoicing_from: null
+      invoicing_from: null,
+      warehouse_id: null, warehouse_name: null
     }]);
   };
 
@@ -720,13 +744,13 @@ const OrderDetailPage = () => {
   // Sep 19, 2026: a one-line description of a line item's numbers, shared by
   // both sides of the Items diff below so "before" and "after" are always
   // built the exact same way and a real change can't hide behind formatting.
-  const describeDraftLine = ({ quantity, rate, discount, tax_percent, price_remark }) => {
+  const describeDraftLine = ({ quantity, rate, discount, tax_percent, price_remark, warehouse_name }) => {
     const qty = quantity ?? 0;
     const price = Number(rate) || 0;
     const disc = Number(discount) || 0;
     const tax = tax_percent != null && tax_percent !== '' ? `${tax_percent}%` : 'none';
     const remark = (price_remark || '').trim();
-    return `Qty ${qty} · ₱${price.toFixed(2)}${disc ? ` · -₱${disc.toFixed(2)} disc` : ''} · Tax ${tax}${remark ? ` · “${remark}”` : ''}`;
+    return `Qty ${qty} · ₱${price.toFixed(2)}${disc ? ` · -₱${disc.toFixed(2)} disc` : ''} · Tax ${tax}${warehouse_name ? ` · ${warehouse_name}` : ''}${remark ? ` · “${remark}”` : ''}`;
   };
 
   const diffOrderItems = () => {
@@ -745,7 +769,7 @@ const OrderDetailPage = () => {
       }
       const before = describeDraftLine({
         quantity: orig.quantity, rate: orig.unit_price, discount: orig.discount_amount,
-        tax_percent: orig.tax_percent, price_remark: orig.price_remark
+        tax_percent: orig.tax_percent, price_remark: orig.price_remark, warehouse_name: orig.fulfil_warehouse_name
       });
       if (before !== after) changes.push({ label: name, before, after });
     }
@@ -755,7 +779,7 @@ const OrderDetailPage = () => {
         label: `${orig.product_name} — removed`,
         before: describeDraftLine({
           quantity: orig.quantity, rate: orig.unit_price, discount: orig.discount_amount,
-          tax_percent: orig.tax_percent, price_remark: orig.price_remark
+          tax_percent: orig.tax_percent, price_remark: orig.price_remark, warehouse_name: orig.fulfil_warehouse_name
         }),
         after: '—'
       });
@@ -776,9 +800,13 @@ const OrderDetailPage = () => {
       price_remark: (row.price_remark || '').trim() || null,
       // Sep 22, 2026: a line billed under the OTHER Invoicing From entity —
       // see services/orderSplitService.js on the backend.
-      invoicing_from: row.invoicing_from || null
+      invoicing_from: row.invoicing_from || null,
+      // Oct 9, 2026: only Management's save can set it (the server ignores it for anyone else).
+      ...(isManagementUser ? { warehouse_id: row.warehouse_id || null, warehouse_name: row.warehouse_name || null } : {})
     }));
+    const taxPrefChanged = draftInclusive !== orderIsInclusive;
     const changes = diffOrderItems();
+    if (taxPrefChanged) changes.unshift({ label: 'Item tax preference', before: orderIsInclusive ? 'Tax Inclusive' : 'Tax Exclusive', after: draftInclusive ? 'Tax Inclusive' : 'Tax Exclusive' });
     if (!changes.length) { toast('No changes to save.'); return; }
     const o = data?.data?.order;
     setPendingConfirm({
@@ -787,7 +815,7 @@ const OrderDetailPage = () => {
         ? `Already in Zoho${o.zoho_so_number ? ` (${o.zoho_so_number})` : ''} — confirming this updates the real Sales Order too.`
         : null,
       changes,
-      onConfirm: () => updateItemsMutation.mutate(payloadItems)
+      onConfirm: () => updateItemsMutation.mutate({ items: payloadItems, is_inclusive_tax: taxPrefChanged ? draftInclusive : undefined })
     });
   };
 
@@ -1012,6 +1040,14 @@ const OrderDetailPage = () => {
             order={order}
             onClose={() => setRefundOpen(false)}
             onDone={() => { setRefundOpen(false); qc.invalidateQueries({ queryKey: ['order', id] }); qc.invalidateQueries({ queryKey: ['refund-summary'] }); qc.invalidateQueries({ queryKey: ['refunds'] }); }}
+          />
+        )}
+        {approveOpen && (
+          <ApproveOrderModal
+            orderId={id}
+            orderRef={order.getmeds_order_id}
+            onClose={() => setApproveOpen(false)}
+            onApproved={onApproved}
           />
         )}
         {cancelOpen && (
@@ -1513,11 +1549,10 @@ const OrderDetailPage = () => {
             )}
             <div className="flex flex-wrap gap-2">
               <button
-                disabled={approveMutation.isPending}
-                onClick={() => approveMutation.mutate()}
+                onClick={() => setApproveOpen(true)}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-pharmacy-green text-white rounded hover:opacity-90 disabled:opacity-50"
               >
-                <ShieldCheck className="w-3.5 h-3.5" /> {approveMutation.isPending ? 'Syncing to Zoho...' : 'Approve — sync to Zoho'}
+                <ShieldCheck className="w-3.5 h-3.5" /> Approve — check stock &amp; sync to Zoho
               </button>
               <button
                 disabled={sendBackMutation.isPending}
@@ -1800,13 +1835,18 @@ const OrderDetailPage = () => {
                       Split order — items below are billed across {splits.length + 1} Zoho Sales Orders. See the breakdown under the total.
                     </div>
                   )}
+                  <p className="mb-2 text-right text-xs text-ink-secondary">
+                    Item tax preference: <span className="font-semibold text-ink-primary">{orderIsInclusive ? 'Tax Inclusive' : 'Tax Exclusive'}</span>
+                  </p>
                   <table className="min-w-full">
                     <thead>
                       <tr className="text-left text-xs font-medium text-ink-secondary uppercase border-b border-slate-200">
                         <th className="pb-3">Product</th>
                         <th className="pb-3 text-center">Qty</th>
-                        <th className="pb-3 text-right">Unit Price</th>
-                        <th className="pb-3 text-right">Subtotal</th>
+                        <th className="pb-3 text-right">Price</th>
+                        <th className="pb-3 text-center">Tax</th>
+                        <th className="pb-3">Warehouse</th>
+                        <th className="pb-3 text-right">Amount</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -1824,7 +1864,18 @@ const OrderDetailPage = () => {
                           </td>
                           <td className="py-3 text-center text-sm text-ink-primary">{item.quantity}</td>
                           <td className="py-3 text-right text-sm text-ink-secondary">₱{(item.unit_price || 0).toFixed(2)}</td>
-                          <td className="py-3 text-right text-sm font-semibold text-ink-primary">₱{(item.subtotal || 0).toFixed(2)}</td>
+                          {/* Oct 9, 2026: the line's VAT (what is sent to Zoho), and the warehouse Management chose at approval. */}
+                          <td className="py-3 text-center">
+                            <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold border ${Number(item.tax_percent) > 0 ? 'bg-blue-50 text-blue-900 border-blue-200' : 'bg-slate-100 text-slate-700 border-slate-200'}`}>
+                              {item.tax_label || (Number(item.tax_percent) > 0 ? `VAT ${Number(item.tax_percent)}%` : 'No Tax')}
+                            </span>
+                          </td>
+                          <td className="py-3 text-sm text-ink-primary">
+                            {item.fulfil_warehouse_name || order.fulfil_warehouse_name
+                              ? (item.fulfil_warehouse_name || order.fulfil_warehouse_name)
+                              : <span className="text-ink-secondary" title="No warehouse was chosen, so Zoho uses its main warehouse">Main (Zoho default)</span>}
+                          </td>
+                          <td className="py-3 text-right text-sm font-semibold text-ink-primary">₱{Number(item.line_total ?? item.subtotal ?? 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1837,7 +1888,7 @@ const OrderDetailPage = () => {
                         });
                         return (
                           <tr>
-                            <td colSpan="3" className="pt-2 pb-1 text-right">
+                            <td colSpan="5" className="pt-2 pb-1 text-right">
                               <div className="flex flex-wrap justify-end gap-x-4 gap-y-0.5 text-xs text-ink-secondary">
                                 {Array.from(byEntity.entries()).map(([entity, sum]) => (
                                   <span key={entity}>
@@ -1851,7 +1902,7 @@ const OrderDetailPage = () => {
                         );
                       })()}
                       <tr>
-                        <td colSpan="3" className="pt-3 text-sm font-semibold text-ink-primary text-right">Total Amount</td>
+                        <td colSpan="5" className="pt-3 text-sm font-semibold text-ink-primary text-right">Total Amount</td>
                         <td className="pt-3 text-right text-lg font-bold text-getmeds-blue">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
                       </tr>
                     </tfoot>
@@ -1862,7 +1913,14 @@ const OrderDetailPage = () => {
                 <OrderItemsEditor
                   rows={draftItems}
                   products={products}
-                  inclusive={order.is_inclusive_tax == null ? true : Boolean(Number(order.is_inclusive_tax))}
+                  inclusive={draftInclusive}
+                  onInclusiveChange={setDraftInclusive}
+                  taxLocked={Boolean(order.zoho_so_id)}
+                  canPickWarehouse={isManagementUser}
+                  warehouses={stockWarehouses}
+                  stockLines={stockWarehouseData?.available ? stockWarehouseData.lines : []}
+                  defaultWarehouseId={stockWarehouseData?.available ? stockWarehouseData.selected_warehouse_id : null}
+                  orderWarehouseName={order.fulfil_warehouse_name || null}
                   canEditPrice={isManagementUser}
                   activeProductIds={activeProductIds}
                   onChange={changeDraftField}
