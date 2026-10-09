@@ -453,8 +453,10 @@ exports.resubmitPrescription = async (req, res, next) => {
 
     const role = String(req.user?.role || '').toLowerCase();
     const mine = order.medrep_id === req.user.id || (order.raised_by_id && order.raised_by_id === req.user.id);
-    if (!(role === 'admin' || role === 'management' || (role === 'medrep' && mine))) {
-      return fail(res, 403, 'FORBIDDEN', 'Only the MedRep on this order, or Management, can re-submit its prescription.');
+    // Oct 9, 2026: a Team Lead / Leader too, for an order that is theirs (same rule as
+    // orders.controller.js resubmit).
+    if (!(role === 'admin' || role === 'management' || ((role === 'medrep' || role === 'team_lead') && mine))) {
+      return fail(res, 403, 'FORBIDDEN', 'Only the person who owns or raised this order, or Management, can re-submit its prescription.');
     }
     if (!(await isPharmacyReviewable(order))) {
       return fail(res, 409, 'NOT_IN_QUEUE', `This order is at "${order.status}", so its prescription is not being reviewed now.`);

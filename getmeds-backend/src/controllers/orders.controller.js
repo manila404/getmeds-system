@@ -3469,12 +3469,19 @@ exports.resubmit = async (req, res, next) => {
 
     // The order's MedRep (or the colleague who raised it), and Management —
     // not Finance (they have Reopen) and not Dispatch.
+    //
+    // Oct 9, 2026: a Team Lead / Leader too, for an order that is theirs (they are its
+    // MedRep, or they raised it). Mitzi Francisco could not re-submit her own held order
+    // (GM-20261009-0003) because her account has the team_lead role, and this only
+    // admitted 'medrep'. Same "theirs only" rule canEditOrder already applies to team leads.
     const role = String(req.user?.role || '').toLowerCase();
-    const allowed = role === 'management' || role === 'admin' || (role === 'medrep' && canActOnOrder(req.user, order));
+    const allowed = role === 'management' || role === 'admin' ||
+      (role === 'medrep' && canActOnOrder(req.user, order)) ||
+      (role === 'team_lead' && isTeamLeadsOwnOrder(req.user, order));
     if (!allowed) {
       return res.status(403).json({
         success: false,
-        error: { code: 'FORBIDDEN', message: 'Only the MedRep on this order, or Management, can re-submit it.' }
+        error: { code: 'FORBIDDEN', message: 'Only the person who owns or raised this order, or Management, can re-submit it.' }
       });
     }
     if (!['on_hold', 'exception'].includes(order.status)) {
