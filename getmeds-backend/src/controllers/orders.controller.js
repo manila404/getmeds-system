@@ -2426,8 +2426,6 @@ exports.create = async (req, res, next) => {
       const itemColumns = ['order_id', 'product_id', 'quantity', 'unit_price', 'subtotal', 'discount_amount', 'tax_percent', 'tax_label', 'line_total'];
       if (canWriteRemark) itemColumns.push('price_remark');
       if (canWriteItemInvoicingFrom) itemColumns.push('invoicing_from');
-      const canWriteLineWarehouse = await hasColumn('order_items', 'fulfil_warehouse_id');
-      if (canWriteLineWarehouse) itemColumns.push('fulfil_warehouse_id', 'fulfil_warehouse_name');
       const insItem = db.prepare(
         `INSERT INTO order_items (${itemColumns.join(', ')}) VALUES (${itemColumns.map(() => '?').join(', ')})`
       );
