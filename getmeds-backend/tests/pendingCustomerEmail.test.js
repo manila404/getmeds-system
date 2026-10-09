@@ -61,7 +61,7 @@ describe('pushing to Zoho', () => {
   const sent = async (email) => {
     const adapter = Object.create(LiveZohoAdapter.prototype);
     let body;
-    adapter._request = async (_m, _p, opts) => { body = opts.body; return { contact: { contact_id: '1' } }; };
+    adapter._request = async (m, _p, opts) => { if (m === 'POST') body = opts.body; return { contact: { contact_id: '1' } }; };
     await adapter.createContact({ display_name: 'X Hospital', email, phone: '+639170000000', contact_number: '+639170000000', category: 'hospital' });
     return body;
   };
@@ -74,6 +74,40 @@ describe('pushing to Zoho', () => {
 
   test('a real email is still sent', async () => {
     expect((await sent('records@hospital.com.ph')).email).toBe('records@hospital.com.ph');
+  });
+});
+
+describe('withholding tax (TDS) on a new Zoho customer', () => {
+  const LiveZohoAdapter = require('../src/integrations/zoho/LiveZohoAdapter');
+  const adapterWith = (put) => {
+    const adapter = Object.create(LiveZohoAdapter.prototype);
+    adapter._modeLabel = 'live';
+    adapter.logs = [];
+    adapter._log = (m) => adapter.logs.push(m);
+    adapter.calls = [];
+    adapter._request = async (method, path, opts) => {
+      adapter.calls.push({ method, path, body: opts && opts.body });
+      if (method === 'POST') return { contact: { contact_id: 'C-1' } };
+      return put();
+    };
+    return adapter;
+  };
+  const customer = { display_name: 'TDS Hospital', phone: '+639170000000', contact_number: '+639170000000', category: 'hospital' };
+
+  test('TDS is turned on right after the customer is created, and the create request is unchanged', async () => {
+    const a = adapterWith(() => ({}));
+    const res = await a.createContact(customer);
+    expect(res.contact.contact_id).toBe('C-1');
+    expect(a.calls.map((c) => `${c.method} ${c.path}`)).toEqual(['POST /contacts', 'PUT /contacts/C-1']);
+    expect(a.calls[0].body.is_tds_registered).toBeUndefined();
+    expect(a.calls[1].body).toEqual({ is_tds_registered: true });
+  });
+
+  test('if Zoho refuses the TDS call, the customer is still created and a warning is logged', async () => {
+    const a = adapterWith(() => { throw new Error('Zoho said no'); });
+    const res = await a.createContact(customer);
+    expect(res.contact.contact_id).toBe('C-1');
+    expect(a.logs.some((m) => /could not turn on TDS/.test(m))).toBe(true);
   });
 });
 

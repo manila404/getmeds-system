@@ -1038,6 +1038,21 @@ class LiveZohoAdapter extends ZohoAdapter {
     if (customFields.length) body.custom_fields = customFields;
 
     const result = await this._request('POST', '/contacts', { body });
+
+    // Oct 9, 2026: withholding tax (TDS). Zoho shows "Tax deducted?" when a payment is
+    // recorded only for a customer with is_tds_registered on. A customer someone sets up by
+    // hand has it on; one created through the API comes in with it off, so the option was
+    // missing (THE MEDICAL CITY - TMC, and 210 others). Turned on right after creation, as a
+    // separate best-effort call: if Zoho refuses or ignores it the customer is still created,
+    // and only a warning is logged. The create request above is deliberately left unchanged.
+    const contactId = result?.contact?.contact_id;
+    if (contactId) {
+      try {
+        await this._request('PUT', `/contacts/${contactId}`, { body: { is_tds_registered: true } });
+      } catch (err) {
+        this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] could not turn on TDS for new contact ${contactId}: ${err.message}`);
+      }
+    }
     return { code: 0, message: 'Contact created successfully', contact: result.contact };
   }
 
