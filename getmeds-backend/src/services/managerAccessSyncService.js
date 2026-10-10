@@ -35,17 +35,19 @@ const db = require('../db/database');
 const { SCOPE_ALL, SCOPE_DIVISIONS } = require('./orderScopeService');
 
 // Channel (as named in the structure) -> the order app's divisions. Telesales
-// carries the anesthesia telesales division, and B2C carries MD Telesales, which the
-// sheet renamed to B2C. MT has no division in the order app yet.
+// carries the anesthesia telesales division and MD Telesales. MT has no division in the
+// order app yet.
+// Oct 10, 2026: MD Telesales moved from B2C to Telesales, matching the Pharmacy page's
+// channel tabs (controllers/pharmacy.controller.js PHARMACY_CHANNELS).
 const CHANNEL_DIVISIONS = {
   'RX · B&B': ['B&B'],
   'RX · STC': ['STC'],
   'RX · URO': ['URO'],
-  'RX · B2C': ['B2C', 'MD Telesales'],
+  'RX · B2C': ['B2C'],
   B2B: ['B2B'],
   BID: ['BID'],
   CLIDP: ['CLIDP'],
-  TELESALES: ['TeleSales', 'TeleSales Anesthesia'],
+  TELESALES: ['TeleSales', 'TeleSales Anesthesia', 'MD Telesales'],
   HOSP: ['HOS'],
   MT: [],
 };
