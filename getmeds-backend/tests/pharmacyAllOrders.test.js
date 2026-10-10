@@ -89,14 +89,14 @@ describe('pharmacy: All orders and channel pills', () => {
     for (const id of [b2b, imported, noDivision, draft, tooOld]) expect(got).not.toContain(id);
   });
 
-  test('the channel pill narrows the list: Telesales, B2C (which carries MD Telesales), HOS', async () => {
+  test('the channel pill narrows the list: Telesales (which carries MD Telesales), B2C, HOS', async () => {
     const tele = ids(await get('state=all_orders&channel=Telesales'));
     expect(tele).toContain(telesales);
+    expect(tele).toContain(md);
     expect(tele).not.toContain(hos);
-    expect(tele).not.toContain(md);
 
     const b2c = ids(await get('state=all_orders&channel=B2C'));
-    expect(b2c).toContain(md);
+    expect(b2c).not.toContain(md);
     expect(b2c).not.toContain(telesales);
 
     const h = ids(await get('state=all_orders&channel=hos'));

@@ -54,16 +54,17 @@ const HELD_FROM_SQL = `(SELECT e.old_status FROM order_events e
                           ORDER BY e.id DESC LIMIT 1)`;
 
 // Sep 26, 2026: the six sales channels a pharmacist audits, as the divisions that
-// carry them on an order. Telesales is TeleSales + TeleSales Anesthesia; B2C is
-// B2C + MD Telesales (the sheet renamed MD Telesales to B2C, see
-// services/managerAccessSyncService.js, which holds the same mapping).
+// carry them on an order. Telesales is TeleSales + TeleSales Anesthesia + MD Telesales.
+// Oct 10, 2026: MD Telesales moved here from B2C: its orders belong on the Telesales
+// tab for the pharmacist. (services/managerAccessSyncService.js still maps MD Telesales
+// to B2C for manager access; that is a separate rule and unchanged.)
 const PHARMACY_CHANNELS = {
   HOS: ['HOS'],
-  Telesales: ['TeleSales', 'TeleSales Anesthesia'],
+  Telesales: ['TeleSales', 'TeleSales Anesthesia', 'MD Telesales'],
   'B&B': ['B&B'],
   STC: ['STC'],
   URO: ['URO'],
-  B2C: ['B2C', 'MD Telesales'],
+  B2C: ['B2C'],
 };
 const ALL_ORDERS_DIVISIONS = Object.values(PHARMACY_CHANNELS).flat();
 
