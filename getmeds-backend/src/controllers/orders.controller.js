@@ -692,6 +692,14 @@ exports.getAll = async (req, res, next) => {
       where.push('(o.medrep_id = ? OR o.raised_by_id = ?)');
       params.push(req.user.id, req.user.id);
     }
+    // Oct 10, 2026: a Team Lead sees their own team's orders (and their own), not every order.
+    // The list never applied the scope the order page and My Team already use, so a Team Lead
+    // fell through as "sees all". Fails closed: no team means only their own.
+    if (req.user.role === 'team_lead') {
+      const scope = await teamScopeService.teamScopeSql(req.user.id, 'o');
+      where.push(scope.sql);
+      params.push(...scope.params);
+    }
     // Oct 3, 2026: a draft cancelled by Management is hidden from the back office;
     // only the people who raise orders (and see it as Cancelled) still list it.
     if (!['medrep', 'team_lead'].includes(req.user.role)) where.push('o.draft_cancelled_at IS NULL');

@@ -48,6 +48,12 @@ exports.search = async (req, res, next) => {
       orderWhere.push('(o.medrep_id = ? OR o.raised_by_id = ?)');
       orderParams.push(req.user.id, req.user.id);
     }
+    // Oct 10, 2026: a Team Lead finds their own team's orders (and their own), not every order.
+    if (req.user.role === 'team_lead') {
+      const team = await require('../services/teamScopeService').teamScopeSql(req.user.id, 'o');
+      orderWhere.push(team.sql);
+      orderParams.push(...team.params);
+    }
     if (req.user.role === 'management') {
       const scope = await loadScope(req.user);
       const { sql: scopeClause, params: scopeParams } = scopeSql(scope, 'o');
