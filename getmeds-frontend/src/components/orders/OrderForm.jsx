@@ -624,8 +624,13 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
    * colleague who covers three Salespersons should not mean searching 198
    * names for one of the three.
    */
+  // Oct 10, 2026: raising for someone else, the raiser's own Salespersons are offered too (after
+  // the owner's): a MedRep covering a Leader can still file the order under their own.
   const ownerSalespersons = actingMedrep
-    ? (actingMedrep.salespersons || []).map((x) => x.salesperson).filter(Boolean)
+    ? [...new Set([
+        ...(actingMedrep.salespersons || []).map((x) => x.salesperson).filter(Boolean),
+        ...myOwnSalespersons.map((x) => x.salesperson).filter(Boolean)
+      ])]
     // For a rep's own order: their whole list, not just the primary —
     // /api/orders/meta/salesperson returns every Salesperson on the account.
     : (myOwnSalespersons.length
@@ -1933,14 +1938,17 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   <>
                     <ZohoSalespersonCombo
                       names={ownerSalespersons}
+                      preferred={actingMedrep ? (actingMedrep.salespersons || []).map((x) => x.salesperson).filter(Boolean) : []}
                       value={zohoSalespersonChoice}
                       onSelect={setZohoSalespersonChoice}
                     />
                     <p className="text-[11px] mt-1.5 text-getmeds-blue-dark/80">
                       Sent as the Salesperson on the Zoho Sales Order.
-                      {ownerSalespersons.length > 1
-                        ? ` ${ownerOwnerLabel} covers ${ownerSalespersons.length} — pick the one this order is for.`
-                        : ''}
+                      {actingMedrep
+                        ? ` Pick ${ownerOwnerLabel}'s, or one of your own.`
+                        : (ownerSalespersons.length > 1
+                          ? ` ${ownerOwnerLabel} covers ${ownerSalespersons.length} — pick the one this order is for.`
+                          : '')}
                     </p>
                   </>
                 ) : (

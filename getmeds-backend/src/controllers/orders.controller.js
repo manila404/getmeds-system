@@ -1858,7 +1858,13 @@ exports.create = async (req, res, next) => {
       }
       effectiveSalesperson = (verification.checked && verification.matchedName) ? verification.matchedName : cleanSalesperson;
     } else if (!isBackOfficeOrder && cleanSalesperson !== null) {
-      const choice = await salespersonService.resolveForUser(effectiveActor.id, cleanSalesperson);
+      let choice = await salespersonService.resolveForUser(effectiveActor.id, cleanSalesperson);
+      // Oct 10, 2026: raising an order for someone else, the Salesperson may be one of the
+      // RAISER's own as well as the owner's (a MedRep covering a Leader files it under their own).
+      if (choice.error && onBehalfOf) {
+        const own = await salespersonService.resolveForUser(req.user.id, cleanSalesperson);
+        if (!own.error) choice = own;
+      }
       if (choice.error) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: choice.error } });
       }
