@@ -71,6 +71,9 @@ const LACKABLE_BUSINESS = [
 ];
 const LACKABLE = { doctor: [['email', 'Email']], hospital: LACKABLE_BUSINESS, distributor: LACKABLE_BUSINESS };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Oct 10, 2026: "n/a", "none", "-" typed for a customer with no email counts as blank (the
+// customer then goes to Management review) instead of being refused as "not an email".
+const NO_EMAIL_RE = /^(n\/?a|n\.a\.?|none|nil|null|no|no e-?mail( address)?|wala|-+|\.+|x+)$/i;
 
 // customer_sub_type sent to Zoho — 'individual' for Patient/Doctor, 'business' for Hospital/Distributor
 const SUB_TYPE = { patient: 'individual', doctor: 'individual', hospital: 'business', distributor: 'business' };
@@ -285,7 +288,8 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   const shippingOk = sameAsBilling || !!form.shipping_address.address.trim();
   const checking = checkMutation.isPending;
   const canSubmit = missing.length === 0 && displayNameOk && billingOk && shippingOk && !create.isPending && !checking;
-  const emailTyped = String(form.email || '').trim();
+  const emailRaw = String(form.email || '').trim();
+  const emailTyped = NO_EMAIL_RE.test(emailRaw) ? '' : emailRaw;
   const emailBad = !!emailTyped && !EMAIL_RE.test(emailTyped);
   const lacking = (LACKABLE[form.category] || [])
     .filter(([k]) => (k === 'email' ? !EMAIL_RE.test(emailTyped) : !String(form[k] || '').trim()))
@@ -295,6 +299,7 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
     const phone = form.phone;
     create.mutate({
       ...form,
+      email: emailTyped,
       contact_number: phone, // Zoho cf_contact_number — always required in this org
       customer_sub_type: SUB_TYPE[form.category] || 'business',
       is_doctor: form.category === 'doctor',

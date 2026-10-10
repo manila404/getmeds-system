@@ -403,6 +403,7 @@ async function updateHeldCustomer(id, details, actor) {
   next.contact_number = next.phone || next.contact_number;
   if (next.shipping_same_as_billing !== false) next.shipping_address = next.billing_address;
 
+  next.email = blankIfPlaceholder(next.email);
   const problems = validate(next);
   if (problems.length) return { ok: false, status: 400, reason: problems.join(' ') };
 
@@ -606,6 +607,10 @@ async function discardHeldCustomer(heldId, actor) {
 // required field, and the customer was stuck. Deliberately loose: something@something.tld.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isEmail = (v) => EMAIL_RE.test(String(v || '').trim());
+// Oct 10, 2026: what a rep types when the customer has no email ("n/a", "none", "-"). It is not an
+// email and must not stop the order: it counts as blank, so the customer goes to Management review.
+const NO_EMAIL_RE = /^(n\/?a|n\.a\.?|none|nil|null|no|no e-?mail( address)?|wala|-+|\.+|x+)$/i;
+const blankIfPlaceholder = (v) => (NO_EMAIL_RE.test(String(v || '').trim()) ? '' : v);
 
 // Oct 8, 2026: details a MedRep may leave out. The customer is still saved, but held for
 // Management, who see what is missing and choose: push as new anyway, link to a customer
@@ -695,6 +700,7 @@ function validate(input) {
  * wrong, the customer simply already exists.
  */
 async function createCustomer(input, actor) {
+  input = { ...(input || {}), email: blankIfPlaceholder((input || {}).email) };
   const problems = validate(input);
   if (problems.length) {
     const err = new Error(problems.join(' '));
