@@ -232,7 +232,10 @@ async function resolveOrderMedrep(user, requestedMedrepId) {
   // team lead never for someone beside or above them: the team check below only
   // contains people under them.
   const targetRole = (target && target.role || '').toLowerCase();
-  const targetAllowed = targetRole === 'medrep' || (targetRole === 'team_lead' && (isTeamLead || isManagement || isAdmin));
+  // Oct 10, 2026: a MedRep may raise for a Leader / Team Leader too (Mitzi, a Leader, could not be
+  // found in a MedRep's picker). Same openness as raising for another MedRep: the order is
+  // recorded as raised by the MedRep, so who typed it in is never in doubt.
+  const targetAllowed = targetRole === 'medrep' || targetRole === 'team_lead';
   if (!target || !targetAllowed) {
     return {
       error: {
@@ -520,12 +523,13 @@ exports.getMedreps = async (req, res, next) => {
       return res.json({ success: true, data: { enabled: true, medreps: [], salespersons: [] } });
     }
     // Oct 6, 2026: Leaders below a team lead (and, for Management/Admin, any Leader) can be
-    // picked too — see resolveOrderMedrep. A MedRep's picker stays MedReps only.
+    // picked too — see resolveOrderMedrep. Oct 10, 2026: and by a MedRep, who could not find a
+    // Leader (Mitzi) in the list. A team lead's own picker is still only their team (above).
     const medrepRows = await db
       .prepare(
         `SELECT id, name, email, display_name, division, sub_division, salesperson, role
          FROM users
-         WHERE ${isMedrep ? "LOWER(role) = 'medrep'" : "LOWER(role) IN ('medrep', 'team_lead')"} AND is_active = 1
+         WHERE LOWER(role) IN ('medrep', 'team_lead') AND is_active = 1
            ${teamFilterIds ? `AND id IN (${teamFilterIds.map(() => '?').join(', ')})` : ''}
          ORDER BY COALESCE(NULLIF(TRIM(display_name), ''), name)`
       )
