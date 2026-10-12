@@ -374,6 +374,14 @@ const UserDetailsModal = ({
             )}
           </Field>
 
+          {/* Oct 12, 2026: a Team Lead who leads another lead's team alongside them. Shown only
+              when set; the link is made in the database for now. */}
+          {user.shares_team_with ? (
+            <Field label="Shares team with">
+              <p className="text-sm text-ink-primary">{user.shares_team_with_name || `#${user.shares_team_with}`} <span className="text-ink-secondary">(sees and can raise for the same members)</span></p>
+            </Field>
+          ) : null}
+
           <div className="sm:col-span-2">
             <Field label="Zoho Salesperson">
               {editing ? (

@@ -108,6 +108,19 @@ function channelRows(h, c, usersById) {
       key: `c${c.id}-m${m.id}`, level: 2, kind: 'lead', name: m.name, user: m.user,
       handles: m.scope_note || `Team lead of ${chLabel(c.name)}`, act: { type: 'lead', manager: m },
     });
+    // Oct 12, 2026: Team Leads who share this lead's team (users.shares_team_with) sit right
+    // under them, so the same members read as led by both.
+    if (m.user) {
+      for (const u of usersById.values()) {
+        if (u.shares_team_with !== m.user.id) continue;
+        place(u);
+        rows.push({
+          key: `c${c.id}-m${m.id}-shared-${u.id}`, level: 2, kind: 'lead', shared: true,
+          name: displayName(u), user: { id: u.id, name: u.name, role: u.role },
+          handles: `Shares ${m.name}'s team: the same members below`, status: accStatus(u.id), act: null,
+        });
+      }
+    }
     repRows(m, 3);
   }
   return { rows, placed };
@@ -247,7 +260,7 @@ const Row = ({ r, onOpen, actions }) => {
         </div>
       </td>
       <td className="py-2 pr-3 whitespace-nowrap">
-        {!r.missing && <span className={`inline-block px-2 py-0.5 rounded-full text-[10.5px] font-bold border ${k.chip}`}>{k.label}</span>}
+        {!r.missing && <span className={`inline-block px-2 py-0.5 rounded-full text-[10.5px] font-bold border ${k.chip}`}>{k.label}{r.shared ? ' · shared' : ''}</span>}
       </td>
       <td className="py-2 pr-3 text-[12.5px] text-ink-secondary">{r.handles}</td>
       <td className="py-2 pr-3 text-[12px] font-mono text-ink-secondary">
@@ -730,7 +743,16 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
       approves.get(a.user.id).push(chLabel(s.c.name));
     }
   }
-  const membersOf = (id) => users.filter((u) => u.team_lead_id === id).length;
+  // Oct 12, 2026: a lead who shares another lead's team (shares_team_with) counts that team too.
+  const directOf = (id) => users.filter((u) => u.team_lead_id === id).length;
+  const membersOf = (id) => {
+    const me = users.find((u) => u.id === id);
+    return directOf(id) + (me && me.shares_team_with ? directOf(me.shares_team_with) : 0);
+  };
+  const sharedNote = (id) => {
+    const me = users.find((u) => u.id === id);
+    return me && me.shares_team_with ? ` (shares ${me.shares_team_with_name || 'another lead'}'s team)` : '';
+  };
 
   const rowsFor = (d) => users
     .filter((u) => d.roles.includes(String(u.role).toLowerCase()))
@@ -739,7 +761,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
       key: `d-${u.id}`, user: u, name: displayName(u), roleText: String(u.role).replace('_', ' '), zoho: u.salesperson || '', status: statusOf(u),
       detail: d.key === 'mgmt'
         ? (approves.get(u.id) ? `Approves: ${approves.get(u.id).join(', ')}` : '')
-        : d.key === 'lead' ? `${membersOf(u.id)} team member${membersOf(u.id) === 1 ? '' : 's'}` : '',
+        : d.key === 'lead' ? `${membersOf(u.id)} team member${membersOf(u.id) === 1 ? '' : 's'}${sharedNote(u.id)}` : '',
     }));
 
   const unplacedReps = built.others.filter((u) => String(u.role).toLowerCase() === 'medrep').map((u) => ({

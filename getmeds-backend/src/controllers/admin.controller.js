@@ -25,6 +25,8 @@ const getAllUsers = async (req, res, next) => {
     // Sep 21, 2026: team_lead_id + the Team Lead's own name (tl.name) — so
     // UsersPage's inline "Team Lead" dropdown can show the current
     // assignment without a second round trip per row.
+    // Oct 12, 2026: who shares whose team (users.shares_team_with), once the column exists.
+    const hasShare = await hasColumn('users', 'shares_team_with');
     const users = await db
       .prepare(
         `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at,
@@ -32,9 +34,9 @@ const getAllUsers = async (req, res, next) => {
                 u.display_name, u.division, u.sub_division, u.salesperson,
                 u.first_name AS stored_first_name, u.last_name AS stored_last_name,
                 u.updated_at, u.username AS stored_username,
-                u.team_lead_id, tl.name AS team_lead_name${(await hasColumn('users', 'sales_title')) ? ', u.sales_title' : ''}
+                u.team_lead_id, tl.name AS team_lead_name${(await hasColumn('users', 'sales_title')) ? ', u.sales_title' : ''}${hasShare ? ', u.shares_team_with, sw.name AS shares_team_with_name' : ''}
            FROM users u
-           LEFT JOIN users tl ON tl.id = u.team_lead_id
+           LEFT JOIN users tl ON tl.id = u.team_lead_id${hasShare ? ' LEFT JOIN users sw ON sw.id = u.shares_team_with' : ''}
           -- Sep 24, 2026: admins first, always (the Users screen keeps them there
           -- through every sort as well), then anyone waiting on approval.
           ORDER BY (u.role = 'admin') DESC, (u.approval_status = 'pending') DESC, u.name`
