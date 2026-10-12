@@ -121,8 +121,32 @@ async function walkTeam(teamLeadUserId) {
     WHERE sc.head_user_id = ?
   `).all(teamLeadUserId);
 
+  // Oct 12, 2026: the whole channel, by the structure, not only by who each person's Team Lead
+  // field points at. Vanessa heads HOS, but Jimlord's, Ken's and Daniel's people have no Team
+  // Lead set (those leads have no account to point at), so they never reached her. The channel
+  // head also sees everyone who holds a territory under ANY manager in the channel, and the
+  // accounts of those managers themselves. Same alias matching the By Team page uses.
+  const structureRows = await db.prepare(`
+    SELECT DISTINCT us.user_id AS id
+      FROM sales_channels sc
+      JOIN sales_managers sm ON sm.channel_id = sc.id
+      JOIN sales_territories t ON t.manager_id = sm.id
+      JOIN user_salespersons us ON LOWER(TRIM(us.salesperson)) = LOWER(TRIM(t.zoho_salesperson))
+                               OR LOWER(TRIM(us.salesperson)) = LOWER(TRIM(COALESCE(t.zoho_alias, '')))
+     WHERE sc.head_user_id = ?
+    UNION
+    SELECT DISTINCT sm.user_id AS id
+      FROM sales_channels sc
+      JOIN sales_managers sm ON sm.channel_id = sc.id
+     WHERE sc.head_user_id = ? AND sm.user_id IS NOT NULL
+  `).all(teamLeadUserId, teamLeadUserId);
+
   const team = new Set();
-  let level = [...(below.get(teamLeadUserId) || []), ...headRows.map((r) => r.id)];
+  let level = [
+    ...(below.get(teamLeadUserId) || []),
+    ...headRows.map((r) => r.id),
+    ...structureRows.map((r) => r.id)
+  ];
   for (let depth = 0; depth < MAX_DEPTH && level.length; depth++) {
     const next = [];
     for (const id of level) {
