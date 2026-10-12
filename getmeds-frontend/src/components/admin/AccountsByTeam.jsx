@@ -30,7 +30,6 @@ import ManagerAccessTable from './ManagerAccessTable';
  */
 
 const chLabel = (n) => String(n).replace(/^RX · /, '').replace('HOSP', 'HOS').replace('TELESALES', 'Telesales');
-const peso = (n) => { const v = Number(n || 0); return `₱${v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : `${Math.round(v / 1e3)}K`}`; };
 const errorText = (err, fallback) => err?.response?.data?.error?.message || err?.message || fallback;
 const displayName = (u) => [u.first_name, u.last_name].filter(Boolean).join(' ') || u.name;
 
@@ -610,7 +609,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
     retry: false,
   });
   // Departments: Sales opens by default, the rest start shut. Channels start shut too,
-  // since each header already carries its head, counts and target.
+  // since each header already carries its head and counts.
   const [openDept, setOpenDept] = useState({});
   const toggleDept = (key, wasOpen) => setOpenDept((s) => ({ ...s, [key]: !wasOpen }));
   const [openCh, setOpenCh] = useState({});
@@ -797,7 +796,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
                   </button>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                     <span className="text-xs text-ink-secondary tabular-nums">
-                      {s.c.counts.territories} territories{s.c.counts.vacant ? <span className="text-red-700"> · {s.c.counts.vacant} vacant</span> : ''} · {peso(s.c.counts.target)}
+                      {s.c.counts.territories} territories{s.c.counts.vacant ? <span className="text-red-700"> · {s.c.counts.vacant} vacant</span> : ''}
                     </span>
                     <button type="button" className={`${linkBtn} inline-flex items-center gap-1`} onClick={() => setEditor({ mode: 'manager-add', channel: s.c })}><Plus className="w-3.5 h-3.5" />Team lead</button>
                     <button type="button" className={`${linkBtn} inline-flex items-center gap-1`} onClick={() => setEditor({ mode: 'approver-add', channel: s.c })}><Plus className="w-3.5 h-3.5" />Manager</button>
