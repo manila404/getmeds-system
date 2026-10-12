@@ -25,6 +25,7 @@ import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import RelinkCustomerModal from '../components/orders/RelinkCustomerModal';
 import CancelDraftModal from '../components/orders/CancelDraftModal';
 import RestoreDraftModal from '../components/orders/RestoreDraftModal';
+import StockHoldModal from '../components/orders/StockHoldModal';
 import ApproveOrderModal from '../components/orders/ApproveOrderModal';
 import RefundModal from '../components/orders/RefundModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
@@ -175,6 +176,8 @@ const EVENT_LABELS = {
   ORDER_CUSTOMER_RELINKED: 'CUSTOMER CHANGED BY MANAGEMENT',
   DRAFT_CANCELLED: 'DRAFT CANCELLED',
   DRAFT_RESTORED: 'RESTORED BY MANAGEMENT',
+  STOCK_HOLD: 'WAITING FOR STOCK',
+  STOCK_RELEASED: 'STOCK IS BACK',
   REFUND_RECORDED: 'REFUND RECORDED',
   PAP_PROGRAM_SET: 'PATIENT ASSISTANCE PROGRAM',
   ORDER_RESUMED: 'RESUMED BY MANAGEMENT',
@@ -344,6 +347,8 @@ const OrderDetailPage = () => {
   const [cancelOpen, setCancelOpen] = useState(false);
   // Oct 12, 2026: bring a cancelled draft back straight to Management approval.
   const [restoreOpen, setRestoreOpen] = useState(false);
+  // Oct 12, 2026: a draft waiting for stock (instead of cancelling it).
+  const [stockHoldOpen, setStockHoldOpen] = useState(false);
   const [refundOpen, setRefundOpen] = useState(false);
   // Sep 18, 2026: reason first (moves the order off the hold/exception with
   // the MedRep's own words on the trail), then the file — attaching
@@ -576,6 +581,26 @@ const OrderDetailPage = () => {
       qc.invalidateQueries();
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not cancel this draft')
+  });
+
+  // Oct 12, 2026: put a draft on hold, waiting for stock; and "Stock is back" sends it for approval.
+  const stockHoldMutation = useMutation({
+    mutationFn: ({ reason, item }) => client.post(`/api/orders/${id}/stock-hold`, { reason, item }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Draft is now waiting for stock. It was not cancelled.');
+      setStockHoldOpen(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not put this draft on hold', { duration: 8000 })
+  });
+  const stockReleaseMutation = useMutation({
+    mutationFn: () => client.post(`/api/orders/${id}/stock-release`, {}).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Stock is back. The order is with Management for approval.');
+      qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not release this order', { duration: 8000 })
   });
 
   // Oct 12, 2026: Management/Admin restore a cancelled draft (stock is back); a pending refund is closed.
@@ -1006,6 +1031,24 @@ const OrderDetailPage = () => {
             </button>
           </div>
         </div>
+        {order.status === 'draft' && order.stock_hold_at && !order.draft_cancelled_at && (
+          <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-[13px] text-amber-950">
+            <p className="font-semibold">⏳ Waiting for stock{order.stock_hold_item ? `: ${order.stock_hold_item}` : ''}</p>
+            <p className="mt-0.5">
+              Reason: {order.stock_hold_reason || '—'} · since {new Date(order.stock_hold_at).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })}
+              {' '}({Math.max(0, Math.floor((Date.now() - Date.parse(order.stock_hold_at)) / 86400000))} days)
+            </p>
+            <p className="mt-0.5 text-[12px]">This order was not cancelled and no refund was started. It continues when the stock is back.</p>
+            {(user?.id === order.medrep_id || user?.id === order.raised_by_id || ['management', 'admin'].includes(user?.role)) && (
+              <button
+                type="button"
+                disabled={stockReleaseMutation.isPending}
+                onClick={() => stockReleaseMutation.mutate()}
+                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-pharmacy-green text-white rounded hover:opacity-90 disabled:opacity-50"
+              >{stockReleaseMutation.isPending ? 'Sending…' : '✓ Stock is back, send for approval'}</button>
+            )}
+          </div>
+        )}
         {order.draft_cancelled_at && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-900">
             <p className="font-semibold">
@@ -1074,6 +1117,14 @@ const OrderDetailPage = () => {
             orderRef={order.getmeds_order_id}
             onClose={() => setApproveOpen(false)}
             onApproved={onApproved}
+          />
+        )}
+        {stockHoldOpen && (
+          <StockHoldModal
+            order={order}
+            saving={stockHoldMutation.isPending}
+            onClose={() => setStockHoldOpen(false)}
+            onConfirm={(reason, item) => stockHoldMutation.mutate({ reason, item })}
           />
         )}
         {restoreOpen && (
@@ -1615,7 +1666,7 @@ const OrderDetailPage = () => {
             so a rep who raised an order for a colleague and had it sent back
             could not resubmit it. A sent-back draft resubmits from the
             banner below instead. */}
-        {order.status === 'draft' && !order.sent_back &&
+        {order.status === 'draft' && !order.sent_back && !order.stock_hold_at &&
           (user?.id === order.medrep_id || user?.id === order.raised_by_id || ['management', 'admin'].includes(user?.role)) && (
           <div className="mt-4 pt-4 border-t border-gray-100">
             <button
@@ -1636,6 +1687,13 @@ const OrderDetailPage = () => {
                 onClick={() => setResumeOpen(true)}
                 className="px-3 py-1.5 text-xs font-semibold bg-pharmacy-green text-white rounded hover:opacity-90"
               >▶ Resume order</button>
+            )}
+            {order.status === 'draft' && !order.zoho_so_id && !order.stock_hold_at && (
+              <button
+                onClick={() => setStockHoldOpen(true)}
+                className="px-3 py-1.5 text-xs border border-amber-400 text-amber-900 rounded hover:bg-amber-50"
+                title="Out of stock? Keep the order and its payment instead of cancelling it"
+              >⏳ Wait for stock</button>
             )}
             {order.status === 'draft' && !order.zoho_so_id && (
               <button

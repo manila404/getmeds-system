@@ -399,6 +399,13 @@ CREATE TABLE IF NOT EXISTS orders (
   -- Oct 9, 2026: the warehouse Management chose at approval (NULL = Zoho's main warehouse).
   fulfil_warehouse_id TEXT,
   fulfil_warehouse_name TEXT,
+  -- Oct 12, 2026: a draft Management has put on hold because an item is out of stock. The order stays
+  -- a draft; these mark it. NULL stock_hold_at = not held. See controllers/orders.controller.js stockHold.
+  stock_hold_at TEXT,
+  stock_hold_by INTEGER REFERENCES users(id),
+  stock_hold_reason TEXT,
+  stock_hold_item TEXT,
+  stock_hold_reminded_at TEXT,
   rx_not_required_reason TEXT,
   -- Sep 5, 2026 (3): THIS order's Sub-division — editable at order creation
   -- by whoever raises it (medrep or management), unlike Division (which

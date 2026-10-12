@@ -22,6 +22,7 @@ const zohoAutoSyncService = require('../services/zohoAutoSyncService');
 const zohoRetryService = require('../services/zohoRetryService');
 const notificationRetentionService = require('../services/notificationRetentionService');
 const deletedDraftPurge = require('../services/deletedDraftPurge');
+const stockHoldService = require('../services/stockHoldService');
 const { withLock } = require('../services/cronLock');
 
 /**
@@ -90,6 +91,13 @@ exports.autoSync = async (req, res, next) => {
       retention.deleted_drafts_purged = await deletedDraftPurge.purgeExpired();
     } catch (err) {
       console.error('[CRON] deleted-draft purge failed:', err.message);
+    }
+
+    // Oct 12, 2026: drafts waiting for stock are re-announced every 3 days, same tick, own try/catch.
+    try {
+      retention.stock_hold_reminders = await stockHoldService.remindDue();
+    } catch (err) {
+      console.error('[CRON] stock-hold reminders failed:', err.message);
     }
 
     if (!zohoAutoSyncService.isEnabled()) {

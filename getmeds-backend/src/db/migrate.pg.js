@@ -1387,6 +1387,19 @@ async function reconcileFulfilWarehouseColumns(client) {
 }
 
 /**
+ * Oct 12, 2026: a draft Management has put on hold "waiting for stock". The order stays a draft;
+ * these columns mark it (NULL stock_hold_at = not held). Nullable and additive.
+ */
+async function reconcileStockHoldColumns(client) {
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_hold_at TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_hold_by INTEGER REFERENCES users(id)');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_hold_reason TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_hold_item TEXT');
+  await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_hold_reminded_at TEXT');
+  console.log('  ✔ orders.stock_hold_* present');
+}
+
+/**
  * Oct 12, 2026: a Team Lead can share another lead's team (users.shares_team_with). Nullable and
  * additive; see services/teamScopeService.js.
  */
@@ -1553,6 +1566,7 @@ async function main() {
     await reconcileDraftCancelColumns(client);
     await reconcileFulfilWarehouseColumns(client);
     await reconcileSharedTeamColumn(client);
+    await reconcileStockHoldColumns(client);
     await reconcileSalesTitleColumn(client);
     await reconcileKpiTargetSourceCheck(client);
     await reconcileIdentitySequences(client);

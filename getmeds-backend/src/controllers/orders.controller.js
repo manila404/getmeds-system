@@ -1348,6 +1348,9 @@ exports.cancelDraft = async (req, res, next) => {
       await setOrderStatus(order.id, order.status, 'cancelled', now);
       await db.prepare('UPDATE orders SET draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, draft_cancel_kind = ?, refund_status = ?, updated_at = ? WHERE id = ?')
         .run(now, actor.id, reason, kind, kind === 'keep_record' ? 'pending' : null, now, order.id);
+      if (order.stock_hold_at) {
+        await db.prepare('UPDATE orders SET stock_hold_at = NULL, stock_hold_by = NULL, stock_hold_reason = NULL, stock_hold_item = NULL, stock_hold_reminded_at = NULL WHERE id = ?').run(order.id);
+      }
       await logEvent({
         orderId: order.id,
         eventType: 'DRAFT_CANCELLED',
@@ -1380,6 +1383,157 @@ exports.cancelDraft = async (req, res, next) => {
     })();
     const updated = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
     res.json({ success: true, data: { order: updated } });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/orders/:id/stock-hold — Management / Admin put a DRAFT on hold because an item is
+ * out of stock. Oct 12, 2026. The alternative to cancelling it: a paid draft that is cancelled
+ * starts a refund; this keeps the order and its payment exactly as they are.
+ *
+ * The order stays a draft (nothing else in the system changes); stock_hold_* mark it. The MedRep
+ * is told; a reminder goes out every 3 days (services/stockHoldService.js).
+ */
+exports.stockHold = async (req, res, next) => {
+  try {
+    const reason = String((req.body || {}).reason || '').trim();
+    const item = String((req.body || {}).item || '').trim().slice(0, 200) || null;
+    if (!reason) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'A reason is required, e.g. "HYDROXYGET out of stock". The MedRep sees it.' } });
+    }
+    if (reason.length > 500) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'The reason is too long (500 characters at most).' } });
+    }
+    if (!(await hasColumn('orders', 'stock_hold_at'))) {
+      return res.status(503).json({ success: false, error: { code: 'MIGRATION_PENDING', message: 'Waiting for stock needs a database update that has not been run yet.' } });
+    }
+    const order = await db.prepare(`
+      SELECT o.*, u.email AS medrep_email, c.name AS customer_name
+      FROM orders o LEFT JOIN users u ON o.medrep_id = u.id LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = ?`).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    if (order.status !== 'draft' || order.draft_cancelled_at) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_A_DRAFT', message: `Only a draft can wait for stock. This order is "${order.status}".` } });
+    }
+    if (order.zoho_so_id) {
+      return res.status(409).json({ success: false, error: { code: 'ALREADY_IN_ZOHO', message: 'This order already has a Zoho Sales Order.' } });
+    }
+    if (order.stock_hold_at) {
+      return res.status(409).json({ success: false, error: { code: 'ALREADY_HELD', message: 'This draft is already waiting for stock.' } });
+    }
+
+    const actor = await resolveActor(req.user, 'management');
+    const now = new Date().toISOString();
+    let moved = 0;
+    await db.transaction(async () => {
+      const r = await db.prepare(`
+        UPDATE orders SET stock_hold_at = ?, stock_hold_by = ?, stock_hold_reason = ?, stock_hold_item = ?,
+                          stock_hold_reminded_at = NULL, updated_at = ?
+         WHERE id = ? AND status = 'draft' AND stock_hold_at IS NULL AND zoho_so_id IS NULL`).run(now, actor.id, reason, item, now, order.id);
+      moved = r.changes ?? r.rowCount ?? 0;
+      if (!moved) return;
+      await logEvent({
+        orderId: order.id,
+        eventType: 'STOCK_HOLD',
+        oldStatus: 'draft',
+        newStatus: 'draft',
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Put on hold, waiting for stock, by ${actor.name}${item ? ` (${item})` : ''}: ${reason}`,
+        metadata: { reason, item }
+      });
+    })();
+    if (!moved) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_MOVED', message: 'The order could not be put on hold. Refresh the page and try again.' } });
+    }
+    await notify({
+      orderId: order.id,
+      recipientIds: [order.medrep_id, order.raised_by_id].filter((id) => id && id !== actor.id),
+      message: `Order ${order.getmeds_order_id} is waiting for stock${item ? ` (${item})` : ''}: ${reason}. It was not cancelled; Management will release it when the stock is back. You can also press "Stock is back".`,
+      eventType: 'STOCK_HOLD',
+      orderData: { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: 'draft', medrep_email: order.medrep_email }
+    });
+    const updated = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({ success: true, data: { order: updated } });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/orders/:id/stock-release — "Stock is back". Management / Admin, or the person who
+ * owns or raised the draft, release a held draft; it goes straight to Management approval
+ * (where the stock check shows live Zoho stock). Oct 12, 2026.
+ */
+exports.stockRelease = async (req, res, next) => {
+  try {
+    const note = String((req.body || {}).note || '').trim().slice(0, 500);
+    if (!(await hasColumn('orders', 'stock_hold_at'))) {
+      return res.status(503).json({ success: false, error: { code: 'MIGRATION_PENDING', message: 'Waiting for stock needs a database update that has not been run yet.' } });
+    }
+    const order = await db.prepare(`
+      SELECT o.*, u.email AS medrep_email, u.name AS medrep_name, c.name AS customer_name
+      FROM orders o LEFT JOIN users u ON o.medrep_id = u.id LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = ?`).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+
+    const role = String(req.user?.role || '').toLowerCase();
+    const allowed = role === 'management' || role === 'admin' ||
+      (role === 'medrep' && canActOnOrder(req.user, order)) ||
+      (role === 'team_lead' && isTeamLeadsOwnOrder(req.user, order));
+    if (!allowed) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only the person who owns or raised this order, or Management, can release it.' } });
+    }
+    if (order.status !== 'draft' || !order.stock_hold_at || order.draft_cancelled_at) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_HELD', message: 'This draft is not waiting for stock.' } });
+    }
+    if (order.zoho_so_id) {
+      return res.status(409).json({ success: false, error: { code: 'ALREADY_IN_ZOHO', message: 'This order already has a Zoho Sales Order.' } });
+    }
+
+    const actor = await resolveActor(req.user, role === 'medrep' || role === 'team_lead' ? role : 'management');
+    const now = new Date().toISOString();
+    const heldDays = Math.max(0, Math.floor((Date.parse(now) - Date.parse(order.stock_hold_at)) / 86400000));
+    let moved = 0;
+    await db.transaction(async () => {
+      const r = await db.prepare(`
+        UPDATE orders
+           SET status = 'pending_management_approval', submitted_at = ?, updated_at = ?,
+               stock_hold_at = NULL, stock_hold_by = NULL, stock_hold_reason = NULL, stock_hold_item = NULL, stock_hold_reminded_at = NULL
+         WHERE id = ? AND status = 'draft' AND stock_hold_at IS NOT NULL AND zoho_so_id IS NULL`).run(now, now, order.id);
+      moved = r.changes ?? r.rowCount ?? 0;
+      if (!moved) return;
+      await logEvent({
+        orderId: order.id,
+        eventType: 'STOCK_RELEASED',
+        oldStatus: 'draft',
+        newStatus: 'pending_management_approval',
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Stock is back, released by ${actor.name} after ${heldDays} day${heldDays === 1 ? '' : 's'}${note ? `: ${note}` : ''} — waiting for Management approval.`,
+        metadata: { held_reason: order.stock_hold_reason, held_item: order.stock_hold_item, held_days: heldDays, note: note || null }
+      });
+    })();
+    if (!moved) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_MOVED', message: 'The order could not be released. Refresh the page and try again.' } });
+    }
+
+    const orderData = { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: 'pending_management_approval', medrep_email: order.medrep_email };
+    const management = (await getUserIdsByRole('management')).filter((id) => id !== actor.id);
+    await notify({
+      orderId: order.id,
+      recipientIds: management,
+      message: `Order ${order.getmeds_order_id} (${order.customer_name}) is back from waiting for stock${order.stock_hold_item ? ` (${order.stock_hold_item})` : ''} and is ready for your approval.`,
+      eventType: 'ORDER_RESUBMITTED',
+      orderData
+    });
+    await notify({
+      orderId: order.id,
+      recipientIds: [order.medrep_id, order.raised_by_id].filter((id) => id && id !== actor.id),
+      message: `Order ${order.getmeds_order_id} was released by ${actor.name}: stock is back. It is with Management for approval.`,
+      eventType: 'ORDER_RESUBMITTED',
+      orderData
+    });
+    const updated = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({ success: true, data: { order: updated, status: updated.status } });
   } catch (err) { next(err); }
 };
 
@@ -3212,6 +3366,11 @@ exports.submit = async (req, res, next) => {
     }
     const gateError = checkTestCustomerGate({ name: order.customer_name, zoho_contact_id: order.customer_zoho_contact_id });
     if (gateError) return res.status(403).json({ success: false, error: gateError });
+
+    // Oct 12, 2026: submitting a draft that was waiting for stock ends the wait.
+    if (order.stock_hold_at) {
+      await db.prepare('UPDATE orders SET stock_hold_at = NULL, stock_hold_by = NULL, stock_hold_reason = NULL, stock_hold_item = NULL, stock_hold_reminded_at = NULL WHERE id = ?').run(order.id);
+    }
 
     // ─── Sep 7, 2026: MedRep orders wait for Management approval ──────────
     //
