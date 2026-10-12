@@ -1233,7 +1233,7 @@ const OrderDetailPage = () => {
                       {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
                     </button>
                   )}
-                  {isManagementUser && !order.zoho_so_id && order.zoho_sync_status === 'failed' && (
+                  {isManagementUser && !order.zoho_so_id && (order.zoho_sync_status === 'failed' || (order.zoho_sync_status === 'pending' && !['draft', 'pending_management_approval'].includes(order.status))) && (
                     <button
                       type="button"
                       onClick={() => setRelinkOpen(true)}
@@ -1282,7 +1282,7 @@ const OrderDetailPage = () => {
                     {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
                   </button>
                 )}
-                {isManagementUser && !order.zoho_so_id && order.zoho_sync_status === 'failed' && (
+                {isManagementUser && !order.zoho_so_id && (order.zoho_sync_status === 'failed' || (order.zoho_sync_status === 'pending' && !['draft', 'pending_management_approval'].includes(order.status))) && (
                   <button
                     type="button"
                     onClick={() => setRelinkOpen(true)}

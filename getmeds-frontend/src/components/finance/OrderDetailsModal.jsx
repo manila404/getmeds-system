@@ -615,7 +615,10 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
   // Sep 14, 2026 (GETMEDS_WORKFLOW_V2): with the switch on, confirming takes
   // the same two ticks the queue row asks for — prices and proof of payment —
   // because Dispatch invoices straight after it. They reset for each order.
-  const canConfirm = Boolean(onConfirm) && order?.status === 'ready_for_finance_verified';
+  // Oct 12, 2026: no Sales Order in Zoho yet = nothing to verify (the server refuses it too).
+  const hasSalesOrder = Boolean(order?.zoho_so_number || order?.zoho_so_id || splits.some((x) => x.zoho_so_number || x.zoho_so_id));
+  const awaitingZoho = Boolean(onConfirm) && order?.status === 'ready_for_finance_verified' && !hasSalesOrder;
+  const canConfirm = Boolean(onConfirm) && order?.status === 'ready_for_finance_verified' && hasSalesOrder;
   const confirmsSalesOrder = canConfirm && workflowV2;
   const [checks, setChecks] = useState({ prices: false, proof: false });
   useEffect(() => { setChecks({ prices: false, proof: false }); }, [orderId]);
@@ -927,6 +930,11 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
             </div>
           ) : footer ? (
             <div className="min-w-0">{footer}</div>
+          ) : awaitingZoho ? (
+            <p className="text-[12px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-3 py-2 min-w-0">
+              <strong>Not in Zoho yet.</strong> This order has no Sales Order, so it cannot be verified. It is waiting for its
+              customer or the sync; Management can press Retry Zoho Sync on the order.
+            </p>
           ) : splits.length > 0 ? (
             <p className="text-[11px] text-ink-secondary min-w-0">
               Verify or hold each entity above — this order is split across {splits.length + 1} Sales Orders.

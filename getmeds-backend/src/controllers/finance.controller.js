@@ -861,6 +861,26 @@ exports.verifyAccount = async (req, res, next) => {
       });
     }
 
+    // Oct 12, 2026: nothing to verify against. An order whose Sales Order never reached Zoho (its
+    // customer was not registered yet, or the sync failed) was cleared to invoice anyway, then
+    // showed up with Dispatch with no SO to work from (GM-20261012-0031). Holding or rejecting is
+    // still allowed; clearing it is not, until the Sales Order exists. Split orders count as in
+    // Zoho when any of their entities has one.
+    if (approved && !order.zoho_so_id) {
+      const splitSo = await db
+        .prepare('SELECT COUNT(*) AS n FROM order_split_sales_orders WHERE order_id = ? AND zoho_so_id IS NOT NULL')
+        .get(order.id);
+      if (!(Number(splitSo?.n) > 0)) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'NO_ZOHO_SO',
+            message: 'This order has no Sales Order in Zoho yet, so it cannot be verified. It is waiting to sync (its customer was not in Zoho yet, or the sync failed). Ask Management to press Retry Zoho Sync on the order, then verify it.'
+          }
+        });
+      }
+    }
+
     // Sep 22, 2026: a split-invoicing order (see services/orderSplitService.js)
     // needs EVERY entity verified — this one and each order_split_sales_orders
     // row — before the order itself is cleared to invoice. Checked before

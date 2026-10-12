@@ -408,6 +408,7 @@ exports.getRecent = async (req, res, next) => {
          ORDER BY fe.id DESC LIMIT 1
       ) fv ON TRUE
        WHERE o.status = ANY(?)
+         AND o.zoho_so_id IS NOT NULL
          AND NOT (${importedSql('o')})${scopeAnd}${whAnd}${today ? ' AND fv.finance_confirmed_at >= ?' : ''}
        ORDER BY COALESCE(fv.finance_confirmed_at, o.updated_at) DESC
        LIMIT ${listLimit}

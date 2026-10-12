@@ -1214,7 +1214,21 @@ exports.retryZohoSync = async (req, res, next) => {
     if ((req.user.role || '').toLowerCase() === 'team_lead' && !isTeamLeadsOwnOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
-    if (order.zoho_sync_status !== 'failed') {
+    // Oct 12, 2026: an order whose customer was not in Zoho yet stays 'pending' with a queued row,
+    // and the background retry is off, so nothing ever created its Sales Order. Once the customer
+    // is registered it can be created by hand, same as a failed one.
+    let retryable = order.zoho_sync_status === 'failed';
+    if (!retryable && order.zoho_sync_status === 'pending' && !order.zoho_so_id && order.status !== 'draft') {
+      const cust = await db.prepare('SELECT zoho_contact_id FROM customers WHERE id = ?').get(order.customer_id);
+      if (!cust || !cust.zoho_contact_id) {
+        return res.status(409).json({
+          success: false,
+          error: { code: 'CUSTOMER_NOT_IN_ZOHO', message: 'This order is waiting for its customer to be registered in Zoho first. Open the customer under Pending Customers and push it, then retry.' }
+        });
+      }
+      retryable = true;
+    }
+    if (!retryable) {
       return res.status(409).json({
         success: false,
         error: {
