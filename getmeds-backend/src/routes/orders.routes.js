@@ -118,6 +118,8 @@ router.post('/:id/relink-customer', requireRole('management', 'admin'), c.relink
 router.post('/:id/relink-customer/new', requireRole('management', 'admin'), c.relinkToNewZohoCustomer);
 // Oct 3, 2026: Management/Admin cancel a draft (reason required); hidden from the back office.
 router.post('/:id/cancel-draft', requireRole('management', 'admin'), c.cancelDraft);
+// Oct 12, 2026: bring a cancelled draft back, straight to Management approval.
+router.post('/:id/restore-draft', requireRole('management', 'admin'), c.restoreDraft);
 router.get('/:id/payment-on-record', requireRole('management', 'admin'), c.paymentOnRecord);
 // Oct 8, 2026: Management/Admin permanently delete an unpaid draft that never reached Zoho.
 router.post('/:id/delete-draft', requireRole('management', 'admin'), c.deleteDraft);

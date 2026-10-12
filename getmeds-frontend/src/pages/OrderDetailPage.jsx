@@ -24,6 +24,7 @@ import { roleLabel } from '../constants/roles';
 import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import RelinkCustomerModal from '../components/orders/RelinkCustomerModal';
 import CancelDraftModal from '../components/orders/CancelDraftModal';
+import RestoreDraftModal from '../components/orders/RestoreDraftModal';
 import ApproveOrderModal from '../components/orders/ApproveOrderModal';
 import RefundModal from '../components/orders/RefundModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
@@ -173,6 +174,7 @@ const EVENT_LABELS = {
   CUSTOMER_LINKED_TO_ZOHO: 'CUSTOMER LINKED TO ZOHO',
   ORDER_CUSTOMER_RELINKED: 'CUSTOMER CHANGED BY MANAGEMENT',
   DRAFT_CANCELLED: 'DRAFT CANCELLED',
+  DRAFT_RESTORED: 'RESTORED BY MANAGEMENT',
   REFUND_RECORDED: 'REFUND RECORDED',
   PAP_PROGRAM_SET: 'PATIENT ASSISTANCE PROGRAM',
   ORDER_RESUMED: 'RESUMED BY MANAGEMENT',
@@ -340,6 +342,8 @@ const OrderDetailPage = () => {
   // Oct 2, 2026: Management's fix for an order linked to a customer Zoho holds as a vendor.
   const [relinkOpen, setRelinkOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
+  // Oct 12, 2026: bring a cancelled draft back straight to Management approval.
+  const [restoreOpen, setRestoreOpen] = useState(false);
   const [refundOpen, setRefundOpen] = useState(false);
   // Sep 18, 2026: reason first (moves the order off the hold/exception with
   // the MedRep's own words on the trail), then the file — attaching
@@ -572,6 +576,20 @@ const OrderDetailPage = () => {
       qc.invalidateQueries();
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not cancel this draft')
+  });
+
+  // Oct 12, 2026: Management/Admin restore a cancelled draft (stock is back); a pending refund is closed.
+  const restoreDraftMutation = useMutation({
+    mutationFn: ({ reason }) => client.post(`/api/orders/${id}/restore-draft`, { reason }).then(r => r.data),
+    onSuccess: () => {
+      toast.success('Order restored. It is back with Management for approval.');
+      setRestoreOpen(false);
+      qc.invalidateQueries({ queryKey: ['order', id] });
+      qc.invalidateQueries({ queryKey: ['refund-summary'] });
+      qc.invalidateQueries({ queryKey: ['refunds'] });
+      qc.invalidateQueries({ queryKey: ['management-approval-queue'] });
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not restore this order', { duration: 8000 })
   });
 
   // Oct 8, 2026: Management/Admin permanently delete an unpaid draft that never reached Zoho.
@@ -1001,6 +1019,14 @@ const OrderDetailPage = () => {
                 It is erased for good when the MedRep reads the notice, or one day after{order.draft_cancelled_at ? ` (${new Date(order.draft_cancelled_at).toLocaleString('en-PH')})` : ''}.
               </p>
             )}
+            {['discard', 'keep_record'].includes(order.draft_cancel_kind) && order.status === 'cancelled' && !order.zoho_so_id && ['management', 'admin'].includes(user?.role) && (
+              <button
+                type="button"
+                onClick={() => setRestoreOpen(true)}
+                className="mt-2 mr-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-getmeds-blue/50 text-getmeds-blue-dark bg-white rounded hover:bg-getmeds-blue/10"
+                title="Bring this order back to Management approval, e.g. when the stock is available again"
+              >↩ Restore order</button>
+            )}
             {order.draft_cancel_kind === 'discard' && !order.zoho_so_id && ['management', 'admin'].includes(user?.role) && (
               <button
                 type="button"
@@ -1048,6 +1074,14 @@ const OrderDetailPage = () => {
             orderRef={order.getmeds_order_id}
             onClose={() => setApproveOpen(false)}
             onApproved={onApproved}
+          />
+        )}
+        {restoreOpen && (
+          <RestoreDraftModal
+            order={order}
+            saving={restoreDraftMutation.isPending}
+            onClose={() => setRestoreOpen(false)}
+            onConfirm={(reason) => restoreDraftMutation.mutate({ reason })}
           />
         )}
         {cancelOpen && (

@@ -1383,6 +1383,130 @@ exports.cancelDraft = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+/**
+ * POST /api/orders/:id/restore-draft — Management or Admin brings back a draft that was
+ * cancelled, straight to Management approval. Oct 12, 2026.
+ *
+ * The case: a paid draft was cancelled "out of stock" and a refund was started; the stock came
+ * back. Cancelled is terminal everywhere else, so this is the ONE narrow way out, and only for
+ * a draft cancelled through cancelDraft that never reached Zoho. Its items, customer, payment
+ * proof and attachments were never touched by the cancel, so they are all still there.
+ *
+ * Money first:
+ *   refund 'done'     -> refused (the customer was already paid back; raise a new order).
+ *   refund 'pending'  -> closed, Finance told to stop it, gone from their Refund queue.
+ *   'not_due' / none  -> nothing to undo.
+ * The cancellation stays on the timeline; nothing is erased.
+ */
+exports.restoreDraft = async (req, res, next) => {
+  try {
+    const reason = String((req.body || {}).reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'A reason is required, e.g. "Stock is available again".' } });
+    }
+    if (reason.length > 500) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'The reason is too long (500 characters at most).' } });
+    }
+    const order = await db.prepare(`
+      SELECT o.*, u.email AS medrep_email, u.name AS medrep_name, c.name AS customer_name
+      FROM orders o LEFT JOIN users u ON o.medrep_id = u.id LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = ?`).get(req.params.id);
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+
+    if (order.status !== 'cancelled' || !order.draft_cancelled_at || !['discard', 'keep_record'].includes(order.draft_cancel_kind)) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_A_CANCELLED_DRAFT', message: `Only a draft that was cancelled here can be restored. This order is "${order.status}".` } });
+    }
+    if (order.zoho_so_id) {
+      return res.status(409).json({ success: false, error: { code: 'ALREADY_IN_ZOHO', message: 'This order already has a Zoho Sales Order, so it cannot be restored here.' } });
+    }
+    const split = await db.prepare('SELECT COUNT(*) AS n FROM order_split_sales_orders WHERE order_id = ? AND zoho_so_id IS NOT NULL').get(order.id);
+    if (Number(split?.n) > 0) {
+      return res.status(409).json({ success: false, error: { code: 'ALREADY_IN_ZOHO', message: 'Part of this order already has a Zoho Sales Order, so it cannot be restored here.' } });
+    }
+    const queued = await db.prepare("SELECT COUNT(*) AS n FROM zoho_sync_queue WHERE order_id = ? AND status = 'pending'").get(order.id);
+    if (Number(queued?.n) > 0) {
+      return res.status(409).json({ success: false, error: { code: 'ZOHO_SYNC_PENDING', message: 'This order is waiting to be sent to Zoho, so it cannot be restored.' } });
+    }
+    if (order.refund_status === 'done') {
+      const ref = order.refund_reference ? `, ref ${order.refund_reference}` : '';
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'REFUND_ALREADY_PAID',
+          message: `₱${Number(order.refund_amount || 0).toLocaleString('en-PH')} was already refunded${ref}, so the customer has to pay again. Raise a new order instead.`
+        }
+      });
+    }
+
+    const actor = await resolveActor(req.user, 'management');
+    const now = new Date().toISOString();
+    const hadRefundPending = order.refund_status === 'pending';
+    const before = {
+      kind: order.draft_cancel_kind, reason: order.draft_cancel_reason, cancelled_at: order.draft_cancelled_at,
+      refund_status: order.refund_status || null
+    };
+
+    // The same conditions again in the UPDATE, so a refund recorded, or a second click, between
+    // the checks above and here leaves the order alone.
+    let moved = 0;
+    await db.transaction(async () => {
+      const r = await db.prepare(`
+        UPDATE orders
+           SET status = 'pending_management_approval', submitted_at = ?, updated_at = ?,
+               draft_cancelled_at = NULL, draft_cancelled_by = NULL, draft_cancel_reason = NULL, draft_cancel_kind = NULL,
+               refund_status = NULL, refund_received_amount = NULL, refund_amount = NULL, refund_reference = NULL,
+               refund_at = NULL, refund_note = NULL, refund_by = NULL, refund_updated_at = NULL
+         WHERE id = ? AND status = 'cancelled' AND zoho_so_id IS NULL
+           AND (refund_status IS NULL OR refund_status <> 'done')`).run(now, now, order.id);
+      moved = r.changes ?? r.rowCount ?? 0;
+      if (!moved) return;
+      await logEvent({
+        orderId: order.id,
+        eventType: 'DRAFT_RESTORED',
+        oldStatus: 'cancelled',
+        newStatus: 'pending_management_approval',
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `Restored by ${actor.name}: ${reason}${hadRefundPending ? ' (the pending refund was closed)' : ''} — back with Management for approval.`,
+        metadata: { reason, was: before }
+      });
+    })();
+    if (!moved) {
+      return res.status(409).json({ success: false, error: { code: 'NOT_MOVED', message: 'The order could not be restored. Refresh the page and try again.' } });
+    }
+
+    const orderData = { getmeds_order_id: order.getmeds_order_id, customer_name: order.customer_name, status: 'pending_management_approval', medrep_email: order.medrep_email };
+    if (hadRefundPending) {
+      const finance = (await getUserIdsByRole('finance', 'admin')).filter((id) => id !== actor.id);
+      await notify({
+        orderId: order.id,
+        recipientIds: finance,
+        message: `Order ${order.getmeds_order_id} was restored by ${actor.name}, so its refund is no longer due. Please do not pay it out. Reason: ${reason}`,
+        eventType: 'REFUND_CANCELLED',
+        orderData
+      });
+    }
+    const management = (await getUserIdsByRole('management')).filter((id) => id !== actor.id);
+    await notify({
+      orderId: order.id,
+      recipientIds: management,
+      message: `Order ${order.getmeds_order_id} (${order.customer_name}) was restored by ${actor.name} and is ready for your approval. Reason: ${reason}`,
+      eventType: 'ORDER_RESUBMITTED',
+      orderData
+    });
+    await notify({
+      orderId: order.id,
+      recipientIds: [order.medrep_id, order.raised_by_id].filter((id) => id && id !== actor.id),
+      message: `Order ${order.getmeds_order_id} was restored by ${actor.name}: ${reason}. It is back with Management for approval.`,
+      eventType: 'ORDER_RESUBMITTED',
+      orderData
+    });
+
+    const updated = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({ success: true, data: { order: updated, status: updated.status } });
+  } catch (err) { next(err); }
+};
+
 /** GET /api/orders/:id/payment-on-record — the Cancel dialog asks this to default and disable its options. */
 exports.paymentOnRecord = async (req, res, next) => {
   try {
