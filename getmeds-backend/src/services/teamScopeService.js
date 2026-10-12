@@ -86,6 +86,25 @@ const MAX_DEPTH = 6;
 async function teamMedrepIds(teamLeadUserId) {
   if (!teamLeadUserId) return [];
 
+  const own = await walkTeam(teamLeadUserId);
+
+  // Oct 12, 2026: a Team Lead can share another lead's team (users.shares_team_with): Claire
+  // leads Saurav's members alongside him. A person still reports to ONE lead (team_lead_id);
+  // this only adds the shared lead's team to what this lead sees. One level, never chained, and
+  // not the shared lead themselves. Skipped until the column exists.
+  if (await hasColumn('users', 'shares_team_with')) {
+    const me = await db.prepare('SELECT shares_team_with FROM users WHERE id = ?').get(teamLeadUserId);
+    const sharedId = me && me.shares_team_with;
+    if (sharedId && sharedId !== teamLeadUserId) {
+      const merged = new Set(own);
+      for (const id of await walkTeam(sharedId)) if (id !== teamLeadUserId) merged.add(id);
+      return [...merged];
+    }
+  }
+  return own;
+}
+
+async function walkTeam(teamLeadUserId) {
   const rows = await db.prepare('SELECT id, team_lead_id FROM users WHERE team_lead_id IS NOT NULL').all();
   const below = new Map();
   for (const r of rows) {

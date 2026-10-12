@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS users (
   -- role='medrep' on this end, same as division/sub_division above -- both
   -- are validated in application code, not the database.
   team_lead_id INTEGER REFERENCES users(id),
+  -- Oct 12, 2026: a Team Lead who leads another lead's team alongside them (Claire shares
+  -- Saurav's). NULL for everyone else. Adds that lead's team to this user's; moves nobody.
+  shares_team_with INTEGER REFERENCES users(id) ON DELETE SET NULL,
   -- The name Zoho knows this person by, chosen by an admin from Zoho's own
   -- Salesperson list. NOT derived from anything here.
   --

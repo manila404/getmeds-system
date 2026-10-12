@@ -1387,6 +1387,15 @@ async function reconcileFulfilWarehouseColumns(client) {
 }
 
 /**
+ * Oct 12, 2026: a Team Lead can share another lead's team (users.shares_team_with). Nullable and
+ * additive; see services/teamScopeService.js.
+ */
+async function reconcileSharedTeamColumn(client) {
+  await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS shares_team_with INTEGER REFERENCES users(id) ON DELETE SET NULL');
+  console.log('  ✔ users.shares_team_with present');
+}
+
+/**
  * Oct 3, 2026: a draft cancelled by Management/Admin. draft_cancelled_at is the
  * marker every back-office list and count filters on (an ordinary 'cancelled'
  * status is a Zoho void and keeps counting under Needs attention); the reason is
@@ -1543,6 +1552,7 @@ async function main() {
     await reconcileNoRxReasonColumn(client);
     await reconcileDraftCancelColumns(client);
     await reconcileFulfilWarehouseColumns(client);
+    await reconcileSharedTeamColumn(client);
     await reconcileSalesTitleColumn(client);
     await reconcileKpiTargetSourceCheck(client);
     await reconcileIdentitySequences(client);
