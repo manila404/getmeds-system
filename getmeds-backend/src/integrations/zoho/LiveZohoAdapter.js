@@ -1,5 +1,6 @@
 const ZohoAdapter = require('./ZohoAdapter');
 const { findSalesperson, SalespersonNotFoundError } = require('./salespersonName');
+const { assertZohoCallAllowed } = require('./zohoWriteLock');
 
 // Sep 2, 2026 — network resilience, added after a Full Resync died with the
 // famously unhelpful "fetch failed". See _request below for why retries are
@@ -145,8 +146,19 @@ class LiveZohoAdapter extends ZohoAdapter {
     }
   }
 
+  /** The Zoho write lock (see zohoWriteLock.js): no deletes ever, and only approved writes. */
+  _assertCallAllowed(method, path) {
+    try {
+      assertZohoCallAllowed(method, path);
+    } catch (err) {
+      this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] BLOCKED ${method} ${path} (org=${this.organizationId}): ${err.message}`);
+      throw err;
+    }
+  }
+
   async _request(method, path, { query = {}, body } = {}) {
     this._assertOrgAllowed();
+    this._assertCallAllowed(method, path);
     const params = new URLSearchParams({ organization_id: this.organizationId, ...query });
     const url = `${this.baseUrl}${path}?${params.toString()}`;
     this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] ${method} ${path} (org=${this.organizationId})`);
@@ -1085,6 +1097,7 @@ class LiveZohoAdapter extends ZohoAdapter {
     if (!buffer || !buffer.length) throw new Error('addSalesOrderAttachment requires non-empty file data');
 
     this._assertOrgAllowed();
+    this._assertCallAllowed('POST', `/salesorders/${salesorderId}/attachment`);
     const token = await this.getAccessToken();
     const params = new URLSearchParams({ organization_id: this.organizationId });
     const url = `${this.baseUrl}/salesorders/${salesorderId}/attachment?${params.toString()}`;
@@ -1154,6 +1167,7 @@ class LiveZohoAdapter extends ZohoAdapter {
     if (!documentId) throw new Error('getSalesOrderAttachment requires a document_id');
 
     this._assertOrgAllowed();
+    this._assertCallAllowed('GET', `/salesorders/${salesorderId}/attachment`);
     const token = await this.getAccessToken();
     const params = new URLSearchParams({ organization_id: this.organizationId, document_id: documentId });
     const url = `${this.baseUrl}/salesorders/${salesorderId}/attachment?${params.toString()}`;
@@ -1296,6 +1310,7 @@ class LiveZohoAdapter extends ZohoAdapter {
     if (!salesorderId) throw new Error('confirmSalesOrder requires a Zoho Sales Order id');
 
     this._assertOrgAllowed();
+    this._assertCallAllowed('POST', `/salesorders/${salesorderId}/status/confirmed`);
     const token = await this.getAccessToken();
     const params = new URLSearchParams({ organization_id: this.organizationId });
     const url = `${this.baseUrl}/salesorders/${salesorderId}/status/confirmed?${params.toString()}`;

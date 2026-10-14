@@ -78,8 +78,21 @@ const SCOPES = [
   'ZohoInventory.contacts.READ',
   'ZohoInventory.contacts.CREATE', // new — create a customer from the order form
   'ZohoInventory.contacts.UPDATE', // new — updateContactTin (TIN on a business contact)
-  'ZohoInventory.items.READ'
+  'ZohoInventory.items.READ',
+  // Oct 14, 2026 — the Admin Overview's Total Sales and Sales KPIs read Zoho's invoices and
+  // credit notes (GET only), the same figures as Zoho's "Sales by Salesperson" report.
+  'ZohoInventory.invoices.READ',
+  'ZohoInventory.creditnotes.READ'
 ];
+
+/**
+ * Oct 14, 2026 (Aaron's decision): the token is ISSUED with full access to Zoho Inventory,
+ * so a new feature never needs a new token. Trade-off accepted: a leaked token can do
+ * anything in Inventory (not Books or CRM). SCOPES above stays as the list of what the app
+ * actually uses, for --check; full access counts as having every one of them.
+ */
+const FULL_ACCESS = 'ZohoInventory.fullaccess.all';
+const REQUEST = [FULL_ACCESS];
 
 const args = process.argv.slice(2);
 const arg = (flag) => {
@@ -111,14 +124,15 @@ async function post(url) {
 }
 
 function printScopeReport(granted) {
-  const have = new Set(String(granted || '').split(/\s+/).filter(Boolean));
-  console.log('\n  scopes on this token:');
+  const have = new Set(String(granted || '').split(/[\s,]+/).filter(Boolean));
+  const full = have.has(FULL_ACCESS);
+  console.log(`\n  scopes on this token:${full ? `  ${FULL_ACCESS} (covers everything below)` : ''}`);
   for (const s of SCOPES) {
-    console.log(`    ${have.has(s) ? '✓' : '✗ MISSING'}  ${s}`);
+    console.log(`    ${full || have.has(s) ? '✓' : '✗ MISSING'}  ${s}`);
   }
-  const extra = [...have].filter((s) => !SCOPES.includes(s));
+  const extra = [...have].filter((s) => !SCOPES.includes(s) && s !== FULL_ACCESS);
   for (const s of extra) console.log(`    +  ${s}   (extra, not required)`);
-  const missing = SCOPES.filter((s) => !have.has(s));
+  const missing = full ? [] : SCOPES.filter((s) => !have.has(s));
   return missing;
 }
 
@@ -155,7 +169,7 @@ function printScopeReport(granted) {
   if (args.includes('--scopes')) {
     console.log('\n1. API Console \u2192 Self Client \u2192 Generate Code.');
     console.log('\n2. Paste this into the Scope box (one line, commas, no spaces):\n');
-    console.log(SCOPES.join(','));
+    console.log(REQUEST.join(','));
     console.log('\n3. Set the expiry to 10 minutes rather than 3 \u2014 the default leaves very');
     console.log('   little room if anything needs re-reading. Description can be anything.');
     console.log('\n4. CREATE. Pick organisation ' + process.env.ZOHO_ORG_ID + ' if asked, then copy the code.');
@@ -166,7 +180,7 @@ function printScopeReport(granted) {
 
   if (args.includes('--url')) {
     const p = new URLSearchParams({
-      scope: SCOPES.join(','),
+      scope: REQUEST.join(','),
       client_id: CLIENT_ID,
       response_type: 'code',
       redirect_uri: REDIRECT,
