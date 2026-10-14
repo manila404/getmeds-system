@@ -225,7 +225,11 @@ const AttachmentCard = ({
         <div className="flex items-center gap-2 px-3 py-2 text-xs border-b border-slate-200 bg-slate-50 text-ink-secondary">
           <Paperclip className="w-3.5 h-3.5 shrink-0" />
           <span className="font-semibold">{attachmentLabel(attachment.file_type)}</span>
-          <span className="opacity-80">— informational only, not reviewed by Finance</span>
+          <span className="opacity-80">
+            {attachment.file_type === 'prescription'
+              ? '— reviewed by Pharmacy'
+              : '— informational only, not reviewed by Finance'}
+          </span>
         </div>
       )}
 
@@ -250,7 +254,7 @@ const AttachmentCard = ({
       {/* The view URL is signed and short-lived — minted per request by the
           API, never stored. A stale tab will 403 on the image; Refresh mints
           a new one. */}
-      <div className="px-3 py-2 border-t border-slate-200 flex items-center justify-between gap-2">
+      <div className="px-3 py-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
         <span className="text-xs font-semibold text-ink-primary">Attached document</span>
         <div className="flex items-center gap-3">
           {/* Sep 19, 2026: "add download feature for all users to download
@@ -652,7 +656,7 @@ const PaymentProofPanel = ({ orderId, order }) => {
               value={uploadType}
               onChange={(e) => setUploadType(e.target.value)}
               disabled={uploading || (uploadType === 'payment_proof' && proofLocked)}
-              className="text-sm border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white text-ink-primary disabled:opacity-50"
+              className="w-full sm:w-auto text-sm border border-slate-300 rounded-lg px-2.5 py-2 bg-white text-ink-primary disabled:opacity-50"
             >
               {ATTACHMENT_TYPES.map(t => (
                 <option key={t.value} value={t.value}>{t.label}</option>
@@ -698,12 +702,12 @@ const PaymentProofPanel = ({ orderId, order }) => {
                 <input type="file" accept={ACCEPT} onChange={onPick} className="hidden" disabled={uploading} />
               </label>
 
-              <div className="flex sm:hidden flex-wrap gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:hidden">
                 <button
                   type="button"
                   disabled={uploading}
                   onClick={() => cameraRef.current?.click()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50"
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-getmeds-blue text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50 shadow-sm"
                 >
                   <Camera className="w-3.5 h-3.5" />
                   {uploading ? 'Uploading…' : 'Take photo'}
@@ -712,7 +716,7 @@ const PaymentProofPanel = ({ orderId, order }) => {
                   type="button"
                   disabled={uploading}
                   onClick={() => fileRef.current?.click()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white text-ink-secondary text-xs font-semibold hover:bg-surface disabled:opacity-50"
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white text-ink-secondary text-xs font-semibold hover:bg-surface disabled:opacity-50 shadow-sm"
                 >
                   <Upload className="w-3.5 h-3.5" />
                   {uploading ? 'Uploading…' : 'Choose file'}
