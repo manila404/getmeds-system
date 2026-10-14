@@ -242,7 +242,11 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       key: 'operations',
       title: 'Operations',
       links: [
-        { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
+        // ADMIN OVERVIEW MOCK (Oct 14, 2026): for Admin, the Overview replaces Global Dashboard
+        // as the first tab (Aaron). Management keeps Global Dashboard. Remove with the page.
+        (role === 'admin' && import.meta.env.VITE_ADMIN_OVERVIEW_MOCK === 'true')
+          ? { to: '/admin/overview-mock', icon: <LayoutDashboard size={19} />, label: 'Overview' }
+          : { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
         // Sep 7, 2026: MedRep orders wait here for Management approval before
         // they sync to Zoho — see orders.controller.js's submit().
         { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },

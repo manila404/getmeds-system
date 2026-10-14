@@ -18,8 +18,12 @@ const DashboardPage = () => {
       return <Navigate to="/finance" replace />;
     case 'dispatch':
       return <Navigate to="/dispatch" replace />;
-    case 'management':
     case 'admin':
+      // ADMIN OVERVIEW MOCK (Oct 14, 2026): Admin starts on the Overview while the try-out
+      // is on (Aaron). Remove with the page.
+      if (import.meta.env.VITE_ADMIN_OVERVIEW_MOCK === 'true') return <Navigate to="/admin/overview-mock" replace />;
+      return <Navigate to="/management" replace />;
+    case 'management':
       return <Navigate to="/management" replace />;
     case 'team_lead':
       return <Navigate to="/team-lead" replace />;
