@@ -375,7 +375,7 @@ const FinanceQueuePage = () => {
     <div className="space-y-5">
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div className="min-w-0">
           {view === 'mine' ? (
             <>
@@ -433,7 +433,7 @@ const FinanceQueuePage = () => {
             </>
           )}
         </div>
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex items-center justify-between sm:justify-end gap-2.5 w-full sm:w-auto shrink-0">
           {!view && zohoSyncedAt && (
             <span className="text-xs text-ink-secondary hidden sm:block">
               Zoho synced {relativeTime(zohoSyncedAt)}
@@ -442,7 +442,7 @@ const FinanceQueuePage = () => {
           <button
             type="button"
             onClick={handleRefresh}
-            className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary"
+            className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary w-full sm:w-auto"
           >
             <RefreshCw className={`w-4 h-4 ${activeIsFetching ? 'animate-spin' : ''}`} />
             Refresh
@@ -458,7 +458,7 @@ const FinanceQueuePage = () => {
       {!view && (<>
 
         {/* Stage cards — all 6, one always selected */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2.5 sm:gap-3">
           {FINANCE_STAGES.map((card) => {
             const isSelected  = stage === card.key;
             const isException = card.key === 'exceptions';
@@ -470,7 +470,7 @@ const FinanceQueuePage = () => {
                 type="button"
                 aria-pressed={isSelected}
                 onClick={() => setParam('stage', card.key, true)}
-                className={`text-left rounded-xl border p-4 transition-all ${
+                className={`text-left rounded-xl border p-3 sm:p-4 transition-all ${
                   isSelected
                     ? 'border-getmeds-blue bg-getmeds-blue/5 ring-1 ring-getmeds-blue'
                     : isException
@@ -501,7 +501,7 @@ const FinanceQueuePage = () => {
         <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
 
           {/* Toolbar */}
-          <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center gap-3">
+          <div className="px-3 sm:px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
             {/* Title */}
             <div className="flex-1 min-w-0">
               <h2 className="text-sm font-semibold text-ink-primary">
@@ -513,19 +513,19 @@ const FinanceQueuePage = () => {
             </div>
 
             {/* Search */}
-            <div className="relative">
+            <div className="relative w-full sm:w-52">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-secondary pointer-events-none" />
               <input
                 type="search"
                 placeholder="Order #, customer, MedRep"
                 value={search}
                 onChange={(e) => setParam('q', e.target.value || null, true)}
-                className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-md w-52 focus:outline-none focus:ring-1 focus:ring-getmeds-blue text-ink-primary placeholder:text-ink-secondary"
+                className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-md w-full focus:outline-none focus:ring-1 focus:ring-getmeds-blue text-ink-primary placeholder:text-ink-secondary"
               />
             </div>
 
             {/* Source filter — GetMeds is the default */}
-            <div className="flex items-center rounded-md border border-slate-200 overflow-hidden text-xs font-semibold">
+            <div className="flex items-center justify-center rounded-md border border-slate-200 overflow-hidden text-xs font-semibold w-full sm:w-auto">
               {[
                 { key: 'getmeds', label: 'GetMeds' },
                 { key: 'zoho',    label: 'Zoho' },
@@ -535,7 +535,7 @@ const FinanceQueuePage = () => {
                   key={key}
                   type="button"
                   onClick={() => setParam('source', key === 'getmeds' ? null : key, true)}
-                  className={`px-3 py-1.5 transition-colors ${
+                  className={`flex-1 sm:flex-none text-center px-3 py-1.5 transition-colors ${
                     source === key
                       ? 'bg-getmeds-blue text-white'
                       : 'bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'
@@ -550,7 +550,7 @@ const FinanceQueuePage = () => {
             <button
               type="button"
               onClick={() => toast('CSV export coming soon', { icon: '📋' })}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-md text-ink-secondary hover:bg-surface hover:text-ink-primary"
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-md text-ink-secondary hover:bg-surface hover:text-ink-primary w-full sm:w-auto"
             >
               <Download className="w-3.5 h-3.5" /> Export CSV
             </button>
@@ -658,8 +658,8 @@ const FinanceQueuePage = () => {
 
           {/* Pagination */}
           {pagination.total > 0 && (
-            <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between gap-3 text-xs text-ink-secondary">
-              <p>
+            <div className="px-4 py-3 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-ink-secondary">
+              <p className="text-center sm:text-left">
                 {pagination.total > 0
                   ? `Showing ${showingFrom.toLocaleString('en-PH')}–${showingTo.toLocaleString('en-PH')} of ${pagination.total.toLocaleString('en-PH')}`
                   : 'No orders'}

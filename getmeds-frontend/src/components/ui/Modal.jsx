@@ -6,26 +6,27 @@ const Modal = ({ isOpen, onClose, title, children }) => {
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
-      <div className="flex min-h-screen items-center justify-center px-4 pt-4 pb-20 text-center sm:block sm:p-0">
-        <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" onClick={onClose} aria-hidden="true" />
+      <div className="flex min-h-full items-end sm:items-center justify-center p-2 sm:p-4 text-center sm:block">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs transition-opacity" onClick={onClose} aria-hidden="true" />
         <span className="hidden sm:inline-block sm:h-screen sm:align-middle" aria-hidden="true">&#8203;</span>
         
-        <div className="inline-block transform overflow-hidden rounded-lg bg-white text-left align-bottom shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-lg sm:align-middle">
-          <div className="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-            <div className="sm:flex sm:items-start">
-              <div className="mt-3 w-full text-center sm:mt-0 sm:ml-4 sm:text-left">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-lg font-medium leading-6 text-gray-900" id="modal-title">
-                    {title}
-                  </h3>
-                  <button onClick={onClose} className="text-gray-400 hover:text-gray-500">
-                    <X className="h-5 w-5" />
-                  </button>
-                </div>
-                <div className="mt-2">
-                  {children}
-                </div>
-              </div>
+        <div className="relative inline-block w-full transform overflow-hidden rounded-2xl bg-white text-left align-bottom sm:align-middle shadow-2xl transition-all sm:my-8 sm:max-w-lg max-h-[90vh] flex flex-col">
+          <div className="bg-white p-4 sm:p-6 flex flex-col max-h-[90vh] w-full">
+            <div className="flex justify-between items-center pb-3 border-b border-slate-100 flex-shrink-0">
+              <h3 className="text-base sm:text-lg font-bold text-ink-primary pr-2" id="modal-title">
+                {title}
+              </h3>
+              <button
+                type="button"
+                onClick={onClose}
+                className="p-1 rounded-lg text-slate-400 hover:text-ink-primary hover:bg-surface transition-colors shrink-0"
+                aria-label="Close dialog"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-3 overflow-y-auto pr-0.5 flex-1 thin-scroll text-left">
+              {children}
             </div>
           </div>
         </div>

@@ -979,17 +979,17 @@ const OrderDetailPage = () => {
   // submitting lands on the story of the order rather than on a table the
   // MedRep just typed themselves.
   const tabs = [
-    { id: 'timeline', label: 'Audit Timeline', icon: Clock },
-    { id: 'items', label: 'Order Items', icon: Package },
-    { id: 'payment', label: 'Payment', icon: CreditCard },
-    { id: 'dispatch', label: 'Dispatch', icon: Truck },
+    { id: 'timeline', label: 'Audit Timeline', shortLabel: 'Timeline', icon: Clock },
+    { id: 'items', label: 'Order Items', shortLabel: 'Items', icon: Package },
+    { id: 'payment', label: 'Payment', shortLabel: 'Payment', icon: CreditCard },
+    { id: 'dispatch', label: 'Dispatch', shortLabel: 'Dispatch', icon: Truck },
     // Sep 4, 2026: the deposit slip or receipt Finance checks before
     // invoicing. Next to Payment because that is what it is evidence about —
     // that tab is Zoho's record of the money, this one is the claim to it.
     // Sep 5, 2026: generalized beyond just the proof — this tab (id kept as
     // 'proof' so existing links/tab-state keep working) now lists every file
     // attached to the order, tagged Proof of Payment or Other.
-    { id: 'proof', label: 'Attachments', icon: Receipt },
+    { id: 'proof', label: 'Attachments', shortLabel: 'Files', icon: Receipt },
   ];
 
   return (
@@ -999,8 +999,8 @@ const OrderDetailPage = () => {
       </button>
 
       {/* Header */}
-      <div className="bg-white shadow rounded-lg p-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="bg-white shadow rounded-lg p-4 sm:p-6">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
             <p className="text-xs font-mono text-ink-secondary mb-1">Getmeds Order ID</p>
             <h1 className="text-2xl font-bold font-mono text-getmeds-blue">{order.getmeds_order_id}</h1>
@@ -1017,15 +1017,17 @@ const OrderDetailPage = () => {
               {' · '}Created: {formatPHT(order.created_at)}
             </p>
           </div>
-          <div className="flex flex-col items-end gap-2">
-            <span className={`px-3 py-1 rounded-full text-sm font-semibold capitalize ${STATUS_COLORS[order.status] || 'bg-slate-100 text-slate-700'}`}>
-              {order.status?.replace(/_/g, ' ')}
-            </span>
-            <p className="text-xl font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
+          <div className="flex flex-col items-start sm:items-end gap-2 w-full sm:w-auto">
+            <div className="flex items-center justify-between sm:justify-end gap-3 w-full sm:w-auto">
+              <span className={`px-3 py-1 rounded-full text-sm font-semibold capitalize ${STATUS_COLORS[order.status] || 'bg-slate-100 text-slate-700'}`}>
+                {order.status?.replace(/_/g, ' ')}
+              </span>
+              <p className="text-xl font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
+            </div>
             <button
               type="button"
               onClick={() => setOverviewOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-getmeds-blue/40 bg-white text-xs font-semibold text-getmeds-blue hover:bg-getmeds-blue/5"
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-getmeds-blue/40 bg-white text-xs font-semibold text-getmeds-blue hover:bg-getmeds-blue/5 w-full sm:w-auto"
             >
               📋 Order overview
             </button>
@@ -1872,20 +1874,32 @@ const OrderDetailPage = () => {
 
       {/* Tabs */}
       <div className="bg-white shadow rounded-lg overflow-hidden">
-        <div className="border-b border-slate-200 flex">
+        <div className="border-b border-slate-200 grid grid-cols-5 sm:flex sm:overflow-x-auto sm:no-scrollbar sm:thin-scroll -mb-px">
           {tabs.map(tab => {
             const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
             return (
-              <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === tab.id ? 'border-getmeds-blue text-getmeds-blue font-semibold' : 'border-transparent text-ink-secondary hover:text-ink-primary'}`}
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                className={`min-w-0 flex flex-col sm:flex-row items-center justify-center sm:justify-start gap-1 sm:gap-1.5 py-2.5 sm:py-3 px-1 sm:px-4 text-center sm:text-left border-b-2 transition-colors shrink-0 sm:shrink-0 ${
+                  isActive
+                    ? 'border-getmeds-blue text-getmeds-blue font-semibold'
+                    : 'border-transparent text-ink-secondary hover:text-ink-primary'
+                }`}
               >
-                <Icon className="w-4 h-4" />{tab.label}
+                <Icon className="w-4 h-4 shrink-0" />
+                <span className="text-[11px] sm:text-sm leading-tight truncate sm:overflow-visible sm:whitespace-nowrap">
+                  <span className="inline sm:hidden">{tab.shortLabel}</span>
+                  <span className="hidden sm:inline">{tab.label}</span>
+                </span>
               </button>
             );
           })}
         </div>
 
-        <div className="p-6">
+        <div className="p-4 sm:p-6">
           {/* Items Tab */}
           {activeTab === 'items' && (
             <div>
@@ -1932,48 +1946,120 @@ const OrderDetailPage = () => {
                   <p className="mb-2 text-right text-xs text-ink-secondary">
                     Item tax preference: <span className="font-semibold text-ink-primary">{orderIsInclusive ? 'Tax Inclusive' : 'Tax Exclusive'}</span>
                   </p>
-                  <table className="min-w-full">
-                    <thead>
-                      <tr className="text-left text-xs font-medium text-ink-secondary uppercase border-b border-slate-200">
-                        <th className="pb-3">Product</th>
-                        <th className="pb-3 text-center">Qty</th>
-                        <th className="pb-3 text-right">Price</th>
-                        <th className="pb-3 text-center">Tax</th>
-                        <th className="pb-3">Warehouse</th>
-                        <th className="pb-3 text-right">Amount</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {items.map(item => (
-                        <tr key={item.id}>
-                          <td className="py-3">
-                            <p className="text-sm font-semibold text-ink-primary">{item.product_name}</p>
-                            <p className="text-xs text-ink-secondary">SKU: {item.sku} · Unit: {item.unit}</p>
-                            {item.invoicing_from && item.invoicing_from !== order.invoicing_from && (
-                              <p className="text-xs font-semibold text-indigo-700 mt-0.5">↳ {item.invoicing_from}</p>
-                            )}
-                            {item.price_remark && (
-                              <p className="text-xs text-ink-secondary italic mt-0.5">💬 {item.price_remark}</p>
-                            )}
-                          </td>
-                          <td className="py-3 text-center text-sm text-ink-primary">{item.quantity}</td>
-                          <td className="py-3 text-right text-sm text-ink-secondary">₱{(item.unit_price || 0).toFixed(2)}</td>
-                          {/* Oct 9, 2026: the line's VAT (what is sent to Zoho), and the warehouse Management chose at approval. */}
-                          <td className="py-3 text-center">
-                            <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold border ${Number(item.tax_percent) > 0 ? 'bg-blue-50 text-blue-900 border-blue-200' : 'bg-slate-100 text-slate-700 border-slate-200'}`}>
+                  
+                  {/* Desktop Table View */}
+                  <div className="hidden md:block overflow-x-auto thin-scroll">
+                    <table className="min-w-full">
+                      <thead>
+                        <tr className="text-left text-xs font-medium text-ink-secondary uppercase border-b border-slate-200">
+                          <th className="pb-3">Product</th>
+                          <th className="pb-3 text-center">Qty</th>
+                          <th className="pb-3 text-right">Price</th>
+                          <th className="pb-3 text-center">Tax</th>
+                          <th className="pb-3">Warehouse</th>
+                          <th className="pb-3 text-right">Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {items.map(item => (
+                          <tr key={item.id}>
+                            <td className="py-3">
+                              <p className="text-sm font-semibold text-ink-primary">{item.product_name}</p>
+                              <p className="text-xs text-ink-secondary">SKU: {item.sku} · Unit: {item.unit}</p>
+                              {item.invoicing_from && item.invoicing_from !== order.invoicing_from && (
+                                <p className="text-xs font-semibold text-indigo-700 mt-0.5">↳ {item.invoicing_from}</p>
+                              )}
+                              {item.price_remark && (
+                                <p className="text-xs text-ink-secondary italic mt-0.5">💬 {item.price_remark}</p>
+                              )}
+                            </td>
+                            <td className="py-3 text-center text-sm text-ink-primary">{item.quantity}</td>
+                            <td className="py-3 text-right text-sm text-ink-secondary">₱{(item.unit_price || 0).toFixed(2)}</td>
+                            {/* Oct 9, 2026: the line's VAT (what is sent to Zoho), and the warehouse Management chose at approval. */}
+                            <td className="py-3 text-center">
+                              <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold border ${Number(item.tax_percent) > 0 ? 'bg-blue-50 text-blue-900 border-blue-200' : 'bg-slate-100 text-slate-700 border-slate-200'}`}>
+                                {item.tax_label || (Number(item.tax_percent) > 0 ? `VAT ${Number(item.tax_percent)}%` : 'No Tax')}
+                              </span>
+                            </td>
+                            <td className="py-3 text-sm text-ink-primary">
+                              {item.fulfil_warehouse_name || order.fulfil_warehouse_name
+                                ? (item.fulfil_warehouse_name || order.fulfil_warehouse_name)
+                                : <span className="text-ink-secondary" title="No warehouse was chosen, so Zoho uses its main warehouse">Main (Zoho default)</span>}
+                            </td>
+                            <td className="py-3 text-right text-sm font-semibold text-ink-primary">₱{Number(item.line_total ?? item.subtotal ?? 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="border-t-2 border-slate-200">
+                        {splits.length > 0 && (() => {
+                          const byEntity = new Map();
+                          items.forEach((it) => {
+                            const entity = it.invoicing_from || order.invoicing_from;
+                            byEntity.set(entity, (byEntity.get(entity) || 0) + Number(it.subtotal || 0));
+                          });
+                          return (
+                            <tr>
+                              <td colSpan="5" className="pt-2 pb-1 text-right">
+                                <div className="flex flex-wrap justify-end gap-x-4 gap-y-0.5 text-xs text-ink-secondary">
+                                  {Array.from(byEntity.entries()).map(([entity, sum]) => (
+                                    <span key={entity}>
+                                      {entity}: <span className="font-semibold text-ink-primary">₱{sum.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                                    </span>
+                                  ))}
+                                </div>
+                              </td>
+                              <td />
+                            </tr>
+                          );
+                        })()}
+                        <tr>
+                          <td colSpan="5" className="pt-3 text-sm font-semibold text-ink-primary text-right">Total Amount</td>
+                          <td className="pt-3 text-right text-lg font-bold text-getmeds-blue">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+
+                  {/* Mobile Cards View */}
+                  <div className="block md:hidden space-y-3">
+                    {items.map(item => (
+                      <div key={item.id} className="p-3.5 bg-surface/50 border border-slate-200 rounded-xl space-y-2 text-xs">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-ink-primary leading-snug">{item.product_name}</p>
+                            <p className="text-ink-secondary mt-0.5">SKU: {item.sku} · Unit: {item.unit}</p>
+                          </div>
+                          <span className="text-sm font-bold text-ink-primary whitespace-nowrap shrink-0">
+                            ₱{Number(item.line_total ?? item.subtotal ?? 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        {item.invoicing_from && item.invoicing_from !== order.invoicing_from && (
+                          <p className="font-semibold text-indigo-700">↳ {item.invoicing_from}</p>
+                        )}
+                        {item.price_remark && (
+                          <p className="text-ink-secondary italic">💬 {item.price_remark}</p>
+                        )}
+                        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 text-ink-secondary">
+                          <div>Qty: <span className="font-semibold text-ink-primary">{item.quantity}</span></div>
+                          <div>Unit Price: <span className="font-semibold text-ink-primary">₱{(item.unit_price || 0).toFixed(2)}</span></div>
+                          <div>
+                            Tax:{' '}
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold border ${Number(item.tax_percent) > 0 ? 'bg-blue-50 text-blue-900 border-blue-200' : 'bg-slate-100 text-slate-700 border-slate-200'}`}>
                               {item.tax_label || (Number(item.tax_percent) > 0 ? `VAT ${Number(item.tax_percent)}%` : 'No Tax')}
                             </span>
-                          </td>
-                          <td className="py-3 text-sm text-ink-primary">
-                            {item.fulfil_warehouse_name || order.fulfil_warehouse_name
-                              ? (item.fulfil_warehouse_name || order.fulfil_warehouse_name)
-                              : <span className="text-ink-secondary" title="No warehouse was chosen, so Zoho uses its main warehouse">Main (Zoho default)</span>}
-                          </td>
-                          <td className="py-3 text-right text-sm font-semibold text-ink-primary">₱{Number(item.line_total ?? item.subtotal ?? 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot className="border-t-2 border-slate-200">
+                          </div>
+                          <div>
+                            Warehouse:{' '}
+                            <span className="font-semibold text-ink-primary">
+                              {item.fulfil_warehouse_name || order.fulfil_warehouse_name || 'Main (Zoho)'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Mobile Totals Card */}
+                    <div className="p-3.5 bg-surface border border-slate-200 rounded-xl space-y-2">
                       {splits.length > 0 && (() => {
                         const byEntity = new Map();
                         items.forEach((it) => {
@@ -1981,26 +2067,22 @@ const OrderDetailPage = () => {
                           byEntity.set(entity, (byEntity.get(entity) || 0) + Number(it.subtotal || 0));
                         });
                         return (
-                          <tr>
-                            <td colSpan="5" className="pt-2 pb-1 text-right">
-                              <div className="flex flex-wrap justify-end gap-x-4 gap-y-0.5 text-xs text-ink-secondary">
-                                {Array.from(byEntity.entries()).map(([entity, sum]) => (
-                                  <span key={entity}>
-                                    {entity}: <span className="font-semibold text-ink-primary">₱{sum.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
-                                  </span>
-                                ))}
+                          <div className="space-y-1 pb-2 border-b border-slate-200 text-xs text-ink-secondary">
+                            {Array.from(byEntity.entries()).map(([entity, sum]) => (
+                              <div key={entity} className="flex justify-between">
+                                <span>{entity}:</span>
+                                <span className="font-semibold text-ink-primary">₱{sum.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
                               </div>
-                            </td>
-                            <td />
-                          </tr>
+                            ))}
+                          </div>
                         );
                       })()}
-                      <tr>
-                        <td colSpan="5" className="pt-3 text-sm font-semibold text-ink-primary text-right">Total Amount</td>
-                        <td className="pt-3 text-right text-lg font-bold text-getmeds-blue">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
-                      </tr>
-                    </tfoot>
-                  </table>
+                      <div className="flex justify-between items-center text-sm">
+                        <span className="font-semibold text-ink-primary">Total Amount</span>
+                        <span className="text-lg font-bold text-getmeds-blue">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                      </div>
+                    </div>
+                  </div>
                 </>
               ) : (
                 /* Sep 14, 2026: the same table as raising an order. */

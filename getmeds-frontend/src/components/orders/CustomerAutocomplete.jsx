@@ -162,7 +162,7 @@ const CustomerAutocomplete = ({
 
   return (
     <div className="relative w-full" ref={containerRef}>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
         <div className="relative flex-1">
           <Search className="w-4 h-4 text-ink-secondary absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
@@ -197,9 +197,9 @@ const CustomerAutocomplete = ({
               setCreatingFor(searchTerm.trim());
               setIsOpen(false);
             }}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-getmeds-blue text-getmeds-blue text-[11px] font-semibold hover:bg-getmeds-blue hover:text-white transition-colors"
+            className="shrink-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md border border-getmeds-blue text-getmeds-blue text-xs sm:text-[11px] font-semibold hover:bg-getmeds-blue hover:text-white transition-colors w-full sm:w-auto"
           >
-            <UserPlus size={12} /> Add new customer
+            <UserPlus size={13} /> Add new customer
           </button>
         )}
       </div>

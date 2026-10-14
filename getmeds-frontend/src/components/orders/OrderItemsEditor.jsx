@@ -150,71 +150,283 @@ const OrderItemsEditor = ({
           No items. Use the search box above to add one.
         </div>
       ) : (
-        <div className="border border-slate-200 rounded-xl overflow-x-auto shadow-2xs">
-          <table className="min-w-full divide-y divide-slate-200 text-xs sm:text-sm">
-            <thead className="bg-surface">
-              <tr>
-                <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Product</th>
-                <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Qty</th>
-                <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Price</th>
-                <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Discount</th>
-                <th
-                  className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider"
-                  title="Changes the price here only — Zoho still bills at the item's own configured tax once this order syncs, so the two can differ."
-                >
-                  Tax <span className="text-[9px] normal-case font-medium text-ink-secondary/70">(this order only)</span>
-                </th>
-                <th className="px-3 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Warehouse</th>
-                <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Amount</th>
-                <th className="px-3 py-3 w-12"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 bg-white">
-              {rows.map((row, idx) => {
-                const inactive = !activeProductIds.has(String(row.product_id));
-                return (
-                  <tr key={idx} className={inactive ? 'bg-state-error-light/40' : 'hover:bg-surface/50 transition-colors'}>
-                    <td className="px-4 py-3 min-w-[11rem]">
-                      <p className="font-semibold text-ink-primary whitespace-nowrap">{row.name}</p>
+        <>
+          {/* Desktop Table View */}
+          <div className="hidden md:block border border-slate-200 rounded-xl overflow-x-auto shadow-2xs">
+            <table className="min-w-full divide-y divide-slate-200 text-xs sm:text-sm">
+              <thead className="bg-surface">
+                <tr>
+                  <th className="px-4 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Product</th>
+                  <th className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider">Qty</th>
+                  <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Price</th>
+                  <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Discount</th>
+                  <th
+                    className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider"
+                    title="Changes the price here only — Zoho still bills at the item's own configured tax once this order syncs, so the two can differ."
+                  >
+                    Tax <span className="text-[9px] normal-case font-medium text-ink-secondary/70">(this order only)</span>
+                  </th>
+                  <th className="px-3 py-3 text-left font-bold text-ink-secondary uppercase tracking-wider">Warehouse</th>
+                  <th className="px-4 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Amount</th>
+                  <th className="px-3 py-3 w-12"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 bg-white">
+                {rows.map((row, idx) => {
+                  const inactive = !activeProductIds.has(String(row.product_id));
+                  return (
+                    <tr key={idx} className={inactive ? 'bg-state-error-light/40' : 'hover:bg-surface/50 transition-colors'}>
+                      <td className="px-4 py-3 min-w-[11rem]">
+                        <p className="font-semibold text-ink-primary whitespace-nowrap">{row.name}</p>
+                        <span className="text-[11px] font-mono text-ink-secondary">{row.sku}</span>
+                        {inactive && (
+                          <p className="text-[11px] text-red-700 mt-1 flex items-center gap-1 font-medium">
+                            <AlertCircle className="w-3.5 h-3.5" /> No longer active in Zoho
+                          </p>
+                        )}
+                        {/* Sep 18, 2026: why this line is priced this way — kept
+                            editable here even for a MedRep who cannot touch
+                            Rate/Discount (canEditPrice, Management-only below):
+                            explaining a price is not the same as setting one. */}
+                        <input
+                          type="text"
+                          value={row.price_remark || ''}
+                          onChange={(e) => onChange(idx, 'price_remark', e.target.value)}
+                          maxLength={300}
+                          placeholder="Price remark (optional) — why this rate/discount"
+                          title="Visible to Management and Finance"
+                          className="mt-1 block w-full text-[11px] text-ink-secondary placeholder:text-ink-secondary/50 border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
+                        />
+                        {/* Sep 22, 2026: per-line override of the order's own
+                            Invoicing From — same control and gating as the
+                            order form's own (canEditPrice, Management/admin
+                            only). Set to the other entity and this becomes a
+                            split-invoicing order on save. */}
+                        {canEditPrice && orderInvoicingFrom && (
+                          <select
+                            value={row.invoicing_from || ''}
+                            onChange={(e) => onChange(idx, 'invoicing_from', e.target.value)}
+                            title="Bill this line under a different entity than the order's own Invoicing From — creates a second Zoho Sales Order for it"
+                            className="mt-1 block w-full text-[11px] font-semibold text-ink-secondary border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
+                          >
+                            <option value="">Invoicing From: {orderInvoicingFrom} (follows order)</option>
+                            {INVOICING_FROM_OPTIONS.filter((v) => v !== orderInvoicingFrom).map((v) => (
+                              <option key={v} value={v}>Invoicing From: {v} (split)</option>
+                            ))}
+                          </select>
+                        )}
+                      </td>
+                      <td className="px-3 py-3 text-center">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={row.quantity}
+                          onChange={(e) => onChange(idx, 'quantity', e.target.value)}
+                          onBlur={() => onBlurField(idx, 'quantity')}
+                          onFocus={(e) => e.target.select()}
+                          className={`w-16 ${inputClass}`}
+                        />
+                      </td>
+                      {/* Price and discount: Management only. A MedRep sets the
+                          price when raising the order; changing it afterwards is
+                          Management's call. */}
+                      <td className="px-3 py-3 text-right">
+                        {canEditPrice ? (
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={row.rate}
+                            onChange={(e) => onChange(idx, 'rate', e.target.value)}
+                            onBlur={() => onBlurField(idx, 'rate')}
+                            onFocus={(e) => e.target.select()}
+                            className={`w-24 !text-right px-1.5 ${inputClass}`}
+                          />
+                        ) : (
+                          <span className="font-semibold text-ink-primary">{peso(row.rate)}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        {canEditPrice ? (
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={row.discount}
+                            onChange={(e) => onChange(idx, 'discount', e.target.value)}
+                            onBlur={() => onBlurField(idx, 'discount')}
+                            onFocus={(e) => e.target.select()}
+                            className={`w-20 !text-right px-1.5 ${inputClass}`}
+                          />
+                        ) : (
+                          <span className="text-ink-secondary">{peso(row.discount)}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-3 text-center">
+                        {/* Sep 14, 2026: used to be a read-only badge unless
+                            nobody had pulled the product's tax from Zoho yet.
+                            Sep 18, 2026: editable for every item on request —
+                            picking a preset changes THIS order's price/total;
+                            Zoho still bills at the item's own tax on sync (see
+                            the column header). */}
+                        {(() => {
+                          const product = productById.get(String(row.product_id));
+                          const zohoPct = product?.tax_percentage;
+                          return (
+                            <select
+                              value={row.taxOption || 'none'}
+                              onChange={(e) => onChange(idx, 'taxOption', e.target.value)}
+                              title={
+                                zohoPct != null
+                                  ? `Zoho has this item at ${product.tax_name || 'VAT'} (${zohoPct}%) — this only changes the price in this order`
+                                  : 'Not yet pulled from Zoho — this only changes the price in this order'
+                              }
+                              className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
+                            >
+                              {TAX_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                            </select>
+                          );
+                        })()}
+                      </td>
+                      <td className="px-3 py-3 min-w-[10rem]">
+                        {(() => {
+                          const st = canPickWarehouse ? stockFor(row) : null;
+                          // Zoho's own cell: stock on hand in the line's warehouse, and the warehouse
+                          // name as a link that opens the Warehouses popup (the numbers live there).
+                          if (st) {
+                            const effective = row.warehouse_id || defaultWarehouseId;
+                            const here = st.per_warehouse.find((p) => p.warehouse_id === effective);
+                            return (
+                              <div className="text-[11px] leading-snug">
+                                {here && (
+                                  <p className="text-ink-secondary">
+                                    Stock on Hand: <span className="font-bold text-ink-primary">{Number(here.on_hand).toLocaleString('en-PH')} pcs</span>
+                                  </p>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => setStockRow(idx)}
+                                  title="Click to see the stock in every warehouse and choose one"
+                                  className="inline-flex items-center gap-1 font-semibold uppercase text-getmeds-blue hover:underline text-left"
+                                >
+                                  <Building2 className="w-3 h-3 shrink-0" />
+                                  {here ? here.warehouse_name : (row.warehouse_name || orderWarehouseName || 'Main (Zoho default)')}
+                                </button>
+                              </div>
+                            );
+                          }
+                          // Fallback (stock not loaded, or someone who cannot choose): just the name.
+                          return (
+                            <span className="text-[11px] font-semibold text-ink-primary" title={canPickWarehouse ? 'Stock could not be loaded from Zoho' : 'Management chooses the warehouse'}>
+                              {row.warehouse_name || orderWarehouseName || 'Main (Zoho default)'}
+                            </span>
+                          );
+                        })()}
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">
+                        {peso(lines[idx].amount)}
+                      </td>
+                      <td className="px-3 py-3 text-center">
+                        <button
+                          type="button"
+                          onClick={() => onRemove(idx)}
+                          title="Remove this line"
+                          className="text-slate-400 hover:text-red-600 p-1"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot className="bg-surface/80 border-t-2 border-slate-200">
+                <tr>
+                  <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Subtotal</td>
+                  <td colSpan={2} className="px-4 py-2 text-right font-semibold text-ink-primary font-mono text-xs">{peso(totals.subtotal)}</td>
+                </tr>
+                {totals.discount > 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Total Discount</td>
+                    <td colSpan={2} className="px-4 py-2 text-right font-semibold text-state-error font-mono text-xs">-{peso(totals.discount)}</td>
+                  </tr>
+                )}
+                {totals.tax > 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">
+                      {inclusive ? 'Tax (included in the rates above)' : 'Total Tax'}
+                    </td>
+                    <td colSpan={2} className={`px-4 py-2 text-right font-semibold font-mono text-xs ${inclusive ? 'text-ink-secondary' : 'text-ink-primary'}`}>
+                      {inclusive ? '' : '+'}{peso(totals.tax)}
+                    </td>
+                  </tr>
+                )}
+                <tr>
+                  <td colSpan={6} className="px-4 py-3.5 text-right font-bold text-ink-primary uppercase tracking-wider text-xs">Grand Total:</td>
+                  <td colSpan={2} className="px-4 py-3.5 text-right font-extrabold text-getmeds-blue text-base font-mono">{peso(totals.grand)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          {/* Mobile Cards View */}
+          <div className="block md:hidden space-y-3">
+            {rows.map((row, idx) => {
+              const inactive = !activeProductIds.has(String(row.product_id));
+              const line = lines[idx];
+              const st = canPickWarehouse ? stockFor(row) : null;
+              const effectiveWh = row.warehouse_id || defaultWarehouseId;
+              const here = st?.per_warehouse?.find((p) => p.warehouse_id === effectiveWh);
+
+              return (
+                <div key={idx} className={`p-3.5 border rounded-xl space-y-3 ${inactive ? 'bg-state-error-light/40 border-red-200' : 'bg-white border-slate-200 shadow-2xs'}`}>
+                  {/* Card Header: Product & Remove */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-sm text-ink-primary leading-snug">{row.name}</p>
                       <span className="text-[11px] font-mono text-ink-secondary">{row.sku}</span>
                       {inactive && (
-                        <p className="text-[11px] text-red-700 mt-1 flex items-center gap-1 font-medium">
-                          <AlertCircle className="w-3.5 h-3.5" /> No longer active in Zoho
+                        <p className="text-[11px] text-red-700 mt-0.5 flex items-center gap-1 font-medium">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" /> No longer active in Zoho
                         </p>
                       )}
-                      {/* Sep 18, 2026: why this line is priced this way — kept
-                          editable here even for a MedRep who cannot touch
-                          Rate/Discount (canEditPrice, Management-only below):
-                          explaining a price is not the same as setting one. */}
-                      <input
-                        type="text"
-                        value={row.price_remark || ''}
-                        onChange={(e) => onChange(idx, 'price_remark', e.target.value)}
-                        maxLength={300}
-                        placeholder="Price remark (optional) — why this rate/discount"
-                        title="Visible to Management and Finance"
-                        className="mt-1 block w-full text-[11px] text-ink-secondary placeholder:text-ink-secondary/50 border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
-                      />
-                      {/* Sep 22, 2026: per-line override of the order's own
-                          Invoicing From — same control and gating as the
-                          order form's own (canEditPrice, Management/admin
-                          only). Set to the other entity and this becomes a
-                          split-invoicing order on save. */}
-                      {canEditPrice && orderInvoicingFrom && (
-                        <select
-                          value={row.invoicing_from || ''}
-                          onChange={(e) => onChange(idx, 'invoicing_from', e.target.value)}
-                          title="Bill this line under a different entity than the order's own Invoicing From — creates a second Zoho Sales Order for it"
-                          className="mt-1 block w-full text-[11px] font-semibold text-ink-secondary border border-transparent hover:border-slate-200 focus:border-getmeds-blue rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-transparent focus:bg-white"
-                        >
-                          <option value="">Invoicing From: {orderInvoicingFrom} (follows order)</option>
-                          {INVOICING_FROM_OPTIONS.filter((v) => v !== orderInvoicingFrom).map((v) => (
-                            <option key={v} value={v}>Invoicing From: {v} (split)</option>
-                          ))}
-                        </select>
-                      )}
-                    </td>
-                    <td className="px-3 py-3 text-center">
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemove(idx)}
+                      title="Remove this line"
+                      className="text-slate-400 hover:text-red-600 p-1.5 -mr-1 shrink-0"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Price remark & Split select */}
+                  <div className="space-y-1.5">
+                    <input
+                      type="text"
+                      value={row.price_remark || ''}
+                      onChange={(e) => onChange(idx, 'price_remark', e.target.value)}
+                      maxLength={300}
+                      placeholder="Price remark (optional)"
+                      className="block w-full text-xs text-ink-secondary placeholder:text-ink-secondary/50 border border-slate-200 focus:border-getmeds-blue rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-surface/50 focus:bg-white"
+                    />
+                    {canEditPrice && orderInvoicingFrom && (
+                      <select
+                        value={row.invoicing_from || ''}
+                        onChange={(e) => onChange(idx, 'invoicing_from', e.target.value)}
+                        className="block w-full text-xs font-semibold text-ink-secondary border border-slate-200 focus:border-getmeds-blue rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue bg-surface/50 focus:bg-white"
+                      >
+                        <option value="">Invoicing From: {orderInvoicingFrom} (follows order)</option>
+                        {INVOICING_FROM_OPTIONS.filter((v) => v !== orderInvoicingFrom).map((v) => (
+                          <option key={v} value={v}>Invoicing From: {v} (split)</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {/* Quantity and Price Row */}
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div>
+                      <label className="block text-[11px] font-medium text-ink-secondary mb-1">Quantity</label>
                       <input
                         type="text"
                         inputMode="numeric"
@@ -222,13 +434,11 @@ const OrderItemsEditor = ({
                         onChange={(e) => onChange(idx, 'quantity', e.target.value)}
                         onBlur={() => onBlurField(idx, 'quantity')}
                         onFocus={(e) => e.target.select()}
-                        className={`w-16 ${inputClass}`}
+                        className={`w-full ${inputClass}`}
                       />
-                    </td>
-                    {/* Price and discount: Management only. A MedRep sets the
-                        price when raising the order; changing it afterwards is
-                        Management's call. */}
-                    <td className="px-3 py-3 text-right">
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-ink-secondary mb-1">Price</label>
                       {canEditPrice ? (
                         <input
                           type="text"
@@ -237,13 +447,18 @@ const OrderItemsEditor = ({
                           onChange={(e) => onChange(idx, 'rate', e.target.value)}
                           onBlur={() => onBlurField(idx, 'rate')}
                           onFocus={(e) => e.target.select()}
-                          className={`w-24 !text-right px-1.5 ${inputClass}`}
+                          className={`w-full !text-right px-2 ${inputClass}`}
                         />
                       ) : (
-                        <span className="font-semibold text-ink-primary">{peso(row.rate)}</span>
+                        <div className="py-1 text-right font-semibold text-ink-primary">{peso(row.rate)}</div>
                       )}
-                    </td>
-                    <td className="px-3 py-3 text-right">
+                    </div>
+                  </div>
+
+                  {/* Discount and Tax Row */}
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div>
+                      <label className="block text-[11px] font-medium text-ink-secondary mb-1">Discount</label>
                       {canEditPrice ? (
                         <input
                           type="text"
@@ -252,118 +467,77 @@ const OrderItemsEditor = ({
                           onChange={(e) => onChange(idx, 'discount', e.target.value)}
                           onBlur={() => onBlurField(idx, 'discount')}
                           onFocus={(e) => e.target.select()}
-                          className={`w-20 !text-right px-1.5 ${inputClass}`}
+                          className={`w-full !text-right px-2 ${inputClass}`}
                         />
                       ) : (
-                        <span className="text-ink-secondary">{peso(row.discount)}</span>
+                        <div className="py-1 text-ink-secondary">{peso(row.discount)}</div>
                       )}
-                    </td>
-                    <td className="px-3 py-3 text-center">
-                      {/* Sep 14, 2026: used to be a read-only badge unless
-                          nobody had pulled the product's tax from Zoho yet.
-                          Sep 18, 2026: editable for every item on request —
-                          picking a preset changes THIS order's price/total;
-                          Zoho still bills at the item's own tax on sync (see
-                          the column header). */}
-                      {(() => {
-                        const product = productById.get(String(row.product_id));
-                        const zohoPct = product?.tax_percentage;
-                        return (
-                          <select
-                            value={row.taxOption || 'none'}
-                            onChange={(e) => onChange(idx, 'taxOption', e.target.value)}
-                            title={
-                              zohoPct != null
-                                ? `Zoho has this item at ${product.tax_name || 'VAT'} (${zohoPct}%) — this only changes the price in this order`
-                                : 'Not yet pulled from Zoho — this only changes the price in this order'
-                            }
-                            className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
-                          >
-                            {TAX_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                          </select>
-                        );
-                      })()}
-                    </td>
-                    <td className="px-3 py-3 min-w-[10rem]">
-                      {(() => {
-                        const st = canPickWarehouse ? stockFor(row) : null;
-                        // Zoho's own cell: stock on hand in the line's warehouse, and the warehouse
-                        // name as a link that opens the Warehouses popup (the numbers live there).
-                        if (st) {
-                          const effective = row.warehouse_id || defaultWarehouseId;
-                          const here = st.per_warehouse.find((p) => p.warehouse_id === effective);
-                          return (
-                            <div className="text-[11px] leading-snug">
-                              {here && (
-                                <p className="text-ink-secondary">
-                                  Stock on Hand: <span className="font-bold text-ink-primary">{Number(here.on_hand).toLocaleString('en-PH')} pcs</span>
-                                </p>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => setStockRow(idx)}
-                                title="Click to see the stock in every warehouse and choose one"
-                                className="inline-flex items-center gap-1 font-semibold uppercase text-getmeds-blue hover:underline text-left"
-                              >
-                                <Building2 className="w-3 h-3 shrink-0" />
-                                {here ? here.warehouse_name : (row.warehouse_name || orderWarehouseName || 'Main (Zoho default)')}
-                              </button>
-                            </div>
-                          );
-                        }
-                        // Fallback (stock not loaded, or someone who cannot choose): just the name.
-                        return (
-                          <span className="text-[11px] font-semibold text-ink-primary" title={canPickWarehouse ? 'Stock could not be loaded from Zoho' : 'Management chooses the warehouse'}>
-                            {row.warehouse_name || orderWarehouseName || 'Main (Zoho default)'}
-                          </span>
-                        );
-                      })()}
-                    </td>
-                    <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">
-                      {peso(lines[idx].amount)}
-                    </td>
-                    <td className="px-3 py-3 text-center">
-                      <button
-                        type="button"
-                        onClick={() => onRemove(idx)}
-                        title="Remove this line"
-                        className="text-slate-400 hover:text-red-600 p-1"
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-ink-secondary mb-1">Tax</label>
+                      <select
+                        value={row.taxOption || 'none'}
+                        onChange={(e) => onChange(idx, 'taxOption', e.target.value)}
+                        className="w-full border border-slate-300 rounded py-1 px-1.5 text-xs font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
                       >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-            <tfoot className="bg-surface/80 border-t-2 border-slate-200">
-              <tr>
-                <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Subtotal</td>
-                <td colSpan={2} className="px-4 py-2 text-right font-semibold text-ink-primary font-mono text-xs">{peso(totals.subtotal)}</td>
-              </tr>
+                        {TAX_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Warehouse & Line Amount */}
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                    <div className="text-[11px]">
+                      {st ? (
+                        <button
+                          type="button"
+                          onClick={() => setStockRow(idx)}
+                          className="inline-flex items-center gap-1 font-semibold uppercase text-getmeds-blue hover:underline"
+                        >
+                          <Building2 className="w-3 h-3 shrink-0" />
+                          {here ? here.warehouse_name : (row.warehouse_name || orderWarehouseName || 'Main (Zoho)')}
+                        </button>
+                      ) : (
+                        <span className="text-ink-secondary font-medium">
+                          {row.warehouse_name || orderWarehouseName || 'Main (Zoho)'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-bold text-ink-primary font-mono">{peso(line.amount)}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Mobile Totals Summary */}
+            <div className="p-3.5 bg-surface border border-slate-200 rounded-xl space-y-2 text-xs">
+              <div className="flex justify-between text-ink-secondary">
+                <span>Subtotal</span>
+                <span className="font-semibold text-ink-primary font-mono">{peso(totals.subtotal)}</span>
+              </div>
               {totals.discount > 0 && (
-                <tr>
-                  <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">Total Discount</td>
-                  <td colSpan={2} className="px-4 py-2 text-right font-semibold text-state-error font-mono text-xs">-{peso(totals.discount)}</td>
-                </tr>
+                <div className="flex justify-between text-state-error">
+                  <span>Total Discount</span>
+                  <span className="font-semibold font-mono">-{peso(totals.discount)}</span>
+                </div>
               )}
               {totals.tax > 0 && (
-                <tr>
-                  <td colSpan={6} className="px-4 py-2 text-right font-semibold text-ink-secondary text-xs">
-                    {inclusive ? 'Tax (included in the rates above)' : 'Total Tax'}
-                  </td>
-                  <td colSpan={2} className={`px-4 py-2 text-right font-semibold font-mono text-xs ${inclusive ? 'text-ink-secondary' : 'text-ink-primary'}`}>
+                <div className="flex justify-between text-ink-secondary">
+                  <span>{inclusive ? 'Tax (included)' : 'Total Tax'}</span>
+                  <span className={`font-semibold font-mono ${inclusive ? 'text-ink-secondary' : 'text-ink-primary'}`}>
                     {inclusive ? '' : '+'}{peso(totals.tax)}
-                  </td>
-                </tr>
+                  </span>
+                </div>
               )}
-              <tr>
-                <td colSpan={6} className="px-4 py-3.5 text-right font-bold text-ink-primary uppercase tracking-wider text-xs">Grand Total:</td>
-                <td colSpan={2} className="px-4 py-3.5 text-right font-extrabold text-getmeds-blue text-base font-mono">{peso(totals.grand)}</td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
+              <div className="pt-2 border-t border-slate-200 flex justify-between items-center text-sm">
+                <span className="font-bold text-ink-primary uppercase tracking-wider text-xs">Grand Total:</span>
+                <span className="font-extrabold text-getmeds-blue text-base font-mono">{peso(totals.grand)}</span>
+              </div>
+            </div>
+          </div>
+        </>
       )}
 
       {stockRow != null && rows[stockRow] && stockFor(rows[stockRow]) && (
@@ -380,11 +554,11 @@ const OrderItemsEditor = ({
         />
       )}
 
-      <div className="flex justify-end gap-2">
+      <div className="flex flex-col-reverse sm:flex-row justify-end gap-2">
         <button
           type="button"
           onClick={onCancel}
-          className="px-3 py-1.5 text-xs border border-slate-300 text-ink-secondary rounded hover:bg-surface"
+          className="w-full sm:w-auto px-4 py-2 text-xs border border-slate-300 text-ink-secondary rounded-lg hover:bg-surface text-center"
         >
           Cancel
         </button>
@@ -392,7 +566,7 @@ const OrderItemsEditor = ({
           type="button"
           disabled={saving}
           onClick={onSave}
-          className="px-3 py-1.5 text-xs font-semibold bg-getmeds-blue text-white rounded hover:bg-getmeds-blue-dark disabled:opacity-50"
+          className="w-full sm:w-auto px-4 py-2 text-xs font-semibold bg-getmeds-blue text-white rounded-lg hover:bg-getmeds-blue-dark disabled:opacity-50 text-center"
         >
           {saving ? 'Saving...' : 'Save Changes'}
         </button>

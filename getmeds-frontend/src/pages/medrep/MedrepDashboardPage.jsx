@@ -91,16 +91,16 @@ const MedrepDashboardPage = () => {
             Welcome back, <span className="font-semibold text-ink-primary">{user?.name}</span>. Here is your current order pipeline.
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
           <button 
             onClick={() => refetch()} 
-            className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary bg-white hover:bg-surface hover:text-ink-primary transition-colors shadow-sm"
+            className="flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary bg-white hover:bg-surface hover:text-ink-primary transition-colors shadow-sm w-full sm:w-auto"
           >
             <RefreshCw className="w-4 h-4" /> Refresh
           </button>
           <button 
             onClick={() => navigate('/orders/new')} 
-            className="flex items-center gap-1.5 px-4 py-2 bg-getmeds-blue text-white rounded-md text-sm font-semibold hover:bg-getmeds-blue-hover transition-colors shadow-md shadow-getmeds-blue/20"
+            className="flex items-center justify-center gap-1.5 px-4 py-2 bg-getmeds-blue text-white rounded-md text-sm font-semibold hover:bg-getmeds-blue-hover transition-colors shadow-md shadow-getmeds-blue/20 w-full sm:w-auto"
           >
             <Plus className="w-4 h-4" /> Create New Order
           </button>
@@ -214,44 +214,78 @@ const MedrepDashboardPage = () => {
               No orders submitted yet. Click "Create New Order" to begin!
             </div>
           ) : (
-            <table className="min-w-full divide-y divide-slate-100">
-              <thead className="bg-white">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Order ID</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Customer</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Status</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Total</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-ink-secondary uppercase"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
+            <>
+              {/* Desktop Table View */}
+              <div className="hidden md:block overflow-x-auto thin-scroll">
+                <table className="min-w-full divide-y divide-slate-100">
+                  <thead className="bg-white">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Order ID</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Customer</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Status</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-ink-secondary uppercase">Total</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-ink-secondary uppercase"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {recentOrders.map(order => (
+                      <tr key={order.id} className="hover:bg-surface transition-colors">
+                        <td className="px-4 py-3 text-xs font-mono font-bold text-getmeds-blue">
+                          {order.getmeds_order_id}
+                        </td>
+                        <td className="px-4 py-3 text-xs font-medium text-ink-primary">
+                          {order.customer_name}
+                          <span className="block text-[11px] text-ink-secondary capitalize">{order.customer_type}</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <OrderStatusBadge status={order.status} />
+                        </td>
+                        <td className="px-4 py-3 text-xs font-bold text-ink-primary">
+                          ₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <Link
+                            to={`/orders/${order.id}`}
+                            className="inline-flex items-center gap-1 text-xs text-getmeds-blue hover:text-getmeds-blue-dark font-semibold"
+                          >
+                            <Eye className="w-3.5 h-3.5" /> View
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile Cards View */}
+              <div className="block md:hidden divide-y divide-slate-100">
                 {recentOrders.map(order => (
-                  <tr key={order.id} className="hover:bg-surface transition-colors">
-                    <td className="px-4 py-3 text-xs font-mono font-bold text-getmeds-blue">
-                      {order.getmeds_order_id}
-                    </td>
-                    <td className="px-4 py-3 text-xs font-medium text-ink-primary">
-                      {order.customer_name}
-                      <span className="block text-[11px] text-ink-secondary capitalize">{order.customer_type}</span>
-                    </td>
-                    <td className="px-4 py-3">
+                  <div key={order.id} className="p-4 space-y-2 hover:bg-surface/50 transition-colors">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-mono font-bold text-getmeds-blue">
+                        {order.getmeds_order_id}
+                      </span>
                       <OrderStatusBadge status={order.status} />
-                    </td>
-                    <td className="px-4 py-3 text-xs font-bold text-ink-primary">
-                      ₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-                    </td>
-                    <td className="px-4 py-3 text-right">
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-ink-primary">{order.customer_name}</p>
+                      <span className="text-xs text-ink-secondary capitalize">{order.customer_type} account</span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1 text-xs">
+                      <span className="font-bold text-ink-primary">
+                        ₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                      </span>
                       <Link
                         to={`/orders/${order.id}`}
-                        className="inline-flex items-center gap-1 text-xs text-getmeds-blue hover:text-getmeds-blue-dark font-semibold"
+                        className="inline-flex items-center gap-1 font-semibold text-getmeds-blue hover:text-getmeds-blue-dark"
                       >
-                        <Eye className="w-3.5 h-3.5" /> View
+                        <Eye className="w-3.5 h-3.5" /> View Order
                       </Link>
-                    </td>
-                  </tr>
+                    </div>
+                  </div>
                 ))}
-              </tbody>
-            </table>
+              </div>
+            </>
           )}
         </div>
       </div>

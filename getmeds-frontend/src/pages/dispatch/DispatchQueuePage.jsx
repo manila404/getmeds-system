@@ -89,8 +89,8 @@ const Pager = ({ pagination, onPage, fetching }) => {
   const to = Math.min(page * limit, total);
   const btn = 'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed';
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-slate-200 bg-surface">
-      <p className="text-xs text-ink-secondary">
+    <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 py-3 border-t border-slate-200 bg-surface">
+      <p className="text-xs text-ink-secondary text-center sm:text-left">
         Showing <span className="font-semibold text-ink-primary">{from.toLocaleString()}–{to.toLocaleString()}</span> of{' '}
         <span className="font-semibold text-ink-primary">{total.toLocaleString()}</span>
         {fetching && <span className="ml-2">Loading…</span>}
@@ -421,7 +421,7 @@ const DispatchQueuePage = () => {
   );
 
   const header = (
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
       <div>
         <h1 className="text-2xl font-semibold text-ink-primary">{workflowV2 ? 'Dispatch' : 'Zoho Dispatch Status'}</h1>
         <p className="text-sm text-ink-secondary mt-1">
@@ -430,7 +430,7 @@ const DispatchQueuePage = () => {
             : 'Orders waiting on Pharmacy/Dispatch in Zoho. This list is read-only — create the Package and Shipment in Zoho Inventory itself; this page updates automatically once that happens.'}
         </p>
       </div>
-      <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0">
+      <button onClick={() => refetch()} className="flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0 w-full sm:w-auto">
         <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
       </button>
     </div>
@@ -574,7 +574,7 @@ const DispatchQueuePage = () => {
         {header}
         {recentAndDialog}
 
-        <div className="flex flex-wrap gap-2" role="tablist" aria-label="Dispatch steps">
+        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar thin-scroll pb-1" role="tablist" aria-label="Dispatch steps">
           {STEPS.map((s) => {
             const Icon = s.icon;
             const count = stepCount(s.key);
@@ -586,9 +586,9 @@ const DispatchQueuePage = () => {
                 role="tab"
                 aria-selected={selected}
                 onClick={() => setStepKey(s.key)}
-                className={`inline-flex items-center gap-2 px-3 py-2 rounded-md border text-sm font-semibold ${selected ? 'border-getmeds-blue bg-getmeds-blue/10 text-getmeds-blue-dark' : 'border-slate-200 bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'}`}
+                className={`inline-flex items-center gap-2 px-3 py-2 rounded-md border text-sm font-semibold whitespace-nowrap shrink-0 ${selected ? 'border-getmeds-blue bg-getmeds-blue/10 text-getmeds-blue-dark' : 'border-slate-200 bg-white text-ink-secondary hover:bg-surface hover:text-ink-primary'}`}
               >
-                <Icon className="w-4 h-4" />
+                <Icon className="w-4 h-4 shrink-0" />
                 {s.label}
                 <span className={`min-w-[1.5rem] rounded-full px-1.5 text-xs tabular-nums ${count ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>{count}</span>
               </button>

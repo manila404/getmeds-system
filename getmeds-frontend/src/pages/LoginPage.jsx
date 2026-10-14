@@ -57,7 +57,7 @@ const LoginPage = () => {
   };
 
   return (
-    <div className="h-screen w-full flex font-sans relative overflow-hidden bg-gray-900">
+    <div className="min-h-screen w-full flex font-sans relative overflow-y-auto bg-gray-900">
       
       {/* Full Screen Background Image */}
       <div 
@@ -70,26 +70,26 @@ const LoginPage = () => {
       <div className="absolute inset-0 z-0 bg-getmeds-blue-dark/30"></div> {/* Extra tint */}
 
       {/* Content Container */}
-      <div className="relative z-10 flex flex-col md:flex-row items-center justify-between w-full h-full max-w-7xl mx-auto p-6 md:p-12">
+      <div className="relative z-10 flex flex-col md:flex-row items-center justify-center md:justify-between w-full min-h-screen max-w-7xl mx-auto px-4 py-8 sm:p-6 md:p-12">
         
         {/* Left Side: Texts */}
-        <div className="flex-1 flex flex-col justify-center pr-10 text-white mb-10 md:mb-0">
-          <h1 className="text-4xl md:text-5xl font-semibold mb-4 tracking-tight leading-tight">
+        <div className="flex-1 flex flex-col justify-center md:pr-10 text-white mb-6 md:mb-0 text-center md:text-left">
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-semibold mb-2 sm:mb-4 tracking-tight leading-tight">
             Getmeds System
           </h1>
-          <p className="text-base md:text-lg text-blue-100/90 max-w-lg font-medium">
+          <p className="text-sm sm:text-base md:text-lg text-blue-100/90 max-w-lg font-medium mx-auto md:mx-0">
             Your centralized portal for seamless medical supply management and operations.
           </p>
         </div>
 
         {/* Right Side: Login Form Container */}
-        <div className="w-full max-w-[420px] bg-white rounded-2xl p-10 shadow-2xl">
+        <div className="w-full max-w-[420px] bg-white rounded-2xl p-6 sm:p-8 md:p-10 shadow-2xl">
           
           <div className="w-full mx-auto">
-            <h2 className="text-[26px] font-semibold text-center text-ink-primary">
+            <h2 className="text-2xl sm:text-[26px] font-semibold text-center text-ink-primary">
               Welcome Back!
             </h2>
-            <p className="text-[14px] text-ink-secondary text-center mt-2 mb-8">
+            <p className="text-xs sm:text-[14px] text-ink-secondary text-center mt-1.5 mb-6 sm:mb-8">
               We missed you! Please enter your details.
             </p>
 

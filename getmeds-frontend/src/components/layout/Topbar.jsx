@@ -50,7 +50,9 @@ const Topbar = ({ onToggleSidebar }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
   const searchRef = useRef(null);
+  const mobileSearchRef = useRef(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 300);
@@ -70,10 +72,13 @@ const Topbar = ({ onToggleSidebar }) => {
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (searchRef.current && !searchRef.current.contains(e.target)) setIsSearchOpen(false);
+      if (mobileSearchRef.current && !mobileSearchRef.current.contains(e.target)) {
+        setIsMobileSearchOpen(false);
+      }
     };
-    if (isSearchOpen) document.addEventListener('mousedown', handleClickOutside);
+    if (isSearchOpen || isMobileSearchOpen) document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [isSearchOpen]);
+  }, [isSearchOpen, isMobileSearchOpen]);
 
   const goToOrder = (order) => {
     setIsSearchOpen(false);
@@ -130,8 +135,129 @@ const Topbar = ({ onToggleSidebar }) => {
   const roleBadgeStyle = roleBadgeStyles[roleKey] || 'bg-slate-100 text-slate-800 border-slate-200';
   const hasExceptionAlert = notifications?.some(n => !n.is_read && (n.message?.toLowerCase().includes('exception') || n.message?.toLowerCase().includes('hold')));
 
+  const renderSearchResults = () => (
+    <div className="bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 max-h-96 overflow-y-auto animate-in fade-in slide-in-from-top-2 duration-150">
+      {isSearching && !hasSearchResults ? (
+        <div className="py-8 flex items-center justify-center gap-2 text-xs text-ink-secondary">
+          <Loader2 size={14} className="animate-spin" /> Searching…
+        </div>
+      ) : !hasSearchResults ? (
+        <div className="py-8 text-center text-xs text-ink-secondary">
+          No matches for &ldquo;{searchQuery.trim()}&rdquo;
+        </div>
+      ) : (
+        <>
+          {searchResults.orders?.length > 0 && (
+            <div className="pb-1.5">
+              <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Orders</p>
+              {searchResults.orders.map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => {
+                    goToOrder(o);
+                    setIsMobileSearchOpen(false);
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-3.5 py-2 text-left hover:bg-surface transition-colors"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-xs font-semibold text-getmeds-blue truncate">
+                      {o.getmeds_order_id}{o.zoho_so_number ? <span className="font-normal text-ink-secondary"> · {o.zoho_so_number}</span> : null}
+                    </span>
+                    <span className="block text-[11px] text-ink-secondary truncate">
+                      {o.customer_name || '—'}{o.intake_receiver ? <> · <span className="text-ink-primary">Receiver: {o.intake_receiver}</span></> : null}
+                    </span>
+                  </span>
+                  <span className="shrink-0 text-[11px] font-medium text-ink-secondary">
+                    ₱{(Number(o.total_amount) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+          {searchResults.customers?.length > 0 && (
+            <div className="pb-1.5 border-t border-slate-100">
+              <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Clients</p>
+              {searchResults.customers.map((c) => (
+                <div key={c.id} className="flex items-center gap-2 px-3.5 py-2">
+                  <Users size={13} className="text-ink-secondary shrink-0" />
+                  <span className="min-w-0">
+                    <span className="block text-xs font-medium text-ink-primary truncate">{c.name}</span>
+                    {c.contact_number && <span className="block text-[11px] text-ink-secondary truncate">{c.contact_number}</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {searchResults.products?.length > 0 && (
+            <div className="border-t border-slate-100">
+              <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Products</p>
+              {searchResults.products.map((p) => (
+                <div key={p.id} className="flex items-center gap-2 px-3.5 py-2">
+                  <Pill size={13} className="text-ink-secondary shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-xs font-medium text-ink-primary truncate">{p.name}</span>
+                    {p.sku && <span className="block text-[11px] text-ink-secondary truncate">SKU: {p.sku}</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="px-3.5 pt-1.5 text-[10px] text-ink-secondary/70 border-t border-slate-100">
+            Clients and products aren&rsquo;t clickable yet — open Order or Products from the menu to work with them.
+          </p>
+        </>
+      )}
+    </div>
+  );
+
   return (
-    <header className="relative h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 sm:px-6 shadow-2xs z-20 flex-shrink-0">
+    <header className="relative h-16 bg-white border-b border-slate-200 flex items-center justify-between px-3 sm:px-6 shadow-2xs z-20 flex-shrink-0">
+      {/* Mobile Search Overlay */}
+      {isMobileSearchOpen && (
+        <div ref={mobileSearchRef} className="absolute inset-0 bg-white z-30 px-3 flex items-center gap-2 border-b border-slate-200">
+          <button
+            type="button"
+            onClick={() => {
+              setIsMobileSearchOpen(false);
+              setIsSearchOpen(false);
+            }}
+            className="p-1.5 text-ink-secondary hover:text-ink-primary hover:bg-surface rounded-lg transition-colors"
+            aria-label="Close search"
+          >
+            <X size={20} />
+          </button>
+          <div className="relative flex-1">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            <input
+              type="search"
+              autoFocus
+              placeholder="Search orders, clients, products..."
+              aria-label="Search"
+              value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value); setIsSearchOpen(true); }}
+              onFocus={() => setIsSearchOpen(true)}
+              onKeyDown={(e) => { if (e.key === 'Escape') { setIsMobileSearchOpen(false); setIsSearchOpen(false); } }}
+              className="w-full pl-9 pr-8 py-2 rounded-full border border-slate-200 bg-slate-50 text-xs text-ink-primary placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-getmeds-blue/40 focus:bg-white transition-colors"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-ink-primary"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          {isSearchOpen && searchQuery.trim().length >= 2 && (
+            <div className="absolute top-full left-3 right-3 mt-1.5 z-50">
+              {renderSearchResults()}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Left Area: Mobile Hamburger Button */}
       <div className="flex items-center space-x-2 sm:space-x-3">
         {/* Hamburger Menu Button (visible on mobile / tablet < lg) */}
@@ -144,12 +270,25 @@ const Topbar = ({ onToggleSidebar }) => {
         >
           <Menu size={22} />
         </button>
-
       </div>
 
-      {/* Right Area: Notification Bell & User Identity */}
-      <div className="flex items-center space-x-2 sm:space-x-4">
-        {/* Global Search */}
+      {/* Right Area: Mobile Search Toggle, Notification Bell & User Identity */}
+      <div className="flex items-center space-x-1.5 sm:space-x-4">
+        {/* Mobile Search Toggle Button */}
+        <button
+          type="button"
+          onClick={() => {
+            setIsMobileSearchOpen(true);
+            setIsSearchOpen(true);
+          }}
+          className="md:hidden p-2 rounded-lg text-ink-secondary hover:text-ink-primary hover:bg-surface focus:outline-none focus:ring-2 focus:ring-getmeds-blue transition-colors"
+          aria-label="Open search"
+          title="Search"
+        >
+          <Search size={20} />
+        </button>
+
+        {/* Global Search (Desktop) */}
         <div className="relative hidden md:block" ref={searchRef}>
           <Search
             size={16}
@@ -166,78 +305,8 @@ const Topbar = ({ onToggleSidebar }) => {
             className="w-48 lg:w-72 pl-9 pr-4 py-2 rounded-full border border-slate-100 bg-slate-50 text-xs text-ink-primary placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-getmeds-blue/40 focus:border-getmeds-blue/40 focus:bg-white transition-colors"
           />
           {isSearchOpen && searchQuery.trim().length >= 2 && (
-            <div className="absolute top-full left-0 mt-1.5 w-80 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50 max-h-96 overflow-y-auto animate-in fade-in slide-in-from-top-2 duration-150">
-              {isSearching && !hasSearchResults ? (
-                <div className="py-8 flex items-center justify-center gap-2 text-xs text-ink-secondary">
-                  <Loader2 size={14} className="animate-spin" /> Searching…
-                </div>
-              ) : !hasSearchResults ? (
-                <div className="py-8 text-center text-xs text-ink-secondary">
-                  No matches for &ldquo;{searchQuery.trim()}&rdquo;
-                </div>
-              ) : (
-                <>
-                  {searchResults.orders?.length > 0 && (
-                    <div className="pb-1.5">
-                      <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Orders</p>
-                      {searchResults.orders.map((o) => (
-                        <button
-                          key={o.id}
-                          type="button"
-                          onClick={() => goToOrder(o)}
-                          className="w-full flex items-center justify-between gap-2 px-3.5 py-2 text-left hover:bg-surface transition-colors"
-                        >
-                          <span className="min-w-0">
-                            <span className="block text-xs font-semibold text-getmeds-blue truncate">
-                              {o.getmeds_order_id}{o.zoho_so_number ? <span className="font-normal text-ink-secondary"> · {o.zoho_so_number}</span> : null}
-                            </span>
-                            <span className="block text-[11px] text-ink-secondary truncate">
-                              {o.customer_name || '—'}{o.intake_receiver ? <> · <span className="text-ink-primary">Receiver: {o.intake_receiver}</span></> : null}
-                            </span>
-                          </span>
-                          <span className="shrink-0 text-[11px] font-medium text-ink-secondary">
-                            ₱{(Number(o.total_amount) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {searchResults.customers?.length > 0 && (
-                    <div className="pb-1.5 border-t border-slate-100">
-                      <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Clients</p>
-                      {searchResults.customers.map((c) => (
-                        <div key={c.id} className="flex items-center gap-2 px-3.5 py-2">
-                          <Users size={13} className="text-ink-secondary shrink-0" />
-                          <span className="min-w-0">
-                            <span className="block text-xs font-medium text-ink-primary truncate">{c.name}</span>
-                            {c.contact_number && <span className="block text-[11px] text-ink-secondary truncate">{c.contact_number}</span>}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {searchResults.products?.length > 0 && (
-                    <div className="border-t border-slate-100">
-                      <p className="px-3.5 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-secondary">Products</p>
-                      {searchResults.products.map((p) => (
-                        <div key={p.id} className="flex items-center gap-2 px-3.5 py-2">
-                          <Pill size={13} className="text-ink-secondary shrink-0" />
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-xs font-medium text-ink-primary truncate">{p.name}</span>
-                            {p.sku && <span className="block text-[11px] text-ink-secondary truncate">SKU: {p.sku}</span>}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {/* Orders link to their own page; clients and products have
-                      no dedicated page anywhere in this app (confirmed before
-                      building this), so they're shown for reference only. */}
-                  <p className="px-3.5 pt-1.5 text-[10px] text-ink-secondary/70 border-t border-slate-100">
-                    Clients and products aren&rsquo;t clickable yet — open Order or Products from the menu to work with them.
-                  </p>
-                </>
-              )}
+            <div className="absolute top-full left-0 mt-1.5 w-80 z-50">
+              {renderSearchResults()}
             </div>
           )}
         </div>
@@ -251,7 +320,7 @@ const Topbar = ({ onToggleSidebar }) => {
           />
 
           {isNotificationsOpen && (
-            <div className="absolute top-full right-4 sm:right-6 w-72 sm:w-96 bg-white rounded-b-xl shadow-xl border border-t-0 border-slate-200 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
+            <div className="absolute top-full right-2 sm:right-6 w-[calc(100vw-1rem)] sm:w-96 max-w-[380px] bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
               <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <h4 className="text-sm font-semibold text-ink-primary">Alerts & Notifications</h4>
@@ -316,22 +385,22 @@ const Topbar = ({ onToggleSidebar }) => {
         </div>
         
         {/* User Identity Display — click to open Profile Settings / Sign Out */}
-        <div className="relative border-l pl-3 sm:pl-4 border-slate-200" ref={userMenuRef}>
+        <div className="relative border-l pl-2 sm:pl-4 border-slate-200" ref={userMenuRef}>
           <button
             type="button"
             onClick={() => setIsUserMenuOpen((v) => !v)}
             aria-haspopup="true"
             aria-expanded={isUserMenuOpen}
-            className="flex items-center space-x-2 sm:space-x-3 rounded-lg py-1 pr-1.5 hover:bg-surface transition-colors focus:outline-none focus:ring-2 focus:ring-getmeds-blue/40"
+            className="flex items-center space-x-1.5 sm:space-x-3 rounded-lg py-1 pr-1 hover:bg-surface transition-colors focus:outline-none focus:ring-2 focus:ring-getmeds-blue/40"
           >
             <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-getmeds-blue/15 border border-getmeds-blue/30 flex items-center justify-center text-getmeds-blue flex-shrink-0">
               <User size={16} />
             </div>
-            <div className="flex flex-col items-start">
-              <span className="text-xs sm:text-sm font-medium text-ink-primary leading-tight truncate max-w-[100px] sm:max-w-[160px]">
+            <div className="flex flex-col items-start min-w-0">
+              <span className="text-xs sm:text-sm font-medium text-ink-primary leading-tight truncate max-w-[70px] sm:max-w-[140px]">
                 {user?.name}
               </span>
-              <div className="flex items-center gap-1.5 mt-0.5">
+              <div className="hidden sm:flex items-center gap-1.5 mt-0.5">
                 <span className={`inline-flex items-center px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-bold uppercase tracking-wider border ${roleBadgeStyle}`}>
                   {user?.role}
                 </span>
@@ -344,10 +413,15 @@ const Topbar = ({ onToggleSidebar }) => {
           </button>
 
           {isUserMenuOpen && (
-            <div className="absolute top-full right-0 mt-1.5 w-56 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
+            <div className="absolute top-full right-0 mt-1.5 w-56 max-w-[calc(100vw-1rem)] bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
               <div className="px-3.5 py-2 border-b border-slate-100">
                 <p className="text-sm font-semibold text-ink-primary truncate">{user?.name}</p>
                 <p className="text-xs text-ink-secondary truncate">{user?.email}</p>
+                <div className="mt-1 sm:hidden">
+                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider border ${roleBadgeStyle}`}>
+                    {user?.role}
+                  </span>
+                </div>
               </div>
               <button
                 type="button"
