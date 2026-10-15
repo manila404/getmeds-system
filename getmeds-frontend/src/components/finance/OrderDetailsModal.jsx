@@ -6,6 +6,9 @@ import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
 import { attachmentLabel, HOSPITAL_REQUIRED_TYPES } from '../../constants/attachmentTypes';
+import { uploadOrderAttachment } from '../../utils/attachmentUpload';
+import HoldProofField from './HoldProofField';
+import HoldEvidence, { evidenceOf } from '../orders/HoldEvidence';
 
 /**
  * Sep 28, 2026: the little status line under a file's name — a proof of
@@ -543,7 +546,7 @@ const Section = ({ title, children }) => (
 // Sep 15, 2026: `footer` — Dispatch opens this same panel as the order's
 // receipt (what to prepare), and puts its own actions there instead of
 // Finance's Confirm. Without `onConfirm` no Confirm button can appear anyway.
-const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfirm = null, confirming, workflowV2 = false, footer = null }) => {
+const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = null, onOpenConfirm = null, confirming, workflowV2 = false, footer = null }) => {
   const detail = useQuery({
     queryKey: ['finance-order-detail', orderId],
     queryFn: () => client.get(`/api/orders/${orderId}`).then((r) => r.data),
@@ -627,7 +630,36 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
   const canHold = Boolean(onReject) && order?.status === 'ready_for_finance_verified';
   const [rejecting, setRejecting] = useState(false);
   const [holdReason, setHoldReason] = useState('');
-  useEffect(() => { setRejecting(false); setHoldReason(''); }, [orderId]);
+  const [holdFiles, setHoldFiles] = useState([]);
+  const [holdBusy, setHoldBusy] = useState(false);
+  // Oct 15, 2026: bring a hold Finance itself applied back for verification.
+  const canReopen = Boolean(onReopen) && order?.status === 'on_hold' && order?.finance_hold === true;
+  const [reopening, setReopening] = useState(false);
+  const [reopenReason, setReopenReason] = useState('');
+  useEffect(() => {
+    setRejecting(false); setHoldReason(''); setHoldFiles([]); setReopening(false); setReopenReason('');
+  }, [orderId]);
+
+  // The screenshots are attached FIRST, while the order is still with Finance, then the hold
+  // names them. (Attached to an already-held order they would be a separate action.)
+  const confirmHold = async () => {
+    setHoldBusy(true);
+    try {
+      const ids = [];
+      for (const f of holdFiles) {
+        const saved = await uploadOrderAttachment(client, order.id, f, 'other');
+        if (saved?.id) ids.push(saved.id);
+      }
+      onReject(order.id, holdReason.trim(), ids);
+      setRejecting(false);
+      setHoldReason('');
+      setHoldFiles([]);
+    } catch (err) {
+      toast.error(err.response?.data?.error?.message || err.message || 'Could not attach the screenshot. Nothing was held.');
+    } finally {
+      setHoldBusy(false);
+    }
+  };
 
   return (
     <>
@@ -700,6 +732,7 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
                           {e.notes && (
                             <p className="text-[12px] text-ink-primary mt-0.5 break-words">{e.notes}</p>
                           )}
+                          {isHold && <HoldEvidence orderId={orderId} evidence={evidenceOf(e)} />}
                           <p className="text-[11px] text-ink-secondary mt-0.5">
                             {e.actor_name}
                             {e.created_at ? ` · ${formatPHT(e.created_at, 'short-datetime')}` : ''}
@@ -917,16 +950,28 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
               Verify/Hold inline in the "Split Sales Orders" section above —
               this footer would otherwise offer the exact same action a
               second time, with no Hold of its own to match it. */}
-          {rejecting ? (
+          {reopening ? (
+            <div className="min-w-0 flex-1">
+              <textarea
+                autoFocus
+                rows={2}
+                value={reopenReason}
+                onChange={(e) => setReopenReason(e.target.value)}
+                placeholder="Why is this going back for verification? (e.g. balance settled, customer called)"
+                className="w-full text-xs rounded-md border border-slate-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue resize-none"
+              />
+            </div>
+          ) : rejecting ? (
             <div className="min-w-0 flex-1">
               <textarea
                 autoFocus
                 rows={2}
                 value={holdReason}
                 onChange={(e) => setHoldReason(e.target.value)}
-                placeholder="Why is this order being held?"
+                placeholder="Why is this order being held? The MedRep sees this."
                 className="w-full text-xs rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400 resize-none"
               />
+              <HoldProofField files={holdFiles} onChange={setHoldFiles} disabled={holdBusy} />
             </div>
           ) : footer ? (
             <div className="min-w-0">{footer}</div>
@@ -975,24 +1020,41 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
             </p>
           )}
           <div className="flex items-center gap-2 shrink-0">
-            {rejecting ? (
+            {reopening ? (
               <>
                 <button
-                  onClick={() => { setRejecting(false); setHoldReason(''); }}
+                  onClick={() => { setReopening(false); setReopenReason(''); }}
                   className="px-4 py-2 rounded-md border border-slate-200 text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
                 >
                   Cancel
                 </button>
                 <button
-                  disabled={!holdReason.trim() || confirming}
+                  disabled={!reopenReason.trim() || confirming}
                   onClick={() => {
-                    onReject(order.id, holdReason.trim());
-                    setRejecting(false);
-                    setHoldReason('');
+                    onReopen(order.id, reopenReason.trim());
+                    setReopening(false);
+                    setReopenReason('');
                   }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-getmeds-blue text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+                >
+                  Bring back
+                </button>
+              </>
+            ) : rejecting ? (
+              <>
+                <button
+                  onClick={() => { setRejecting(false); setHoldReason(''); setHoldFiles([]); }}
+                  disabled={holdBusy}
+                  className="px-4 py-2 rounded-md border border-slate-200 text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
+                >
+                  Cancel
+                </button>
+                <button
+                  disabled={!holdReason.trim() || confirming || holdBusy}
+                  onClick={confirmHold}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-state-error text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Confirm hold
+                  {holdBusy ? 'Attaching…' : 'Confirm hold'}
                 </button>
               </>
             ) : (
@@ -1003,6 +1065,16 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onOpenConfir
                 >
                   Close
                 </button>
+                {canReopen && (
+                  <button
+                    onClick={() => setReopening(true)}
+                    disabled={confirming}
+                    title="You held this order. Bring it back to your queue to verify it."
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md border border-getmeds-blue/50 text-getmeds-blue-dark text-sm font-semibold hover:bg-getmeds-blue/10 disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-4 h-4" /> Bring back for verification
+                  </button>
+                )}
                 {canHold && (
                   <button
                     onClick={() => setRejecting(true)}

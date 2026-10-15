@@ -168,6 +168,12 @@ function canAttach(user, order, fileType = 'payment_proof') {
   // Sep 15, 2026: a dispatch proof is Dispatch's alone — not the MedRep's,
   // even on their own order — and Dispatch attaches nothing else.
   if (fileType === DISPATCH_PROOF) return role === 'dispatch';
+  // Oct 15, 2026: Finance can attach a screenshot (e.g. the customer's overdue balance) when it
+  // holds an order, so the MedRep can see why. Type 'other' only, and only while the order is
+  // with Finance or held. It is the evidence for the hold, not an answer to one: see attach().
+  if (role === 'finance' && fileType === 'other') {
+    return ['ready_for_finance_verified', 'on_hold'].includes(order.status);
+  }
   if (order.medrep_id === user.id) return true;
   return Boolean(order.raised_by_id) && order.raised_by_id === user.id;
 }
@@ -338,7 +344,10 @@ exports.attach = async (req, res, next) => {
     // tracks are independent: a replacement prescription must not send a Finance
     // hold back to Finance (see services/prescriptionService.js).
     const isPrescription = fileType === 'prescription';
-    const returnedToFinance = isDispatchProof || isPrescription ? false : await returnToFinanceIfHeld(order, actor, {
+    // Oct 15, 2026: a screenshot Finance itself attaches is the evidence FOR its hold. It must not
+    // send the order straight back to Finance (that is what an answer from the MedRep does).
+    const isFinanceUpload = String(req.user?.role || '').toLowerCase() === 'finance';
+    const returnedToFinance = isDispatchProof || isPrescription || isFinanceUpload ? false : await returnToFinanceIfHeld(order, actor, {
       reason: fileType === 'payment_proof' ? 'Proof of payment attached' : 'File attached',
     });
 

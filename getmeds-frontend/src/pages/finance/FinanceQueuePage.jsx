@@ -253,9 +253,10 @@ const FinanceQueuePage = () => {
 
   // ── Verify mutation ─────────────────────────────────────────────────────────
   const verifyMutation = useMutation({
-    mutationFn: ({ id, approved, reason }) =>
+    mutationFn: ({ id, approved, reason, evidence }) =>
       client.post(`/api/finance/orders/${id}/verify`, {
         approved, reason,
+        ...(evidence && evidence.length ? { evidence_attachment_ids: evidence } : {}),
         pricesChecked: approved ? true : undefined,
         proofChecked:  approved ? true : undefined,
       }).then((r) => r.data),
@@ -340,6 +341,19 @@ const FinanceQueuePage = () => {
       }
     },
     onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not record that'),
+  });
+
+  // ── Bring a held order back for verification (Oct 15, 2026) ─────────────────
+  const reopenMutation = useMutation({
+    mutationFn: ({ id, reason }) =>
+      client.post(`/api/finance/orders/${id}/reopen`, { reason }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['finance-order-detail'] });
+      qc.invalidateQueries({ queryKey: ['finance-orders'] });
+      qc.invalidateQueries({ queryKey: ['finance-sales-summary'] });
+      toast.success('Back in your queue for verification.');
+    },
+    onError: (err) => toast.error(err.response?.data?.error?.message || 'Could not bring that order back'),
   });
 
   // ── Unverify mutation (undo) ────────────────────────────────────────────────
@@ -697,8 +711,9 @@ const FinanceQueuePage = () => {
           onConfirm={(id, panelChecks) =>
             verifyMutation.mutate({ id, approved: true, pricesChecked: panelChecks?.prices, proofChecked: panelChecks?.proof })
           }
-          onReject={(id, reason) => verifyMutation.mutate({ id, approved: false, reason })}
-          confirming={verifyMutation.isPending}
+          onReject={(id, reason, evidence) => verifyMutation.mutate({ id, approved: false, reason, evidence })}
+          onReopen={(id, reason) => reopenMutation.mutate({ id, reason })}
+          confirming={verifyMutation.isPending || reopenMutation.isPending}
           workflowV2={workflowV2}
         />
       )}

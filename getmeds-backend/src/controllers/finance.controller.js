@@ -813,7 +813,7 @@ exports.getPayment = async (req, res, next) => {
 // stuck in this app while Zoho carried on without them.
 exports.verifyAccount = async (req, res, next) => {
   try {
-    const { approved, reason, pricesChecked, proofChecked } = req.body || {};
+    const { approved, reason, pricesChecked, proofChecked, evidence_attachment_ids } = req.body || {};
     if (typeof approved !== 'boolean') {
       return res.status(400).json({
         success: false,
@@ -859,6 +859,18 @@ exports.verifyAccount = async (req, res, next) => {
           message: `This order is at "${order.status}", not awaiting finance verification.`
         }
       });
+    }
+
+    // Oct 15, 2026: screenshots Finance attached to explain a hold (attached first, through the
+    // normal attachment upload). Only ones that belong to THIS order count; at most 5.
+    let holdEvidence = [];
+    if (approved === false && Array.isArray(evidence_attachment_ids) && evidence_attachment_ids.length) {
+      const ids = evidence_attachment_ids.map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0).slice(0, 5);
+      if (ids.length) {
+        holdEvidence = await db
+          .prepare('SELECT id, file_name FROM payment_proofs WHERE order_id = ? AND id = ANY(?)')
+          .all(order.id, [ids]);
+      }
     }
 
     // Oct 12, 2026: nothing to verify against. An order whose Sales Order never reached Zoho (its
@@ -974,6 +986,7 @@ exports.verifyAccount = async (req, res, next) => {
           // Recorded so the trail says what evidence was on the order at the
           // moment of the decision — including that there was none, which is
           // the point of a soft gate.
+          ...(holdEvidence.length ? { evidence: holdEvidence.map((e) => ({ id: e.id, file_name: e.file_name })) } : {}),
           paymentProofVerified: verifiedProofs.length > 0,
           paymentProofPaths: verifiedProofs.map((p) => p.storage_path),
           ...(approved && v2 ? { pricesChecked: true, proofChecked: true } : {})
@@ -988,7 +1001,8 @@ exports.verifyAccount = async (req, res, next) => {
           ? heldForSiblingSplit
             ? `Order ${order.getmeds_order_id}: ${order.invoicing_from} account verified — still waiting on ${pendingSplits.map((s) => s.invoicing_from).join(', ')} before it's cleared to invoice.`
             : `Order ${order.getmeds_order_id} passed finance verification — ready to invoice.`
-          : `Order ${order.getmeds_order_id} was put on hold by Finance: ${String(reason).trim()}`,
+          : `Order ${order.getmeds_order_id} was put on hold by Finance: ${String(reason).trim()}` +
+            (holdEvidence.length ? ` (${holdEvidence.length} screenshot${holdEvidence.length === 1 ? '' : 's'} attached as proof)` : ''),
         eventType: approved ? 'FINANCE_VERIFIED' : 'FINANCE_REJECTED',
         orderData: { ...order, status: newStatus }
       });

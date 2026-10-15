@@ -966,7 +966,7 @@ exports.getById = async (req, res, next) => {
     res.json({
       success: true,
       data: {
-        order: { ...order, resubmittable, resume_to: resumeTo, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold, rx: await rxStatusForOrder(order) },
+        order: { ...order, finance_hold: isFinHold, resubmittable, resume_to: resumeTo, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold, rx: await rxStatusForOrder(order) },
         items,
         payment,
         dispatch,

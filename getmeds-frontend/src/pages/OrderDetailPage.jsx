@@ -26,6 +26,7 @@ import RelinkCustomerModal from '../components/orders/RelinkCustomerModal';
 import CancelDraftModal from '../components/orders/CancelDraftModal';
 import RestoreDraftModal from '../components/orders/RestoreDraftModal';
 import StockHoldModal from '../components/orders/StockHoldModal';
+import HoldEvidence, { evidenceOf } from '../components/orders/HoldEvidence';
 import ApproveOrderModal from '../components/orders/ApproveOrderModal';
 import RefundModal from '../components/orders/RefundModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
@@ -1730,6 +1731,13 @@ const OrderDetailPage = () => {
                     : 'Exception/Hold Reason:'}
                 </span> {order.exception_reason}
               </p>
+              {/* Oct 15, 2026: screenshots Finance attached to its hold (e.g. the customer's
+                  overdue balance), so the MedRep can see why. */}
+              {order.status === 'on_hold' && (() => {
+                const last = [...(events || [])].reverse().find((e) => e.event_type === 'FINANCE_REJECTED');
+                const ev = last ? evidenceOf(last) : [];
+                return ev.length ? <HoldEvidence orderId={order.id} evidence={ev} /> : null;
+              })()}
               {/* Sep 15, 2026: fix it, then send it back to Management from
                   here. They are told it is a resubmission, with this reason.
                   Sep 18, 2026: a supporting file can go along with it. */}
