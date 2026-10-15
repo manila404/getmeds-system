@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, ChevronLeft, ChevronRight, RefreshCw, CheckCircle2, AlertTriangle, Search, Copy, Save } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, RefreshCw, CheckCircle2, AlertTriangle, Search, Copy, Save, Download } from 'lucide-react';
 import client from '../../api/client';
 
 /**
@@ -297,6 +297,93 @@ function SalesVisibility() {
   );
 }
 
+// ── Download (Oct 15, 2026, Aaron) ───────────────────────────────────────
+// The current tab as a spreadsheet (CSV), or a report for one channel: the channel's totals
+// plus every person in it. Built from the data already on the page; no extra request.
+const C = (key, label) => ({ key, label });
+const GROUP_COLS = [
+  C('people', 'People'), C('target_php', 'Target (PHP)'), C('targets_missing', 'People with no target'), C('booked_php', 'Booked (PHP)'),
+  C('pct_of_target', '% of target'), C('booked_orders', 'Booked orders'), C('delivered_php', 'Delivered (PHP)'), C('orders', 'Orders raised'),
+  C('orders_held', 'Orders held'), C('booked_raised_by_others_php', 'Booked, raised by others (PHP)'), C('new_customers', 'New customers'),
+];
+const PEOPLE_COLS = [
+  C('person', 'Person'), C('email', 'Email'), C('role', 'Role'), C('active', 'Active'), C('rep_type', 'Type'), C('team_lead', 'Team lead'),
+  C('channel', 'Channel'), C('channel_source', 'Channel from'), C('head', 'Head'), C('target_php', 'Target (PHP)'), C('booked_php', 'Booked (PHP)'),
+  C('pct_of_target', '% of target'), C('booked_orders', 'Booked orders'), C('delivered_php', 'Delivered (PHP)'), C('orders', 'Orders raised'),
+  C('orders_held', 'Orders held'), C('booked_raised_by_others_php', 'Booked, raised by others (PHP)'),
+  C('booked_raised_by_others_orders', 'Orders raised by others'), C('new_customers', 'New customers'),
+];
+const TAB_EXPORT = {
+  people: { name: 'people', cols: PEOPLE_COLS },
+  teams: { name: 'team-leads', cols: [C('team_lead', 'Team lead'), C('title', 'Title'), C('reports_to', 'Reports to'), C('level', 'Level'), ...GROUP_COLS],
+    note: 'Each row is a team lead plus everyone below them; rows overlap and should not be added together.' },
+  heads: { name: 'heads', cols: [C('head', 'Head'), ...GROUP_COLS] },
+  channels: { name: 'channels', cols: [C('channel', 'Channel'), ...GROUP_COLS] },
+  routing: { name: 'raised-for-others', cols: [C('owner_credited', 'Credited to (owner)'), C('owner_rep_type', 'Owner type'), C('raised_by', 'Raised by'), C('raiser_rep_type', 'Raiser type'), C('booked_orders', 'Booked orders'), C('booked_php', 'Booked (PHP)')] },
+  unplaced: { name: 'no-territory', cols: [C('person', 'Person'), C('email', 'Email'), C('team_lead', 'Team lead'), C('booked_php', 'Booked (PHP)'), C('booked_orders', 'Booked orders'), C('order_divisions', 'Order divisions'), C('placed_in_export_as', 'Shown under'), C('how_placed', 'How')] },
+  checks: { name: 'checks', cols: [C('check', 'Check'), C('value', 'Value'), C('note', 'Note')] },
+};
+const csvCell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+const csvTable = (cols, rows) => [cols.map((c) => c.label), ...rows.map((r) => cols.map((c) => r[c.key]))];
+const fileSafe = (s) => String(s).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+function downloadCsv(filename, lines) {
+  const csv = lines.map((row) => row.map(csvCell).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function buildKpiDownload(data, month, choice, { tab, people }) {
+  const head = [
+    [`GetMeds Sales KPIs — ${monthLabel(month)} (${data.partial ? 'so far' : 'final'})`],
+    ['As of', data.generatedAt ? new Date(data.generatedAt).toLocaleString('en-PH') : ''],
+    ['Booked', 'Orders Finance confirmed in the month, credited to the order’s owner'],
+  ];
+  if (choice.startsWith('channel:')) {
+    const channel = choice.slice(8);
+    const sum = data.channels.find((r) => r.channel === channel);
+    const members = data.people.filter((p) => p.channel === channel).sort((a, b) => b.booked_php - a.booked_php);
+    return {
+      filename: `getmeds-kpis-${fileSafe(channel)}-${month}.csv`,
+      lines: [...head, ['Channel', channel], [], ['Channel totals'], ...csvTable(TAB_EXPORT.channels.cols, sum ? [sum] : []),
+        [], [`People in ${channel}`], ...csvTable(PEOPLE_COLS, members)],
+    };
+  }
+  const spec = TAB_EXPORT[tab];
+  const rows = tab === 'people' ? people : data[tab] || [];
+  return {
+    filename: `getmeds-kpis-${spec.name}-${month}.csv`,
+    lines: [...head, ...(spec.note ? [['Note', spec.note]] : []), [], ...csvTable(spec.cols, rows)],
+  };
+}
+
+const KpiDownload = ({ data, month, tab, people }) => {
+  const [choice, setChoice] = useState('tab');
+  const tabName = (TABS.find(([k]) => k === tab) || [])[1];
+  const canTab = !!TAB_EXPORT[tab];
+  // real channels A–Z, then the people not placed in any channel yet
+  const channels = (data?.channels || []).map((r) => r.channel).filter(Boolean)
+    .sort((a, b) => (a === '(unplaced)') - (b === '(unplaced)') || a.localeCompare(b));
+  const value = choice === 'tab' && !canTab ? '' : choice;
+  return (
+    <div className="flex items-center gap-1.5">
+      <select value={value} onChange={(e) => setChoice(e.target.value)} disabled={!data} aria-label="What to download"
+        className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm bg-white max-w-[220px]">
+        {canTab ? <option value="tab">This tab: {tabName}</option> : <option value="" disabled>Pick a channel…</option>}
+        <optgroup label="Report per channel">
+          {channels.map((c) => <option key={c} value={`channel:${c}`}>{c === '(unplaced)' ? 'No channel yet' : `Channel: ${c}`}</option>)}
+        </optgroup>
+      </select>
+      <button type="button" disabled={!data || !value}
+        onClick={() => { const f = buildKpiDownload(data, month, value, { tab, people }); downloadCsv(f.filename, f.lines); }}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-sm font-semibold disabled:opacity-50">
+        <Download className="w-4 h-4" />Download
+      </button>
+    </div>
+  );
+};
+
 const KpiPage = () => {
   const [month, setMonth] = useState(manilaMonth());
   const [tab, setTab] = useState('people');
@@ -360,6 +447,7 @@ const KpiPage = () => {
           <button type="button" onClick={() => refetch()} disabled={isFetching} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-sm font-semibold disabled:opacity-50">
             <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />Refresh
           </button>
+          <KpiDownload data={data} month={month} tab={tab} people={people} />
         </div>
       </div>
 
