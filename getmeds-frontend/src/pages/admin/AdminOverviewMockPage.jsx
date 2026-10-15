@@ -370,7 +370,7 @@ const Overview = ({ ds, firstName }) => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <SalesActivity className="lg:col-span-2" ds={ds} total={totals.total} mode={mode} setMode={setMode} onBucket={setBucket} />
         {ds.live
-          ? <LiveTargetPerformance k={ds.salesKpi} groups={sampleGroupsFor(ds)} onGroup={setKpiGroup} onSales={setSalesView} />
+          ? <LiveTargetPerformance k={ds.salesKpi} onSales={setSalesView} />
           : <TargetPerformance onGroup={setKpiGroup} />}
       </div>
 
@@ -566,23 +566,13 @@ const TargetPerformance = ({ onGroup }) => {
 // ── Target Performance, live (Oct 14, 2026) ──────────────────────────────
 // Zoho Total Sales with Tax vs the monthly targets on the Sales KPIs page
 // (backend: buildSalesKpis in adminOverview.controller.js).
+const chName = (n) => String(n).replace(/^RX · /, '').replace('HOSP', 'HOS').replace('TELESALES', 'Telesales');
 const scoreCls = (on, total) => (!total ? 'bg-slate-50 text-ink-secondary border-slate-200'
   : on === total ? STATUS_META.on.cls : on * 2 >= total ? STATUS_META.risk.cls : STATUS_META.behind.cls);
 
-const LiveTargetPerformance = ({ k, groups, onGroup, onSales }) => {
+const LiveTargetPerformance = ({ k, onSales }) => {
   const ok = k && k.available;
   const pct = ok && k.total.pct_of_target != null ? k.total.pct_of_target : null;
-  const live = (key, label, on, total, unit) => (
-    <button key={key} type="button" onClick={() => onSales(key)} disabled={!ok}
-      className="flex w-full items-center justify-between rounded-lg px-2 py-2.5 text-sm text-ink-primary hover:bg-slate-50 disabled:cursor-default disabled:hover:bg-transparent">
-      <span className="flex items-center gap-2">{label} <LivePill /></span>
-      <span className="flex items-center gap-1">
-        {ok && <span className="text-[11px] text-ink-secondary">{unit} on pace</span>}
-        <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${scoreCls(on, total)}`}>{ok ? `${on}/${total}` : '—'}</span>
-        <ChevronRight size={14} className="text-slate-300" />
-      </span>
-    </button>
-  );
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
       <div className="flex items-center justify-between gap-2">
@@ -608,24 +598,32 @@ const LiveTargetPerformance = ({ k, groups, onGroup, onSales }) => {
         </div>
       )}
       <div className="mt-4 border-t border-slate-100 pt-2">
-        {live('people', 'Sales', ok ? k.counts.on_pace : 0, ok ? k.counts.people_with_target : 0, 'people')}
-        {live('teams', 'Team Leads', ok ? k.counts.teams_on_pace : 0, ok ? k.counts.teams_with_target : 0, 'teams')}
-        {groups.map((g) => {
-          const s = groupScore(g);
-          return (
-            <button key={g.key} type="button" onClick={() => onGroup(g)}
-              className="flex w-full items-center justify-between rounded-lg px-2 py-2.5 text-sm text-ink-secondary hover:bg-slate-50">
-              <span className="flex items-center gap-2">{g.label} <SamplePill /></span>
-              <span className="flex items-center gap-1">
-                <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold opacity-60 ${s.cls}`}>{s.on}/{s.total}</span>
-                <ChevronRight size={14} className="text-slate-300" />
-              </span>
-            </button>
-          );
-        })}
+        <div className="flex items-center justify-between px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-secondary">
+          <span>By sales channel</span>{ok && <span>{k.counts.channels_on_pace} of {k.counts.channels_with_target} on pace</span>}
+        </div>
+        {ok ? k.channels.map((c) => (
+          <button key={c.channel} type="button" onClick={() => onSales(`channel:${c.channel}`)}
+            className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-sm text-ink-primary hover:bg-slate-50">
+            <span className="min-w-0 text-left">
+              <span className="block truncate">{chName(c.channel)}</span>
+              <span className="block text-[11px] text-ink-secondary tabular-nums">{pesoShort(c.sales_php)}{c.target_php ? ` of ${pesoShort(c.target_php)}` : ' · no target'}</span>
+            </span>
+            <span className="flex shrink-0 items-center gap-1">
+              <span className="text-xs font-semibold tabular-nums">{c.pct_of_target != null ? `${c.pct_of_target}%` : '—'}</span>
+              {c.status ? <StatusPill status={c.status} /> : null}
+              <ChevronRight size={14} className="text-slate-300" />
+            </span>
+          </button>
+        )) : <p className="px-2 py-2 text-xs text-ink-secondary">Channels show once Zoho sales can be read.</p>}
       </div>
+      {ok && (
+        <div className="mt-2 flex gap-3 px-2 text-xs">
+          <button type="button" onClick={() => onSales('people')} className="font-semibold text-getmeds-blue hover:underline">All salespeople ({k.counts.on_pace}/{k.counts.people_with_target} on pace)</button>
+          <button type="button" onClick={() => onSales('teams')} className="font-semibold text-getmeds-blue hover:underline">Team leads ({k.counts.teams_on_pace}/{k.counts.teams_with_target})</button>
+        </div>
+      )}
       <p className="mt-3 text-[11px] leading-snug text-ink-secondary">
-        Sales and Team Leads: Zoho Total Sales with Tax against the targets on the Sales KPIs page. On target means at or above today&apos;s pace. The other groups are sample KPIs, not counted.
+        Zoho Total Sales with Tax against the targets on the Sales KPIs page, by the channel of each salesperson&apos;s territory. On target means at or above today&apos;s pace.
       </p>
     </div>
   );
@@ -634,14 +632,19 @@ const LiveTargetPerformance = ({ k, groups, onGroup, onSales }) => {
 const SalesKpiModal = ({ view, k, onClose }) => {
   if (!view || !k || !k.available) return null;
   const teams = view === 'teams';
-  const rows = teams ? k.teams : k.people;
+  const channel = view.startsWith('channel:') ? view.slice(8) : null;
+  const ch = channel ? k.channels.find((x) => x.channel === channel) : null;
+  const rows = teams ? k.teams : channel ? k.people.filter((p) => p.channel === channel) : k.people;
   const c = k.counts;
   return (
     <Modal isOpen onClose={onClose} className="sm:!max-w-4xl"
-      title={teams ? `Team Leads — ${c.teams_on_pace} of ${c.teams_with_target} teams on pace` : `Sales — ${c.on_pace} of ${c.people_with_target} people on pace`}>
+      title={teams ? `Team Leads — ${c.teams_on_pace} of ${c.teams_with_target} teams on pace`
+        : ch ? `${chName(channel)} — ${ch.pct_of_target != null ? `${ch.pct_of_target}% of target` : 'no target'}`
+          : `Sales — ${c.on_pace} of ${c.people_with_target} people on pace`}>
       <p className="mb-3 flex flex-wrap items-center gap-2 text-sm text-ink-secondary">
         <LivePill /> Zoho Total Sales with Tax (invoices minus credit notes) vs this month&apos;s target. Pace for the period: {k.pace}% of the month.
-        {!teams && <> {c.at_risk} at risk, {c.behind} behind, {c.zero_sales} with no sales yet.</>}
+        {ch && <> {peso(ch.sales_php)} of {ch.target_php ? peso(ch.target_php, 0) : 'no target'}, {ch.people} people.{ch.not_linked_php ? ` Includes ${peso(ch.not_linked_php)} of this channel's Zoho sales not linked to a person.` : ''}</>}
+        {!teams && !ch && <> {c.at_risk} at risk, {c.behind} behind, {c.zero_sales} with no sales yet.</>}
       </p>
       <div className="max-h-[55vh] overflow-auto thin-scroll rounded-xl border border-slate-100">
         <table className="min-w-full text-sm">
@@ -667,7 +670,7 @@ const SalesKpiModal = ({ view, k, onClose }) => {
       ) : (
         <div className="mt-3 text-xs text-ink-secondary">
           <p>Each invoice goes to the owner of its app order (by Sales Order number; {c.invoices_via_sales_order} of {c.invoices} invoices). Otherwise it goes to the account whose Zoho salesperson it carries. Credit notes come off by salesperson.</p>
-          {k.unlinked.rows.length > 0 && (
+          {!ch && k.unlinked.rows.length > 0 && (
             <p className="mt-1">
               <span className="font-semibold text-ink-primary">Not linked to a person: {peso(k.unlinked.total)}</span> —{' '}
               {k.unlinked.rows.map((r) => `${r.salesperson} ${peso(r.total, 0)}`).join(' · ')}. Raised directly in Zoho, or the salesperson is shared with no single primary account.

@@ -78,3 +78,27 @@ test('says why when it cannot be worked out', () => {
   expect(buildSalesKpis({ ...base, users: undefined }).reason).toMatch(/No monthly targets/);
   expect(buildSalesKpis({ ...base, zoho: { available: false, error: 'not authorized' } }).reason).toMatch(/Waiting for Zoho: not authorized/);
 });
+
+test('Target Performance by sales channel (Oct 15, 2026)', () => {
+  // HOS: Rep1 (HOS | PALAWAN); STC: Rep2 (STC | NCL primary) and Loner via STC | CEBU; URO | DAVAO's
+  // unowned sales go to URO by the invoice's salesperson; Lazada has no territory -> No channel yet.
+  const chTerrs = [
+    { zoho_salesperson: 'HOS | PALAWAN', zoho_alias: 'HOS I PALAWAN', manager_id: 1 },
+    { zoho_salesperson: 'STC | NCL', zoho_alias: null, manager_id: 2 },
+    { zoho_salesperson: 'STC | CEBU', zoho_alias: null, manager_id: 2 },
+    { zoho_salesperson: 'URO | DAVAO', zoho_alias: null, manager_id: 3 },
+  ];
+  const k = buildSalesKpis({
+    ...base, terrs: chTerrs,
+    managers: [{ id: 1, channel_id: 10 }, { id: 2, channel_id: 20 }, { id: 3, channel_id: 30 }],
+    channels: [{ id: 10, name: 'HOSP', sort_order: 1 }, { id: 20, name: 'RX · STC', sort_order: 2 }, { id: 30, name: 'RX · URO', sort_order: 3 }],
+  });
+  const c = Object.fromEntries(k.channels.map((x) => [x.channel, x]));
+  expect(k.channels.map((x) => x.channel)).toEqual(['HOSP', 'RX · STC', 'RX · URO', 'No channel yet']);
+  expect(c.HOSP).toMatchObject({ people: 1, target_php: 200000, sales_php: 100000, pct_of_target: 50, status: 'on' });
+  expect(c['RX · STC']).toMatchObject({ people: 3, target_php: 250000, sales_php: 40000 }); // Rep2, Loner and the Lead (STC | CEBU primary)
+  expect(c['RX · URO']).toMatchObject({ people: 0, target_php: 0, sales_php: 80000, not_linked_php: 80000, status: null });
+  expect(c['No channel yet'].sales_php).toBe(5000);
+  expect(k.channels.reduce((a, x) => a + x.sales_php, 0)).toBe(zoho.total_sales_with_tax);
+  expect(k.people.find((p) => p.name === 'Rep1').channel).toBe('HOSP');
+});

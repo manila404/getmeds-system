@@ -239,7 +239,10 @@ async function getOverview(req, res, next) {
         kpiInput = {
           users: await q(`SELECT id, name, role, is_active, team_lead_id${titled ? ', sales_title' : ''} FROM users`),
           accts: await q('SELECT user_id, salesperson, is_primary FROM user_salespersons'),
-          terrs: await q('SELECT zoho_salesperson, zoho_alias FROM sales_territories'),
+          terrs: await q('SELECT zoho_salesperson, zoho_alias, manager_id FROM sales_territories'),
+          // Oct 15, 2026: the sales channels, for Target Performance by channel
+          managers: await q('SELECT id, channel_id FROM sales_managers'),
+          channels: await q('SELECT id, name, sort_order FROM sales_channels ORDER BY sort_order, id'),
           targets: await q('SELECT user_id, target_php FROM kpi_targets WHERE month = $1', [months[0]]),
           // Sales Order number -> the order's owner, for orders raised from 60 days before the
           // period to its end (an invoice can come weeks after its order). Split Sales Orders
@@ -313,8 +316,9 @@ const statusFor = (actual, target, pace) => {
 };
 const pctOf = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : null);
 const key = (s) => String(s || '').toLowerCase().trim();
+const NO_CHANNEL = 'No channel yet';
 
-function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, soOwners = [] }) {
+function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, soOwners = [], managers = [], channels = [] }) {
   if (!month || from !== `${month}-01`) {
     return { available: false, reason: 'Pick This month or Last month: targets are monthly.' };
   }
@@ -346,6 +350,21 @@ function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, s
     return primary.length === 1 ? primary[0].user_id : null;
   };
 
+  // Oct 15, 2026 (Aaron): Target Performance by sales channel. A person's channel is the
+  // channel of their primary Zoho salesperson's territory (as on the Sales KPIs page); sales
+  // nobody owns go to the channel of the invoice's salesperson; the rest, "No channel yet".
+  const chById = new Map(channels.map((c) => [c.id, c]));
+  const mgrCh = new Map(managers.map((m) => [m.id, m.channel_id]));
+  const terrByKey = new Map();
+  for (const t of terrs) for (const n of [t.zoho_salesperson, t.zoho_alias]) if (n) terrByKey.set(key(n), t);
+  const channelOfName = (name) => { const t = terrByKey.get(key(name)); const c = t && chById.get(mgrCh.get(t.manager_id)); return c ? c.name : null; };
+  const personChannel = new Map();
+  for (const a of [...accts].sort((x, y) => Number(y.is_primary) - Number(x.is_primary))) {
+    if (personChannel.has(a.user_id)) continue;
+    const ch = channelOfName(a.salesperson);
+    if (ch) personChannel.set(a.user_id, ch);
+  }
+
   const bySo = new Map(soOwners.map((r) => [key(r.so), r.user_id]));
   const sales = new Map(); // user_id -> Zoho total with tax
   const unlinkedBySp = new Map();
@@ -371,6 +390,7 @@ function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, s
       const lead = u.team_lead_id ? byId.get(u.team_lead_id) : null;
       return {
         user_id: u.id, name: u.name, role: u.role, title: u.sales_title || '', team_lead: lead ? lead.name : '',
+        channel: personChannel.get(u.id) || NO_CHANNEL,
         target_php: target, sales_php: actual, pct_of_target: pctOf(actual, target), status: statusFor(actual, target, pace),
       };
     })
@@ -404,6 +424,17 @@ function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, s
     .filter((t) => t.target_php > 0 || t.sales_php > 0)
     .sort((a, b) => (b.pct_of_target ?? -1) - (a.pct_of_target ?? -1));
 
+  const chRows = new Map(); // channel -> { target, sales, people }
+  const chRow = (name) => { if (!chRows.has(name)) chRows.set(name, { target: 0, sales: 0, people: 0, unlinked: 0 }); return chRows.get(name); };
+  for (const p of people) { const r = chRow(p.channel); r.target += p.target_php; r.sales += p.sales_php; r.people += 1; }
+  for (const u of unlinked) { const r = chRow(channelOfName(u.salesperson) || NO_CHANNEL); r.sales += u.total; r.unlinked += u.total; }
+  const order = [...channels.map((c) => c.name), NO_CHANNEL];
+  const byChannel = [...chRows].map(([name, r]) => ({
+    channel: name, people: r.people, target_php: num(r.target), sales_php: num(r.sales), not_linked_php: num(r.unlinked),
+    pct_of_target: pctOf(r.sales, r.target), status: statusFor(r.sales, r.target, pace),
+  })).filter((r) => r.target_php > 0 || r.sales_php !== 0)
+    .sort((a, b) => order.indexOf(a.channel) - order.indexOf(b.channel));
+
   const target = num(targets.reduce((a, t) => a + (Number(t.target_php) || 0), 0));
   const withTarget = people.filter((p) => p.target_php > 0);
   return {
@@ -417,9 +448,11 @@ function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, s
       zero_sales: withTarget.filter((p) => p.sales_php <= 0).length,
       teams_with_target: teams.filter((t) => t.target_php > 0).length,
       teams_on_pace: teams.filter((t) => t.status === 'on').length,
+      channels_with_target: byChannel.filter((c) => c.target_php > 0).length,
+      channels_on_pace: byChannel.filter((c) => c.status === 'on').length,
       invoices: (zoho.invoices || []).length, invoices_via_sales_order: viaSo,
     },
-    people, teams,
+    people, teams, channels: byChannel,
     unlinked: { total: num(unlinked.reduce((a, r) => a + r.total, 0)), rows: unlinked.sort((a, b) => b.total - a.total) },
   };
 }
