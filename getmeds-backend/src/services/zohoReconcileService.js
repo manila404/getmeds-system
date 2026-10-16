@@ -8,6 +8,7 @@ const { evaluateCompletion } = require('./orderCompletionService');
 // 'salesorder.edited' branch already runs — see the note where it's used
 // below for why this path needed it too.
 const { diffSalesOrderFields, summarizeChanges } = require('./zohoEditDiffService');
+const { alertFinancePaidEarly } = require('./paidTermsGuard');
 // Sep 10, 2026: Zoho's own dates for the checkpoints backfilled below. Without
 // these every event was stamped with the moment of the sync, so an order
 // raised on 31 Jan showed Confirmed / Invoiced / Paid / Packed all at 08:08 on
@@ -317,6 +318,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
       })();
 
       if (fieldChanges.length) action = 'EDIT_BACKFILLED';
+      if (fieldChanges.length) await alertFinancePaidEarly(order, fieldChanges);
     }
 
     // Sep 14, 2026: the line items and the total, which the field diff above

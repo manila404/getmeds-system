@@ -30,7 +30,7 @@ import HoldEvidence, { evidenceOf } from '../components/orders/HoldEvidence';
 import ApproveOrderModal from '../components/orders/ApproveOrderModal';
 import RefundModal from '../components/orders/RefundModal';
 import { ORDER_SOURCES } from '../constants/orderSources';
-import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../constants/paymentTerms';
+import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint, isPaidTerms } from '../constants/paymentTerms';
 import DeliveryConfirmModal from '../components/dispatch/DeliveryConfirmModal';
 import { TRACKING_EDITABLE_STATUSES, TrackingValue } from '../components/dispatch/DeliveryActions';
 import { TAX_OPTIONS, inferTaxOption } from '../utils/orderLines';
@@ -1578,6 +1578,9 @@ const OrderDetailPage = () => {
                     </datalist>
                     {/* Sep 19, 2026: what to attach as proof — see
                         constants/paymentTerms.js's paymentTermsProofHint. */}
+                    {isPaidTerms(draftDetails.payment_terms) && isPaidTerms(order.intake_payment_terms) === false && (
+                      <p className="text-[11px] text-red-600 mt-1">"Paid" can't be picked here. Finance marks an order Paid once the payment is confirmed.</p>
+                    )}
                     {paymentTermsProofHint(draftDetails.payment_terms) && (
                       <p className="text-[11px] text-amber-800 bg-state-warning-light border border-state-warning/30 rounded px-2 py-1 mt-1.5">
                         {paymentTermsProofHint(draftDetails.payment_terms)}

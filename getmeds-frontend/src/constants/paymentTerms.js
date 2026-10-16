@@ -31,7 +31,6 @@ export const PAYMENT_TERMS_SUGGESTIONS = [
   ...PDC_NET_SUGGESTIONS,
   'Due end of next month',
   'Due end of the month',
-  'Paid',
   'Advanced Payment',
   'Advanced Payment - Partial',
   'Donation/Charity',
@@ -60,6 +59,12 @@ export const PAYMENT_TERMS_SUGGESTIONS = [
  * — or null for anything else (Zoho's other presets: CASH, COD, Donation,
  * Samples...) since none of those carry the same PDC-vs-NET ambiguity.
  */
+/**
+ * Oct 16, 2026: "Paid" is not offered, and is refused when typed (the server
+ * refuses it too): Finance marks an order Paid once the payment is confirmed.
+ */
+export const isPaidTerms = (terms) => /^\s*paid\s*$/i.test(String(terms || ''));
+
 export const paymentTermsProofHint = (terms) => {
   const t = String(terms || '').toLowerCase();
   if (/\bpdc\b/.test(t)) return '📋 PDC terms — attach a clear photo of the post-dated cheque as proof of payment.';

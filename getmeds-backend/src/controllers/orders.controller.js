@@ -38,6 +38,7 @@ const { canAccessOrder } = require('../services/orderScopeService');
 // Sep 21, 2026: Team Lead visibility — a different, person-based shape of
 // scope. See services/teamScopeService.js.
 const teamScopeService = require('../services/teamScopeService');
+const { paidTermsRefusal } = require('../services/paidTermsGuard');
 // Sep 22, 2026: split-invoicing orders — one order, two Zoho Sales Orders.
 // See services/orderSplitService.js.
 const { groupItemsByInvoicingFrom, createSplitSalesOrder, getSplitsForOrder } = require('../services/orderSplitService');
@@ -2207,6 +2208,12 @@ exports.create = async (req, res, next) => {
       });
     }
 
+    // Oct 16, 2026: "Paid" is Finance's call, not the MedRep's. See paidTermsRefusal.
+    const paidRefusal = paidTermsRefusal(req.user.role, payment_terms, null);
+    if (paidRefusal) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: paidRefusal } });
+    }
+
     // Accepts a real boolean, and the strings a form or query string produces.
     // Anything else is left NULL ("not answered") rather than being coerced —
     // `Boolean('false')` is true, and silently recording the opposite of what
@@ -4140,6 +4147,13 @@ exports.updateDetails = async (req, res, next) => {
       if ((order.headquarter || null) !== cleanHq) {
         updates.headquarter = cleanHq;
         changedSummary.push(`Headquarter: ${order.headquarter || '(none)'} → ${cleanHq || '(none)'}`);
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'payment_terms')) {
+      const paidRefusal = paidTermsRefusal(req.user.role, body.payment_terms, order.intake_payment_terms);
+      if (paidRefusal) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: paidRefusal } });
       }
     }
 

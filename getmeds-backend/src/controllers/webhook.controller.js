@@ -3,6 +3,7 @@ const { logEvent } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const zoho = require('../integrations/zoho');
 const { diffSalesOrderFields, summarizeChanges } = require('../services/zohoEditDiffService');
+const { alertFinancePaidEarly } = require('../services/paidTermsGuard');
 // Sep 1, 2026: status writes now go through the state machine rather than
 // raw UPDATEs, and completion is one shared rule instead of a hop bolted to
 // whichever event happened to be last. See both services for the full why.
@@ -1198,6 +1199,10 @@ exports.handleZohoWebhook = async (req, res, next) => {
             orderData: { ...order }
           });
         }
+
+        // Oct 16, 2026: Payment Terms moved to "Paid" in Zoho before Finance confirmed
+        // the order. See services/paidTermsGuard.js.
+        await alertFinancePaidEarly(order, changes);
 
         actionTaken = zohoStatusChanged
           ? 'STATUS_CHANGE_LOGGED'

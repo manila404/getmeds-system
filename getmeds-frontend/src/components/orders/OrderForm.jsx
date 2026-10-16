@@ -34,7 +34,7 @@ import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ORDER_SOURCES } from '../../constants/orderSources';
-import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint } from '../../constants/paymentTerms';
+import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint, isPaidTerms } from '../../constants/paymentTerms';
 import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
 import StockWarningModal from './StockWarningModal';
 import { usePasteImage } from '../../hooks/usePasteImage';
@@ -1175,6 +1175,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // enforced by POST /api/orders, which would otherwise reject every other
   // caller of that endpoint including the test suite.
   if (!paymentTerms.trim()) missingFields.push('Payment Terms');
+  // Oct 16, 2026: "Paid" is Finance's call; the server refuses it as well.
+  else if (isPaidTerms(paymentTerms)) missingFields.push('Payment Terms (not "Paid"; Finance marks that)');
   if (!orderSource) missingFields.push('Source');
   if (!invoicingFrom) missingFields.push('Invoicing From');
   // Sep 23, 2026: Delivery Method — previously the only shipping-relevant
@@ -2133,6 +2135,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                     of PDC/NET is in what's typed — a post-dated cheque and a
                     bank transfer are different proof, and the two are easy to
                     conflate at a glance. */}
+                {isPaidTerms(paymentTerms) && (
+                  <p className="text-[11px] text-red-600 mt-1.5">
+                    "Paid" isn't a term you can pick. Finance marks an order Paid once the payment is confirmed. Use Advanced Payment, CASH, COD or the terms that apply.
+                  </p>
+                )}
                 {paymentTermsProofHint(paymentTerms) && (
                   <p className="text-[11px] text-amber-800 bg-state-warning-light border border-state-warning/30 rounded px-2 py-1 mt-1.5">
                     {paymentTermsProofHint(paymentTerms)}
