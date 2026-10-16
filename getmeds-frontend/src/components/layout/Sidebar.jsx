@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, ShieldCheck, Clock, Pill, Megaphone, Banknote, Target } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, Clock, Pill, Megaphone, Banknote, Target } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 import { FINANCE_STAGES } from '../../constants/financeStages';
 import { useUnseenAnnouncementsCount } from '../stock/StockAnnouncements';
@@ -249,9 +249,13 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
           : { to: '/management', icon: <LayoutDashboard size={19} />, label: 'Global Dashboard' },
         // Sep 7, 2026: MedRep orders wait here for Management approval before
         // they sync to Zoho — see orders.controller.js's submit().
-        { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
-        { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
-        { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' },
+        // Oct 16, 2026 (Aaron): not in Admin's menu. Approvals, exceptions and the orders log
+        // are Management's work. This hides the links only; the routes still allow Admin.
+        ...(role === 'admin' ? [] : [
+          { to: '/management/approvals', icon: <ClipboardCheck size={19} />, label: 'Approval Queue' },
+          { to: '/management/exceptions', icon: <AlertTriangle size={19} />, label: 'Exception Hub' },
+          { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
+        ]),
         ...(role === 'management' ? [{ to: '/finance/refunds', icon: <Banknote size={19} />, label: 'Refunds owed' }] : []),
         // Oct 2, 2026: Management decides what happens to a customer a MedRep
         // created that Zoho has not accepted yet (push as new, or link to the
@@ -333,28 +337,6 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   // Hand-toggled state wins; otherwise Operations starts open and any other
   // group opens when it holds the page you're on.
   const groupIsOpen = (g) => openGroups[g.key] ?? (g.key === 'operations' || g.links.some(isLinkActive));
-
-  // Single "Finance Confirmation" nav link for Admin's navGroups — replaces the
-  // old accordion with 6 sub-items. The stage cards on the page itself are the
-  // navigation; a duplicate sidebar sub-nav was the source of confusion.
-  const financeNavLink = canSeeFinance ? (
-    <NavLink
-      key="finance"
-      to="/finance"
-      onClick={handleLinkClick}
-      end
-      className={({ isActive }) =>
-        `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
-          isActive
-            ? 'bg-getmeds-blue/10 text-ink-primary font-medium border-r-4 border-getmeds-blue'
-            : 'text-ink-primary hover:bg-surface'
-        }`
-      }
-    >
-      <span className={`mr-3 ${isCollapsed ? 'lg:mr-0' : ''}`}><ShieldCheck size={19} /></span>
-      <span className={`truncate ${hideWhenCollapsed}`}>Finance Confirmation</span>
-    </NavLink>
-  ) : null;
 
   return (
     <>
@@ -530,9 +512,11 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                     // Oct 1, 2026: Finance Confirmation link + sub-items that
                     // were previously top-right header buttons on FinanceQueuePage.
                     <React.Fragment key="finance">
-                      {financeNavLink}
+                      {/* Oct 16, 2026 (Aaron): Finance Confirmation and My Confirmations are
+                          Finance's own screens, so they are no longer in Admin's menu (this
+                          group only renders for Admin). Reports stays. The routes still allow
+                          Admin: only the links are gone. */}
                       {canSeeFinance && ([
-                        { to: '/finance?view=mine', view: 'mine', icon: <UserCheck size={19} />, label: 'My Confirmations' },
                         { to: '/finance?view=reports', view: 'reports', icon: <BarChart3 size={19} />, label: 'Reports' },
                       ].map((link) => (
                         <NavLink
