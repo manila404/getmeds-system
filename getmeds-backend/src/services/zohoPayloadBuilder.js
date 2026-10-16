@@ -1,4 +1,5 @@
 const db = require('../db/database');
+const { groupItemsByInvoicingFrom } = require('./orderSplitService');
 
 /**
  * Aug 31, 2026: built to fix the "edited an order's items after a failed
@@ -45,18 +46,31 @@ async function buildZohoSalesOrderPayload(orderId, { items: itemsOverride, invoi
 
   if (!order) return null;
 
-  const items = itemsOverride || await db.prepare(`
-    SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit
-    FROM order_items oi
-    LEFT JOIN products p ON oi.product_id = p.id
-    WHERE oi.order_id = ?
-  `).all(orderId);
+  // Oct 16, 2026: with no override this is the PRIMARY Sales Order's payload,
+  // so on a split order it carries only the primary entity's lines. Sending
+  // every line pushed the split entity's items onto the primary Sales Order
+  // in Zoho whenever Edit Items or Edit Details ran on a synced split order
+  // (SO-68791 briefly showed CarboGet 450 that belongs on SO-68792). An order
+  // with no split has no split lines, so its payload is unchanged.
+  let primarySlice = false;
+  let items = itemsOverride;
+  if (!items) {
+    const allItems = await db.prepare(`
+      SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit
+      FROM order_items oi
+      LEFT JOIN products p ON oi.product_id = p.id
+      WHERE oi.order_id = ?
+    `).all(orderId);
+    const grouped = groupItemsByInvoicingFrom(allItems, order.invoicing_from);
+    primarySlice = Boolean(grouped.splitItems);
+    items = grouped.primaryItems;
+  }
 
   // A split payload's total is that subset's own line totals, not the whole
   // order's — Zoho computes the Sales Order total from line_items itself
   // and never reads total_amount (see LiveZohoAdapter._buildSalesOrderBody),
   // so this only matters for this app's own bookkeeping.
-  const totalAmount = itemsOverride
+  const totalAmount = (itemsOverride || primarySlice)
     ? items.reduce((sum, it) => sum + (Number(it.line_total) || 0), 0)
     : order.total_amount;
 

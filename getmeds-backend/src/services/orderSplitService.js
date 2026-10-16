@@ -201,6 +201,61 @@ async function createSplitSalesOrder({ orderId, getmedsOrderId, primaryPayload, 
 }
 
 /**
+ * Oct 16, 2026: after Edit Items on an order Zoho already has, the PRIMARY
+ * Sales Order is updated by the caller (its payload now carries only the
+ * primary entity's lines). This is the other half: the split entity's own
+ * Sales Order gets ITS lines. Before this, an item edit on a split order only
+ * ever touched the primary Sales Order, so a change to a split line never
+ * reached SO-xxxx for the other entity.
+ *
+ *   - a split Sales Order exists  -> update it with the split's current lines
+ *   - split lines but no Sales Order yet -> create it (same as at approval)
+ *   - no split lines left but a Sales Order exists -> left alone and reported;
+ *     emptying a Sales Order in Zoho is a human decision
+ *
+ * Returns { action, note }. Never throws.
+ */
+async function pushItemsToSplit({ orderId, primaryPayload }) {
+  try {
+    const order = await db.prepare('SELECT id, getmeds_order_id, invoicing_from FROM orders WHERE id = ?').get(orderId);
+    if (!order) return { action: 'none', note: null };
+    const allItems = await db.prepare(`
+      SELECT oi.*, p.name as name, p.sku, p.zoho_item_id, p.unit
+        FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id
+       WHERE oi.order_id = ?
+    `).all(orderId);
+    const { splitItems, splitInvoicingFrom } = groupItemsByInvoicingFrom(allItems, order.invoicing_from);
+    const { rows, byEntity } = await getSplitsForOrder(orderId);
+
+    if (!splitItems) {
+      const left = rows.find((r) => r.zoho_so_id);
+      return left
+        ? { action: 'none', note: `No lines are left for ${left.invoicing_from}, so its Sales Order ${left.zoho_so_number || left.zoho_so_id} was not changed. Check it in Zoho.` }
+        : { action: 'none', note: null };
+    }
+
+    const existing = byEntity[splitInvoicingFrom];
+    if (existing && existing.zoho_so_id) {
+      if (isDryRunMode()) return { action: 'skipped', note: 'Dry run: the split Sales Order was not contacted.' };
+      const total = splitItems.reduce((s, it) => s + (Number(it.line_total) || 0), 0);
+      await zoho.updateSalesOrder(existing.zoho_so_id, {
+        ...primaryPayload, items: splitItems, invoicing_from: splitInvoicingFrom, total_amount: total
+      });
+      return { action: 'updated', note: `${splitInvoicingFrom} Sales Order ${existing.zoho_so_number || existing.zoho_so_id} updated too.` };
+    }
+
+    const created = await createSplitSalesOrder({
+      orderId, getmedsOrderId: order.getmeds_order_id, primaryPayload, splitItems, splitInvoicingFrom
+    });
+    return created.zohoError
+      ? { action: 'failed', note: `The ${splitInvoicingFrom} Sales Order could not be created yet (${created.zohoError}); it is queued for retry.` }
+      : { action: 'created', note: `${splitInvoicingFrom} Sales Order created for the split lines.` };
+  } catch (err) {
+    return { action: 'failed', note: `The split Sales Order could not be updated: ${err.message}` };
+  }
+}
+
+/**
  * Sep 22, 2026: pushes ONE physical pack/ship action (per the business
  * decision — Dispatch enters one tracking number in GetMeds, not two) onto
  * every split entity's OWN Sales Order in Zoho, in addition to whatever
@@ -284,5 +339,6 @@ module.exports = {
   groupItemsByInvoicingFrom,
   getSplitsForOrder,
   createSplitSalesOrder,
+  pushItemsToSplit,
   pushDispatchActionToSplits
 };

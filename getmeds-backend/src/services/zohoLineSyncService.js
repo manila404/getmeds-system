@@ -133,8 +133,17 @@ async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zo
     console.warn(`[ZOHO_LINE_SYNC] order ${order.id}: cannot sync ${invoicingFrom}'s items — order_items.invoicing_from is missing (run the migration).`);
     return 'skipped';
   }
-  const entityFilterSql = canScopeByEntity ? (invoicingFrom ? 'AND oi.invoicing_from = ?' : 'AND oi.invoicing_from IS NULL') : '';
-  const entityFilterParams = canScopeByEntity && invoicingFrom ? [invoicingFrom] : [];
+  // Oct 16, 2026: the PRIMARY slice is the lines that follow the order (NULL)
+  // AND the lines explicitly stamped with the order's own entity. Edit Items
+  // stamps every line once an order has a split, so on GM-20261016-0015 the
+  // two 2mg lines were tagged "2mg Incorporated" (the order's own entity).
+  // Matching only NULL made the primary slice look empty ("Was: none"), so
+  // syncing SO-68791 inserted its two lines a second time (5 lines, 19,500
+  // instead of 3 lines, 13,200), and the next Edit Items pushed that mess on.
+  const entityFilterSql = canScopeByEntity
+    ? (invoicingFrom ? 'AND oi.invoicing_from = ?' : 'AND (oi.invoicing_from IS NULL OR oi.invoicing_from = ?)')
+    : '';
+  const entityFilterParams = canScopeByEntity ? [invoicingFrom || order.invoicing_from || null] : [];
 
   const lines = Array.isArray(salesorder.line_items) ? salesorder.line_items : [];
   // Never empty an order, and never sync from a partial response.

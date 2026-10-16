@@ -41,7 +41,7 @@ const teamScopeService = require('../services/teamScopeService');
 const { paidTermsRefusal } = require('../services/paidTermsGuard');
 // Sep 22, 2026: split-invoicing orders — one order, two Zoho Sales Orders.
 // See services/orderSplitService.js.
-const { groupItemsByInvoicingFrom, createSplitSalesOrder, getSplitsForOrder } = require('../services/orderSplitService');
+const { groupItemsByInvoicingFrom, createSplitSalesOrder, getSplitsForOrder, pushItemsToSplit } = require('../services/orderSplitService');
 const syncJobs = require('../services/syncJobs');
 const { getSyncState } = require('../services/syncState');
 // Sep 9, 2026: the Master Form collects a TIN, and Zoho refuses a Sales Order
@@ -4575,11 +4575,15 @@ exports.updateItems = async (req, res, next) => {
     // anything on it.
     let zohoPushed = false;
     let zohoError = null;
+    let splitNote = null;
     if (wasAlreadySynced) {
       try {
         const freshPayload = await buildZohoSalesOrderPayload(order.id);
         await zoho.updateSalesOrder(order.zoho_so_id, freshPayload);
         zohoPushed = true;
+        // Oct 16, 2026: a split order's other Sales Order gets its own lines.
+        const splitPush = await pushItemsToSplit({ orderId: order.id, primaryPayload: freshPayload });
+        splitNote = splitPush.note;
       } catch (err) {
         zohoError = err.message;
       }
@@ -4597,7 +4601,8 @@ exports.updateItems = async (req, res, next) => {
         ? `Order items changed by ${actorForLog.name} after this order was already synced to Zoho ` +
           `(${order.zoho_so_number || order.zoho_so_id}) — was: ${oldItemsSummary}; now: ${newItemsSummary}. ` +
           `New total: ₱${total_amount.toFixed(2)}. ` +
-          (zohoPushed ? 'Pushed to the Zoho Sales Order.' : `Could NOT push to Zoho — ${zohoError}`)
+          (zohoPushed ? 'Pushed to the Zoho Sales Order.' : `Could NOT push to Zoho — ${zohoError}`) +
+          (splitNote ? ` ${splitNote}` : '')
         : `Order items changed before this order was sent to Zoho — was: ${oldItemsSummary}; now: ${newItemsSummary}. New total: ₱${total_amount.toFixed(2)}.`,
       metadata: { oldItemsSummary, newItemsSummary, total_amount, zoho_pushed: zohoPushed, zoho_error: zohoError }
     });
