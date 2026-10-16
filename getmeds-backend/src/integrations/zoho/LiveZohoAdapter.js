@@ -11,6 +11,10 @@ const RETRY_BASE_MS = Number(process.env.ZOHO_REQUEST_RETRY_BASE_MS) || 800;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Oct 15, 2026: customers whose withholding-tax (TDS) flag was already switched on by this
+// process, so a customer ordering many times is only touched once per server start.
+const tdsEnsured = new Set();
+
 /**
  * Today's date in the Philippines, as YYYY-MM-DD — comparable directly
  * against expected_shipment_date, which is stored the same way. Manila is
@@ -278,7 +282,24 @@ class LiveZohoAdapter extends ZohoAdapter {
       }
       throw err;
     }
+    // Oct 15, 2026: every order's customer gets the TDS tag. Zoho shows "Tax deducted?" when a
+    // payment is recorded only for a customer with is_tds_registered on, and an older customer
+    // (created before the app set it) has it off, so Finance could not record the withholding.
+    // Best-effort and after the order exists: a refusal is only logged, never fails the order.
+    // Only this one flag is sent.
+    await this._ensureCustomerTds(contactId);
+
     return { code: 0, message: 'Sales order created successfully', salesorder: result.salesorder };
+  }
+
+  async _ensureCustomerTds(contactId) {
+    if (!contactId || tdsEnsured.has(String(contactId))) return;
+    try {
+      await this._request('PUT', `/contacts/${contactId}`, { body: { is_tds_registered: true } });
+      tdsEnsured.add(String(contactId));
+    } catch (err) {
+      this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] could not turn on TDS for contact ${contactId}: ${err.message}`);
+    }
   }
 
   /**
