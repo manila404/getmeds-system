@@ -6,6 +6,14 @@ const zoho = require('../integrations/zoho');
 const { hasColumn } = require('./schemaColumns');
 
 /**
+ * Oct 17, 2026: Zoho refuses a file whose extension it does not list ("File types with
+ * extension jfif are not supported"), so a prescription photo named *.jfif (a JPEG
+ * from Windows) never reached the Sales Order. The bytes are an ordinary JPEG, so it
+ * goes up as .jpg; only the name Zoho shows changes.
+ */
+const zohoFileName = (name) => String(name || 'attachment').replace(/\.jfif$/i, '.jpg');
+
+/**
  * Sep 21, 2026: push every local attachment an order already has onto its
  * Zoho Sales Order the moment that Sales Order first exists.
  *
@@ -60,7 +68,7 @@ async function pushUnsyncedAttachments(orderId, zohoSoId) {
       const buffer = await proofStorage.downloadFile(row.storage_path);
       const pushResult = await zoho.addSalesOrderAttachment(zohoSoId, {
         buffer,
-        filename: row.file_name || 'attachment',
+        filename: zohoFileName(row.file_name),
         contentType: row.content_type || 'application/octet-stream',
       });
       if (canTrackPushed) {
@@ -123,7 +131,7 @@ async function syncVerifiedPrescriptionsToZoho(orderId, zohoSoId, proofIds) {
       const buffer = await proofStorage.downloadFile(row.storage_path);
       const pushResult = await zoho.addSalesOrderAttachment(zohoSoId, {
         buffer,
-        filename: row.file_name || 'attachment',
+        filename: zohoFileName(row.file_name),
         contentType: row.content_type || 'application/octet-stream',
       });
       if (canTrackPushed) {
@@ -145,4 +153,4 @@ async function syncVerifiedPrescriptionsToZoho(orderId, zohoSoId, proofIds) {
   return { pushed, failed };
 }
 
-module.exports = { pushUnsyncedAttachments, syncVerifiedPrescriptionsToZoho };
+module.exports = { pushUnsyncedAttachments, syncVerifiedPrescriptionsToZoho, zohoFileName };

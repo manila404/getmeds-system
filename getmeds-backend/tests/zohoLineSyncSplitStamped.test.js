@@ -102,6 +102,19 @@ describe('line sync on a split order whose primary lines carry the order entity'
     expect(Number(payload.total_amount)).toBe(6300);
   });
 
+  test("a 'split' of the order's own entity, or a voided Sales Order, is never copied in", async () => {
+    const order = await splitOrder();
+    const split = primarySalesOrder();
+    split.line_items = [{ item_id: Z.paclia, name: 'PacliGet 260', quantity: 1, rate: 3500, discount: 0, tax_percentage: 0, tax_name: 'No Tax' }];
+    split.total = 3500;
+    // Same entity as the order's own (2mg): not a real split.
+    expect(await syncLineItemsFromZoho({ order, salesorder: split, invoicingFrom: TWO_MG })).toBe('skipped');
+    // A void Sales Order for the other entity: skipped too.
+    expect(await syncLineItemsFromZoho({ order, salesorder: { ...split, status: 'void' }, invoicingFrom: GETMEDS })).toBe('skipped');
+    expect(await itemCount(order.id)).toBe(3);
+    expect(await totalOf(order.id)).toBe(13200);
+  });
+
   test('an order with no split still sends every line', async () => {
     const order = await splitOrder();
     await db.prepare('UPDATE order_items SET invoicing_from = NULL WHERE order_id = ?').run(order.id);

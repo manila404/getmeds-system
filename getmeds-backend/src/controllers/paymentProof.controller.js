@@ -9,6 +9,7 @@ const zoho = require('../integrations/zoho');
 const { constraintAllows, hasColumn } = require('../services/schemaColumns');
 const attachmentLink = require('../services/attachmentLinkService');
 const { isPharmacyReviewable, RX_FILE_TYPE, supersededIds } = require('../services/prescriptionService');
+const { zohoFileName } = require('../services/zohoAttachmentSync');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -399,7 +400,7 @@ exports.attach = async (req, res, next) => {
         const buffer = await proofStorage.downloadFile(storagePath);
         const pushResult = await zoho.addSalesOrderAttachment(order.zoho_so_id, {
           buffer,
-          filename: fileName || 'attachment',
+          filename: zohoFileName(fileName),
           contentType: contentType || 'application/octet-stream',
         });
         zohoPushed = true;

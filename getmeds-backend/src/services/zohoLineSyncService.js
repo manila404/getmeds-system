@@ -145,6 +145,18 @@ async function syncLineItemsFromZoho({ order: given, salesorder, actorName = 'Zo
     : '';
   const entityFilterParams = canScopeByEntity ? [invoicingFrom || order.invoicing_from || null] : [];
 
+  // Oct 17, 2026: two split syncs that can only do harm.
+  //  - A split whose entity IS the order's own entity is not a split any more. That is how
+  //    GM-20261016-0004 ended up after someone changed its Invoicing From in Zoho: the
+  //    split Sales Order's lines were written in as a second copy of lines the order
+  //    already had (PHP 12,518 instead of 10,718).
+  //  - A voided Sales Order is not billing anything, so its lines must not be copied in.
+  if (invoicingFrom) {
+    const sameAsPrimary = order.invoicing_from && invoicingFrom === order.invoicing_from;
+    const voided = String(salesorder.status || '').toLowerCase() === 'void';
+    if (sameAsPrimary || voided) return 'skipped';
+  }
+
   const lines = Array.isArray(salesorder.line_items) ? salesorder.line_items : [];
   // Never empty an order, and never sync from a partial response.
   if (!lines.length || !hasNumber(salesorder.total) || !lines.every((l) => hasNumber(l.rate))) return 'skipped';
