@@ -419,10 +419,16 @@ async function decide(req, res, next, verdict) {
     // Sales Order already exists. Best-effort — a Zoho failure never fails the
     // verify response; the file will be picked up by pushUnsyncedAttachments on
     // the next re-sync if this call misses.
+    // Oct 17, 2026: AWAITED. It used to run after the response without waiting, and on
+    // Vercel the function can be frozen the moment the response is sent, so about 1 in 5
+    // verified prescriptions (44 of 236 in two weeks) never reached Zoho. Every upload
+    // that is awaited (payment proofs, other files) arrived 99% of the time.
     if (verdict === 'verified' && order.zoho_so_id) {
-      syncVerifiedPrescriptionsToZoho(order.id, order.zoho_so_id, ids).catch((err) =>
-        console.warn(`[PHARMACY] syncVerifiedPrescriptionsToZoho failed for order ${order.id}:`, err.message)
-      );
+      try {
+        await syncVerifiedPrescriptionsToZoho(order.id, order.zoho_so_id, ids);
+      } catch (err) {
+        console.warn(`[PHARMACY] syncVerifiedPrescriptionsToZoho failed for order ${order.id}:`, err.message);
+      }
     }
 
     const s = (await rxSummaries([order.id])).get(order.id);
@@ -531,7 +537,10 @@ exports.reject = (req, res, next) => decide(req, res, next, 'rejected');
 // order's own LIVE rejected row(s) instead (not one a MedRep has already
 // answered with a replacement — that one is already `superseded`, and is
 // resubmitPrescription's job above, not this one's).
-const RE_REVIEW_ACTIONS = ['verify', 'reject', 'reset'];
+// Oct 17, 2026: 'undo' takes back a VERIFICATION (verified -> Awaiting review) so
+// Pharmacy can look again and re-verify, reject or leave it. The other three act
+// on a live rejection, as before.
+const RE_REVIEW_ACTIONS = ['verify', 'reject', 'reset', 'undo'];
 exports.reReview = async (req, res, next) => {
   try {
     if (!mayDecide(req.user)) {
@@ -563,23 +572,36 @@ exports.reReview = async (req, res, next) => {
     // and it is history, not something this re-review touches).
     const rows = await prescriptionRows([order.id]);
     const { prescriptions } = summarize(rows);
-    const liveRejectedIds = prescriptions.filter((p) => p.status === 'rejected' && !p.superseded).map((p) => p.id);
+    const isUndo = action === 'undo';
+    const fromStatus = isUndo ? 'verified' : 'rejected';
+    const liveRejectedIds = prescriptions.filter((p) => p.status === fromStatus && !p.superseded).map((p) => p.id);
     if (!liveRejectedIds.length) {
-      return fail(res, 404, 'NOTHING_TO_REVIEW', 'This order has no open rejection to re-review.');
+      return isUndo
+        ? fail(res, 404, 'NOTHING_TO_REVIEW', 'This order has no verified prescription to undo.')
+        : fail(res, 404, 'NOTHING_TO_REVIEW', 'This order has no open rejection to re-review.');
+    }
+
+    // A verified file was pushed to the Zoho Sales Order at verification. This app can
+    // only ADD attachments in Zoho (no delete), so an undo can't take that copy back.
+    let onZoho = 0;
+    if (isUndo && (await hasColumn('payment_proofs', 'zoho_pushed'))) {
+      onZoho = Number((await db
+        .prepare('SELECT COUNT(*) AS n FROM payment_proofs WHERE id = ANY(?) AND zoho_pushed = true')
+        .get([liveRejectedIds]))?.n || 0);
     }
 
     const actor = await resolveActor(req.user, 'dispatch');
     const now = new Date().toISOString();
-    const newStatus = action === 'verify' ? 'verified' : action === 'reset' ? 'pending' : 'rejected';
+    const newStatus = action === 'verify' ? 'verified' : (action === 'reset' || isUndo) ? 'pending' : 'rejected';
     // A reset means nobody has decided yet, same as a fresh upload — clear who/when.
-    const stampDecision = action !== 'reset';
+    const stampDecision = action !== 'reset' && !isUndo;
 
     await db.transaction(async () => {
       await db
         .prepare(
           `UPDATE payment_proofs
               SET status = ?, verified_by = ?, verified_at = ?, rejection_reason = ?
-            WHERE id = ANY(?) AND status = 'rejected'`
+            WHERE id = ANY(?) AND status = '${fromStatus}'`
         )
         .run(newStatus, stampDecision ? actor.id : null, stampDecision ? now : null, action === 'reject' ? reason : null, [liveRejectedIds]);
 
@@ -591,17 +613,20 @@ exports.reReview = async (req, res, next) => {
         actorId: actor.id,
         actorName: actor.name,
         notes:
-          action === 'verify'
+          isUndo
+            ? `Prescription verification undone by ${actor.name} — back to Awaiting review.` +
+              (onZoho ? ' The file is already on the Zoho Sales Order and stays there; remove it in Zoho if it should not be kept.' : '')
+          : action === 'verify'
             ? `Prescription re-reviewed and Verified by ${actor.name}, overriding an earlier rejection.`
             : action === 'reject'
               ? `Prescription re-reviewed by ${actor.name} — still rejected, reason updated: ${reason}`
               : `Prescription re-reviewed by ${actor.name} — reset to Awaiting review for a second look.`,
-        metadata: { attachmentIds: liveRejectedIds, action, ...(action === 'reject' ? { reason } : {}) },
+        metadata: { attachmentIds: liveRejectedIds, action, ...(isUndo ? { alreadyOnZoho: onZoho } : {}), ...(action === 'reject' ? { reason } : {}) },
       });
 
       // A verify needs nothing from the MedRep — the order simply proceeds.
       // The other two outcomes are still something for them to know about.
-      if (action !== 'verify') {
+      if (action !== 'verify' && !isUndo) {
         await notify({
           orderId: order.id,
           recipientIds: Array.from(new Set([order.medrep_id, order.raised_by_id].filter(Boolean))),
@@ -617,14 +642,17 @@ exports.reReview = async (req, res, next) => {
 
     // Sep 29, 2026: same Zoho push as decide() — push the re-reviewed
     // prescription to Zoho if the Sales Order already exists.
+    // Oct 17, 2026: awaited, same reason as in decide().
     if (action === 'verify' && order.zoho_so_id) {
-      syncVerifiedPrescriptionsToZoho(order.id, order.zoho_so_id, liveRejectedIds).catch((err) =>
-        console.warn(`[PHARMACY] syncVerifiedPrescriptionsToZoho (re-review) failed for order ${order.id}:`, err.message)
-      );
+      try {
+        await syncVerifiedPrescriptionsToZoho(order.id, order.zoho_so_id, liveRejectedIds);
+      } catch (err) {
+        console.warn(`[PHARMACY] syncVerifiedPrescriptionsToZoho (re-review) failed for order ${order.id}:`, err.message);
+      }
     }
 
     const s = (await rxSummaries([order.id])).get(order.id);
-    res.json({ success: true, data: { id: order.id, rx_state: s.state, prescriptions: s.prescriptions } });
+    res.json({ success: true, data: { id: order.id, rx_state: s.state, prescriptions: s.prescriptions, ...(isUndo ? { already_on_zoho: onZoho } : {}) } });
   } catch (err) {
     next(err);
   }

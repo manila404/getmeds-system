@@ -369,6 +369,60 @@ describe('Pharmacy queue, verification and the gate', () => {
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('NOTHING_TO_REVIEW');
     });
+
+    describe('undo — taking back a verification', () => {
+      test('puts it back at Awaiting review, re-blocks Dispatch, and can be verified again', async () => {
+        const o = await orderAt('ready_for_draft_invoice');
+        const rxId = await addRx(o.id);
+        expect((await verify(o.id)).status).toBe(200);
+        expect(idsOf(await queue('verified'))).toContain(o.id);
+
+        const res = await reReview(o.id, { action: 'undo' });
+        expect(res.status).toBe(200);
+        expect(res.body.data.rx_state).toBe('pending');
+        expect(idsOf(await queue('pending'))).toContain(o.id);
+        expect(idsOf(await queue('verified'))).not.toContain(o.id);
+
+        const row = await db.prepare('SELECT status, verified_by, verified_at FROM payment_proofs WHERE id = ?').get(rxId);
+        expect(row.status).toBe('pending');
+        expect(row.verified_by).toBeNull();
+        expect(row.verified_at).toBeNull();
+
+        const ev = await db.prepare("SELECT notes FROM order_events WHERE order_id = ? AND event_type = 'RX_RE_REVIEWED'").get(o.id);
+        expect(ev.notes).toMatch(/verification undone/i);
+
+        // The gate closes again until it is re-verified.
+        expect((await confirm(o.id)).status).toBe(409);
+        expect((await verify(o.id)).status).toBe(200);
+        expect((await confirm(o.id)).status).toBe(200);
+      });
+
+      test('says so when the file is already on the Zoho Sales Order', async () => {
+        const o = await orderAt('ready_for_draft_invoice');
+        const rxId = await addRx(o.id);
+        await verify(o.id);
+        await db.prepare('UPDATE payment_proofs SET zoho_pushed = true WHERE id = ?').run(rxId);
+
+        const res = await reReview(o.id, { action: 'undo' });
+        expect(res.status).toBe(200);
+        expect(res.body.data.already_on_zoho).toBe(1);
+        const ev = await db.prepare("SELECT notes FROM order_events WHERE order_id = ? AND event_type = 'RX_RE_REVIEWED'").get(o.id);
+        expect(ev.notes).toMatch(/already on the Zoho Sales Order/i);
+      });
+
+      test('nothing to undo when nothing is verified; a MedRep may not; shipped orders are out of reach', async () => {
+        const o = await orderAt('ready_for_draft_invoice');
+        await addRx(o.id);
+        expect((await reReview(o.id, { action: 'undo' })).status).toBe(404);
+
+        await verify(o.id);
+        expect((await reReview(o.id, { action: 'undo' }, medrepToken)).status).toBe(403);
+
+        const shipped = await orderAt('dispatched');
+        await addRx(shipped.id, { status: 'verified' });
+        expect((await reReview(shipped.id, { action: 'undo' })).status).toBe(409);
+      });
+    });
   });
 
   describe('an order with no prescription at all (no-rx-decision)', () => {

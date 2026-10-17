@@ -296,6 +296,72 @@ const ReReview = ({ order, canDecide, onDone }) => {
 };
 
 /**
+ * Oct 17, 2026: take back a verification. The prescription goes back to Awaiting
+ * review, Dispatch is blocked again until it is re-verified, and the trail records
+ * who undid it. A verified file was already pushed to the Zoho Sales Order, and this
+ * app can only add attachments there, so that copy has to be removed in Zoho by hand.
+ */
+const UndoVerify = ({ order, canDecide, onDone }) => {
+  const [open, setOpen] = useState(false);
+  const qc = useQueryClient();
+
+  const act = useMutation({
+    mutationFn: () => client.post(`/api/dispatch/pharmacy/orders/${order.id}/re-review`, { action: 'undo' }).then((r) => r.data),
+    onSuccess: (res) => {
+      toast.success(
+        res?.data?.already_on_zoho
+          ? `${order.getmeds_order_id}: back to Awaiting review. The file is already on the Zoho Sales Order; remove it there if it should not stay.`
+          : `${order.getmeds_order_id}: back to Awaiting review.`
+      );
+      setOpen(false);
+      qc.invalidateQueries({ queryKey: ['pharmacy-queue'] });
+      qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
+      onDone?.();
+    },
+    onError: (err) => toast.error(errorText(err, 'Could not undo the verification.')),
+  });
+
+  const hasVerified = order.prescriptions.some((p) => p.status === 'verified' && !p.superseded);
+  if (!canDecide || !hasVerified) return null;
+  const busy = act.isPending;
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
+      >
+        <RotateCcw className="w-3.5 h-3.5" /> Undo verification
+      </button>
+    );
+  }
+
+  return (
+    <div className="w-full space-y-1.5">
+      <p className="text-xs font-semibold text-ink-primary">Undo this verification?</p>
+      <p className="text-xs text-ink-secondary">
+        The prescription goes back to Awaiting review and Dispatch can't send the order until it is verified again.
+        A copy was already added to the Zoho Sales Order; the system can't remove it, so delete it in Zoho if it shouldn't stay.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => act.mutate()}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+        >
+          <Clock className="w-3.5 h-3.5" /> {busy ? 'Undoing…' : 'Yes, back to Awaiting review'}
+        </button>
+        <button type="button" disabled={busy} onClick={() => setOpen(false)} className="text-xs text-ink-secondary hover:text-ink-primary">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+};
+
+/**
  * Sep 28, 2026: an order with zero prescription rows — a MedRep mis-tagged
  * the division, or uploaded the prescription under the wrong attachment
  * category, and it sits in "All orders" as "No prescription uploaded" with
@@ -646,6 +712,7 @@ const PharmacyQueuePage = () => {
                     <div onClick={(e) => e.stopPropagation()}>
                       {o.reviewable !== false && <Decision order={o} canDecide={canDecide} />}
                       {o.reviewable !== false && <ReReview order={o} canDecide={canDecide} />}
+                      {o.reviewable !== false && <UndoVerify order={o} canDecide={canDecide} />}
                       {o.prescriptions.length === 0 && o.rx_state !== 'not_required' && (
                         <NoRxActions order={o} canDecide={canDecide} />
                       )}
@@ -716,6 +783,7 @@ const PharmacyQueuePage = () => {
               <div className="w-full space-y-2">
                 {viewing.reviewable !== false && <Decision order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />}
                 {viewing.reviewable !== false && <ReReview order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />}
+                {viewing.reviewable !== false && <UndoVerify order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />}
                 {viewing.prescriptions.length === 0 && viewing.rx_state !== 'not_required' && (
                   <NoRxActions order={viewing} canDecide={canDecide} onDone={() => setViewingId(null)} />
                 )}
