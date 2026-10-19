@@ -132,13 +132,65 @@ describe('Dispatch catering orders', () => {
     expect(await q('open')).toEqual([open.id]);
   });
 
-  test('any order in Dispatch, imported ones included — but not before Finance', async () => {
+  test('any order in Dispatch, imported ones included — but not one with no Sales Order or still awaiting approval', async () => {
     const imported = await orderAt('dispatched', 'ZOHO-SO-CATER');
     expect((await cater(imported.id, dispatchA)).status).toBe(200);
+    // A draft with no Sales Order in Zoho yet is not on the Dispatch board.
     const early = await orderAt('ready_for_finance_verified');
     const res = await cater(early.id, dispatchA);
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('NOT_CATERABLE');
+    const unapproved = await orderAt('pending_management_approval');
+    expect((await cater(unapproved.id, dispatchA)).status).toBe(409);
+  });
+
+  describe('a draft SO still waiting on Finance and Pharmacy (Oct 19, 2026)', () => {
+    async function draftSo() {
+      const order = await orderAt('ready_for_finance_verified', 'GM-CATERDRAFT');
+      await db.prepare('UPDATE orders SET zoho_so_id = ?, zoho_so_number = ? WHERE id = ?')
+        .run(`ZSO-${order.id}`, `SO-CD-${order.id}`, order.id);
+      return order;
+    }
+    const board = async (token = dispatchA) => (await request(app).get('/api/dispatch/recent').set(auth(token))).body.data;
+
+    test('can be catered, and stays in New draft SOs with the label', async () => {
+      const order = await draftSo();
+      const res = await cater(order.id, dispatchA);
+      expect(res.status).toBe(200);
+      expect(res.body.data.catered.by_id).toBe(dispatchAId);
+
+      const data = await board(dispatchB);
+      const draft = data.new_draft_sos.find((o) => o.id === order.id);
+      expect(draft).toBeTruthy();
+      expect(draft.catered.by_id).toBe(dispatchAId);
+      // Not in the Catered Orders column yet, and nothing about the order changed.
+      expect(data.catered_orders.map((o) => o.id)).not.toContain(order.id);
+      expect((await db.prepare('SELECT status FROM orders WHERE id = ?').get(order.id)).status).toBe('ready_for_finance_verified');
+    });
+
+    test('once Finance confirms it, it moves to Catered Orders with the same person', async () => {
+      const order = await draftSo();
+      await cater(order.id, dispatchA);
+      await db.prepare("UPDATE orders SET status = 'ready_for_draft_invoice' WHERE id = ?").run(order.id);
+
+      const data = await board();
+      expect(data.new_draft_sos.map((o) => o.id)).not.toContain(order.id);
+      const row = data.catered_orders.find((o) => o.id === order.id);
+      expect(row).toBeTruthy();
+      expect(row.catered.by_id).toBe(dispatchAId);
+    });
+
+    test('can be taken over or released like any other, and does not clear the gate', async () => {
+      const order = await draftSo();
+      await cater(order.id, dispatchA);
+      expect((await cater(order.id, dispatchB)).body.data.message).toMatch(/taken over/);
+      expect((await release(order.id, dispatchA)).status).toBe(403);
+      expect((await release(order.id, dispatchB)).status).toBe(200);
+      expect((await board()).new_draft_sos.find((o) => o.id === order.id).catered).toBeNull();
+      // Catering is only a label: confirming for delivery is still refused before Finance.
+      const confirm = await request(app).post(`/api/dispatch/orders/${order.id}/confirm-delivery`).set(auth(dispatchA)).send({});
+      expect(confirm.status).toBeGreaterThanOrEqual(400);
+    });
   });
 
   test('a MedRep cannot cater an order', async () => {

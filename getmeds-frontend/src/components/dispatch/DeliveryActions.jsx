@@ -153,8 +153,10 @@ export function deliveryActionFlags(order, user, { onConfirm, onHold, onAddTrack
   const role = String(user?.role || '').toLowerCase();
   const catered = order.catered;
   const cateredByMe = Boolean(catered) && String(catered.by_id) === String(user?.id);
+  // Oct 19, 2026: also a draft SO still waiting on Finance/Pharmacy — it stays in New draft SOs.
+  const isWaitingDraft = order.status === 'ready_for_finance_verified';
   const canCater = Boolean(onCater) && ['dispatch', 'admin'].includes(role) &&
-    TRACKING_EDITABLE_STATUSES.includes(order.status) && !cateredByMe;
+    (TRACKING_EDITABLE_STATUSES.includes(order.status) || isWaitingDraft) && !cateredByMe;
   const canRelease = Boolean(onReleaseCater) && Boolean(catered) && (cateredByMe || ['management', 'admin'].includes(role));
   // Sep 15, 2026: Dispatch's hold — a flag; the order keeps its place.
   const dispatchHold = order.dispatch_hold;
@@ -180,7 +182,7 @@ export function deliveryActionFlags(order, user, { onConfirm, onHold, onAddTrack
 
   return {
     role, catered, cateredByMe, canCater, canRelease, dispatchHold, canHoldOrder, canLiftHold,
-    confirmed, stale, canConfirm, hold, entered, trackingFree, canHold, canAddTracking
+    confirmed, stale, canConfirm, hold, entered, trackingFree, canHold, canAddTracking, isWaitingDraft
   };
 }
 

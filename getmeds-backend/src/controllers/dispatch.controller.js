@@ -981,12 +981,17 @@ exports.cater = async (req, res, next) => {
     const loaded = await loadCater(req.params.id);
     if (!loaded) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     const order = loaded.raw;
-    if (!TRACKING_EDITABLE.includes(order.status)) {
+    // Oct 19, 2026: a draft Sales Order waiting on Finance/Pharmacy can be catered too
+    // ("I'll handle this one"), so the label is there before Finance confirms. Nothing
+    // moves: the order stays in New draft SOs until Finance confirms it, and the
+    // prescription gate is untouched.
+    const isWaitingDraft = order.status === 'ready_for_finance_verified' && Boolean(order.zoho_so_id);
+    if (!TRACKING_EDITABLE.includes(order.status) && !isWaitingDraft) {
       return res.status(409).json({
         success: false,
         error: {
           code: 'NOT_CATERABLE',
-          message: `Only an order Finance has confirmed can be catered. This one is at "${order.status}".`
+          message: `Only a draft Sales Order waiting on Finance, or an order Finance has confirmed, can be catered. This one is at "${order.status}".`
         }
       });
     }

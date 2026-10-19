@@ -275,35 +275,49 @@ const RecentDispatchPanel = ({
         title="New draft SOs"
         hint={
           today
-            ? 'Every draft SO created today, waiting on Finance. Nothing to do yet — a heads-up of what is coming.'
-            : 'Just created in Zoho and waiting on Finance. Nothing to do yet — a heads-up of what is coming.'
+            ? 'Every draft SO created today, waiting on Finance and Pharmacy. You can cater one now; it stays here until Finance confirms it.'
+            : 'Just created in Zoho and waiting on Finance and Pharmacy. You can cater one now; it stays here until Finance confirms it, then moves to Catered Orders.'
         }
         count={drafts.length}
       >
         {isLoading ? loading : drafts.length === 0 ? <Empty text={today ? 'No draft Sales Orders created today.' : 'No new draft Sales Orders.'} /> : (
           <ul className="divide-y divide-slate-100">
-            {drafts.map((o) => (
-              <li key={o.id} className="px-4 py-3 flex items-center justify-between gap-3">
-                <Opener order={o} onOpen={onOpen}>
-                  <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}<WarehouseTag order={o} /></p>
-                  <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
-                </Opener>
-                <div className="flex items-center gap-1 shrink-0">
-                  <div className="text-right">
-                    <p className="text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</p>
-                    <p className="text-[11px] text-amber-800 font-semibold mt-0.5">Waiting {timeAgo(o.created_at)}</p>
+            {drafts.map((o) => {
+              // Oct 19, 2026: Cater from here too. The order stays in this list (Finance
+              // and Pharmacy still have to clear it); the label just says who has it.
+              const { canCater, canRelease, cateredByMe } = deliveryActionFlags(o, user, { onCater, onReleaseCater });
+              const busy = confirmingId === o.id;
+              return (
+                <li key={o.id} className="px-4 py-3 flex items-center justify-between gap-3">
+                  <Opener order={o} onOpen={onOpen}>
+                    <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}<WarehouseTag order={o} /></p>
+                    <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
+                    {o.catered && (
+                      <p className="text-[11px] text-ink-secondary mt-0.5" title={o.catered.at ? `Catering since ${formatPHT(o.catered.at, 'short-datetime')}` : undefined}>
+                        Catered by <span className="font-semibold text-ink-primary">{cateredByMe ? 'You' : o.catered.by}</span>
+                      </p>
+                    )}
+                  </Opener>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <div className="text-right">
+                      <p className="text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</p>
+                      <p className="text-[11px] text-amber-800 font-semibold mt-0.5">Waiting {timeAgo(o.created_at)}</p>
+                    </div>
+                    {canCater && <IconButton icon={PackageCheck} title={o.catered ? `Take over from ${o.catered.by}` : 'Cater this order (it stays here until Finance confirms)'} onClick={() => onCater(o)} disabled={busy} />}
+                    {canRelease && <IconButton icon={X} title="Release it so anyone in Dispatch can cater it" onClick={() => onReleaseCater(o)} disabled={busy} tone="amber" />}
+                    <MoreInfoMenu
+                      title={o.getmeds_order_id}
+                      items={[
+                        { label: 'SO number', value: o.zoho_so_number },
+                        { label: 'MedRep', value: o.medrep_name },
+                        { label: 'Prescription', value: o.rx_badge?.label },
+                        { label: 'Catered by', value: o.catered?.by }
+                      ]}
+                    />
                   </div>
-                  <MoreInfoMenu
-                    title={o.getmeds_order_id}
-                    items={[
-                      { label: 'SO number', value: o.zoho_so_number },
-                      { label: 'MedRep', value: o.medrep_name },
-                      { label: 'Prescription', value: o.rx_badge?.label }
-                    ]}
-                  />
-                </div>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         )}
       </Card>
