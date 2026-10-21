@@ -4,6 +4,7 @@
  * KPI Scorecard try-out (Oct 21, 2026): NZSD and HRR from the Zoho invoice copy.
  *   GET /api/kpi-scorecard/nzsd?month=2026-10[&prefix=HOS]
  *   GET /api/kpi-scorecard/hrr?month=2026-10[&prefix=HOS]
+ *   GET /api/kpi-scorecard/dso[?prefix=HOS]            today's figure only
  * Admin only, read-only. Off (404) unless GETMEDS_KPI_SCORECARD=true. See services/kpiScorecardService.js.
  */
 const express = require('express');
@@ -28,6 +29,16 @@ function handler(kind) {
       }
       const prefix = req.query.prefix ? String(req.query.prefix).replace(/[^A-Za-z&]/g, '').slice(0, 10) : '';
       const st = await copy.status();
+      if (kind === 'dso') {
+        if (month !== thisMonth()) {
+          return res.json({ success: true, data: { available: false, reason: 'DSO shows today’s figure only: Zoho keeps today’s unpaid balance, not past months’. Past months need the daily snapshot (planned).' } });
+        }
+        if (!st.openSyncedAt) {
+          return res.json({ success: true, data: { available: false, reason: 'The unpaid invoices have not been copied from Zoho yet.' } });
+        }
+        const data = await scorecard.dso({ prefix });
+        return res.json({ success: true, data: { available: true, prefix, as_of: st.lastRun, open_synced_at: st.openSyncedAt, covered_from: st.coveredFrom, ...data } });
+      }
       const needFrom = kind === 'hrr' ? `${scorecard._test.prevMonth(month)}-01` : `${month}-01`;
       if (!st.coveredFrom || st.coveredFrom > needFrom) {
         return res.json({ success: true, data: { available: false, reason: `The invoice copy starts ${st.coveredFrom || 'nowhere yet'}; this needs ${needFrom}.` } });
@@ -42,5 +53,6 @@ function handler(kind) {
 
 router.get('/nzsd', handler('nzsd'));
 router.get('/hrr', handler('hrr'));
+router.get('/dso', handler('dso'));
 
 module.exports = router;

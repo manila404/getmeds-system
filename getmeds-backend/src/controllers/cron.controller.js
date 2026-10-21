@@ -164,7 +164,8 @@ exports.zohoRetry = async (req, res, next) => {
  * Called every 15 minutes by Supabase pg_cron (Vercel Hobby can only schedule once a day).
  *   no parameter        the newest changes since the last run (usually 1–2 Zoho calls)
  *   ?backfill=2026-01   one month of history (the first load, one month per call)
- *   ?reconcile=1        this month and last month in full
+ *   ?reconcile=1        this month and last month in full, then every unpaid invoice
+ *   ?open=1             every unpaid invoice, however old (for DSO)
  * Off unless ZOHO_INVOICE_COPY_SYNC=true. Reads Zoho only; never writes to it.
  */
 exports.zohoInvoiceCopy = async (req, res, next) => {
@@ -175,6 +176,7 @@ exports.zohoInvoiceCopy = async (req, res, next) => {
     }
     const job = req.query.backfill ? () => zohoInvoiceCopy.backfillMonth(String(req.query.backfill))
       : req.query.reconcile ? () => zohoInvoiceCopy.reconcile()
+        : req.query.open ? () => zohoInvoiceCopy.syncOpen()
         : () => zohoInvoiceCopy.runRecent();
     const outcome = await withLock('zoho_invoice_copy', 4 * 60 * 1000, async () => await job());
     if (!outcome.ran) {

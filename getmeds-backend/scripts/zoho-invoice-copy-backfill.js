@@ -45,6 +45,10 @@ const monthEnd = (m) => { const [y, mm] = m.split('-').map(Number); return `${m}
     calls += r.invoices.calls + r.creditnotes.calls;
     console.log(`${m}: ${r.invoices.copied} invoices, ${r.creditnotes.copied} credit notes, ${r.invoices.calls + r.creditnotes.calls} Zoho calls, ${((Date.now() - t) / 1000).toFixed(1)} s${r.invoices.truncated ? '  (CUT SHORT: more than the page cap)' : ''}`);
   }
+  const t2 = Date.now();
+  const open = await copy.syncOpen();
+  calls += open.calls;
+  console.log(`Unpaid invoices (any date, for DSO): ${open.copied} copied, ${open.settled} set to paid, ${open.calls} Zoho calls, ${((Date.now() - t2) / 1000).toFixed(1)} s${open.truncated ? '  (CUT SHORT)' : ''}`);
   console.log(`Total Zoho calls: ${calls}`);
 
   if (VERIFY) {

@@ -4,7 +4,7 @@
  *  - HRR counts customers invoiced last month that were invoiced again this month, per salesperson;
  *  - the playbook's point bands.
  */
-const { computeNzsd, computeHrr, _test } = require('../src/services/kpiScorecardService');
+const { computeNzsd, computeHrr, computeDso, _test } = require('../src/services/kpiScorecardService');
 
 test('working days are Monday to Friday, up to today in the running month', () => {
   // Oct 2026: the 1st is a Thursday
@@ -60,4 +60,33 @@ test('HRR: customers kept per salesperson, the lapsed list biggest first, and th
 
 test('HRR bands: 95 → 15, 85 → 12, 75 → 8, below → 0', () => {
   expect([100, 95, 94.9, 85, 84.9, 75, 74.9].map(_test.hrrPts)).toEqual([15, 15, 12, 12, 8, 8, 0]);
+});
+
+test('DSO: open AR over credit sales per day so far, aging buckets, Monday-call list', () => {
+  const open = [
+    { salesperson: 'HOS | A', date: '2026-10-10', balance: 30000 }, // 11 days old
+    { salesperson: 'HOS | A', date: '2026-07-01', balance: 10000 }, // 112 days old -> 90+
+    { salesperson: 'HOS | B', date: '2026-09-01', balance: 90000 }, // 50 days old
+  ];
+  const credit = [
+    { salesperson: 'HOS | A', total: 21000 }, // 1,000 a day over 21 days
+    { salesperson: 'HOS | B', total: 21000 },
+  ];
+  const r = computeDso(open, credit, '2026-10-21');
+  const a = r.people.find((p) => p.salesperson === 'HOS | A');
+  expect(a).toMatchObject({ open_ar: 40000, credit_sales: 21000, dso_days: 40, points: 20, bonus: true, aging: [30000, 0, 0, 10000], oldest_days: 112 });
+  const b = r.people.find((p) => p.salesperson === 'HOS | B');
+  expect(b).toMatchObject({ dso_days: 90, points: 0, aging: [0, 90000, 0, 0] });
+  expect(r.total).toMatchObject({ open_ar: 130000, credit_sales: 42000, dso_days: 65 });
+  expect(r.monday_call.map((m) => m.salesperson)).toEqual(['HOS | B']);
+});
+
+test('DSO with open AR but no credit sales this month cannot be divided, and is on the Monday list', () => {
+  const r = computeDso([{ salesperson: 'HOS | C', date: '2026-08-01', balance: 5000 }], [], '2026-10-21');
+  expect(r.people[0]).toMatchObject({ dso_days: null, points: 0 });
+  expect(r.monday_call).toHaveLength(1);
+});
+
+test('DSO bands: up to 70 → 20, 71–89 → 10, 90 and above → 0', () => {
+  expect([0, 59, 60, 70, 71, 89, 90, 200].map(_test.dsoPts)).toEqual([20, 20, 20, 20, 10, 10, 0, 0]);
 });

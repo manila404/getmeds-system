@@ -238,6 +238,37 @@ const INFO = {
   },
 };
 
+INFO.dso = {
+  title: 'DSO · Days Sales Outstanding — how this is calculated',
+  formula: 'DSO = open AR ÷ (credit sales this month ÷ days so far)',
+  bands: 'below 60 days → 20 pts + bonus · 60–70 → 20 · 71–89 → 10 (alert) · 90 and above → 0 (DSC escalation)',
+  source: [
+    'Zoho Books → Sales → Invoices, read by GetMeds through its Zoho connection (read only).',
+    'Open AR: every unpaid invoice of the salesperson, however old (Zoho’s Unpaid list: sent, overdue, partially paid), using its Balance.',
+    'Credit sales: invoices dated this month whose Due Date is after the Invoice Date (payment terms), using their Total.',
+    'Each salesperson is the Zoho Salesperson on the invoice.',
+  ],
+  rules: [
+    'Draft and Void invoices don’t count; invoices deleted in Zoho don’t count.',
+    'Same-day-due invoices are left out of credit sales: they behave like cash (Aaron, Oct 21).',
+    'Days so far = calendar days from the 1st to today.',
+    '“—” means the CHC has open AR but no credit sales yet this month, so DSO can’t be divided; they are on the Monday list.',
+    'Aging buckets use the age of each unpaid invoice (today − invoice date).',
+    'Today’s figure only: Zoho keeps today’s unpaid balance, not last month’s. A daily snapshot will make past months possible.',
+  ],
+  check: [
+    'In Zoho Books, open Sales → Invoices, choose Unpaid Invoices and filter Salesperson: the sum of Balance Due is the CHC’s Open AR.',
+    'Then filter This Month and keep the invoices whose Due Date is later than the Invoice Date: the sum of Total is Credit sales.',
+    'DSO = Open AR ÷ (Credit sales ÷ today’s day of the month).',
+    'Reports → Receivables → AR Aging Summary shows the same open balances by age (by customer).',
+  ],
+  open: [
+    'The playbook’s bands disagree with its own worked example (67.5 days scored as 10 points).',
+    'Payment Terms flipped to “Paid” early makes an invoice look like cash; Finance already guards that.',
+    'Getmeds and 2mg invoices are counted together; a filter on Invoicing From can be added.',
+  ],
+};
+
 const InfoModal = ({ kind, data, onClose }) => {
   if (!kind) return null;
   const i = INFO[kind];
@@ -267,15 +298,77 @@ const InfoModal = ({ kind, data, onClose }) => {
   );
 };
 
+const AGING = [['0–30 days', '#7cc3e8'], ['31–60', '#f2c14e'], ['61–90', '#f08c3a'], ['90+', '#e5534b']];
+const pesoShort = (n) => { const v = Number(n) || 0; return v >= 1e6 ? `₱${(v / 1e6).toFixed(2)}M` : `₱${Math.round(v / 1e3)}K`; };
+const Aging = ({ a, total }) => (
+  <div className="flex h-[9px] min-w-[150px] overflow-hidden rounded-full bg-slate-100">
+    {a.map((v, i) => (total > 0 && v > 0 ? <span key={i} title={`${AGING[i][0]}: ${peso(v)}`} style={{ width: `${(v / total) * 100}%`, background: AGING[i][1] }} /> : null))}
+  </div>
+);
+
+const Dso = ({ d }) => {
+  const people = d.people;
+  const alert = people.filter((p) => p.dso_days != null && p.dso_days > 70 && p.dso_days < 90).length;
+  const esc = people.filter((p) => p.dso_days != null && p.dso_days >= 90).length;
+  return (
+    <>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mb-3">
+        <Card title="Average DSO" value={d.total.dso_days == null ? '—' : `${d.total.dso_days} days`} sub={`all ${people.length} CHCs · day ${d.days_so_far} of the month`} />
+        <Card title="Open AR" value={pesoShort(d.total.open_ar)} sub="unpaid, not Draft or Void, any date" />
+        <Card title="71–89 days" value={alert} sub="alert · Monday call" />
+        <Card title="90 days or more" value={esc} sub="DSC escalation" red />
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-5 gap-3">
+        <div className="xl:col-span-3">
+          <Panel title="Per CHC" aside="open AR by age of invoice">
+            <table className="w-full">
+              <thead><tr><Th>CHC</Th><Th right>Open AR</Th><Th right>Credit sales</Th><Th>Aging</Th><Th right>DSO</Th><Th right>Pts</Th></tr></thead>
+              <tbody>
+                {people.map((p) => (
+                  <tr key={p.salesperson}>
+                    <Td strong>{p.salesperson}</Td><Td right>{pesoShort(p.open_ar)}</Td><Td right>{pesoShort(p.credit_sales)}</Td>
+                    <Td><Aging a={p.aging} total={p.open_ar} /></Td>
+                    <Td right>{p.dso_days == null ? '—' : `${p.dso_days} d`}</Td>
+                    <Td right><Pts pts={p.points} max={20} /></Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="mt-2 flex flex-wrap gap-3 px-1 text-[11px] text-ink-secondary">
+              {AGING.map(([label, color]) => <Legend key={label} color={color}>{label}</Legend>)}
+              <span>· “—” = open AR but no credit sales yet this month</span>
+            </div>
+          </Panel>
+        </div>
+        <div className="xl:col-span-2">
+          <Panel title="For the Monday call" aside="above 70 days">
+            <table className="w-full">
+              <thead><tr><Th>CHC</Th><Th right>DSO</Th><Th right>Open AR</Th><Th right>Oldest</Th></tr></thead>
+              <tbody>
+                {d.monday_call.map((m) => (
+                  <tr key={m.salesperson}><Td>{m.salesperson.replace(/^HOS \| /i, '')}</Td><Td right>{m.dso_days == null ? '—' : `${m.dso_days} d`}</Td><Td right>{pesoShort(m.open_ar)}</Td><Td right>{m.oldest_days} d</Td></tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="mt-2 px-1 text-[11px] text-ink-secondary">Oldest = age of the oldest unpaid invoice. Today’s figure only; past months need the daily snapshot.</p>
+          </Panel>
+        </div>
+      </div>
+    </>
+  );
+};
+
 const TITLES = {
   nzsd: ['NZSD · No Zero Sales Days', 'Working days with at least one invoice, counted by the invoice’s creation time (it can’t be backdated).'],
   hrr: ['HRR · Hospital Retention Rate', 'Accounts invoiced last month that were invoiced again this month. All customers count until hospitals are tagged.'],
+  dso: ['DSO · Days Sales Outstanding', 'Open balance on each CHC’s invoices, divided by their average credit sales per day this month. Today’s figure.'],
 };
+const POINTS = { nzsd: 15, hrr: 15, dso: 20 };
 
 const KpiScorecardPage = () => {
   const navigate = useNavigate();
   const { tab: tabParam } = useParams();
-  const tab = tabParam === 'hrr' ? 'hrr' : 'nzsd';
+  const tab = ['hrr', 'dso'].includes(tabParam) ? tabParam : 'nzsd';
   const [month, setMonth] = useState(manilaMonth());
   const [prefix, setPrefix] = useState('HOS');
   const [info, setInfo] = useState(null);
@@ -284,7 +377,10 @@ const KpiScorecardPage = () => {
   const download = () => {
     if (!data?.available) return;
     const head = [[`GetMeds KPI Scorecard — ${TITLES[tab][0]} — ${monthLabel(month)}${prefix ? ` — ${prefix}` : ''}`], ['From the Zoho invoice copy, as of', data.as_of || ''], []];
-    const rows = tab === 'nzsd'
+    const rows = tab === 'dso'
+      ? [['CHC', 'Open AR', 'Credit sales this month', 'DSO days', 'Points', '0–30 days', '31–60', '61–90', '90+', 'Oldest unpaid (days)'],
+        ...data.people.map((p) => [p.salesperson, p.open_ar, p.credit_sales, p.dso_days ?? '', p.points, ...p.aging, p.oldest_days])]
+      : tab === 'nzsd'
       ? [['CHC', 'Working days', 'Days with sales', 'Zero days', 'NZSD %', 'Points', 'Zero-sales dates'],
         ...data.people.map((p) => [p.salesperson, p.working_days, p.days_with_sales, p.zero_days.length, p.nzsd_pct, p.points, p.zero_days.join(' ')])]
       : [['CHC', 'Last month', 'Kept', 'Lapsed', 'HRR %', 'Points'], ...data.people.map((p) => [p.salesperson, p.last_month_customers, p.kept, p.lapsed, p.hrr_pct, p.points]),
@@ -313,19 +409,19 @@ const KpiScorecardPage = () => {
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        {[['nzsd', 'NZSD · Zero-sales days'], ['hrr', 'HRR · Retention']].map(([k, label]) => (
+        {[['dso', 'DSO · Collections'], ['hrr', 'HRR · Retention'], ['nzsd', 'NZSD · Zero-sales days']].map(([k, label]) => (
           <button key={k} type="button" onClick={() => navigate(`/admin/kpi-scorecard/${k}`)}
             className={`rounded-full border px-3 py-1 text-xs font-semibold ${tab === k ? 'border-getmeds-blue bg-getmeds-blue text-white' : 'border-slate-300 bg-white text-ink-secondary'}`}>{label}</button>
         ))}
       </div>
 
-      <h1 className="mt-3 text-xl font-bold text-ink-primary">{TITLES[tab][0]} <span className="ml-1 align-middle rounded-full bg-state-success-light px-2 py-0.5 text-[11px] font-semibold text-pharmacy-green-700">15 pts</span></h1>
+      <h1 className="mt-3 text-xl font-bold text-ink-primary">{TITLES[tab][0]} <span className="ml-1 align-middle rounded-full bg-state-success-light px-2 py-0.5 text-[11px] font-semibold text-pharmacy-green-700">{POINTS[tab]} pts</span></h1>
       <p className="mb-3 text-[13px] text-ink-secondary">{TITLES[tab][1]}{data?.as_of ? ` As of ${new Date(data.as_of).toLocaleString('en-PH')}.` : ''}</p>
 
       {isLoading ? <p className="flex items-center gap-2 text-sm text-ink-secondary"><Loader2 className="h-4 w-4 animate-spin" />Loading…</p>
         : isError ? <p className="text-sm text-red-700">{error?.response?.data?.error?.message || 'Could not load the KPIs.'}</p>
           : !data?.available ? <p className="rounded-lg border border-amber-200 bg-state-warning-light p-3 text-sm text-amber-800">{data?.reason}</p>
-            : tab === 'nzsd' ? <Nzsd d={data} month={month} /> : <Hrr d={data} />}
+            : tab === 'nzsd' ? <Nzsd d={data} month={month} /> : tab === 'dso' ? <Dso d={data} /> : <Hrr d={data} />}
 
       <InfoModal kind={info} data={data} onClose={() => setInfo(null)} />
     </div>

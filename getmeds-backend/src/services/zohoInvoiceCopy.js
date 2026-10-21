@@ -30,6 +30,7 @@ const q = (sql, params) => db._rawQuery(sql, params);
 const PER_PAGE = 200;
 const RECENT_MAX_PAGES = 10; // at most 2,000 changes per run; the next run carries on
 const RANGE_MAX_PAGES = 30; // 6,000 per month: far above a month's volume
+const OPEN_MAX_PAGES = 50; // 10,000 unpaid invoices
 const OVERLAP_MS = 10 * 60 * 1000;
 const STALE_MS = 60 * 60 * 1000;
 
@@ -37,6 +38,7 @@ const KEY = {
   cursor: (kind) => `zoho_invoice_copy:${kind}_cursor`,
   coveredFrom: 'zoho_invoice_copy:covered_from',
   lastRun: 'zoho_invoice_copy:last_run',
+  openSynced: 'zoho_invoice_copy:open_synced_at',
 };
 
 const KINDS = {
@@ -165,6 +167,37 @@ async function syncRange(kind, from, to, { adapter = liveAdapter() } = {}) {
   return { copied, calls, truncated, markedDeleted };
 }
 
+/**
+ * Every unpaid invoice, however old (Oct 21, 2026, for DSO): Zoho's Status.Unpaid list (sent,
+ * overdue, partially paid). Afterwards the copy's open balances are exactly Zoho's: an invoice
+ * the copy still shows as unpaid but Zoho no longer lists is set to balance 0 (paid or voided
+ * since). A list cut short by the page cap changes nothing it didn't see. Payments after this
+ * keep balances current through the 15-minute run, because a payment changes the invoice's
+ * last-modified time.
+ */
+async function syncOpen({ adapter = liveAdapter() } = {}) {
+  const seen = []; let calls = 0; let truncated = true; let copied = 0;
+  for (let page = 1; page <= OPEN_MAX_PAGES; page++) {
+    const json = await adapter._request('GET', '/invoices', {
+      query: { filter_by: 'Status.Unpaid', sort_column: 'date', page: String(page), per_page: String(PER_PAGE) },
+    });
+    calls += 1;
+    const items = json.invoices || [];
+    copied += await upsert('invoices', items);
+    seen.push(...items.map((x) => String(x.invoice_id)));
+    if (!(json.page_context && json.page_context.has_more_page)) { truncated = false; break; }
+  }
+  let settled = 0;
+  if (!truncated) {
+    const r = await q(
+      `UPDATE zoho_invoices SET balance = 0, synced_at = iso_now()
+        WHERE balance > 0 AND deleted_at IS NULL AND NOT (invoice_id = ANY($1::text[])) RETURNING invoice_id`, [seen]);
+    settled = r.length;
+    await setState(KEY.openSynced, new Date().toISOString());
+  }
+  return { copied, calls, truncated, settled };
+}
+
 /** The 15-minute run: recent changes of both kinds. */
 async function runRecent(opts = {}) {
   const invoices = await syncRecent('invoices', opts);
@@ -199,15 +232,16 @@ async function reconcile(opts = {}) {
       creditnotes: await syncRange('creditnotes', `${month}-01`, monthEnd(month), opts),
     };
   }
+  out.open = await syncOpen(opts);
   await setState(KEY.lastRun, new Date().toISOString());
   return out;
 }
 
 async function status() {
-  const [coveredFrom, lastRun, invCursor, cnCursor] = await Promise.all([
-    getState(KEY.coveredFrom), getState(KEY.lastRun), getState(KEY.cursor('invoices')), getState(KEY.cursor('creditnotes')),
+  const [coveredFrom, lastRun, invCursor, cnCursor, openSyncedAt] = await Promise.all([
+    getState(KEY.coveredFrom), getState(KEY.lastRun), getState(KEY.cursor('invoices')), getState(KEY.cursor('creditnotes')), getState(KEY.openSynced),
   ]);
-  return { coveredFrom, lastRun, cursors: { invoices: invCursor, creditnotes: cnCursor } };
+  return { coveredFrom, lastRun, openSyncedAt, cursors: { invoices: invCursor, creditnotes: cnCursor } };
 }
 
 /**
@@ -263,6 +297,6 @@ const syncOn = () => process.env.ZOHO_INVOICE_COPY_SYNC === 'true';
 const readOn = () => process.env.ZOHO_INVOICE_COPY_READ === 'true';
 
 module.exports = {
-  runRecent, backfillMonth, reconcile, readSales, status, syncRecent, syncRange, syncOn, readOn,
+  runRecent, backfillMonth, reconcile, readSales, status, syncRecent, syncRange, syncOpen, syncOn, readOn,
   _test: { tsMs, monthEnd, manilaMonths, KEY },
 };
