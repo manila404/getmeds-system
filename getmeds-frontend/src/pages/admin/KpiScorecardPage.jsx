@@ -8,8 +8,9 @@
  */
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { Loader2, RefreshCw, Info } from 'lucide-react';
 import client from '../../api/client';
+import Modal from '../../components/ui/Modal';
 
 const manilaMonth = () => new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 7);
 const shift = (m, by) => { const [y, mo] = m.split('-').map(Number); const d = new Date(Date.UTC(y, mo - 1 + by, 1)); return d.toISOString().slice(0, 7); };
@@ -124,10 +125,103 @@ const Hrr = ({ d }) => (
   </>
 );
 
+// ── "How this is calculated" (Oct 21, 2026, Aaron): where each number comes from in Zoho and
+// how to check it there, so the figures can be evaluated before anyone relies on them.
+const INFO = {
+  nzsd: {
+    title: 'NZSD · No Zero Sales Days — how this is calculated',
+    formula: 'NZSD % = working days with at least one invoice ÷ working days so far × 100',
+    bands: '95–100% → 15 pts · 90–94% → 12 · 80–89% → 9 · 70–79% → 6 · below 70% → 0',
+    source: [
+      'Zoho Books → Sales → Invoices, read by GetMeds through its Zoho connection (read only).',
+      'Fields used: Salesperson, Created Time (when the invoice was created in Zoho), Status.',
+      'Each salesperson is the Zoho Salesperson on the invoice (a territory such as HOS | LAGUNA), not the GetMeds account.',
+    ],
+    rules: [
+      'A day counts when at least one invoice was CREATED that day (Manila time). Created Time can’t be backdated; the invoice Date can.',
+      'Working days are Monday to Friday. Holidays and approved leave are not deducted yet.',
+      'Draft and Void invoices don’t count; invoices deleted in Zoho don’t count.',
+      'Invoices created on a Saturday or Sunday count as sales, but weekends are not scored.',
+      'The running month is scored up to today.',
+    ],
+    check: [
+      'In Zoho Books, open Sales → Invoices and choose All Invoices.',
+      'Filter Salesperson = the row you want to check (for example HOS | LAGUNA).',
+      'Sort by Created Time and note the dates that have at least one invoice, leaving out Draft and Void.',
+      'Count the Monday–Friday dates of the month (up to today) with no invoice: that is the “Zero days” column.',
+    ],
+    open: [
+      'Holidays and leave calendar (who keeps it).',
+      'Whether Saturday is a working day.',
+      'The playbook counts only Sent or Paid invoices; this counts every invoice except Draft and Void (Overdue and Partially Paid are real sales).',
+    ],
+  },
+  hrr: {
+    title: 'HRR · Retention — how this is calculated',
+    formula: 'HRR % = customers invoiced last month AND this month ÷ customers invoiced last month × 100',
+    bands: '95–100% → 15 pts · 85–94% → 12 · 75–84% → 8 · below 75% → 0',
+    source: [
+      'Zoho Books → Sales → Invoices, read by GetMeds through its Zoho connection (read only).',
+      'Fields used: Salesperson, Customer, Invoice Date, Total, Status.',
+      'Each salesperson is the Zoho Salesperson on the invoice; a customer counts for the salesperson on its invoices.',
+    ],
+    rules: [
+      'The invoice DATE decides the month.',
+      '“Last month” customers = every customer with at least one invoice last month for that salesperson.',
+      '“Kept” = those customers that have at least one invoice this month for the same salesperson. New customers this month don’t change HRR.',
+      'All customers count, not only hospitals, because hospitals are not tagged on customers yet.',
+      'Draft and Void invoices don’t count; invoices deleted in Zoho don’t count.',
+      'During the month, “Lapsed” means no invoice yet; a customer can still re-order before month end.',
+    ],
+    check: [
+      'In Zoho Books, open Reports → Sales by Customer (or the saved report “HRR – Account Retention”).',
+      'Date range: this month, Compare with: Previous Period.',
+      'Filter or read the customers of one salesperson (Sales → Invoices, filter Salesperson, for last month and this month).',
+      'Customers with sales last month and this month are “Kept”; last month only are “Lapsed”. Kept ÷ last month = HRR.',
+      'Already checked: September, Division HOS = 39.1% (77 of 197), the same as the manual count in the KPI report.',
+    ],
+    open: [
+      'Tag hospitals on the customer record so HRR becomes hospitals only, as the playbook says.',
+      'About 1,100 HOS invoices carry a non-hospital Source in Zoho (KPI report).',
+      'Some territories appear under two Zoho names (for example HOS | Ana Mae Otucan and HOS | PARANAQUE) and are counted separately until aliases are linked.',
+    ],
+  },
+};
+
+const InfoModal = ({ kind, data, onClose }) => {
+  if (!kind) return null;
+  const i = INFO[kind];
+  const Section = ({ title, items, ordered }) => {
+    const List = ordered ? 'ol' : 'ul';
+    return (
+      <div className="mt-4">
+        <p className="text-sm font-semibold text-ink-primary">{title}</p>
+        <List className={`mt-1 space-y-1 pl-5 text-sm text-ink-secondary ${ordered ? 'list-decimal' : 'list-disc'}`}>{items.map((x) => <li key={x}>{x}</li>)}</List>
+      </div>
+    );
+  };
+  return (
+    <Modal isOpen onClose={onClose} title={i.title} className="sm:!max-w-2xl">
+      <div className="overflow-y-auto pr-1">
+        <p className="rounded-lg bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{i.formula}</p>
+        <p className="mt-2 text-xs text-ink-secondary">Points (Hospital CHC playbook): {i.bands}</p>
+        <Section title="Where the data comes from" items={[
+          ...i.source,
+          `GetMeds keeps a copy of Zoho’s invoices, refreshed every 15 minutes with a full check every night. This page reads that copy${data?.covered_from ? `, which starts ${data.covered_from}` : ''}${data?.as_of ? ` and was last refreshed ${new Date(data.as_of).toLocaleString('en-PH')}` : ''}.`,
+        ]} />
+        <Section title="How each number is worked out" items={i.rules} />
+        <Section title="How to check it in Zoho" items={i.check} ordered />
+        <Section title="Still to decide" items={i.open} />
+      </div>
+    </Modal>
+  );
+};
+
 const KpiScorecardPage = () => {
   const [tab, setTab] = useState('nzsd');
   const [month, setMonth] = useState(manilaMonth());
   const [prefix, setPrefix] = useState('HOS');
+  const [info, setInfo] = useState(null);
   const { data, isLoading, isError, error, refetch, isFetching } = useScorecard(tab, month, prefix);
 
   return (
@@ -150,14 +244,19 @@ const KpiScorecardPage = () => {
         </div>
       </div>
 
-      <div className="mt-4 flex gap-2">
+      <div className="mt-4 flex flex-wrap gap-2">
         {[['nzsd', 'NZSD · No Zero Sales Days', '15 pts'], ['hrr', 'HRR · Retention', '15 pts']].map(([k, label, pts]) => (
           <button key={k} type="button" onClick={() => setTab(k)}
             className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${tab === k ? 'border-getmeds-blue bg-getmeds-blue text-white' : 'border-slate-300 bg-white text-ink-secondary'}`}>
             {label} <span className="opacity-75">· {pts}</span>
           </button>
         ))}
+        <button type="button" onClick={() => setInfo(tab)}
+          className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-getmeds-blue hover:bg-blue-50">
+          <Info className="h-3.5 w-3.5" />How this is calculated
+        </button>
       </div>
+      <InfoModal kind={info} data={data} onClose={() => setInfo(null)} />
 
       <div className="mt-4">
         {isLoading ? <p className="flex items-center gap-2 text-sm text-ink-secondary"><Loader2 className="h-4 w-4 animate-spin" />Loading…</p>

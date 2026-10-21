@@ -33,7 +33,7 @@ function handler(kind) {
         return res.json({ success: true, data: { available: false, reason: `The invoice copy starts ${st.coveredFrom || 'nowhere yet'}; this needs ${needFrom}.` } });
       }
       const data = kind === 'hrr' ? await scorecard.hrr(month, { prefix }) : await scorecard.nzsd(month, { prefix });
-      return res.json({ success: true, data: { available: true, prefix, as_of: st.lastRun, ...data } });
+      return res.json({ success: true, data: { available: true, prefix, as_of: st.lastRun, covered_from: st.coveredFrom, ...data } });
     } catch (err) {
       return next(err);
     }
