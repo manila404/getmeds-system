@@ -220,6 +220,24 @@ async function getOverview(req, res, next) {
       const hasTargets = (await q(
         "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'kpi_targets'"
       )).length > 0;
+      // Oct 21, 2026: the targets of territories nobody holds (vacant, or no account yet)
+      // belong in the company and channel targets too. A row counts while its territory is
+      // flagged vacant (even if a lead covers it as a secondary salesperson: that is not
+      // their own target) or no account holds it; once the territory is no longer vacant and
+      // someone holds it, the target is theirs (kpi_targets), so it is not counted twice.
+      const hasTerritoryTargets = (await q(
+        "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'territory_targets'"
+      )).length > 0;
+      const vacantTargets = hasTerritoryTargets ? await q(
+        `SELECT tt.label, tt.month, tt.target_php, t.zoho_salesperson, t.manager_id
+           FROM territory_targets tt LEFT JOIN sales_territories t ON t.id = tt.territory_id
+          WHERE tt.month = ANY($1)
+            AND (tt.territory_id IS NULL OR t.is_vacant OR NOT EXISTS (
+                  SELECT 1 FROM user_salespersons us
+                   WHERE LOWER(TRIM(us.salesperson)) IN (LOWER(TRIM(t.zoho_salesperson)), LOWER(TRIM(COALESCE(t.zoho_alias, ''))))))`,
+        [months]
+      ) : [];
+      const vacantTotal = num(vacantTargets.reduce((a, r) => a + (Number(r.target_php) || 0), 0));
       let target = null;
       let targetPeople = 0;
       if (hasTargets) {
@@ -227,7 +245,7 @@ async function getOverview(req, res, next) {
           'SELECT COUNT(*)::int AS n, SUM(target_php) AS total FROM kpi_targets WHERE month = ANY($1)',
           [months]
         ))[0];
-        if (row && row.n > 0) { target = num(row.total); targetPeople = row.n; }
+        if (row && row.n > 0) { target = num(Number(row.total) + vacantTotal); targetPeople = row.n; }
       }
       // Sales KPIs (Oct 14, 2026): who each Zoho salesperson is, and each person's target.
       // Only for a period that starts on the 1st and stays inside one month.
@@ -244,6 +262,7 @@ async function getOverview(req, res, next) {
           managers: await q('SELECT id, channel_id FROM sales_managers'),
           channels: await q('SELECT id, name, sort_order FROM sales_channels ORDER BY sort_order, id'),
           targets: await q('SELECT user_id, target_php FROM kpi_targets WHERE month = $1', [months[0]]),
+          vacantTargets,
           // Sales Order number -> the order's owner, for orders raised from 60 days before the
           // period to its end (an invoice can come weeks after its order). Split Sales Orders
           // too. Uses the created_at index; the window keeps it small.
@@ -257,7 +276,7 @@ async function getOverview(req, res, next) {
           ),
         };
       }
-      return { orders, booked, target, targetPeople, kpiInput };
+      return { orders, booked, target, targetPeople, vacantTotal, vacantCount: vacantTargets.length, kpiInput };
     })();
 
     const shape = (r) => ({
@@ -281,6 +300,7 @@ async function getOverview(req, res, next) {
         booked: result.booked.slice(0, MAX_ROWS).map(shape),
         target_php: result.target,
         target_people: result.targetPeople,
+        target_vacant_php: result.vacantTotal,
         truncated,
         zoho: zohoSales,
         sales_kpi: buildSalesKpis({ ...(result.kpiInput || {}), zoho: zohoSales, from, to, month: months.length === 1 ? months[0] : null }),
@@ -318,7 +338,7 @@ const pctOf = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : null);
 const key = (s) => String(s || '').toLowerCase().trim();
 const NO_CHANNEL = 'No channel yet';
 
-function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, soOwners = [], managers = [], channels = [] }) {
+function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, vacantTargets = [], soOwners = [], managers = [], channels = [] }) {
   if (!month || from !== `${month}-01`) {
     return { available: false, reason: 'Pick This month or Last month: targets are monthly.' };
   }
@@ -425,17 +445,24 @@ function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, s
     .sort((a, b) => (b.pct_of_target ?? -1) - (a.pct_of_target ?? -1));
 
   const chRows = new Map(); // channel -> { target, sales, people }
-  const chRow = (name) => { if (!chRows.has(name)) chRows.set(name, { target: 0, sales: 0, people: 0, unlinked: 0 }); return chRows.get(name); };
+  const chRow = (name) => { if (!chRows.has(name)) chRows.set(name, { target: 0, sales: 0, people: 0, unlinked: 0, vacant: 0 }); return chRows.get(name); };
   for (const p of people) { const r = chRow(p.channel); r.target += p.target_php; r.sales += p.sales_php; r.people += 1; }
   for (const u of unlinked) { const r = chRow(channelOfName(u.salesperson) || NO_CHANNEL); r.sales += u.total; r.unlinked += u.total; }
+  // Oct 21, 2026: a territory nobody holds still has a target; it goes to its channel's target.
+  const vacantRows = vacantTargets.map((v) => {
+    const ch = chById.get(mgrCh.get(v.manager_id));
+    return { label: v.label, channel: ch ? ch.name : NO_CHANNEL, target_php: Number(v.target_php) || 0 };
+  });
+  for (const v of vacantRows) { const r = chRow(v.channel); r.target += v.target_php; r.vacant += v.target_php; }
   const order = [...channels.map((c) => c.name), NO_CHANNEL];
   const byChannel = [...chRows].map(([name, r]) => ({
-    channel: name, people: r.people, target_php: num(r.target), sales_php: num(r.sales), not_linked_php: num(r.unlinked),
+    channel: name, people: r.people, target_php: num(r.target), sales_php: num(r.sales), not_linked_php: num(r.unlinked), vacant_target_php: num(r.vacant),
     pct_of_target: pctOf(r.sales, r.target), status: statusFor(r.sales, r.target, pace),
   })).filter((r) => r.target_php > 0 || r.sales_php !== 0)
     .sort((a, b) => order.indexOf(a.channel) - order.indexOf(b.channel));
 
-  const target = num(targets.reduce((a, t) => a + (Number(t.target_php) || 0), 0));
+  const vacantTotal = num(vacantRows.reduce((a, v) => a + v.target_php, 0));
+  const target = num(targets.reduce((a, t) => a + (Number(t.target_php) || 0), 0) + vacantTotal);
   const withTarget = people.filter((p) => p.target_php > 0);
   return {
     available: true, month, pace: Math.round(pace * 1000) / 10,
@@ -453,6 +480,8 @@ function buildSalesKpis({ zoho, from, to, month, users, accts, terrs, targets, s
       invoices: (zoho.invoices || []).length, invoices_via_sales_order: viaSo,
     },
     people, teams, channels: byChannel,
+    // Territories nobody holds: their targets are in the totals above and in each channel's.
+    vacant: { territories: vacantRows.length, target_php: vacantTotal },
     unlinked: { total: num(unlinked.reduce((a, r) => a + r.total, 0)), rows: unlinked.sort((a, b) => b.total - a.total) },
   };
 }

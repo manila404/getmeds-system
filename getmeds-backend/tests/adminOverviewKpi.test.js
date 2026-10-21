@@ -102,3 +102,39 @@ test('Target Performance by sales channel (Oct 15, 2026)', () => {
   expect(k.channels.reduce((a, x) => a + x.sales_php, 0)).toBe(zoho.total_sales_with_tax);
   expect(k.people.find((p) => p.name === 'Rep1').channel).toBe('HOSP');
 });
+
+test('a vacant territory still has a target: in the company total and its channel (Oct 21, 2026)', () => {
+  const chTerrs = [
+    { zoho_salesperson: 'HOS | PALAWAN', zoho_alias: 'HOS I PALAWAN', manager_id: 1 },
+    { zoho_salesperson: 'STC | NCL', zoho_alias: null, manager_id: 2 },
+    { zoho_salesperson: 'STC | CEBU', zoho_alias: null, manager_id: 2 },
+    { zoho_salesperson: 'URO | DAVAO', zoho_alias: null, manager_id: 3 },
+  ];
+  const shared = {
+    ...base, terrs: chTerrs,
+    managers: [{ id: 1, channel_id: 10 }, { id: 2, channel_id: 20 }, { id: 3, channel_id: 30 }],
+    channels: [{ id: 10, name: 'HOSP', sort_order: 1 }, { id: 20, name: 'RX · STC', sort_order: 2 }, { id: 30, name: 'RX · URO', sort_order: 3 }],
+  };
+  const without = buildSalesKpis(shared);
+  const k = buildSalesKpis({
+    ...shared,
+    vacantTargets: [
+      { label: 'HOS | Pampanga', target_php: 500000, manager_id: 1 },
+      { label: 'HOS | Zamboanga', target_php: 300000, manager_id: 1 },
+      { label: 'STC | Ortigas, TMC Vacant', target_php: 500000, manager_id: null }, // no territory: no channel yet
+    ],
+  });
+  expect(k.vacant).toEqual({ territories: 3, target_php: 1300000 });
+  // Company target = the people's 450,000 + 1,300,000; Zoho sales are unchanged.
+  expect(k.total).toMatchObject({ target_php: 1750000, sales_php: 225000 });
+  expect(k.total.pct_of_target).toBeLessThan(without.total.pct_of_target);
+  const c = Object.fromEntries(k.channels.map((x) => [x.channel, x]));
+  expect(c.HOSP).toMatchObject({ people: 1, target_php: 1000000, vacant_target_php: 800000, sales_php: 100000 });
+  expect(c['No channel yet']).toMatchObject({ target_php: 500000, vacant_target_php: 500000 });
+  // People's own rows and counts do not change.
+  expect(k.counts.people_with_target).toBe(without.counts.people_with_target);
+  expect(k.people.find((p) => p.name === 'Rep1').target_php).toBe(200000);
+  // With none, nothing changes.
+  expect(without.vacant).toEqual({ territories: 0, target_php: 0 });
+  expect(without.total.target_php).toBe(450000);
+});

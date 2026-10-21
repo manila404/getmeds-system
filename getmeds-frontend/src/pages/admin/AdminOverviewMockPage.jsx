@@ -590,6 +590,11 @@ const LiveTargetPerformance = ({ k, onSales }) => {
         <div className="mt-4 space-y-1 text-xs text-ink-secondary">
           <div className="flex justify-between gap-2"><span>Zoho sales with tax</span><span className="tabular-nums text-ink-primary">{peso(k.total.sales_php, 0)}</span></div>
           <div className="flex justify-between gap-2"><span>Target</span><span className="tabular-nums text-ink-primary">{k.total.target_php ? peso(k.total.target_php, 0) : 'Not set'}</span></div>
+          {k.vacant && k.vacant.territories > 0 && (
+            <div className="flex justify-between gap-2 text-[11px]" title="Territories with no one assigned still have a target; it is in the target above and in its channel">
+              <span>incl. {k.vacant.territories} vacant territories</span><span className="tabular-nums">{peso(k.vacant.target_php, 0)}</span>
+            </div>
+          )}
           <div className="flex justify-between gap-2"><span>Pace for today</span><span className="tabular-nums text-ink-primary">{k.pace}% of the month</span></div>
         </div>
       ) : (
