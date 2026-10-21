@@ -2,36 +2,69 @@
  * KPI Scorecard — try-out (Oct 21, 2026): NZSD and HRR per Zoho salesperson, read from the copy
  * of Zoho's invoices (GET /api/kpi-scorecard/nzsd and /hrr; backend services/kpiScorecardService.js).
  * Admin only. Routed only when VITE_KPI_SCORECARD=true; the backend needs GETMEDS_KPI_SCORECARD=true.
+ * Laid out like the approved mock-up (getmeds-documents/kpi/kpi-admin-mockup.html).
  *
  * Rules for this first version (Aaron, Oct 21): NZSD counts the invoice's creation day, Mon–Fri,
  * no holidays yet; HRR counts all customers until hospitals are tagged.
  */
 import React, { useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, RefreshCw, Info } from 'lucide-react';
+import { Loader2, RefreshCw, Info, Download } from 'lucide-react';
 import client from '../../api/client';
 import Modal from '../../components/ui/Modal';
 
-const manilaMonth = () => new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 7);
+const manilaToday = () => new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+const manilaMonth = () => manilaToday().slice(0, 7);
 const shift = (m, by) => { const [y, mo] = m.split('-').map(Number); const d = new Date(Date.UTC(y, mo - 1 + by, 1)); return d.toISOString().slice(0, 7); };
 const monthLabel = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 1)).toLocaleString('en-PH', { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
+const monthName = (m) => monthLabel(m).split(' ')[0];
 const peso = (n) => `₱${Math.round(Number(n) || 0).toLocaleString('en-PH')}`;
 const DIVISIONS = ['', 'HOS', 'STC', 'B&B', 'URO', 'B2B', 'B2C', 'BID', 'CLIDP', 'TeleSales', 'MT'];
 
-const tone = (pts, max) => (pts >= max * 0.8 ? 'bg-state-success-light text-pharmacy-green-700' : pts > 0 ? 'bg-state-warning-light text-amber-700' : 'bg-state-error-light text-red-700');
-const Pts = ({ pts, max }) => <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${tone(pts, max)}`}>{pts} pts</span>;
-const Card = ({ title, value, sub, warn }) => (
-  <div className="rounded-xl border border-slate-200 bg-white p-4">
-    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-secondary">{title}</p>
-    <p className={`mt-1 text-2xl font-bold tabular-nums ${warn ? 'text-red-700' : 'text-ink-primary'}`}>{value}</p>
-    {sub && <p className="mt-0.5 text-xs text-ink-secondary">{sub}</p>}
+// Same colours as the mock-up: green from 80% of the points, amber above 0, red at 0.
+const toneKey = (pts, max) => (pts >= max * 0.8 ? 'on' : pts > 0 ? 'risk' : 'bad');
+const TONE = { on: 'bg-state-success-light text-pharmacy-green-700', risk: 'bg-state-warning-light text-amber-700', bad: 'bg-state-error-light text-red-700' };
+const COLOR = { on: '#15803d', risk: '#d97706', bad: '#dc2626' };
+const Pts = ({ pts, max }) => <span className={`inline-block min-w-[28px] rounded-full px-2 py-0.5 text-center text-[11px] font-semibold ${TONE[toneKey(pts, max)]}`}>{pts}</span>;
+const Card = ({ title, value, sub, red }) => (
+  <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+    <p className="text-xs font-semibold text-ink-secondary">{title}</p>
+    <p className={`mt-0.5 text-2xl font-bold tabular-nums ${red ? 'text-red-700' : 'text-ink-primary'}`}>{value}</p>
+    {sub && <p className="text-[11px] text-ink-secondary">{sub}</p>}
   </div>
 );
-const Th = ({ children, right }) => <th className={`px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary ${right ? 'text-right' : 'text-left'}`}>{children}</th>;
-const Td = ({ children, right, strong }) => <td className={`px-3 py-2 ${right ? 'text-right tabular-nums' : ''} ${strong ? 'font-semibold text-ink-primary' : ''}`}>{children}</td>;
-const Bar = ({ v, ok }) => (
-  <div className="h-1.5 w-28 rounded-full bg-slate-100"><div className={`h-1.5 rounded-full ${ok ? 'bg-pharmacy-green' : 'bg-state-warning'}`} style={{ width: `${Math.min(100, v || 0)}%` }} /></div>
+const Panel = ({ title, aside, children }) => (
+  <div className="rounded-2xl border border-slate-200 bg-white p-3 overflow-x-auto">
+    <div className="mb-1 flex items-center justify-between gap-2 px-1"><p className="text-sm font-bold text-ink-primary">{title}</p>{aside && <span className="text-[11px] text-ink-secondary">{aside}</span>}</div>
+    {children}
+  </div>
 );
+const Th = ({ children, right }) => <th className={`whitespace-nowrap border-b border-slate-200 px-2 py-2 text-[10.5px] font-semibold uppercase tracking-wide text-ink-secondary ${right ? 'text-right' : 'text-left'}`}>{children}</th>;
+const Td = ({ children, right, strong, wrap }) => <td className={`${wrap ? '' : 'whitespace-nowrap'} border-b border-slate-100 px-2 py-2 text-[13px] ${right ? 'text-right tabular-nums' : ''} ${strong ? 'font-semibold text-ink-primary' : ''}`}>{children}</td>;
+const Chip = ({ children, className = 'border border-slate-200 bg-white' }) => <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs ${className}`}>{children}</span>;
+const Bar = ({ v, color, mark }) => (
+  <div className="relative h-[7px] min-w-[110px] rounded-full bg-slate-100">
+    <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${Math.min(100, v || 0)}%`, background: color }} />
+    {mark != null && <div className="absolute -top-[3px] -bottom-[3px] w-[2px] bg-ink-primary" style={{ left: `${mark}%` }} />}
+  </div>
+);
+const Legend = ({ color, children }) => <span><i className="mr-1 inline-block h-2.5 w-2.5 rounded-sm align-[-1px]" style={{ background: color }} />{children}</span>;
+
+/** Every calendar day of the month, up to today in the running month. */
+function calendarDays(month) {
+  const [y, m] = month.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const today = manilaToday();
+  const out = [];
+  for (let d = 1; d <= last; d++) {
+    const iso = `${month}-${String(d).padStart(2, '0')}`;
+    if (today.slice(0, 7) === month && iso > today) break;
+    const dow = new Date(`${iso}T00:00:00Z`).getUTCDay();
+    out.push({ iso, day: d, weekend: dow === 0 || dow === 6 });
+  }
+  return out;
+}
 
 function useScorecard(kind, month, prefix) {
   return useQuery({
@@ -43,85 +76,102 @@ function useScorecard(kind, month, prefix) {
   });
 }
 
-const Nzsd = ({ d }) => {
+function downloadCsv(filename, rows) {
+  const csv = rows.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a'); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+const Nzsd = ({ d, month }) => {
   const people = d.people;
+  const days = calendarDays(month);
   const avg = people.length ? Math.round(people.reduce((a, p) => a + (p.nzsd_pct || 0), 0) / people.length * 10) / 10 : 0;
   return (
     <>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-        <Card title="Working days" value={d.working_days.length} sub={`Mon–Fri${d.partial ? ', so far' : ''}; no holidays yet`} />
-        <Card title="Average NZSD" value={`${avg}%`} sub={`${people.length} salespersons`} />
-        <Card title="Zero-sales days" value={people.reduce((a, p) => a + p.zero_days.length, 0)} sub="across everyone" warn />
-        <Card title="Below 70%" value={people.filter((p) => (p.nzsd_pct || 0) < 70).length} sub="0 points" />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mb-3">
+        <Card title="Working days so far" value={d.working_days.length} sub="Mon–Fri, no holidays set yet" />
+        <Card title="Average NZSD" value={`${avg}%`} sub={`all ${people.length} CHCs`} />
+        <Card title="Zero-sales days" value={people.reduce((a, p) => a + p.zero_days.length, 0)} sub="across all CHCs" red />
+        <Card title="Below 70%" value={people.filter((p) => (p.nzsd_pct || 0) < 70).length} sub="two months in a row = review" />
       </div>
-      <div className="rounded-xl border border-slate-200 bg-white overflow-x-auto">
-        <table className="w-full text-sm" style={{ minWidth: 900 }}>
-          <thead className="border-b border-slate-200"><tr><Th>Salesperson</Th><Th>Working days</Th><Th right>Zero days</Th><Th right>NZSD</Th><Th right>Points</Th></tr></thead>
-          <tbody className="divide-y divide-slate-100">
+      <Panel title={`${monthName(month)}, day by day`} aside={days.length ? `1 → ${days[days.length - 1].day}` : ''}>
+        <table className="w-full">
+          <thead><tr><Th>CHC</Th><Th>Days</Th><Th right>Zero days</Th><Th right>NZSD</Th><Th right>Pts</Th></tr></thead>
+          <tbody>
             {people.map((p) => {
-              const sold = new Set(p.sold_days);
+              const sold = new Set([...p.sold_days, ...(p.weekend_sales_days || [])]);
               return (
                 <tr key={p.salesperson}>
                   <Td strong>{p.salesperson}</Td>
                   <Td>
                     <div className="flex gap-[3px]">
-                      {d.working_days.map((day) => (
-                        <span key={day} title={`${day}${sold.has(day) ? ' · invoiced' : ' · zero sales'}`}
-                          className={`block h-4 w-4 rounded ${sold.has(day) ? 'bg-pharmacy-green' : 'bg-red-400'}`} />
+                      {days.map((x) => (
+                        <span key={x.iso} title={`${x.iso}${x.weekend ? ' · weekend' : sold.has(x.iso) ? ' · invoiced' : ' · zero sales'}`}
+                          className="block h-4 w-4 rounded" style={{ background: x.weekend ? '#e2e8f0' : sold.has(x.iso) ? '#34a853' : '#e5534b' }} />
                       ))}
                     </div>
                   </Td>
                   <Td right>{p.zero_days.length}</Td>
-                  <Td right>{p.nzsd_pct == null ? '—' : `${p.nzsd_pct}%`}</Td>
+                  <Td right>{p.nzsd_pct == null ? '—' : `${p.nzsd_pct.toFixed(1)}%`}</Td>
                   <Td right><Pts pts={p.points} max={15} /></Td>
                 </tr>
               );
             })}
           </tbody>
         </table>
-      </div>
-      <p className="mt-2 text-xs text-ink-secondary">Each square is a working day: green = at least one invoice created that day, red = zero sales. Weekend invoices count as sales but weekends are not scored.</p>
+        <div className="mt-2 flex flex-wrap gap-3 px-1 text-[11px] text-ink-secondary">
+          <Legend color="#34a853">At least one invoice</Legend>
+          <Legend color="#e5534b">Zero sales</Legend>
+          <Legend color="#e2e8f0">Weekend</Legend>
+          <Legend color="#b8c4d6">Holiday or approved leave (not set up yet)</Legend>
+        </div>
+      </Panel>
     </>
   );
 };
 
 const Hrr = ({ d }) => (
   <>
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-      <Card title="HRR, everyone" value={d.total.hrr_pct == null ? '—' : `${d.total.hrr_pct}%`} sub={`${d.total.kept} of ${d.total.last_month_customers} customers kept`} />
-      <Card title={`Customers in ${monthLabel(d.previous_month).split(' ')[0]}`} value={d.total.last_month_customers} sub="invoiced last month" />
-      <Card title="Lapsed" value={d.total.last_month_customers - d.total.kept} sub="no invoice yet this month" warn />
-      <Card title="At 85% or more" value={`${d.people.filter((p) => (p.hrr_pct || 0) >= 85).length} of ${d.people.length}`} sub="salespersons on target" />
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mb-3">
+      <Card title="HRR, all CHCs" value={d.total.hrr_pct == null ? '—' : `${d.total.hrr_pct}%`} sub={`${d.total.kept} of ${d.total.last_month_customers} accounts kept`} />
+      <Card title="Accounts last month" value={d.total.last_month_customers} sub={monthName(d.previous_month)} />
+      <Card title="Lapsed so far" value={d.total.last_month_customers - d.total.kept} sub={`no invoice yet in ${monthName(d.month)}`} red />
+      <Card title="At 85% or more" value={`${d.people.filter((p) => (p.hrr_pct || 0) >= 85).length} of ${d.people.length}`} sub="CHCs on target" />
     </div>
-    <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
-      <div className="xl:col-span-3 rounded-xl border border-slate-200 bg-white overflow-x-auto">
-        <table className="w-full text-sm" style={{ minWidth: 640 }}>
-          <thead className="border-b border-slate-200"><tr><Th>Salesperson</Th><Th right>Last month</Th><Th right>Kept</Th><Th right>Lapsed</Th><Th>Retention</Th><Th right>HRR</Th><Th right>Points</Th></tr></thead>
-          <tbody className="divide-y divide-slate-100">
-            {d.people.map((p) => (
-              <tr key={p.salesperson}>
-                <Td strong>{p.salesperson}</Td><Td right>{p.last_month_customers}</Td><Td right>{p.kept}</Td><Td right>{p.lapsed}</Td>
-                <Td><Bar v={p.hrr_pct} ok={(p.hrr_pct || 0) >= 85} /></Td>
-                <Td right>{p.hrr_pct == null ? '—' : `${p.hrr_pct}%`}</Td><Td right><Pts pts={p.points} max={15} /></Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="grid grid-cols-1 xl:grid-cols-5 gap-3">
+      <div className="xl:col-span-3">
+        <Panel title="Per CHC">
+          <table className="w-full">
+            <thead><tr><Th>CHC</Th><Th right>Last month</Th><Th right>Kept</Th><Th right>Lapsed</Th><Th>Retention</Th><Th right>HRR</Th><Th right>Pts</Th></tr></thead>
+            <tbody>
+              {d.people.map((p) => (
+                <tr key={p.salesperson}>
+                  <Td strong>{p.salesperson}</Td><Td right>{p.last_month_customers}</Td><Td right>{p.kept}</Td><Td right>{p.lapsed}</Td>
+                  <Td><Bar v={p.hrr_pct} color={COLOR[toneKey(p.points, 15)]} mark={85} /></Td>
+                  <Td right>{p.hrr_pct == null ? '—' : `${p.hrr_pct.toFixed(1)}%`}</Td>
+                  <Td right><Pts pts={p.points} max={15} /></Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-2 px-1 text-[11px] text-ink-secondary">The line on each bar is the 85% target.</p>
+        </Panel>
       </div>
-      <div className="xl:col-span-2 rounded-xl border border-slate-200 bg-white overflow-x-auto">
-        <p className="px-3 pt-3 text-sm font-semibold text-ink-primary">Lapsed customers to call <span className="font-normal text-ink-secondary">· biggest first</span></p>
-        <table className="w-full text-sm">
-          <thead className="border-b border-slate-200"><tr><Th>Salesperson</Th><Th>Customer</Th><Th right>Last month</Th></tr></thead>
-          <tbody className="divide-y divide-slate-100">
-            {d.lapsed.slice(0, 40).map((l) => (
-              <tr key={`${l.salesperson}|${l.customer}`}><Td>{l.salesperson}</Td><Td>{l.customer}</Td><Td right>{peso(l.last_month_sales)}</Td></tr>
-            ))}
-          </tbody>
-        </table>
-        {d.lapsed.length > 40 && <p className="px-3 py-2 text-xs text-ink-secondary">and {d.lapsed.length - 40} more</p>}
+      <div className="xl:col-span-2">
+        <Panel title="Lapsed accounts to call" aside={`bought in ${monthName(d.previous_month).slice(0, 3)}, not yet in ${monthName(d.month).slice(0, 3)}`}>
+          <table className="w-full">
+            <thead><tr><Th>CHC</Th><Th>Account</Th><Th right>{monthName(d.previous_month).slice(0, 3)} sales</Th></tr></thead>
+            <tbody>
+              {d.lapsed.slice(0, 40).map((l) => (
+                <tr key={`${l.salesperson}|${l.customer}`}><Td>{l.salesperson.replace(/^HOS \| /i, '')}</Td><Td wrap>{l.customer}</Td><Td right>{peso(l.last_month_sales)}</Td></tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-2 px-1 text-[11px] text-ink-secondary">{d.lapsed.length > 40 ? `Top 40 of ${d.lapsed.length}. ` : ''}The morning pulse check and the 15th-of-month rescue list, ready without a spreadsheet.</p>
+        </Panel>
       </div>
     </div>
-    <p className="mt-2 text-xs text-ink-secondary">All customers count until hospitals are tagged on the customer record; the playbook's HRR is hospitals only.</p>
   </>
 );
 
@@ -217,58 +267,67 @@ const InfoModal = ({ kind, data, onClose }) => {
   );
 };
 
+const TITLES = {
+  nzsd: ['NZSD · No Zero Sales Days', 'Working days with at least one invoice, counted by the invoice’s creation time (it can’t be backdated).'],
+  hrr: ['HRR · Hospital Retention Rate', 'Accounts invoiced last month that were invoiced again this month. All customers count until hospitals are tagged.'],
+};
+
 const KpiScorecardPage = () => {
-  const [tab, setTab] = useState('nzsd');
+  const navigate = useNavigate();
+  const { tab: tabParam } = useParams();
+  const tab = tabParam === 'hrr' ? 'hrr' : 'nzsd';
   const [month, setMonth] = useState(manilaMonth());
   const [prefix, setPrefix] = useState('HOS');
   const [info, setInfo] = useState(null);
   const { data, isLoading, isError, error, refetch, isFetching } = useScorecard(tab, month, prefix);
 
+  const download = () => {
+    if (!data?.available) return;
+    const head = [[`GetMeds KPI Scorecard — ${TITLES[tab][0]} — ${monthLabel(month)}${prefix ? ` — ${prefix}` : ''}`], ['From the Zoho invoice copy, as of', data.as_of || ''], []];
+    const rows = tab === 'nzsd'
+      ? [['CHC', 'Working days', 'Days with sales', 'Zero days', 'NZSD %', 'Points', 'Zero-sales dates'],
+        ...data.people.map((p) => [p.salesperson, p.working_days, p.days_with_sales, p.zero_days.length, p.nzsd_pct, p.points, p.zero_days.join(' ')])]
+      : [['CHC', 'Last month', 'Kept', 'Lapsed', 'HRR %', 'Points'], ...data.people.map((p) => [p.salesperson, p.last_month_customers, p.kept, p.lapsed, p.hrr_pct, p.points]),
+        [], ['Lapsed accounts'], ['CHC', 'Account', 'Last month sales'], ...data.lapsed.map((l) => [l.salesperson, l.customer, l.last_month_sales])];
+    downloadCsv(`getmeds-kpi-${tab}-${month}${prefix ? `-${prefix.toLowerCase()}` : ''}.csv`, [...head, ...rows]);
+  };
+  const pill = 'inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs disabled:opacity-40';
+
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-ink-primary">KPI Scorecard <span className="ml-1 align-middle rounded-full bg-state-warning-light px-2 py-0.5 text-xs font-semibold text-amber-800">Try-out</span></h1>
-          <p className="mt-1 max-w-3xl text-sm text-ink-secondary">Hospital CHC playbook KPIs per Zoho salesperson, read from the copy of Zoho&apos;s invoices. IST is on Sales Performance; DSO comes later.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={() => setMonth(shift(month, -1))} className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm">‹</button>
-          <span className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">{monthLabel(month)}</span>
-          <button type="button" disabled={month >= manilaMonth()} onClick={() => setMonth(shift(month, 1))} className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm disabled:opacity-40">›</button>
-          <select value={prefix} onChange={(e) => setPrefix(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm" aria-label="Division">
-            {DIVISIONS.map((p) => <option key={p} value={p}>{p ? `Division: ${p}` : 'All divisions'}</option>)}
-          </select>
-          <button type="button" onClick={() => refetch()} disabled={isFetching} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold disabled:opacity-50">
-            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />Refresh
-          </button>
-        </div>
+    <div className="max-w-7xl mx-auto px-4 py-5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center rounded-full border border-slate-200 bg-white text-xs">
+          <button type="button" aria-label="Previous month" onClick={() => setMonth(shift(month, -1))} className="px-2.5 py-1">‹</button>
+          <span className="px-1">{monthLabel(month)}</span>
+          <button type="button" aria-label="Next month" disabled={month >= manilaMonth()} onClick={() => setMonth(shift(month, 1))} className="px-2.5 py-1 disabled:opacity-30">›</button>
+        </span>
+        <Chip>Scorecard: Hospital CHC</Chip>
+        <select value={prefix} onChange={(e) => setPrefix(e.target.value)} aria-label="Division" className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs">
+          {DIVISIONS.map((p) => <option key={p} value={p}>{p ? `Division: ${p}` : 'All divisions'}</option>)}
+        </select>
+        <Chip className="bg-state-success-light font-semibold text-pharmacy-green-700">Live · read from the Zoho invoice copy</Chip>
+        <Chip className="bg-state-warning-light font-semibold text-amber-800">Try-out</Chip>
+        <button type="button" onClick={download} disabled={!data?.available} className={pill}><Download className="h-3.5 w-3.5" />Download</button>
+        <button type="button" onClick={() => refetch()} disabled={isFetching} className={pill}><RefreshCw className={`h-3.5 w-3.5 ${isFetching ? 'animate-spin' : ''}`} />Refresh</button>
+        <button type="button" onClick={() => setInfo(tab)} className={`${pill} font-semibold text-getmeds-blue hover:bg-blue-50`}><Info className="h-3.5 w-3.5" />How this is calculated</button>
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        {[['nzsd', 'NZSD · No Zero Sales Days', '15 pts'], ['hrr', 'HRR · Retention', '15 pts']].map(([k, label, pts]) => (
-          <button key={k} type="button" onClick={() => setTab(k)}
-            className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${tab === k ? 'border-getmeds-blue bg-getmeds-blue text-white' : 'border-slate-300 bg-white text-ink-secondary'}`}>
-            {label} <span className="opacity-75">· {pts}</span>
-          </button>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {[['nzsd', 'NZSD · Zero-sales days'], ['hrr', 'HRR · Retention']].map(([k, label]) => (
+          <button key={k} type="button" onClick={() => navigate(`/admin/kpi-scorecard/${k}`)}
+            className={`rounded-full border px-3 py-1 text-xs font-semibold ${tab === k ? 'border-getmeds-blue bg-getmeds-blue text-white' : 'border-slate-300 bg-white text-ink-secondary'}`}>{label}</button>
         ))}
-        <button type="button" onClick={() => setInfo(tab)}
-          className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-getmeds-blue hover:bg-blue-50">
-          <Info className="h-3.5 w-3.5" />How this is calculated
-        </button>
       </div>
-      <InfoModal kind={info} data={data} onClose={() => setInfo(null)} />
 
-      <div className="mt-4">
-        {isLoading ? <p className="flex items-center gap-2 text-sm text-ink-secondary"><Loader2 className="h-4 w-4 animate-spin" />Loading…</p>
-          : isError ? <p className="text-sm text-red-700">{error?.response?.data?.error?.message || 'Could not load the KPIs.'}</p>
-            : !data?.available ? <p className="rounded-lg border border-amber-200 bg-state-warning-light p-3 text-sm text-amber-800">{data?.reason}</p>
-              : (
-                <>
-                  <p className="mb-3 text-xs text-ink-secondary">From the invoice copy · as of {data.as_of ? new Date(data.as_of).toLocaleString('en-PH') : '—'}</p>
-                  {tab === 'nzsd' ? <Nzsd d={data} /> : <Hrr d={data} />}
-                </>
-              )}
-      </div>
+      <h1 className="mt-3 text-xl font-bold text-ink-primary">{TITLES[tab][0]} <span className="ml-1 align-middle rounded-full bg-state-success-light px-2 py-0.5 text-[11px] font-semibold text-pharmacy-green-700">15 pts</span></h1>
+      <p className="mb-3 text-[13px] text-ink-secondary">{TITLES[tab][1]}{data?.as_of ? ` As of ${new Date(data.as_of).toLocaleString('en-PH')}.` : ''}</p>
+
+      {isLoading ? <p className="flex items-center gap-2 text-sm text-ink-secondary"><Loader2 className="h-4 w-4 animate-spin" />Loading…</p>
+        : isError ? <p className="text-sm text-red-700">{error?.response?.data?.error?.message || 'Could not load the KPIs.'}</p>
+          : !data?.available ? <p className="rounded-lg border border-amber-200 bg-state-warning-light p-3 text-sm text-amber-800">{data?.reason}</p>
+            : tab === 'nzsd' ? <Nzsd d={data} month={month} /> : <Hrr d={data} />}
+
+      <InfoModal kind={info} data={data} onClose={() => setInfo(null)} />
     </div>
   );
 };

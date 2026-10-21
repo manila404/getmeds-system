@@ -348,7 +348,7 @@ function App() {
               Remove this route with the page if the design is not approved. */}
           {import.meta.env.VITE_KPI_SCORECARD === 'true' && (
             <Route
-              path="/admin/kpi-scorecard"
+              path="/admin/kpi-scorecard/:tab?"
               element={
                 <ProtectedRoute allowedRoles={['admin']}>
                   <KpiScorecardPage />
