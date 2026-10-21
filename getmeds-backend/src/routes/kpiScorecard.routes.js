@@ -5,6 +5,7 @@
  *   GET /api/kpi-scorecard/nzsd?month=2026-10[&prefix=HOS]
  *   GET /api/kpi-scorecard/hrr?month=2026-10[&prefix=HOS]
  *   GET /api/kpi-scorecard/dso[?prefix=HOS]            today's figure only
+ *   GET /api/kpi-scorecard/ist?month=2026-10[&prefix=HOS]   per person
  * Admin only, read-only. Off (404) unless GETMEDS_KPI_SCORECARD=true. See services/kpiScorecardService.js.
  */
 const express = require('express');
@@ -43,7 +44,9 @@ function handler(kind) {
       if (!st.coveredFrom || st.coveredFrom > needFrom) {
         return res.json({ success: true, data: { available: false, reason: `The invoice copy starts ${st.coveredFrom || 'nowhere yet'}; this needs ${needFrom}.` } });
       }
-      const data = kind === 'hrr' ? await scorecard.hrr(month, { prefix }) : await scorecard.nzsd(month, { prefix });
+      const data = kind === 'hrr' ? await scorecard.hrr(month, { prefix })
+        : kind === 'ist' ? await scorecard.ist(month, { prefix }) : await scorecard.nzsd(month, { prefix });
+      if (data.available === false) return res.json({ success: true, data });
       return res.json({ success: true, data: { available: true, prefix, as_of: st.lastRun, covered_from: st.coveredFrom, ...data } });
     } catch (err) {
       return next(err);
@@ -54,5 +57,6 @@ function handler(kind) {
 router.get('/nzsd', handler('nzsd'));
 router.get('/hrr', handler('hrr'));
 router.get('/dso', handler('dso'));
+router.get('/ist', handler('ist'));
 
 module.exports = router;

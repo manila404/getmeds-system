@@ -269,6 +269,35 @@ INFO.dso = {
   ],
 };
 
+INFO.ist = {
+  title: 'IST · Individual Sales Target — how this is calculated',
+  formula: 'IST % = invoiced sales this month ÷ the person’s monthly target × 100',
+  bands: 'above 90% → 50 pts (above 110% + bonus) · 81–90% → 40 · 71–80% → 30 · 61–70% → 20 · 60% and below → 0, which caps the whole month’s scorecard at 40',
+  source: [
+    'Target: the person’s monthly target on GetMeds Sales KPIs (Set targets; October to December set from the sales sheet).',
+    'Invoiced: Zoho Books invoices dated this month minus credit notes, with tax — the same total as Zoho’s Sales by Salesperson report.',
+    'Each invoice goes to the owner of its GetMeds order (by Sales Order number); otherwise to the account that holds its Zoho salesperson. Same rule as the Overview and My KPIs.',
+  ],
+  rules: [
+    'Per person (Aaron, Oct 21), not per territory: someone holding two territories has one row.',
+    'Draft and Void invoices don’t count; invoices deleted in Zoho don’t count; credit notes come off in the month they’re dated.',
+    'While the month runs, points use the projection: IST so far × days in month ÷ days so far. A closed month uses the final figure.',
+    'People with sales but no target are shown and not scored.',
+    'The Division filter shows the people whose channel matches.',
+    'Booked and Collected (in the playbook) are not shown yet: Collected needs Zoho payments in the copy.',
+  ],
+  check: [
+    'Target: Sales KPIs → Set targets, the person’s row for the month.',
+    'Invoiced: Zoho Books → Reports → Sales by Salesperson for the month, the person’s salesperson row (Total Sales with Tax). Orders a teammate raised for them are credited to the owner, so a few amounts can move between rows.',
+    'IST = Invoiced ÷ Target. Projection = IST × days in month ÷ today’s day.',
+  ],
+  open: [
+    'The playbook counts only Sent and Paid invoices; this counts every invoice except Draft and Void (Overdue and Partially Paid are real sales).',
+    'Collected (by payment date, tax withheld counted) to be added with Zoho payments.',
+    'Whether points should use the projection during the month, or only the final figure on the 1st.',
+  ],
+};
+
 const InfoModal = ({ kind, data, onClose }) => {
   if (!kind) return null;
   const i = INFO[kind];
@@ -358,17 +387,56 @@ const Dso = ({ d }) => {
   );
 };
 
+const Ist = ({ d }) => {
+  const people = d.people;
+  const t = d.total;
+  return (
+    <>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mb-3">
+        <Card title="Target" value={pesoShort(t.target_php)} sub={`${t.people_with_target} people with a target`} />
+        <Card title="Invoiced" value={pesoShort(t.invoiced_php)} sub={t.ist_now_pct == null ? '—' : `${t.ist_now_pct}% of target`} />
+        <Card title={d.running ? 'Month-end projection' : 'Final'} value={t.ist_projected_pct == null ? '—' : `${t.ist_projected_pct}%`} sub={d.running ? `if the pace holds · day ${d.days_so_far} of ${d.days_in_month}` : 'the month is closed'} />
+        <Card title="At 0 points" value={t.at_zero} sub="caps their month at 40" red />
+      </div>
+      <Panel title="Per person" aside={`invoiced vs target · the line is today’s pace (${d.pace_pct}%)`}>
+        <table className="w-full">
+          <thead><tr><Th>Person</Th><Th>Team lead</Th><Th right>Target</Th><Th right>Invoiced</Th><Th>Invoiced vs target</Th><Th right>Now</Th><Th right>{d.running ? 'Projected' : 'Final'}</Th><Th right>Pts</Th></tr></thead>
+          <tbody>
+            {people.map((p) => (
+              <tr key={p.user_id}>
+                <Td strong>{p.name}{p.title ? <span className="ml-1 text-[11px] font-normal text-ink-secondary">· {p.title}</span> : null}</Td>
+                <Td>{p.team_lead || '—'}</Td>
+                <Td right>{p.target_php ? pesoShort(p.target_php) : 'No target'}</Td>
+                <Td right>{pesoShort(p.invoiced_php)}</Td>
+                <Td>{p.points == null ? <span className="text-[11px] text-ink-secondary">not scored</span> : <Bar v={p.ist_now_pct} color={COLOR[toneKey(p.points, 50)]} mark={d.pace_pct} />}</Td>
+                <Td right>{p.ist_now_pct == null ? '—' : `${p.ist_now_pct.toFixed(1)}%`}</Td>
+                <Td right>{p.ist_projected_pct == null ? '—' : `${p.ist_projected_pct.toFixed(1)}%`}</Td>
+                <Td right>{p.points == null ? '—' : <Pts pts={p.points} max={50} />}{p.bonus ? <span className="ml-1 text-[10px] font-semibold text-pharmacy-green-700">+bonus</span> : null}</Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="mt-2 px-1 text-[11px] text-ink-secondary">
+          Points use the {d.running ? 'month-end projection while the month runs' : 'final figure'}. 0 points on IST caps the month’s scorecard at 40.
+          {d.not_linked_php ? ` Zoho sales not linked to a person this month: ${pesoShort(d.not_linked_php)} (shown on the Overview).` : ''}
+        </p>
+      </Panel>
+    </>
+  );
+};
+
 const TITLES = {
   nzsd: ['NZSD · No Zero Sales Days', 'Working days with at least one invoice, counted by the invoice’s creation time (it can’t be backdated).'],
   hrr: ['HRR · Hospital Retention Rate', 'Accounts invoiced last month that were invoiced again this month. All customers count until hospitals are tagged.'],
+  ist: ['IST · Individual Sales Target', 'Each person’s Zoho sales with tax this month against their monthly target, credited the same way as the Overview and My KPIs.'],
   dso: ['DSO · Days Sales Outstanding', 'Open balance on each CHC’s invoices, divided by their average credit sales per day this month. Today’s figure.'],
 };
-const POINTS = { nzsd: 15, hrr: 15, dso: 20 };
+const POINTS = { ist: 50, nzsd: 15, hrr: 15, dso: 20 };
 
 const KpiScorecardPage = () => {
   const navigate = useNavigate();
   const { tab: tabParam } = useParams();
-  const tab = ['hrr', 'dso'].includes(tabParam) ? tabParam : 'nzsd';
+  const tab = ['hrr', 'dso', 'ist'].includes(tabParam) ? tabParam : 'nzsd';
   const [month, setMonth] = useState(manilaMonth());
   const [prefix, setPrefix] = useState('HOS');
   const [info, setInfo] = useState(null);
@@ -377,7 +445,10 @@ const KpiScorecardPage = () => {
   const download = () => {
     if (!data?.available) return;
     const head = [[`GetMeds KPI Scorecard — ${TITLES[tab][0]} — ${monthLabel(month)}${prefix ? ` — ${prefix}` : ''}`], ['From the Zoho invoice copy, as of', data.as_of || ''], []];
-    const rows = tab === 'dso'
+    const rows = tab === 'ist'
+      ? [['Person', 'Title', 'Team lead', 'Channel', 'Target', 'Invoiced (Zoho, with tax)', 'Balance', 'IST now %', 'IST projected %', 'Points', 'Caps month at 40'],
+        ...data.people.map((p) => [p.name, p.title, p.team_lead, p.channel, p.target_php, p.invoiced_php, p.balance_php, p.ist_now_pct ?? '', p.ist_projected_pct ?? '', p.points ?? '', p.caps_month ? 'yes' : ''])]
+      : tab === 'dso'
       ? [['CHC', 'Open AR', 'Credit sales this month', 'DSO days', 'Points', '0–30 days', '31–60', '61–90', '90+', 'Oldest unpaid (days)'],
         ...data.people.map((p) => [p.salesperson, p.open_ar, p.credit_sales, p.dso_days ?? '', p.points, ...p.aging, p.oldest_days])]
       : tab === 'nzsd'
@@ -409,7 +480,7 @@ const KpiScorecardPage = () => {
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        {[['dso', 'DSO · Collections'], ['hrr', 'HRR · Retention'], ['nzsd', 'NZSD · Zero-sales days']].map(([k, label]) => (
+        {[['ist', 'IST · Sales target'], ['dso', 'DSO · Collections'], ['hrr', 'HRR · Retention'], ['nzsd', 'NZSD · Zero-sales days']].map(([k, label]) => (
           <button key={k} type="button" onClick={() => navigate(`/admin/kpi-scorecard/${k}`)}
             className={`rounded-full border px-3 py-1 text-xs font-semibold ${tab === k ? 'border-getmeds-blue bg-getmeds-blue text-white' : 'border-slate-300 bg-white text-ink-secondary'}`}>{label}</button>
         ))}
@@ -421,7 +492,7 @@ const KpiScorecardPage = () => {
       {isLoading ? <p className="flex items-center gap-2 text-sm text-ink-secondary"><Loader2 className="h-4 w-4 animate-spin" />Loading…</p>
         : isError ? <p className="text-sm text-red-700">{error?.response?.data?.error?.message || 'Could not load the KPIs.'}</p>
           : !data?.available ? <p className="rounded-lg border border-amber-200 bg-state-warning-light p-3 text-sm text-amber-800">{data?.reason}</p>
-            : tab === 'nzsd' ? <Nzsd d={data} month={month} /> : tab === 'dso' ? <Dso d={data} /> : <Hrr d={data} />}
+            : tab === 'nzsd' ? <Nzsd d={data} month={month} /> : tab === 'dso' ? <Dso d={data} /> : tab === 'ist' ? <Ist d={data} /> : <Hrr d={data} />}
 
       <InfoModal kind={info} data={data} onClose={() => setInfo(null)} />
     </div>

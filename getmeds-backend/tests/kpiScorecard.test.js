@@ -4,7 +4,7 @@
  *  - HRR counts customers invoiced last month that were invoiced again this month, per salesperson;
  *  - the playbook's point bands.
  */
-const { computeNzsd, computeHrr, computeDso, _test } = require('../src/services/kpiScorecardService');
+const { computeNzsd, computeHrr, computeDso, computeIst, _test } = require('../src/services/kpiScorecardService');
 
 test('working days are Monday to Friday, up to today in the running month', () => {
   // Oct 2026: the 1st is a Thursday
@@ -89,4 +89,24 @@ test('DSO with open AR but no credit sales this month cannot be divided, and is 
 
 test('DSO bands: up to 70 → 20, 71–89 → 10, 90 and above → 0', () => {
   expect([0, 59, 60, 70, 71, 89, 90, 200].map(_test.dsoPts)).toEqual([20, 20, 20, 20, 10, 10, 0, 0]);
+});
+
+test('IST: invoiced over target per person, projected to month end while the month runs, points and the cap', () => {
+  const people = [
+    { user_id: 1, name: 'A', target_php: 100000, sales_php: 50000 },   // day 15 of 30: 50% now, 100% projected -> 50
+    { user_id: 2, name: 'B', target_php: 100000, sales_php: 20000 },   // 20% -> 40% projected -> 0, caps the month
+    { user_id: 3, name: 'C', target_php: 0, sales_php: 5000 },         // no target: shown, not scored
+  ];
+  const r = computeIst(people, '2026-11', '2026-11-15');
+  expect(r).toMatchObject({ running: true, days_so_far: 15, days_in_month: 30, pace_pct: 50 });
+  expect(r.people.find((p) => p.name === 'A')).toMatchObject({ ist_now_pct: 50, ist_projected_pct: 100, points: 50, caps_month: false, balance_php: 50000 });
+  expect(r.people.find((p) => p.name === 'B')).toMatchObject({ ist_projected_pct: 40, points: 0, caps_month: true });
+  expect(r.people.find((p) => p.name === 'C')).toMatchObject({ ist_now_pct: null, points: null });
+  expect(r.total).toMatchObject({ target_php: 200000, invoiced_php: 70000, ist_now_pct: 35, ist_projected_pct: 70, people_with_target: 2, at_zero: 1, at_full: 1 });
+  // a closed month is scored on the actual figure
+  expect(computeIst(people, '2026-09', '2026-10-21').people.find((p) => p.name === 'A')).toMatchObject({ ist_projected_pct: 50, points: 0 });
+});
+
+test('IST bands: above 90 → 50, 81–90 → 40, 71–80 → 30, 61–70 → 20, 60 and below → 0', () => {
+  expect([150, 91, 90, 81, 80, 71, 70, 61, 60, 0].map(_test.istPts)).toEqual([50, 50, 40, 40, 30, 30, 20, 20, 0, 0]);
 });

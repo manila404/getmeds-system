@@ -308,6 +308,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
         key: 'kpi-scorecard',
         title: 'KPI Scorecard',
         links: [
+          { to: '/admin/kpi-scorecard/ist', icon: <Target size={19} />, label: 'IST · Sales target' },
           { to: '/admin/kpi-scorecard/dso', icon: <Target size={19} />, label: 'DSO · Collections' },
           { to: '/admin/kpi-scorecard/hrr', icon: <Target size={19} />, label: 'HRR · Retention' },
           { to: '/admin/kpi-scorecard/nzsd', icon: <Target size={19} />, label: 'NZSD · Zero-sales days' }

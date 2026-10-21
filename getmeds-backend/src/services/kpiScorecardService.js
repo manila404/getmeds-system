@@ -24,6 +24,15 @@
  *            Today's figure only: Zoho knows today's unpaid balance, not last month's.
  *            below 60 → 20 + bonus · 60–70 → 20 · 71–89 → 10 · 90 and above → 0
  *
+ *   IST    = invoiced sales this month ÷ the person's monthly target × 100   (added Oct 21, 2026)
+ *            per PERSON (Aaron): the target set on Sales KPIs (kpi_targets); invoiced = Zoho Total Sales
+ *            with Tax (invoices minus credit notes), each invoice credited to the owner of its GetMeds
+ *            order by Sales Order number, else to the account holding its Zoho salesperson — the same
+ *            rule as the Overview and My KPIs (adminOverview.controller buildSalesKpis).
+ *            The running month is scored on the month-end projection (IST so far × days in month ÷ days so far).
+ *            above 90% → 50 (above 110% + bonus) · 81–90 → 40 · 71–80 → 30 · 61–70 → 20 · 60% and below → 0,
+ *            and 0 points on IST caps the whole month's scorecard at 40.
+ *
  * The pure functions take plain rows so they can be tested without a database.
  */
 
@@ -34,6 +43,7 @@ const COUNTED = "deleted_at IS NULL AND lower(coalesce(status, '')) NOT IN ('dra
 
 const nzsdPts = (p) => (p >= 95 ? 15 : p >= 90 ? 12 : p >= 80 ? 9 : p >= 70 ? 6 : 0);
 const hrrPts = (p) => (p >= 95 ? 15 : p >= 85 ? 12 : p >= 75 ? 8 : 0);
+const istPts = (p) => (p == null ? 0 : p > 90 ? 50 : p > 80 ? 40 : p > 70 ? 30 : p > 60 ? 20 : 0);
 const dsoPts = (d) => (d == null ? 0 : d <= 70 ? 20 : d < 90 ? 10 : 0);
 const pct = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : null);
 
@@ -190,6 +200,84 @@ async function hrr(month, { prefix } = {}) {
   return computeHrr(last, current, month);
 }
 
+/**
+ * people: buildSalesKpis people rows ({ user_id, name, title, team_lead, channel, target_php, sales_php }).
+ * Adds IST %, the month-end projection, points and the cap flag.
+ */
+function computeIst(people, month, today = manilaToday()) {
+  const total = daysInMonth(month);
+  const running = today.slice(0, 7) === month;
+  const daysSoFar = running ? Number(today.slice(8, 10)) : total;
+  const r1 = (n) => Math.round(n * 10) / 10;
+  const rows = people.map((p) => {
+    const now = p.target_php > 0 ? r1((p.sales_php / p.target_php) * 100) : null;
+    const projected = now == null ? null : r1((now * total) / daysSoFar);
+    const scored = running ? projected : now;
+    const points = p.target_php > 0 ? istPts(scored) : null;
+    return {
+      user_id: p.user_id, name: p.name, title: p.title || '', team_lead: p.team_lead || '', channel: p.channel || '',
+      target_php: p.target_php, invoiced_php: p.sales_php, balance_php: Math.round((p.target_php - p.sales_php) * 100) / 100,
+      ist_now_pct: now, ist_projected_pct: projected, points, bonus: scored != null && scored > 110, caps_month: points === 0,
+    };
+  }).sort((a, b) => (b.ist_projected_pct ?? -1) - (a.ist_projected_pct ?? -1) || b.invoiced_php - a.invoiced_php);
+  const withTarget = rows.filter((r) => r.target_php > 0);
+  const target = withTarget.reduce((a, r) => a + r.target_php, 0);
+  const invoiced = withTarget.reduce((a, r) => a + r.invoiced_php, 0);
+  const nowPct = target ? r1((invoiced / target) * 100) : null;
+  return {
+    month, today, running, days_so_far: daysSoFar, days_in_month: total, pace_pct: r1((daysSoFar / total) * 100),
+    total: { target_php: Math.round(target * 100) / 100, invoiced_php: Math.round(invoiced * 100) / 100, ist_now_pct: nowPct,
+      ist_projected_pct: nowPct == null ? null : r1((nowPct * total) / daysSoFar), people_with_target: withTarget.length,
+      at_zero: withTarget.filter((r) => r.points === 0).length, at_full: withTarget.filter((r) => r.points === 50).length },
+    people: rows,
+  };
+}
+
+// The Division filter on the page names Zoho prefixes; IST rows are people, so it maps to their channel.
+const CHANNEL_OF_PREFIX = { HOS: 'HOSP', STC: 'RX · STC', 'B&B': 'RX · B&B', URO: 'RX · URO', B2C: 'RX · B2C', TELESALES: 'TELESALES', B2B: 'B2B', BID: 'BID', CLIDP: 'CLIDP', MT: 'MT' };
+
+async function ist(month, { prefix, today = manilaToday() } = {}) {
+  const { buildSalesKpis } = require('../controllers/adminOverview.controller');
+  const last = `${month}-${String(daysInMonth(month)).padStart(2, '0')}`;
+  const to = today.slice(0, 7) === month ? today : last;
+  const counted = COUNTED;
+  const [invoices, creditNotes] = await Promise.all([
+    q(`SELECT coalesce(salesperson_name, 'No salesperson') AS salesperson, coalesce(reference_number, '') AS so_number, total
+         FROM zoho_invoices WHERE ${counted} AND date >= $1 AND date <= $2`, [`${month}-01`, to]),
+    q(`SELECT coalesce(salesperson_name, 'No salesperson') AS salesperson, total
+         FROM zoho_credit_notes WHERE ${counted} AND date >= $1 AND date <= $2`, [`${month}-01`, to]),
+  ]);
+  const inv = invoices.map((r) => ({ ...r, total: Number(r.total) }));
+  const cn = creditNotes.map((r) => ({ ...r, total: Number(r.total) }));
+  const cents = (n) => Math.round(n * 100);
+  const totalWithTax = (inv.reduce((a, r) => a + cents(r.total), 0) - cn.reduce((a, r) => a + cents(r.total), 0)) / 100;
+  const titled = (await q("SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'users' AND column_name = 'sales_title'")).length > 0;
+  const startUtc = new Date(`${month}-01T00:00:00+08:00`).getTime();
+  const [users, accts, terrs, managers, channels, targets, soOwners] = await Promise.all([
+    q(`SELECT id, name, role, is_active, team_lead_id${titled ? ', sales_title' : ''} FROM users`),
+    q('SELECT user_id, salesperson, is_primary FROM user_salespersons'),
+    q('SELECT zoho_salesperson, zoho_alias, manager_id FROM sales_territories'),
+    q('SELECT id, channel_id FROM sales_managers'),
+    q('SELECT id, name, sort_order FROM sales_channels ORDER BY sort_order, id'),
+    q('SELECT user_id, target_php FROM kpi_targets WHERE month = $1', [month]),
+    q(`SELECT o.zoho_so_number AS so, o.medrep_id AS user_id FROM orders o
+        WHERE o.created_at >= $1 AND o.created_at < $2 AND o.zoho_so_number IS NOT NULL AND o.medrep_id IS NOT NULL
+       UNION ALL
+       SELECT s.zoho_so_number, o.medrep_id FROM orders o JOIN order_split_sales_orders s ON s.order_id = o.id
+        WHERE o.created_at >= $1 AND o.created_at < $2 AND s.zoho_so_number IS NOT NULL AND o.medrep_id IS NOT NULL`,
+    [new Date(startUtc - 60 * 86400000).toISOString(), new Date(`${to}T23:59:59+08:00`).toISOString()]),
+  ]);
+  const k = buildSalesKpis({
+    zoho: { available: true, total_sales_with_tax: totalWithTax, invoices: inv, credit_notes: cn },
+    from: `${month}-01`, to, month, users, accts, terrs, targets, soOwners, managers, channels,
+  });
+  if (!k.available) return { month, available: false, reason: k.reason };
+  let people = k.people;
+  const ch = prefix ? CHANNEL_OF_PREFIX[String(prefix).toUpperCase()] : null;
+  if (prefix) people = people.filter((p) => p.channel === ch);
+  return { ...computeIst(people, month, today), not_linked_php: prefix ? null : k.unlinked.total, zoho_total_php: totalWithTax };
+}
+
 async function dso({ prefix, today = manilaToday() } = {}) {
   const month = today.slice(0, 7);
   const open = await q(
@@ -203,4 +291,4 @@ async function dso({ prefix, today = manilaToday() } = {}) {
   return { month, ...computeDso(open, credit, today) };
 }
 
-module.exports = { nzsd, hrr, dso, computeNzsd, computeHrr, computeDso, _test: { workingDays, manilaDay, nzsdPts, hrrPts, dsoPts, prevMonth } };
+module.exports = { nzsd, hrr, dso, ist, computeNzsd, computeHrr, computeDso, computeIst, _test: { workingDays, manilaDay, nzsdPts, hrrPts, dsoPts, istPts, prevMonth } };
