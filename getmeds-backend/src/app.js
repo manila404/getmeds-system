@@ -156,6 +156,8 @@ app.use('/api/search', searchRoutes);
 app.use('/api/kpi', require('./routes/kpi.routes'));
 // ADMIN OVERVIEW (try-out, Oct 14, 2026): read-only, Admin only. Remove with routes/adminOverview.routes.js if not approved.
 app.use('/api/admin-overview', require('./routes/adminOverview.routes'));
+// KPI SCORECARD (try-out, Oct 21, 2026): NZSD and HRR from the Zoho invoice copy; off unless GETMEDS_KPI_SCORECARD=true.
+app.use('/api/kpi-scorecard', require('./routes/kpiScorecard.routes'));
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } }));

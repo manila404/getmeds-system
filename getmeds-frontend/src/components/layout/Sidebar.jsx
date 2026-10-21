@@ -310,6 +310,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
           // (User Management was sharing the Users icon with Clients Directory.)
           { to: '/admin/users', icon: <UserCog size={19} />, label: 'User Management' },
           ...(kpi.canViewAll ? [{ to: '/admin/kpi', icon: <Target size={19} />, label: 'Sales KPIs' }] : []),
+          // KPI SCORECARD (try-out, Oct 21, 2026): NZSD and HRR; only when VITE_KPI_SCORECARD=true.
+          ...(import.meta.env.VITE_KPI_SCORECARD === 'true' ? [{ to: '/admin/kpi-scorecard', icon: <Target size={19} />, label: 'KPI Scorecard' }] : []),
           { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
           // Sep 9, 2026: the Zoho sync retry outbox — see ZohoSyncHealthPage.jsx.
           { to: '/finance/refunds', icon: <Banknote size={19} />, label: 'Refunds' },

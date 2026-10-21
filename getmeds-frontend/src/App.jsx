@@ -31,6 +31,8 @@ import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import KpiPage from './pages/admin/KpiPage';
 // ADMIN OVERVIEW MOCK (Oct 14, 2026): try-out page, only routed when VITE_ADMIN_OVERVIEW_MOCK=true.
 import AdminOverviewMockPage from './pages/admin/AdminOverviewMockPage';
+// KPI SCORECARD (try-out, Oct 21, 2026): NZSD and HRR; only routed when VITE_KPI_SCORECARD=true.
+import KpiScorecardPage from './pages/admin/KpiScorecardPage';
 import InventoryPage from './pages/admin/InventoryPage';
 import TestModePage from './pages/TestModePage';
 import ProfilePage from './pages/ProfilePage';
@@ -344,6 +346,16 @@ function App() {
           />
           {/* ADMIN OVERVIEW MOCK (Oct 14, 2026): live, read-only numbers (GET /api/admin-overview), Admin only.
               Remove this route with the page if the design is not approved. */}
+          {import.meta.env.VITE_KPI_SCORECARD === 'true' && (
+            <Route
+              path="/admin/kpi-scorecard"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <KpiScorecardPage />
+                </ProtectedRoute>
+              }
+            />
+          )}
           {import.meta.env.VITE_ADMIN_OVERVIEW_MOCK === 'true' && (
             <Route
               path="/admin/overview-mock"
