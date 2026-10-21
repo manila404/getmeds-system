@@ -18,6 +18,8 @@ const router = express.Router();
 router.all('/auto-sync', cron.autoSync);
 router.all('/zoho-retry', cron.zohoRetry);
 router.all('/notification-retention', cron.notificationRetention);
+// Oct 21, 2026: the Zoho invoice copy (every 15 min from Supabase pg_cron); see services/zohoInvoiceCopy.js.
+router.all('/zoho-invoice-copy', cron.zohoInvoiceCopy);
 router.get('/health', cron.health);
 
 module.exports = router;

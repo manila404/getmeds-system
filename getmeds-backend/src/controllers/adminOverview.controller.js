@@ -33,6 +33,8 @@
 const db = require('../db/database');
 const { importedSql } = require('../services/orderOrigin');
 const zoho = require('../integrations/zoho');
+const invoiceCopy = require('../services/zohoInvoiceCopy');
+const { withLock } = require('../services/cronLock');
 
 const q = (sql, params) => db._rawQuery(sql, params);
 const MAX_DAYS = 92;
@@ -91,6 +93,27 @@ async function zohoList(adapter, path, key, query) {
 }
 
 async function readZohoSales(from, to, { fresh = false } = {}) {
+  // Oct 21, 2026: read the copy of Zoho's invoices kept in our database (services/zohoInvoiceCopy.js)
+  // when it is switched on, covers these dates and synced within the hour; otherwise Zoho live, as before.
+  // Refresh asks for the newest changes first, at most once a minute.
+  if (invoiceCopy.readOn()) {
+    try {
+      if (fresh && invoiceCopy.syncOn()) {
+        const st = await invoiceCopy.status();
+        if (!st.lastRun || Date.now() - Date.parse(st.lastRun) > 60 * 1000) {
+          await withLock('zoho_invoice_copy', 4 * 60 * 1000, async () => await invoiceCopy.runRecent());
+        }
+      }
+      const fromCopy = await invoiceCopy.readSales(from, to);
+      if (fromCopy) return fromCopy;
+    } catch (err) {
+      console.error('[OVERVIEW] invoice copy unavailable, reading Zoho live:', err.message);
+    }
+  }
+  return readZohoSalesLive(from, to, { fresh });
+}
+
+async function readZohoSalesLive(from, to, { fresh = false } = {}) {
   const cacheKey = `${from}|${to}`;
   const hit = zohoCache.get(cacheKey);
   if (!fresh && hit && Date.now() - hit.at < ZOHO_CACHE_MS) return { ...hit.value, cached: true };
@@ -152,7 +175,7 @@ async function readZohoSales(from, to, { fresh = false } = {}) {
     total_sales_with_tax: num(invoiceTotal - creditTotal),
     balance_due: num(inv.reduce((a, i) => a + i.balance, 0)),
     by_salesperson: bySalesperson, invoices: inv, credit_notes: cn,
-    warning: creditError, truncated, fetchedAt: new Date().toISOString(), cached: false,
+    warning: creditError, truncated, fetchedAt: new Date().toISOString(), cached: false, source: 'zoho',
   };
   zohoCache.set(cacheKey, { at: Date.now(), value });
   return value;

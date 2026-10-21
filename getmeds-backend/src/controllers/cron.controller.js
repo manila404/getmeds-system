@@ -24,6 +24,7 @@ const notificationRetentionService = require('../services/notificationRetentionS
 const deletedDraftPurge = require('../services/deletedDraftPurge');
 const stockHoldService = require('../services/stockHoldService');
 const { withLock } = require('../services/cronLock');
+const zohoInvoiceCopy = require('../services/zohoInvoiceCopy');
 
 /**
  * Authenticate the caller.
@@ -100,6 +101,18 @@ exports.autoSync = async (req, res, next) => {
       console.error('[CRON] stock-hold reminders failed:', err.message);
     }
 
+    // Oct 21, 2026: nightly full check of the Zoho invoice copy (this month and last month), so
+    // invoices deleted or voided in Zoho are caught. Own lock and try/catch, same reason as above.
+    if (zohoInvoiceCopy.syncOn()) {
+      try {
+        const out = await withLock('zoho_invoice_copy', 4 * 60 * 1000, async () => await zohoInvoiceCopy.reconcile());
+        retention.invoice_copy_reconcile = out.ran ? 'done' : 'another run holds the lock';
+      } catch (err) {
+        console.error('[CRON] invoice copy reconcile failed:', err.message);
+        retention.invoice_copy_reconcile = err.message;
+      }
+    }
+
     if (!zohoAutoSyncService.isEnabled()) {
       return res.json({ success: true, data: { ran: false, reason: 'ZOHO_AUTO_SYNC_ENABLED=false', retention } });
     }
@@ -135,6 +148,35 @@ exports.zohoRetry = async (req, res, next) => {
       return res.json({ success: true, data: { ran: false, reason: 'ZOHO_AUTO_RETRY_ENABLED is not true' } });
     }
     const outcome = await withLock('zoho_retry', 4 * 60 * 1000, async () => await zohoRetryService.processQueue());
+    if (!outcome.ran) {
+      return res.json({ success: true, data: { ran: false, reason: 'another run holds the lock' } });
+    }
+    return res.json({ success: true, data: { ran: true, ...outcome.result } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST/GET /api/cron/zoho-invoice-copy   (Oct 21, 2026)
+ *
+ * Keeps the copy of Zoho's invoices and credit notes fresh — see services/zohoInvoiceCopy.js.
+ * Called every 15 minutes by Supabase pg_cron (Vercel Hobby can only schedule once a day).
+ *   no parameter        the newest changes since the last run (usually 1–2 Zoho calls)
+ *   ?backfill=2026-01   one month of history (the first load, one month per call)
+ *   ?reconcile=1        this month and last month in full
+ * Off unless ZOHO_INVOICE_COPY_SYNC=true. Reads Zoho only; never writes to it.
+ */
+exports.zohoInvoiceCopy = async (req, res, next) => {
+  if (!authorize(req, res)) return;
+  try {
+    if (!zohoInvoiceCopy.syncOn()) {
+      return res.json({ success: true, data: { ran: false, reason: 'ZOHO_INVOICE_COPY_SYNC is not true' } });
+    }
+    const job = req.query.backfill ? () => zohoInvoiceCopy.backfillMonth(String(req.query.backfill))
+      : req.query.reconcile ? () => zohoInvoiceCopy.reconcile()
+        : () => zohoInvoiceCopy.runRecent();
+    const outcome = await withLock('zoho_invoice_copy', 4 * 60 * 1000, async () => await job());
     if (!outcome.ran) {
       return res.json({ success: true, data: { ran: false, reason: 'another run holds the lock' } });
     }

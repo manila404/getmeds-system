@@ -1330,3 +1330,52 @@ CREATE TABLE IF NOT EXISTS kpi_target_changes (
   changed_at TEXT DEFAULT iso_now()
 );
 CREATE INDEX IF NOT EXISTS idx_kpi_target_changes_month ON kpi_target_changes(month, changed_at DESC);
+
+-- Oct 21, 2026: a copy of Zoho's invoices and credit notes (header fields only, read from
+-- Zoho Books, never written back). The Admin Overview and the KPI Scorecard add up this copy
+-- instead of asking Zoho for every invoice on every page open. Kept fresh by
+-- services/zohoInvoiceCopy.js: every 15 minutes (newest changes first) and a nightly full
+-- check of this month and last month. Amounts are NUMERIC so totals add up to the centavo.
+-- deleted_at: the invoice is no longer in Zoho (deleted there); kept for the record, never counted.
+CREATE TABLE IF NOT EXISTS zoho_invoices (
+  invoice_id TEXT PRIMARY KEY,
+  invoice_number TEXT,
+  date TEXT NOT NULL,
+  due_date TEXT,
+  status TEXT,
+  customer_id TEXT,
+  customer_name TEXT,
+  salesperson_id TEXT,
+  salesperson_name TEXT,
+  reference_number TEXT,
+  invoicing_from TEXT,
+  source TEXT,
+  total NUMERIC(14,2) NOT NULL DEFAULT 0,
+  balance NUMERIC(14,2) NOT NULL DEFAULT 0,
+  last_payment_date TEXT,
+  created_time TEXT,
+  last_modified_time TEXT,
+  deleted_at TEXT,
+  synced_at TEXT DEFAULT iso_now()
+);
+CREATE INDEX IF NOT EXISTS idx_zoho_invoices_date ON zoho_invoices(date);
+CREATE INDEX IF NOT EXISTS idx_zoho_invoices_salesperson_date ON zoho_invoices(salesperson_name, date);
+
+CREATE TABLE IF NOT EXISTS zoho_credit_notes (
+  creditnote_id TEXT PRIMARY KEY,
+  creditnote_number TEXT,
+  date TEXT NOT NULL,
+  status TEXT,
+  customer_id TEXT,
+  customer_name TEXT,
+  salesperson_id TEXT,
+  salesperson_name TEXT,
+  reference_number TEXT,
+  total NUMERIC(14,2) NOT NULL DEFAULT 0,
+  balance NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_time TEXT,
+  last_modified_time TEXT,
+  deleted_at TEXT,
+  synced_at TEXT DEFAULT iso_now()
+);
+CREATE INDEX IF NOT EXISTS idx_zoho_credit_notes_date ON zoho_credit_notes(date);
