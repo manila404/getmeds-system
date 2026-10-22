@@ -104,17 +104,20 @@ const ItemDetailPanel = ({ itemId }) => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
+              {/* Oct 22, 2026: Zoho names these warehouse_stock_on_hand / warehouse_committed_stock /
+                  warehouse_available_for_sale_stock. This table read stock_on_hand and friends, which Zoho
+                  never sends, so every warehouse showed 0 (BorteGet 3.5mg: 3, 4 and 9 in Zoho, 0 here). */}
               {warehouses.map((w, i) => (
                 <tr key={w.warehouse_id || i}>
                   <td className="py-1.5 pr-3 font-medium text-ink-primary text-xs">{w.warehouse_name}</td>
                   <td className={cell + ' text-slate-700'}>
-                    {Number(w.stock_on_hand ?? 0).toLocaleString()}
+                    {Number(w.warehouse_stock_on_hand ?? w.stock_on_hand ?? 0).toLocaleString()}
                   </td>
                   <td className={cell + ' text-amber-700'}>
-                    {Number(w.committed_stock ?? 0).toLocaleString()}
+                    {Number(w.warehouse_committed_stock ?? w.committed_stock ?? 0).toLocaleString()}
                   </td>
                   <td className={cell + ' text-emerald-700 font-semibold'}>
-                    {Number(w.available_for_sale_stock ?? w.available_stock ?? 0).toLocaleString()}
+                    {Number(w.warehouse_available_for_sale_stock ?? w.available_for_sale_stock ?? w.available_stock ?? 0).toLocaleString()}
                   </td>
                 </tr>
               ))}
