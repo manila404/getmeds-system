@@ -170,6 +170,15 @@ class ZohoAdapter {
   }
 
   /**
+   * Read-only: one invoice (status, total, balance). Oct 22, 2026: the refund flow reads it to check that a
+   * payment was removed and that an invoice is void. The app never voids anything itself.
+   * @returns {Promise<{code:number, message:string, invoice:object}>}
+   */
+  async getInvoice(invoiceId) {
+    throw new Error('Not implemented');
+  }
+
+  /**
    * Read-only: one item's stock in every warehouse (on hand, committed, available for sale).
    * Oct 9, 2026: also used by Management's stock check before approving an order.
    * @returns {Promise<{code:number, message:string, warehouses:object[]}>}

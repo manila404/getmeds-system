@@ -39,6 +39,7 @@ const { canAccessOrder } = require('../services/orderScopeService');
 // scope. See services/teamScopeService.js.
 const teamScopeService = require('../services/teamScopeService');
 const { paidTermsRefusal } = require('../services/paidTermsGuard');
+const refundRequestService = require('../services/refundRequestService');
 // Sep 22, 2026: split-invoicing orders — one order, two Zoho Sales Orders.
 // See services/orderSplitService.js.
 const { groupItemsByInvoicingFrom, createSplitSalesOrder, getSplitsForOrder, pushItemsToSplit } = require('../services/orderSplitService');
@@ -967,7 +968,7 @@ exports.getById = async (req, res, next) => {
     res.json({
       success: true,
       data: {
-        order: { ...order, finance_hold: isFinHold, resubmittable, resume_to: resumeTo, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold, rx: await rxStatusForOrder(order) },
+        order: { ...order, finance_hold: isFinHold, resubmittable, resume_to: resumeTo, entered_tracking: enteredTracking, sent_back: sentBackInfo, dispatch_hold: dispatchHold, rx: await rxStatusForOrder(order), refund_request: await refundRequestService.latestForOrder(order.id).catch(() => null) },
         items,
         payment,
         dispatch,

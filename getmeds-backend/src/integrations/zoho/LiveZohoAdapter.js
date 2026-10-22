@@ -588,6 +588,13 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorder: result.salesorder };
   }
 
+  /** Read-only: GET /invoices/{id}. Oct 22, 2026, for the refund flow's "is it void / is a payment still on it" checks. */
+  async getInvoice(invoiceId) {
+    if (!invoiceId) throw new Error('getInvoice requires a Zoho invoice id');
+    const result = await this._request('GET', `/invoices/${invoiceId}`);
+    return { code: 0, message: 'success', invoice: result.invoice };
+  }
+
   /**
    * One page, newest first. Sorted by created_time descending and capped by
    * per_page, so exactly one HTTP GET leaves this process however large the

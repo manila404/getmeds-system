@@ -45,6 +45,9 @@ class MockZohoAdapter extends ZohoAdapter {
     this._items = new Map(seedItems.map((i) => [i.item_id, { ...i }]));
     this._contacts = new Map(seedContacts.map((c) => [c.contact_id, { ...c }]));
     this._salesOrders = new Map();
+    // Oct 22, 2026: the refund walkthrough's sample orders (ZSO-DEV-*) are not created through this adapter, so
+    // their Sales Order and invoice are made up on request. State is per Sales Order id and lives in memory.
+    this._devDocs = new Map();
     this._soCounter = 1;
     this._simulatedOutage = false;
     // Sep 2, 2026: enough of a Salesperson list to exercise both branches of
@@ -314,7 +317,44 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success [MOCK MODE]', batches: [] };
   }
 
+  /** The made-up Sales Order + invoice for a sample order, e.g. ZSO-DEV-0032. Only ids starting ZSO-DEV-. */
+  _devDoc(soId) {
+    if (!String(soId || '').startsWith('ZSO-DEV-')) return null;
+    if (!this._devDocs.has(soId)) {
+      const paid = String(soId).endsWith('0033'); // GM-DEV-0033 is the invoiced-and-paid sample
+      this._devDocs.set(soId, { soStatus: 'open', status: paid ? 'paid' : 'sent', total: 3589, balance: paid ? 0 : 3589 });
+    }
+    const d = this._devDocs.get(soId);
+    const suffix = String(soId).slice('ZSO-'.length);
+    return {
+      d,
+      invoice: { invoice_id: `ZINV-${suffix}`, invoice_number: `INV-${suffix}`, reference_number: `SO-${suffix}`, status: d.status, total: d.total, balance: d.balance },
+      salesorder: { salesorder_id: soId, salesorder_number: `SO-${suffix}`, status: d.soStatus, invoices: [{ invoice_id: `ZINV-${suffix}`, invoice_number: `INV-${suffix}`, status: d.status, total: d.total, balance: d.balance }] }
+    };
+  }
+
+  /** Dev only: change what the mock Zoho says about a sample order. patch: { status, balance, soStatus }. */
+  setDevInvoice(soId, patch = {}) {
+    const doc = this._devDoc(soId);
+    if (!doc) throw new Error('Only sample orders (ZSO-DEV-*) can be changed in the mock Zoho.');
+    const d = doc.d;
+    if (patch.status) d.status = String(patch.status);
+    if (patch.balance !== undefined) d.balance = Number(patch.balance);
+    if (patch.soStatus) d.soStatus = String(patch.soStatus);
+    return this._devDoc(soId);
+  }
+
+  async getInvoice(invoiceId) {
+    if (this._simulatedOutage) throw new Error('Simulated Zoho API outage (Test Mode) — getInvoice rejected on purpose.');
+    const m = /^ZINV-(DEV-\d+)$/.exec(String(invoiceId || ''));
+    const doc = m ? this._devDoc(`ZSO-${m[1]}`) : null;
+    if (!doc) return { code: 4, message: 'The invoice ID given seems to be incorrect. [MOCK MODE]' };
+    return { code: 0, message: 'success [MOCK MODE]', invoice: doc.invoice };
+  }
+
   async getSalesOrder(salesorderId) {
+    const dev = this._devDoc(salesorderId);
+    if (dev) return { code: 0, message: 'success [MOCK MODE]', salesorder: dev.salesorder };
     const salesorder = this._salesOrders.get(salesorderId);
     if (!salesorder) {
       return { code: 4, message: `The Sales Order ID given seems to be incorrect. [MOCK MODE]` };

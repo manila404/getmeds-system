@@ -19,7 +19,8 @@ const RefundModal = ({ order, onClose, onDone }) => {
   const held = order.refund_received_amount ?? order.held_amount ?? order.total_amount ?? 0;
   const [status, setStatus] = useState(order.refund_status === 'pending' ? 'done' : order.refund_status || 'done');
   const [received, setReceived] = useState(String(held));
-  const [refund, setRefund] = useState(order.refund_amount != null ? String(order.refund_amount) : String(held));
+  // Oct 22, 2026: a refund that came from a refund request starts at the amount that was asked for.
+  const [refund, setRefund] = useState(order.refund_amount != null ? String(order.refund_amount) : String(order.requested_amount ?? held));
   const [reference, setReference] = useState(order.refund_reference || '');
   const [date, setDate] = useState(order.refund_at || today());
   const [note, setNote] = useState(order.refund_note || '');

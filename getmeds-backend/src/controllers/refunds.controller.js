@@ -3,6 +3,7 @@
 const db = require('../db/database');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify } = require('../services/notificationService');
+const { hasColumn } = require('../services/schemaColumns');
 
 /**
  * Refunds for drafts that were paid in advance and then cancelled. Oct 5, 2026.
@@ -30,18 +31,26 @@ const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) && !Number.
 exports.list = async (req, res, next) => {
   try {
     const status = STATUSES.includes(req.query.status) ? req.query.status : null;
+    // Oct 22, 2026: where each refund came from, once the refund_requests table exists (skipped before that).
+    const hasRequests = await hasColumn('refund_requests', 'id');
     const rows = await db
       .prepare(
         `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount, o.intake_payment_terms,
                 o.draft_cancelled_at, o.draft_cancel_reason, o.refund_status,
                 ${heldExpr} AS held_amount, o.refund_received_amount, o.refund_amount,
                 o.refund_reference, o.refund_at, o.refund_note, o.refund_updated_at,
-                c.name AS customer_name, u.name AS medrep_name, cb.name AS cancelled_by_name, rb.name AS refunded_by_name
+                c.name AS customer_name, u.name AS medrep_name, cb.name AS cancelled_by_name, rb.name AS refunded_by_name,
+                ${hasRequests ? 'rq.stage' : 'NULL::text'} AS source_stage, ${hasRequests ? 'rq.zoho_invoice_number' : 'NULL::text'} AS source_invoice,
+                ${hasRequests ? 'rq.requested_amount' : 'NULL::double precision'} AS requested_amount, ${hasRequests ? 'rq.reason' : 'NULL::text'} AS request_reason
            FROM orders o
            LEFT JOIN customers c ON c.id = o.customer_id
            LEFT JOIN users u ON u.id = o.medrep_id
            LEFT JOIN users cb ON cb.id = o.draft_cancelled_by
            LEFT JOIN users rb ON rb.id = o.refund_by
+           ${hasRequests ? `LEFT JOIN LATERAL (
+             SELECT r.stage, r.zoho_invoice_number, r.requested_amount, r.reason FROM refund_requests r
+              WHERE r.order_id = o.id AND r.status IN ('queued', 'done', 'not_due') ORDER BY r.id DESC LIMIT 1
+           ) rq ON TRUE` : ''}
           WHERE o.draft_cancel_kind = 'keep_record' ${status ? 'AND o.refund_status = ?' : ''}
           ORDER BY (o.refund_status = 'pending') DESC, o.draft_cancelled_at DESC
           LIMIT 500`
@@ -127,6 +136,12 @@ exports.record = async (req, res, next) => {
       `UPDATE orders SET refund_status = ?, refund_received_amount = ?, refund_amount = ?, refund_reference = ?,
                          refund_at = ?, refund_note = ?, refund_by = ?, refund_updated_at = ?, updated_at = ? WHERE id = ?`
     ).run(status, Number(received), status === 'not_due' ? 0 : (refund === undefined ? null : refund), reference || null, status === 'done' ? date : (date || null), note || null, actor.id, now, now, o.id);
+
+    // Oct 22, 2026: a refund that came from a refund request follows it: done / no refund due, or back to queued.
+    if (await hasColumn('refund_requests', 'id')) {
+      await db.prepare(`UPDATE refund_requests SET status = ?, updated_at = ? WHERE order_id = ? AND status IN ('queued', 'done', 'not_due')`)
+        .run(status === 'pending' ? 'queued' : status, now, o.id);
+    }
 
     const kept = Math.max(0, Number(received) - (status === 'done' ? Number(refund) : 0));
     await logEvent({

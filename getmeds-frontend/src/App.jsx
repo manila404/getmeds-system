@@ -24,6 +24,7 @@ import ClientsPage from './pages/management/ClientsPage';
 import SalespersonMappingPage from './pages/management/SalespersonMappingPage';
 import PendingCustomersPage from './pages/management/PendingCustomersPage';
 import RefundsPage from './pages/finance/RefundsPage';
+import RefundRequestsPage from './pages/management/RefundRequestsPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import KpiPage from './pages/admin/KpiPage';
@@ -276,6 +277,15 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['finance', 'admin', 'management']}>
                 <RefundsPage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Oct 22, 2026: Management decides refund requests on orders already paid for and in Zoho. */}
+          <Route
+            path="/management/refund-requests"
+            element={
+              <ProtectedRoute allowedRoles={['management', 'admin']}>
+                <RefundRequestsPage />
               </ProtectedRoute>
             }
           />

@@ -6,6 +6,7 @@ import client from '../../api/client';
 import DeliveryConfirmModal from '../../components/dispatch/DeliveryConfirmModal';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
+import VoidRequestsPanel from '../../components/dispatch/VoidRequestsPanel';
 import MoreInfoMenu from '../../components/dispatch/MoreInfoMenu';
 import FilterDropdown from '../../components/dispatch/FilterDropdown';
 import DeliveryActions, { CONFIRMABLE_STATUSES, DISPATCH_PROOF_STATUSES } from '../../components/dispatch/DeliveryActions';
@@ -362,6 +363,8 @@ const DispatchQueuePage = () => {
           ]}
         />
       </div>
+      {/* Oct 22, 2026: refunds Management approved: clear the invoice in Zoho by hand, the app checks. */}
+      <VoidRequestsPanel />
       <RecentDispatchPanel
         warehouse={warehouse}
         period={period}

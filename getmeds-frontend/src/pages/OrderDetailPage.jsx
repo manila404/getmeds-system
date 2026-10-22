@@ -25,6 +25,7 @@ import OrderOverviewModal from '../components/orders/OrderOverviewModal';
 import RelinkCustomerModal from '../components/orders/RelinkCustomerModal';
 import CancelDraftModal from '../components/orders/CancelDraftModal';
 import RestoreDraftModal from '../components/orders/RestoreDraftModal';
+import RefundRequestSection from '../components/orders/RefundRequestSection';
 import StockHoldModal from '../components/orders/StockHoldModal';
 import HoldEvidence, { evidenceOf } from '../components/orders/HoldEvidence';
 import ApproveOrderModal from '../components/orders/ApproveOrderModal';
@@ -1034,6 +1035,8 @@ const OrderDetailPage = () => {
             </button>
           </div>
         </div>
+        {/* Oct 22, 2026: ask for a refund on an order that is already paid for (also shows where a request is). */}
+        <RefundRequestSection order={order} user={user} />
         {order.status === 'draft' && order.stock_hold_at && !order.draft_cancelled_at && (
           <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-[13px] text-amber-950">
             <p className="font-semibold">⏳ Waiting for stock{order.stock_hold_item ? `: ${order.stock_hold_item}` : ''}</p>
@@ -1057,7 +1060,7 @@ const OrderDetailPage = () => {
             <p className="font-semibold">
               {order.draft_cancel_kind === 'deleted'
                 ? 'This draft was deleted'
-                : `This draft was cancelled${order.draft_cancel_kind === 'keep_record' ? ' — kept on record' : ''}`}
+                : `${order.zoho_so_id ? 'This order was cancelled for a refund' : 'This draft was cancelled'}${order.draft_cancel_kind === 'keep_record' ? ' — kept on record' : ''}`}
             </p>
             <p className="mt-0.5">Reason: {order.draft_cancel_reason || '—'}</p>
             {order.draft_cancel_kind === 'deleted' && (

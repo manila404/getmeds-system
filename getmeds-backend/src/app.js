@@ -125,6 +125,13 @@ app.use('/api/auth', authRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/finance', financeRoutes);
 app.use('/api/dispatch', dispatchRoutes);
+// Oct 22, 2026: refund requests for orders already in Zoho (see services/refundRequestService.js).
+app.use('/api/refund-requests', require('./routes/refundRequests.routes'));
+// Oct 22, 2026: localhost only. Lets the refund walkthrough "do things in Zoho" against the MOCK adapter.
+// Never mounted when ZOHO_MODE is live.
+if (String(process.env.ZOHO_MODE || 'mock').toLowerCase() === 'mock') {
+  app.use('/api/dev-zoho', require('./routes/devZoho.routes'));
+}
 // Sep 15, 2026: Dispatch's stock announcements (out of stock, back in stock…).
 app.use('/api/stock-announcements', require('./routes/stockAnnouncements.routes'));
 app.use('/api/management', managementRoutes);

@@ -5,6 +5,7 @@ import { Loader2, Banknote, AlertTriangle } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import RefundModal from '../../components/orders/RefundModal';
+import PaymentsToRemovePanel, { PAYMENTS_QUERY_KEY } from '../../components/finance/PaymentsToRemovePanel';
 
 /**
  * Cancelled drafts that were paid in advance, and the refunds owed. Oct 5, 2026.
@@ -13,7 +14,9 @@ import RefundModal from '../../components/orders/RefundModal';
  * money owed back to customers. Loads when opened — no automatic refresh.
  */
 const peso = (n) => `₱${(Number(n) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const TABS = [['pending', 'Refund pending'], ['done', 'Refund done'], ['not_due', 'No refund due'], ['all', 'All']];
+const TABS = [['pending', 'Refund pending'], ['payments', 'Payments to remove'], ['done', 'Refund done'], ['not_due', 'No refund due'], ['all', 'All']];
+// Oct 22, 2026: where each refund came from (a refund request), for the new column.
+const SOURCE = { draft: 'Draft', so: 'Sales Order', invoiced: 'Invoiced' };
 const CHIP = {
   pending: 'bg-amber-100 text-amber-900 border-amber-300',
   done: 'bg-emerald-100 text-emerald-900 border-emerald-300',
@@ -30,11 +33,17 @@ const RefundsPage = () => {
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['refunds', tab],
+    enabled: tab !== 'payments',
     queryFn: () => client.get('/api/finance/refunds', { params: tab === 'all' ? {} : { status: tab } }).then((r) => r.data?.data),
     staleTime: 30_000
   });
   const s = data?.summary;
   const rows = data?.refunds || [];
+  const { data: toRemove } = useQuery({
+    queryKey: PAYMENTS_QUERY_KEY,
+    queryFn: () => client.get('/api/refund-requests/payments-to-remove').then((r) => r.data?.data?.requests || []),
+    staleTime: 30_000
+  });
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
@@ -62,12 +71,14 @@ const RefundsPage = () => {
       <div className="flex flex-wrap gap-2 mt-5">
         {TABS.map(([k, t]) => (
           <button key={k} type="button" onClick={() => setTab(k)}
-            className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${tab === k ? 'bg-getmeds-blue text-white border-getmeds-blue' : 'border-slate-300 text-ink-secondary bg-white'}`}>{t}</button>
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${tab === k ? 'bg-getmeds-blue text-white border-getmeds-blue' : 'border-slate-300 text-ink-secondary bg-white'}`}>{t}{k === 'payments' && toRemove?.length ? ` (${toRemove.length})` : ''}</button>
         ))}
       </div>
 
       <div className="mt-3 rounded-xl border border-slate-200 bg-white overflow-x-auto">
-        {isLoading ? (
+        {tab === 'payments' ? (
+          <PaymentsToRemovePanel canAct={canRecord} />
+        ) : isLoading ? (
           <p className="p-6 text-sm text-ink-secondary flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Loading…</p>
         ) : isError ? (
           <p className="p-6 text-sm text-red-700">Could not load the list. <button className="underline" onClick={() => refetch()}>Try again</button></p>
@@ -77,7 +88,7 @@ const RefundsPage = () => {
           <table className="w-full text-sm min-w-[860px]">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wide text-ink-secondary border-b border-slate-200">
-                <th className="px-4 py-2.5">Order</th><th className="px-3 py-2.5">Customer</th><th className="px-3 py-2.5">MedRep</th>
+                <th className="px-4 py-2.5">Order</th><th className="px-3 py-2.5">Customer</th><th className="px-3 py-2.5">Comes from</th><th className="px-3 py-2.5">MedRep</th>
                 <th className="px-3 py-2.5 text-right">Held</th><th className="px-3 py-2.5">Cancelled</th><th className="px-3 py-2.5">Status</th>
                 {canRecord && <th className="px-3 py-2.5" />}
               </tr>
@@ -87,6 +98,11 @@ const RefundsPage = () => {
                 <tr key={r.id} className="border-b border-slate-100 align-top">
                   <td className="px-4 py-3 font-semibold"><Link className="text-getmeds-blue hover:underline" to={`/orders/${r.id}`}>{r.getmeds_order_id}</Link></td>
                   <td className="px-3 py-3">{r.customer_name}</td>
+                  <td className="px-3 py-3 text-xs">
+                    {SOURCE[r.source_stage] || 'Draft'}
+                    {r.source_stage === 'invoiced' && r.source_invoice && <span className="block text-ink-secondary">{r.source_invoice} void ✓</span>}
+                    {r.requested_amount != null && Number(r.requested_amount) < Number(r.held_amount) && <span className="block text-ink-secondary">asked {peso(r.requested_amount)}</span>}
+                  </td>
                   <td className="px-3 py-3">{r.medrep_name}</td>
                   <td className="px-3 py-3 text-right tabular-nums">{peso(r.held_amount)}</td>
                   <td className="px-3 py-3">

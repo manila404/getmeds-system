@@ -257,6 +257,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
           { to: '/orders', icon: <ClipboardList size={19} />, label: 'All Orders Log' }
         ]),
         ...(role === 'management' ? [{ to: '/finance/refunds', icon: <Banknote size={19} />, label: 'Refunds owed' }] : []),
+        // Oct 22, 2026: refund requests on orders already in Zoho (Management decides).
+        ...(role === 'management' ? [{ to: '/management/refund-requests', icon: <Banknote size={19} />, label: 'Refund requests' }] : []),
         // Oct 2, 2026: Management decides what happens to a customer a MedRep
         // created that Zoho has not accepted yet (push as new, or link to the
         // Zoho customer it duplicates). Admin has the same page under Customers.
