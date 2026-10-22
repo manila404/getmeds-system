@@ -170,6 +170,15 @@ class ZohoAdapter {
   }
 
   /**
+   * Read-only: credit notes matching { creditnote_number } and/or { reference_number } (the invoice number a credit note
+   * was raised against). Oct 23, 2026: the refund flow checks that Finance's credit note exists and is the right size.
+   * @returns {Promise<{code:number, message:string, creditnotes:object[]}>}
+   */
+  async findCreditNotes(filter) {
+    throw new Error('Not implemented');
+  }
+
+  /**
    * Read-only: one invoice (status, total, balance). Oct 22, 2026: the refund flow reads it to check that a
    * payment was removed and that an invoice is void. The app never voids anything itself.
    * @returns {Promise<{code:number, message:string, invoice:object}>}

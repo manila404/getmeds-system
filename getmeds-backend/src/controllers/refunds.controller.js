@@ -4,6 +4,7 @@ const db = require('../db/database');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify } = require('../services/notificationService');
 const { hasColumn } = require('../services/schemaColumns');
+const refundRequestService = require('../services/refundRequestService');
 
 /**
  * Refunds for drafts that were paid in advance and then cancelled. Oct 5, 2026.
@@ -33,6 +34,8 @@ exports.list = async (req, res, next) => {
     const status = STATUSES.includes(req.query.status) ? req.query.status : null;
     // Oct 22, 2026: where each refund came from, once the refund_requests table exists (skipped before that).
     const hasRequests = await hasColumn('refund_requests', 'id');
+    // Oct 23, 2026: the Zoho step each refund still waits for (needs the v2 columns, refund-requests-v2.sql).
+    const hasV2 = hasRequests && (await hasColumn('refund_requests', 'credit_note_checked_at'));
     const rows = await db
       .prepare(
         `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount, o.intake_payment_terms,
@@ -41,14 +44,17 @@ exports.list = async (req, res, next) => {
                 o.refund_reference, o.refund_at, o.refund_note, o.refund_updated_at,
                 c.name AS customer_name, u.name AS medrep_name, cb.name AS cancelled_by_name, rb.name AS refunded_by_name,
                 ${hasRequests ? 'rq.stage' : 'NULL::text'} AS source_stage, ${hasRequests ? 'rq.zoho_invoice_number' : 'NULL::text'} AS source_invoice,
-                ${hasRequests ? 'rq.requested_amount' : 'NULL::double precision'} AS requested_amount, ${hasRequests ? 'rq.reason' : 'NULL::text'} AS request_reason
+                ${hasRequests ? 'rq.requested_amount' : 'NULL::double precision'} AS requested_amount, ${hasRequests ? 'rq.reason' : 'NULL::text'} AS request_reason,
+                ${hasV2 ? 'rq.goods_status' : 'NULL::text'} AS request_goods, ${hasV2 ? 'rq.status' : 'NULL::text'} AS request_status,
+                ${hasV2 ? '(rq.payment_recorded_at IS NOT NULL)' : 'NULL::boolean'} AS payment_confirmed, ${hasV2 ? 'rq.credit_note_number' : 'NULL::text'} AS credit_note_number,
+                ${hasV2 ? '(rq.credit_note_checked_at IS NOT NULL)' : 'NULL::boolean'} AS credit_note_confirmed
            FROM orders o
            LEFT JOIN customers c ON c.id = o.customer_id
            LEFT JOIN users u ON u.id = o.medrep_id
            LEFT JOIN users cb ON cb.id = o.draft_cancelled_by
            LEFT JOIN users rb ON rb.id = o.refund_by
            ${hasRequests ? `LEFT JOIN LATERAL (
-             SELECT r.stage, r.zoho_invoice_number, r.requested_amount, r.reason FROM refund_requests r
+             SELECT r.* FROM refund_requests r
               WHERE r.order_id = o.id AND r.status IN ('queued', 'done', 'not_due') ORDER BY r.id DESC LIMIT 1
            ) rq ON TRUE` : ''}
           WHERE o.draft_cancel_kind = 'keep_record' ${status ? 'AND o.refund_status = ?' : ''}
@@ -127,6 +133,15 @@ exports.record = async (req, res, next) => {
       if (!validDate(date)) return bad('VALIDATION_ERROR', 'Enter the date the refund was paid (YYYY-MM-DD).');
     }
     if (status === 'not_due' && !note) return bad('VALIDATION_ERROR', 'Say why no refund is due.');
+
+    // Oct 23, 2026: a refund that came from a refund request is not marked done until its Zoho step is confirmed
+    // (the customer's payment recorded, or Finance's credit note found in Zoho).
+    if (status === 'done' && (await hasColumn('refund_requests', 'id'))) {
+      try { await refundRequestService.assertReadyToPay(o.id); } catch (err) {
+        if (err instanceof refundRequestService.RefundError) return bad(err.code, err.message, err.status);
+        throw err;
+      }
+    }
 
     const actor = await resolveActor(req.user, 'finance');
     const now = new Date().toISOString();

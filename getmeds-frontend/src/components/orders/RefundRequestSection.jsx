@@ -8,12 +8,12 @@ import client from '../../api/client';
  * Refund requests on the order page. Oct 22, 2026.
  *
  * The one entry point for a refund on an order that is already paid for: the MedRep (or Team Lead,
- * Management, Admin) asks, Management decides, and for an invoiced order Finance and Dispatch clear
- * the invoice in Zoho first. See services/refundRequestService.js and the walkthrough in
- * getmeds-documents/refund-process-walkthrough.html.
+ * Management, Admin) asks, Management decides. If the goods come back, Dispatch checks them and Management
+ * presses Refund; Finance then does its part in Zoho (payment recorded, or a credit note). There is no void.
+ * See services/refundRequestService.js and the walkthrough in getmeds-documents/refund-process-walkthrough.html.
  */
 const peso = (n) => `₱${(Number(n) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const OPEN = ['requested', 'approved', 'voided', 'queued'];
+const OPEN = ['requested', 'approved', 'returned', 'voided', 'queued'];
 const GOODS = [
   ['not_shipped', 'Not shipped'],
   ['returning', 'Shipped, coming back to us'],
@@ -24,8 +24,8 @@ const GOODS = [
 export const stageOf = (order) => (order.zoho_invoice_id || order.zoho_invoice_number ? 'invoiced' : order.zoho_so_id ? 'so' : 'draft');
 const STAGE_TEXT = {
   draft: 'This order is not in Zoho yet. Management decides; if it approves, the order is cancelled and Finance arranges the refund.',
-  so: 'This order has a Sales Order but no invoice. Management decides; if it approves, Finance arranges the refund and Dispatch closes the Sales Order in Zoho.',
-  invoiced: 'This order is invoiced. Management decides. If the goods are not with the customer, Dispatch records them as returned. Finance removes any payment in Zoho, Dispatch voids the invoice, then Finance pays.'
+  so: 'This order has a Sales Order but no invoice. Management decides. If the goods are not coming back, Finance records the payment in Zoho and refunds it. If they are, Dispatch checks them first.',
+  invoiced: 'This order is invoiced. Management decides. If the goods are not coming back, Finance records the payment in Zoho and refunds it. If they are, Dispatch checks them, Management refunds, and Finance creates the credit note in Zoho.'
 };
 
 const errText = (err, fallback) => err?.response?.data?.error?.message || err?.message || fallback;
@@ -127,18 +127,25 @@ const RefundRequestSection = ({ order, user, onChanged }) => {
         <div className="mb-4 rounded-lg border border-getmeds-blue/30 bg-blue-50 px-4 py-3 text-[13px] text-slate-900">
           <p className="font-semibold flex items-center gap-1.5"><Banknote className="w-4 h-4" />
             {rr.status === 'requested' && 'Refund requested: waiting for Management'}
-            {rr.status === 'approved' && 'Refund approved: clearing the invoice in Zoho'}
-            {rr.status === 'voided' && 'Invoice void: waiting for Management to send it to Finance'}
+            {rr.status === 'approved' && 'Refund approved: waiting for Dispatch to check the returned goods'}
+            {['returned', 'voided'].includes(rr.status) && 'Goods checked: waiting for Management to send it to Finance'}
             {rr.status === 'queued' && 'Refund with Finance'}
             <span className="font-normal text-ink-secondary"> · {peso(rr.requested_amount)}</span>
           </p>
           <p className="mt-0.5 text-[12.5px]">Reason: {rr.reason}</p>
-          {rr.status === 'approved' && rr.stage === 'invoiced' && (
+          {rr.path && rr.path !== 'draft' && rr.status !== 'requested' && (
             <ul className="mt-2 space-y-1">
               <Step done>Approved by {rr.decided_by_name || 'Management'}</Step>
-              {rr.payment_applied !== false && <Step done={Boolean(rr.payment_removed_at)}>Payment removed from {rr.zoho_invoice_number || 'the invoice'} in Zoho (Finance)</Step>}
-              {['returning', 'customer_returns'].includes(rr.goods_status) && <Step done={Boolean(rr.goods_returned_at)}>Goods recorded as returned (Dispatch)</Step>}
-              <Step done={false}>{rr.zoho_invoice_number || 'Invoice'} voided in Zoho (Dispatch)</Step>
+              {rr.path === 'return' ? (
+                <>
+                  <Step done={Boolean(rr.goods_returned_at)}>Returned goods checked by Dispatch{rr.goods_condition ? `: ${rr.goods_condition === 'good' ? 'good condition' : 'damaged'}` : ''}</Step>
+                  <Step done={rr.status === 'queued'}>Management checked it and sent it to Finance</Step>
+                  <Step done={Boolean(rr.credit_note_checked_at)}>Credit note {rr.credit_note_number || ''} created in Zoho (Finance)</Step>
+                </>
+              ) : (
+                <Step done={Boolean(rr.payment_recorded_at)}>Customer payment recorded in Zoho (Finance)</Step>
+              )}
+              <Step done={false}>Refunded in Zoho and recorded (Finance)</Step>
             </ul>
           )}
           {rr.status === 'requested' && (rr.requested_by === user?.id || role === 'admin') && (

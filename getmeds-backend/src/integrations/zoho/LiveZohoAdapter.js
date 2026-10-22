@@ -588,6 +588,16 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorder: result.salesorder };
   }
 
+  /** Read-only: GET /creditnotes filtered by number and/or the invoice number it references. Oct 23, 2026. */
+  async findCreditNotes({ creditnote_number, reference_number } = {}) {
+    if (!creditnote_number && !reference_number) throw new Error('findCreditNotes needs a credit note number or an invoice number');
+    const query = { per_page: '25', sort_column: 'date', sort_order: 'D' };
+    if (creditnote_number) query.creditnote_number = String(creditnote_number).trim();
+    if (reference_number) query.reference_number = String(reference_number).trim();
+    const result = await this._request('GET', '/creditnotes', { query });
+    return { code: 0, message: 'success', creditnotes: result.creditnotes || [] };
+  }
+
   /** Read-only: GET /invoices/{id}. Oct 22, 2026, for the refund flow's "is it void / is a payment still on it" checks. */
   async getInvoice(invoiceId) {
     if (!invoiceId) throw new Error('getInvoice requires a Zoho invoice id');

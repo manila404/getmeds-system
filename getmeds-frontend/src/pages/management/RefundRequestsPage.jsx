@@ -10,14 +10,14 @@ import client from '../../api/client';
  *
  * Four tabs, split by what comes next:
  *   Needs decision      approve or reject (a note the requester reads)
- *   Waiting for Zoho    invoiced orders approved, being cleared by Finance (payment) and Dispatch (goods, void)
- *   Ready to refund     the invoice is void: press Refund to put it on Finance's list
+ *   Waiting for goods   approved, the goods are coming back: Dispatch checks them when they arrive
+ *   Ready to refund     Dispatch checked the goods (good or damaged): check it and press Refund to put it on Finance's list
  *   Done                queued, paid, rejected or withdrawn
  *
  * See services/refundRequestService.js and getmeds-documents/refund-process-walkthrough.html.
  */
 const peso = (n) => `₱${(Number(n) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const TABS = [['needs_decision', 'Needs decision'], ['waiting', 'Waiting for Zoho clean-up'], ['ready', 'Ready to refund'], ['done', 'Done']];
+const TABS = [['needs_decision', 'Needs decision'], ['waiting', 'Waiting for returned goods'], ['ready', 'Ready to refund'], ['done', 'Done']];
 const STAGE = {
   draft: ['Draft', 'bg-amber-100 text-amber-900 border-amber-300'],
   so: ['Sales Order, not invoiced', 'bg-sky-100 text-sky-900 border-sky-300'],
@@ -25,16 +25,16 @@ const STAGE = {
 };
 const STATUS = {
   requested: ['Requested', 'bg-blue-50 text-blue-900 border-blue-200'], approved: ['Approved', 'bg-amber-100 text-amber-900 border-amber-300'],
-  voided: ['Void in Zoho', 'bg-violet-100 text-violet-900 border-violet-300'], queued: ['With Finance', 'bg-emerald-50 text-emerald-900 border-emerald-200'],
+  returned: ['Goods checked', 'bg-violet-100 text-violet-900 border-violet-300'], voided: ['Goods checked', 'bg-violet-100 text-violet-900 border-violet-300'], queued: ['With Finance', 'bg-emerald-50 text-emerald-900 border-emerald-200'],
   done: ['Refunded', 'bg-emerald-100 text-emerald-900 border-emerald-300'], not_due: ['No refund due', 'bg-slate-100 text-slate-700 border-slate-300'],
   rejected: ['Rejected', 'bg-red-50 text-red-900 border-red-200'], withdrawn: ['Withdrawn', 'bg-slate-100 text-slate-700 border-slate-300']
 };
 const NEXT_TEXT = {
-  finance_payment: 'Waiting for Finance to remove the payment in Zoho',
-  dispatch_goods: 'Waiting for Dispatch to record the goods as returned',
-  dispatch_void: 'Waiting for Dispatch to void the invoice in Zoho',
-  management_refund: 'Press Refund to send it to Finance',
-  finance_refund: 'Finance is arranging the refund'
+  dispatch_goods: 'Waiting for Dispatch to check the returned goods',
+  management_refund: 'Check it and press Refund to send it to Finance',
+  finance_payment: 'Finance: record the customer payment in Zoho, then refund it',
+  finance_credit_note: 'Finance: create the credit note in Zoho, then refund it',
+  finance_refund: 'Finance is refunding it in Zoho'
 };
 const GOODS = { not_shipped: 'not shipped', returning: 'coming back', customer_returns: 'customer returns', customer_keeps: 'customer keeps' };
 const errText = (err, fallback) => err?.response?.data?.error?.message || err?.message || fallback;
@@ -52,11 +52,11 @@ const RefundRequestsPage = () => {
   });
   const rows = data?.requests || [];
   const counts = data?.counts || {};
-  const refresh = () => { qc.invalidateQueries({ queryKey: ['refund-requests'] }); qc.invalidateQueries({ queryKey: ['refunds'] }); qc.invalidateQueries({ queryKey: ['refund-summary'] }); qc.invalidateQueries({ queryKey: ['void-requests'] }); };
+  const refresh = () => { qc.invalidateQueries({ queryKey: ['refund-requests'] }); qc.invalidateQueries({ queryKey: ['refunds'] }); qc.invalidateQueries({ queryKey: ['refund-summary'] }); qc.invalidateQueries({ queryKey: ['return-checks'] }); qc.invalidateQueries({ queryKey: ['finance-steps'] }); };
 
   const approve = useMutation({
     mutationFn: (r) => client.post(`/api/refund-requests/${r.id}/approve`).then((x) => x.data),
-    onSuccess: (res) => { const s = res?.data?.request?.status; toast.success(s === 'queued' ? 'Approved: the order is cancelled and the refund is on Finance\'s list.' : s === 'voided' ? 'Approved. The invoice is already void: press Refund.' : 'Approved. Finance and Dispatch were told to clear the invoice in Zoho.'); refresh(); },
+    onSuccess: (res) => { const s = res?.data?.request?.status; toast.success(s === 'queued' ? 'Approved: the order is cancelled and the refund is on Finance\'s list.' : 'Approved. Dispatch was told to check the goods when they are back.'); refresh(); },
     onError: (err) => toast.error(errText(err, 'Could not approve it'), { duration: 8000 })
   });
   const refund = useMutation({
@@ -75,7 +75,7 @@ const RefundRequestsPage = () => {
     <div className="max-w-6xl mx-auto px-4 py-6">
       <h1 className="text-2xl font-semibold text-ink-primary">Refund requests</h1>
       <p className="text-sm text-ink-secondary mt-1 max-w-3xl">
-        MedReps ask for a refund on an order that is already paid for. A draft is cancelled and goes to Finance. For an invoiced order, Finance removes any payment and Dispatch records returned goods and voids the invoice in Zoho first.
+        MedReps ask for a refund on an order that is already paid for. If the goods are not coming back, approving puts it on Finance's list (Finance records the payment in Zoho, then refunds it). If they are, Dispatch checks them first, you check it and press Refund, then Finance creates the credit note.
       </p>
 
       <div className="flex flex-wrap gap-2 mt-5">
@@ -118,6 +118,11 @@ const RefundRequestsPage = () => {
                     <td className="px-3 py-3 max-w-[260px]">
                       <span className="block">{r.reason}</span>
                       {r.decision_note && <span className="block text-xs text-ink-secondary mt-0.5">Decision: {r.decision_note}</span>}
+                      {r.goods_condition && (
+                        <span className={`block text-xs mt-1 ${r.goods_condition === 'damaged' ? 'text-red-700 font-semibold' : 'text-emerald-800'}`}>
+                          Dispatch: {r.goods_condition === 'good' ? 'goods in good condition' : 'goods DAMAGED'}{r.goods_returned_note ? ` (${r.goods_returned_note})` : ''}
+                        </span>
+                      )}
                       {tab !== 'needs_decision' && (
                         <span className={`inline-block mt-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${STATUS[r.status]?.[1]}`}>{STATUS[r.status]?.[0]}</span>
                       )}
@@ -127,13 +132,16 @@ const RefundRequestsPage = () => {
                       {r.status === 'requested' && (
                         <span className="inline-flex gap-1.5">
                           <button type="button" disabled={busy} onClick={() => approve.mutate(r)} className="rounded-md bg-getmeds-blue px-2.5 py-1 text-xs font-semibold text-white disabled:opacity-50">
-                            {r.stage === 'draft' ? 'Cancel & refund' : r.stage === 'so' ? 'Approve & refund' : 'Approve'}
+                            {r.path === 'return' ? 'Approve' : 'Approve & refund'}
                           </button>
                           <button type="button" disabled={busy} onClick={() => { setRejecting(r.id); setNote(''); }} className="rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-semibold text-red-700 disabled:opacity-50">Reject</button>
                         </span>
                       )}
-                      {r.status === 'voided' && (
-                        <button type="button" disabled={busy} onClick={() => refund.mutate(r)} className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-50">Refund</button>
+                      {['returned', 'voided'].includes(r.status) && (
+                        <span className="inline-flex gap-1.5">
+                          <button type="button" disabled={busy} onClick={() => refund.mutate(r)} className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-50">Refund</button>
+                          <button type="button" disabled={busy} onClick={() => { setRejecting(r.id); setNote(''); }} className="rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-semibold text-red-700 disabled:opacity-50">Reject</button>
+                        </span>
                       )}
                     </td>
                   </tr>

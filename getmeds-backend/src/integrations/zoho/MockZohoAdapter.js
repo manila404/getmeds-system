@@ -48,6 +48,7 @@ class MockZohoAdapter extends ZohoAdapter {
     // Oct 22, 2026: the refund walkthrough's sample orders (ZSO-DEV-*) are not created through this adapter, so
     // their Sales Order and invoice are made up on request. State is per Sales Order id and lives in memory.
     this._devDocs = new Map();
+    this._devCreditNotes = new Map(); // creditnote_number -> credit note (made up, for the refund walkthrough)
     this._soCounter = 1;
     this._simulatedOutage = false;
     // Sep 2, 2026: enough of a Salesperson list to exercise both branches of
@@ -342,6 +343,23 @@ class MockZohoAdapter extends ZohoAdapter {
     if (patch.balance !== undefined) d.balance = Number(patch.balance);
     if (patch.soStatus) d.soStatus = String(patch.soStatus);
     return this._devDoc(soId);
+  }
+
+  /** Dev only: raise a made-up credit note against a sample order's invoice. */
+  setDevCreditNote(soId, { total, status = 'open' } = {}) {
+    const doc = this._devDoc(soId);
+    if (!doc) throw new Error('Only sample orders (ZSO-DEV-*) can have a credit note in the mock Zoho.');
+    const suffix = String(soId).slice('ZSO-'.length);
+    const cn = { creditnote_id: `ZCN-${suffix}`, creditnote_number: `CN-${suffix}`, status, reference_number: doc.invoice.invoice_number, total: Number(total ?? doc.d.total), balance: Number(total ?? doc.d.total), customer_id: null };
+    this._devCreditNotes.set(cn.creditnote_number, cn);
+    return cn;
+  }
+
+  async findCreditNotes({ creditnote_number, reference_number } = {}) {
+    if (this._simulatedOutage) throw new Error('Simulated Zoho API outage (Test Mode) — findCreditNotes rejected on purpose.');
+    const all = [...this._devCreditNotes.values()];
+    const rows = all.filter((c) => (!creditnote_number || c.creditnote_number === creditnote_number) && (!reference_number || c.reference_number === reference_number));
+    return { code: 0, message: 'success [MOCK MODE]', creditnotes: rows };
   }
 
   async getInvoice(invoiceId) {

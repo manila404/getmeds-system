@@ -235,6 +235,7 @@ const facadeMethods = [
   'updateSalesOrder',
   'getSalesOrder',
   'getInvoice', // Oct 22, 2026: read-only, for the refund flow
+  'findCreditNotes', // Oct 23, 2026: read-only, for the refund flow
   // Oct 9, 2026: added HERE. getItemWarehouses and getItemBatches existed on LiveZohoAdapter
   // (feature 10.8, the Inventory page's warehouse breakdown) but were never listed, so
   // through this facade they were `undefined` and the breakdown could not work. The same

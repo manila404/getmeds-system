@@ -5,7 +5,7 @@ import { Loader2, Banknote, AlertTriangle } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import RefundModal from '../../components/orders/RefundModal';
-import PaymentsToRemovePanel, { PAYMENTS_QUERY_KEY } from '../../components/finance/PaymentsToRemovePanel';
+import ZohoStepsPanel, { FINANCE_STEPS_KEY } from '../../components/finance/ZohoStepsPanel';
 
 /**
  * Cancelled drafts that were paid in advance, and the refunds owed. Oct 5, 2026.
@@ -14,7 +14,7 @@ import PaymentsToRemovePanel, { PAYMENTS_QUERY_KEY } from '../../components/fina
  * money owed back to customers. Loads when opened — no automatic refresh.
  */
 const peso = (n) => `₱${(Number(n) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const TABS = [['pending', 'Refund pending'], ['payments', 'Payments to remove'], ['done', 'Refund done'], ['not_due', 'No refund due'], ['all', 'All']];
+const TABS = [['pending', 'Refund pending'], ['payments', 'Zoho steps'], ['done', 'Refund done'], ['not_due', 'No refund due'], ['all', 'All']];
 // Oct 22, 2026: where each refund came from (a refund request), for the new column.
 const SOURCE = { draft: 'Draft', so: 'Sales Order', invoiced: 'Invoiced' };
 const CHIP = {
@@ -40,8 +40,8 @@ const RefundsPage = () => {
   const s = data?.summary;
   const rows = data?.refunds || [];
   const { data: toRemove } = useQuery({
-    queryKey: PAYMENTS_QUERY_KEY,
-    queryFn: () => client.get('/api/refund-requests/payments-to-remove').then((r) => r.data?.data?.requests || []),
+    queryKey: FINANCE_STEPS_KEY,
+    queryFn: () => client.get('/api/refund-requests/finance-steps').then((r) => r.data?.data?.requests || []),
     staleTime: 30_000
   });
 
@@ -77,7 +77,7 @@ const RefundsPage = () => {
 
       <div className="mt-3 rounded-xl border border-slate-200 bg-white overflow-x-auto">
         {tab === 'payments' ? (
-          <PaymentsToRemovePanel canAct={canRecord} />
+          <ZohoStepsPanel canAct={canRecord} />
         ) : isLoading ? (
           <p className="p-6 text-sm text-ink-secondary flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Loading…</p>
         ) : isError ? (
@@ -100,7 +100,12 @@ const RefundsPage = () => {
                   <td className="px-3 py-3">{r.customer_name}</td>
                   <td className="px-3 py-3 text-xs">
                     {SOURCE[r.source_stage] || 'Draft'}
-                    {r.source_stage === 'invoiced' && r.source_invoice && <span className="block text-ink-secondary">{r.source_invoice} void ✓</span>}
+                    {r.source_stage === 'invoiced' && r.source_invoice && <span className="block text-ink-secondary">{r.source_invoice}</span>}
+                    {r.refund_status === 'pending' && r.request_status === 'queued' && r.source_stage !== 'draft' && (
+                      ['returning', 'customer_returns'].includes(r.request_goods)
+                        ? (r.credit_note_confirmed ? <span className="block text-emerald-700">Credit note {r.credit_note_number} ✓</span> : <span className="block text-amber-800">Needs the credit note in Zoho</span>)
+                        : (r.payment_confirmed ? <span className="block text-emerald-700">Payment in Zoho ✓</span> : <span className="block text-amber-800">Needs the payment recorded in Zoho</span>)
+                    )}
                     {r.requested_amount != null && Number(r.requested_amount) < Number(r.held_amount) && <span className="block text-ink-secondary">asked {peso(r.requested_amount)}</span>}
                   </td>
                   <td className="px-3 py-3">{r.medrep_name}</td>

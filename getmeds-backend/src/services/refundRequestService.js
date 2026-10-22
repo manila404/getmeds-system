@@ -7,33 +7,31 @@ const { notify, getUserIdsByRole } = require('./notificationService');
 const teamScopeService = require('./teamScopeService');
 
 /**
- * Refund requests for orders that are already paid for. Oct 22, 2026.
+ * Refund requests for orders already paid for. Oct 22, 2026; reworked Oct 23, 2026 after Finance: "there is no void".
  *
- * Until now only a paid DRAFT could be refunded (orders.controller cancelDraft: cancel and keep
- * record, then Finance records the refund). Once an order had a Sales Order, or an invoice, there
- * was no way to ask for one. This is that path, in three cases decided by where the order is:
+ * The MedRep asks; Management decides. What happens next depends on where the order is and where the goods are:
  *
- *   draft     no Zoho Sales Order       MedRep asks, Management approves: the order is cancelled and
- *                                       the refund goes on Finance's list.
- *   so        Sales Order, no invoice   same, and Dispatch closes the Sales Order in Zoho (does not
- *                                       hold the refund up).
- *   invoiced  has an invoice            MedRep asks, Management approves, then (as they apply):
- *                                       Finance removes the payment in Zoho, Dispatch records the goods
- *                                       as returned and voids the invoice IN ZOHO BY HAND, the app only
- *                                       READS Zoho to check; then Management presses Refund.
+ *   draft            no Zoho Sales Order            Management cancels it; the refund goes on Finance's list.
+ *   payment path     Sales Order or invoice, the    Management approves and the refund goes straight on Finance's list. Finance records the
+ *                    goods are NOT coming back      customer's payment in Zoho first (if it is not there yet), refunds it in Zoho, then
+ *                    (not shipped / customer keeps) records the refund here.
+ *   return path      shipped and coming back        Dispatch checks the returned items (good condition or not) -> Management checks and
+ *                                                   presses Refund -> Finance creates the credit note in Zoho; the app reads Zoho to
+ *                                                   confirm it exists and is the right size -> Finance refunds and records it here.
  *
- * Nothing here writes to Zoho (the write lock refuses deletes and voids on purpose). The refund
- * itself rides the existing fields on `orders` (draft_cancel_*, refund_*), so Finance's Refunds page,
- * the Record refund dialog and the summary keep working unchanged.
+ * Nothing here writes to Zoho. The app only READS it (the invoice's payment, the credit note), and Finance's "Record refund" is
+ * refused until the Zoho step the path needs is confirmed. The refund itself rides the existing fields on `orders`
+ * (draft_cancel_*, refund_*), so Finance's Refunds page and the Record refund dialog keep working.
  *
- * Status: requested -> approved (invoiced only) -> voided -> queued -> done | not_due
- *         requested -> rejected | withdrawn
+ * Status: requested -> approved (return path, waiting for Dispatch) -> returned (waiting for Management) -> queued -> done | not_due
+ *         requested -> queued (draft, payment path)        requested -> rejected | withdrawn        returned -> rejected
+ * ('voided' is a leftover from the first version; it behaves like 'returned'.)
  */
 
-const OPEN = ['requested', 'approved', 'voided', 'queued'];
+const OPEN = ['requested', 'approved', 'returned', 'voided', 'queued'];
 const GOODS = ['not_shipped', 'returning', 'customer_returns', 'customer_keeps'];
 const GOODS_NEED_RETURN = ['returning', 'customer_returns'];
-const CLOSED_SO_STATUSES = ['void', 'cancelled'];
+const CONDITIONS = ['good', 'damaged'];
 
 class RefundError extends Error {
   constructor(status, code, message) { super(message); this.status = status; this.code = code; }
@@ -43,16 +41,22 @@ const fail = (status, code, message) => { throw new RefundError(status, code, me
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 const peso = (n) => `₱${Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-/** Where the order is, which decides the path. */
+/** Where the order is. */
 function stageOf(order) {
   if (order.zoho_invoice_id || order.zoho_invoice_number) return 'invoiced';
   if (order.zoho_so_id) return 'so';
   return 'draft';
 }
 
+/** draft, payment (goods not coming back) or return (goods coming back). */
+function pathOf(r) {
+  if (r.stage === 'draft') return 'draft';
+  return GOODS_NEED_RETURN.includes(r.goods_status) ? 'return' : 'payment';
+}
+
 async function loadOrder(orderId) {
   return db.prepare(
-    `SELECT o.*, c.name AS customer_name, u.email AS medrep_email, u.name AS medrep_name
+    `SELECT o.*, c.name AS customer_name, c.zoho_contact_id AS customer_zoho_id, u.email AS medrep_email, u.name AS medrep_name
        FROM orders o LEFT JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.medrep_id
       WHERE o.id = ?`
   ).get(orderId);
@@ -80,12 +84,11 @@ async function canRequest(user, order) {
 }
 
 /**
- * What Zoho says about the order's invoice, read-only. Prefers GET /invoices/{id}; falls back to the
- * invoices listed on the Sales Order. Throws RefundError(502) when Zoho cannot be read.
+ * What Zoho says about the order's invoice, read-only: status, total, balance, and whether a payment is on it.
+ * Prefers GET /invoices/{id}; falls back to the invoices listed on the Sales Order. Throws RefundError(502) when unreadable.
  */
 async function zohoInvoiceState(order) {
   let inv = null;
-  let so = null;
   try {
     if (order.zoho_invoice_id && typeof zoho.getInvoice === 'function') {
       const r = await zoho.getInvoice(order.zoho_invoice_id);
@@ -95,7 +98,7 @@ async function zohoInvoiceState(order) {
   if (!inv && order.zoho_so_id) {
     let r;
     try { r = await zoho.getSalesOrder(order.zoho_so_id); } catch (err) { fail(502, 'ZOHO_UNREADABLE', `Could not read Zoho: ${err.message}`); }
-    so = r && r.salesorder;
+    const so = r && r.salesorder;
     if (!so) fail(502, 'ZOHO_UNREADABLE', `Could not read the Sales Order from Zoho${r && r.message ? ` (${r.message})` : ''}.`);
     const list = Array.isArray(so.invoices) ? so.invoices : [];
     inv = list.find((i) => order.zoho_invoice_id && String(i.invoice_id) === String(order.zoho_invoice_id))
@@ -109,19 +112,9 @@ async function zohoInvoiceState(order) {
   const balance = inv.balance === undefined || inv.balance === null ? total : Number(inv.balance);
   return {
     number: inv.invoice_number || order.zoho_invoice_number || null,
-    id: inv.invoice_id || order.zoho_invoice_id || null,
     status, total, balance,
-    voided: status === 'void',
     paymentApplied: status === 'paid' || status === 'partially_paid' || (total > 0 && balance < total - 0.005)
   };
-}
-
-async function zohoSalesOrderStatus(order) {
-  let r;
-  try { r = await zoho.getSalesOrder(order.zoho_so_id); } catch (err) { fail(502, 'ZOHO_UNREADABLE', `Could not read Zoho: ${err.message}`); }
-  const so = r && r.salesorder;
-  if (!so) fail(502, 'ZOHO_UNREADABLE', `Could not read the Sales Order from Zoho${r && r.message ? ` (${r.message})` : ''}.`);
-  return String(so.status || '').toLowerCase();
 }
 
 const touch = (id, sets, params) =>
@@ -187,11 +180,12 @@ async function withdraw({ user, id }) {
   return shaped(id);
 }
 
+/** Management rejects a new request, or (after Dispatch's check) goods that came back unusable. */
 async function reject({ user, id, note }) {
   const text = String(note || '').trim();
   if (!text) fail(400, 'VALIDATION_ERROR', 'Say why: the requester reads it.');
   const r = await loadRequest(id);
-  if (r.status !== 'requested') fail(409, 'NOT_PENDING', `This request is already ${r.status}.`);
+  if (!['requested', 'returned', 'voided'].includes(r.status)) fail(409, 'NOT_PENDING', `This request is already ${r.status}.`);
   const order = await loadOrder(r.order_id);
   const actor = await resolveActor(user, 'management');
   await touch(id, "status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ?", [actor.id, new Date().toISOString(), text]);
@@ -212,109 +206,120 @@ async function approve({ user, id, note }) {
 
   // The stage is read again: an order may have been invoiced since it was asked for.
   const stage = stageOf(order);
-  if (stage !== 'invoiced') {
-    await touch(id, "stage = ?, status = 'approved', decided_by = ?, decided_at = ?, decision_note = ?", [stage, actor.id, now, decidedNote]);
-    await logEvent({ orderId: order.id, eventType: 'REFUND_REQUEST_APPROVED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name, notes: `Refund request approved by ${actor.name}.${decidedNote ? ` ${decidedNote}` : ''}`, metadata: { requestId: id, stage } });
-    return queueRefund({ user, id, viaApprove: true });
+  const path = pathOf({ ...r, stage });
+  await touch(id, "stage = ?, status = 'approved', decided_by = ?, decided_at = ?, decision_note = ?, zoho_invoice_id = ?, zoho_invoice_number = ?",
+    [stage, actor.id, now, decidedNote, order.zoho_invoice_id || null, order.zoho_invoice_number || null]);
+
+  if (path === 'return') {
+    await logEvent({ orderId: order.id, eventType: 'REFUND_REQUEST_APPROVED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name,
+      notes: `Refund request approved by ${actor.name}.${decidedNote ? ` ${decidedNote}` : ''} Waiting for Dispatch to check the returned goods.`, metadata: { requestId: id, stage, path } });
+    await notify({ orderId: order.id, recipientIds: await getUserIdsByRole('dispatch'), message: `Refund approved for ${order.getmeds_order_id} (${peso(r.requested_amount)}): when the goods are back, check the items and record their condition.`, eventType: 'RETURN_CHECK_REQUESTED', orderData: order });
+    await notify({ orderId: order.id, recipientIds: [r.requested_by, order.medrep_id].filter(Boolean), message: `Your refund request for ${order.getmeds_order_id} was approved by ${actor.name}. Dispatch will check the goods when they are back.`, eventType: 'REFUND_REQUEST_APPROVED', orderData: order });
+    return shaped(id);
   }
 
-  // Invoiced: read Zoho once so Finance and Dispatch know what is waiting for them.
-  let inv = null;
-  let unreadable = null;
-  try { inv = await zohoInvoiceState(order); } catch (err) { unreadable = err.message; }
-  const paymentApplied = inv ? inv.paymentApplied : null; // null: could not be read, Finance and Dispatch check later
-  const alreadyVoid = Boolean(inv && inv.voided);
-  await touch(id, `stage = 'invoiced', status = ?, decided_by = ?, decided_at = ?, decision_note = ?, zoho_invoice_id = ?, zoho_invoice_number = ?, payment_applied = ?, voided_at = ?, voided_by = ?`,
-    [alreadyVoid ? 'voided' : 'approved', actor.id, now, decidedNote, inv?.id || order.zoho_invoice_id || null, inv?.number || order.zoho_invoice_number || null, paymentApplied, alreadyVoid ? now : null, alreadyVoid ? actor.id : null]);
-  await logEvent({
-    orderId: order.id, eventType: 'REFUND_REQUEST_APPROVED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name,
-    notes: `Refund request approved by ${actor.name}.${decidedNote ? ` ${decidedNote}` : ''} ` +
-      (alreadyVoid ? 'The invoice is already void in Zoho.' : `Waiting for ${paymentApplied ? 'Finance to remove the payment, ' : ''}Dispatch to ${GOODS_NEED_RETURN.includes(r.goods_status) ? 'record the goods as returned and ' : ''}void ${inv?.number || order.zoho_invoice_number} in Zoho.`) +
-      (unreadable ? ` (Zoho could not be read just now: ${unreadable})` : ''),
-    metadata: { requestId: id, stage, payment_applied: paymentApplied, already_void: alreadyVoid }
-  });
-  if (!alreadyVoid) {
-    const dispatch = await getUserIdsByRole('dispatch');
-    await notify({ orderId: order.id, recipientIds: dispatch, message: `Void ${inv?.number || order.zoho_invoice_number} in Zoho for ${order.getmeds_order_id}: Management approved a refund (${r.reason}).${paymentApplied ? ' Finance is removing the payment first.' : ''}`, eventType: 'VOID_REQUESTED', orderData: order });
-    if (paymentApplied !== false) {
-      const finance = await getUserIdsByRole('finance');
-      await notify({ orderId: order.id, recipientIds: finance, message: `Remove the payment from ${inv?.number || order.zoho_invoice_number} in Zoho (${order.getmeds_order_id}, ${peso(r.amount_paid)}) so Dispatch can void it: refund approved.`, eventType: 'PAYMENT_REMOVAL_REQUESTED', orderData: order });
-    }
+  // Draft or payment path: straight to Finance's list. If Zoho already shows the customer's payment on the invoice, that
+  // Finance step is recorded now (read-only check; a Zoho that cannot be read just leaves the step for Finance).
+  if (path === 'payment' && stage === 'invoiced') {
+    try {
+      const inv = await zohoInvoiceState(order);
+      if (inv.paymentApplied) await touch(id, 'payment_recorded_at = ?', [now]);
+    } catch (err) { /* Finance checks it later */ }
   }
-  await notify({ orderId: order.id, recipientIds: [r.requested_by, order.medrep_id].filter(Boolean), message: `Your refund request for ${order.getmeds_order_id} was approved by ${actor.name}. ${alreadyVoid ? 'The invoice is already void; Management will send it to Finance.' : 'Dispatch and Finance are clearing the invoice in Zoho first.'}`, eventType: 'REFUND_REQUEST_APPROVED', orderData: order });
+  await logEvent({ orderId: order.id, eventType: 'REFUND_REQUEST_APPROVED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name,
+    notes: `Refund request approved by ${actor.name}.${decidedNote ? ` ${decidedNote}` : ''}`, metadata: { requestId: id, stage, path } });
+  return queueRefund({ user, id });
+}
+
+// ── 4. Dispatch: the returned goods ──────────────────────────────────────────────────────────────
+async function goodsChecked({ user, id, condition, note }) {
+  const r = await loadRequest(id);
+  if (r.status !== 'approved' || pathOf(r) !== 'return') fail(409, 'NOT_WAITING', 'This request is not waiting for a goods check.');
+  const cond = String(condition || '');
+  if (!CONDITIONS.includes(cond)) fail(400, 'VALIDATION_ERROR', 'Say whether the items came back in good condition or damaged.');
+  const text = String(note || '').trim().slice(0, 500) || null;
+  if (cond === 'damaged' && !text) fail(400, 'VALIDATION_ERROR', 'Say what is wrong with the items: Management reads it.');
+  const order = await loadOrder(r.order_id);
+  const actor = await resolveActor(user, 'dispatch');
+  await touch(id, "status = 'returned', goods_condition = ?, goods_returned_by = ?, goods_returned_at = ?, goods_returned_note = ?", [cond, actor.id, new Date().toISOString(), text]);
+  await logEvent({ orderId: order.id, eventType: 'GOODS_RETURNED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name,
+    notes: `Returned goods checked by ${actor.name}: ${cond === 'good' ? 'good condition' : 'damaged'}.${text ? ` ${text}` : ''}`, metadata: { requestId: id, condition: cond } });
+  await notify({ orderId: order.id, recipientIds: await getUserIdsByRole('management', 'admin'), message: `Goods are back for ${order.getmeds_order_id}: ${cond === 'good' ? 'in good condition' : `DAMAGED (${text})`}. Check it and press Refund (${peso(r.requested_amount)}), or reject.`, eventType: 'RETURN_CHECKED', orderData: order });
   return shaped(id);
 }
 
-// ── 4. Finance: the payment is off the invoice ───────────────────────────────────────────────────
-async function paymentRemoved({ user, id }) {
+// ── 5. Finance: the Zoho step the path needs ─────────────────────────────────────────────────────
+/** Payment path: the customer's payment is recorded in Zoho (checked against the invoice when there is one). */
+async function paymentRecorded({ user, id }) {
   const r = await loadRequest(id);
-  if (r.status !== 'approved' || r.stage !== 'invoiced') fail(409, 'NOT_WAITING', 'This request is not waiting for a payment to be removed.');
+  if (r.status !== 'queued' || pathOf(r) !== 'payment') fail(409, 'NOT_WAITING', 'This request is not waiting for a payment to be recorded.');
+  if (r.payment_recorded_at) return shaped(id);
   const order = await loadOrder(r.order_id);
-  const inv = await zohoInvoiceState(order);
-  if (inv.paymentApplied && !inv.voided) {
-    fail(409, 'PAYMENT_STILL_APPLIED', `Zoho still shows a payment on ${inv.number} (status ${inv.status}, balance ${peso(inv.balance)} of ${peso(inv.total)}). Remove it in Zoho first.`);
+  let seen = 'confirmed by Finance (no invoice to read)';
+  if (r.stage === 'invoiced') {
+    const inv = await zohoInvoiceState(order);
+    if (!inv.paymentApplied) fail(409, 'PAYMENT_NOT_IN_ZOHO', `Zoho shows no payment on ${inv.number} (status ${inv.status}, balance ${peso(inv.balance)} of ${peso(inv.total)}). Record the customer's payment in Zoho first, then check again.`);
+    seen = `Zoho shows the payment on ${inv.number}`;
   }
   const actor = await resolveActor(user, 'finance');
-  const now = new Date().toISOString();
-  await touch(id, 'payment_applied = ?, payment_removed_by = ?, payment_removed_at = ?', [r.payment_applied === null ? false : r.payment_applied, actor.id, now]);
-  await logEvent({ orderId: order.id, eventType: 'PAYMENT_REMOVED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name, notes: `Payment removed from ${inv.number} in Zoho, confirmed by ${actor.name}: Zoho shows no payment on it.`, metadata: { requestId: id, invoice: inv.number } });
-  await notify({ orderId: order.id, recipientIds: await getUserIdsByRole('dispatch'), message: `${inv.number} (${order.getmeds_order_id}) has no payment on it any more: Dispatch can void it in Zoho${GOODS_NEED_RETURN.includes(r.goods_status) && !r.goods_returned_at ? ' once the goods are recorded as returned' : ''}.`, eventType: 'PAYMENT_REMOVED', orderData: order });
+  await touch(id, 'payment_recorded_by = ?, payment_recorded_at = ?', [actor.id, new Date().toISOString()]);
+  await logEvent({ orderId: order.id, eventType: 'PAYMENT_RECORDED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name, notes: `Customer payment recorded in Zoho: ${seen}. Next: refund it in Zoho, then record the refund here.`, metadata: { requestId: id } });
   return shaped(id);
 }
 
-// ── 5. Dispatch: goods returned, then void (by hand in Zoho), then check ─────────────────────────
-async function goodsReturned({ user, id, note }) {
+/** Return path: Finance's credit note exists in Zoho, belongs to this customer and is the right size. */
+async function creditNoteChecked({ user, id, number }) {
   const r = await loadRequest(id);
-  if (r.status !== 'approved') fail(409, 'NOT_WAITING', 'This request is not waiting for the goods.');
-  if (!GOODS_NEED_RETURN.includes(r.goods_status)) fail(409, 'NOT_NEEDED', 'The customer keeps the goods on this request, so there is nothing to record as returned.');
-  if (r.goods_returned_at) return SHAPE(r);
+  if (r.status !== 'queued' || pathOf(r) !== 'return') fail(409, 'NOT_WAITING', 'This request is not waiting for a credit note.');
+  if (r.credit_note_checked_at) return shaped(id);
   const order = await loadOrder(r.order_id);
-  const actor = await resolveActor(user, 'dispatch');
-  const text = String(note || '').trim().slice(0, 500) || null;
-  await touch(id, 'goods_returned_by = ?, goods_returned_at = ?, goods_returned_note = ?', [actor.id, new Date().toISOString(), text]);
-  await logEvent({ orderId: order.id, eventType: 'GOODS_RETURNED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name, notes: `Goods recorded as returned by ${actor.name}.${text ? ` ${text}` : ''}`, metadata: { requestId: id } });
-  return shaped(id);
-}
+  const cnNumber = String(number || '').trim();
+  const invoiceNumber = r.zoho_invoice_number || order.zoho_invoice_number || null;
+  if (!cnNumber && !invoiceNumber) fail(400, 'VALIDATION_ERROR', 'Enter the credit note number from Zoho.');
 
-async function checkVoid({ user, id }) {
-  const r = await loadRequest(id);
-  if (r.status !== 'approved' || r.stage !== 'invoiced') fail(409, 'NOT_WAITING', 'This request is not waiting for the invoice to be voided.');
-  if (GOODS_NEED_RETURN.includes(r.goods_status) && !r.goods_returned_at) {
-    fail(409, 'GOODS_NOT_RECORDED', 'Record the goods as returned first.');
+  let rows;
+  try {
+    const res = await zoho.findCreditNotes(cnNumber ? { creditnote_number: cnNumber } : { reference_number: invoiceNumber });
+    rows = (res && res.creditnotes) || [];
+  } catch (err) { fail(502, 'ZOHO_UNREADABLE', `Could not read Zoho: ${err.message}`); }
+  const usable = rows.filter((c) => !['void', 'draft'].includes(String(c.status || '').toLowerCase()));
+  if (!usable.length) {
+    fail(409, 'NO_CREDIT_NOTE', cnNumber
+      ? `Zoho has no usable credit note numbered ${cnNumber} (it may be a draft or void).`
+      : `Zoho shows no credit note for ${invoiceNumber} yet. Create it in Zoho, then check again (or enter its number).`);
   }
-  const order = await loadOrder(r.order_id);
-  const inv = await zohoInvoiceState(order);
-  if (!inv.voided) {
-    if (inv.paymentApplied) fail(409, 'PAYMENT_STILL_APPLIED', `Zoho still shows a payment on ${inv.number}. Finance has to remove it before the invoice can be voided.`);
-    fail(409, 'NOT_VOID_YET', `Zoho still says ${inv.number} is ${inv.status === 'void' ? 'void' : inv.status.replace(/_/g, ' ')}. Void it in Zoho first, then check again.`);
+  const mine = order.customer_zoho_id ? usable.filter((c) => !c.customer_id || String(c.customer_id) === String(order.customer_zoho_id)) : usable;
+  if (!mine.length) fail(409, 'WRONG_CUSTOMER', `That credit note belongs to another customer in Zoho, not ${order.customer_name}.`);
+  const ask = Number(r.requested_amount) || 0;
+  const match = mine.find((c) => Math.abs(Number(c.total) - ask) < 0.01);
+  if (!match) {
+    const t = mine.map((c) => `${c.creditnote_number} ${peso(c.total)}`).join(', ');
+    fail(409, 'CREDIT_NOTE_AMOUNT', `The credit note in Zoho (${t}) is not ${peso(ask)}, the amount to refund. Fix the credit note in Zoho, or ask Management to change the amount.`);
   }
-  const actor = await resolveActor(user, 'dispatch');
-  const now = new Date().toISOString();
-  await touch(id, "status = 'voided', voided_by = ?, voided_at = ?", [actor.id, now]);
-  await logEvent({ orderId: order.id, eventType: 'INVOICE_VOIDED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name, notes: `${inv.number} confirmed void by ${actor.name}: Zoho reports it as void.`, metadata: { requestId: id, invoice: inv.number } });
-  await notify({ orderId: order.id, recipientIds: await getUserIdsByRole('management', 'admin'), message: `${inv.number} is void in Zoho (${order.getmeds_order_id}): press Refund to put ${peso(r.requested_amount)} on Finance's list.`, eventType: 'INVOICE_VOIDED', orderData: order });
+  const actor = await resolveActor(user, 'finance');
+  await touch(id, 'credit_note_number = ?, credit_note_total = ?, credit_note_checked_by = ?, credit_note_checked_at = ?', [match.creditnote_number, Number(match.total), actor.id, new Date().toISOString()]);
+  await logEvent({ orderId: order.id, eventType: 'CREDIT_NOTE_CONFIRMED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name, notes: `Credit note ${match.creditnote_number} (${peso(match.total)}) confirmed in Zoho by ${actor.name}. Next: refund it in Zoho, then record the refund here.`, metadata: { requestId: id, creditnote: match.creditnote_number } });
   return shaped(id);
 }
 
-/** Case B: the Sales Order is closed in Zoho too. Never holds the refund up. */
-async function checkSalesOrderClosed({ user, id }) {
-  const r = await loadRequest(id);
-  if (r.stage !== 'so') fail(409, 'NOT_NEEDED', 'This request has no open Sales Order to close.');
-  if (r.so_closed_at) return SHAPE(r);
-  const order = await loadOrder(r.order_id);
-  const status = await zohoSalesOrderStatus(order);
-  if (!CLOSED_SO_STATUSES.includes(status)) fail(409, 'SO_STILL_OPEN', `Zoho still says ${order.zoho_so_number} is ${status.replace(/_/g, ' ')}. Void or cancel it in Zoho first, then check again.`);
-  const actor = await resolveActor(user, 'dispatch');
-  await touch(id, 'so_closed_by = ?, so_closed_at = ?', [actor.id, new Date().toISOString()]);
-  await logEvent({ orderId: order.id, eventType: 'SALES_ORDER_CLOSED', oldStatus: order.status, newStatus: order.status, actorId: actor.id, actorName: actor.name, notes: `${order.zoho_so_number} confirmed ${status} in Zoho by ${actor.name}.`, metadata: { requestId: id } });
-  return shaped(id);
+/**
+ * Finance's "Record refund as done" is refused until the Zoho step is confirmed. Called by refunds.controller before a refund
+ * that came from a request is marked done. No request, or a draft: nothing to check.
+ */
+async function assertReadyToPay(orderId) {
+  const r = await db.prepare(`SELECT * FROM refund_requests WHERE order_id = ? AND status = 'queued' ORDER BY id DESC LIMIT 1`).get(orderId);
+  if (!r) return;
+  const p = pathOf(r);
+  if (p === 'payment' && !r.payment_recorded_at) fail(409, 'PAYMENT_NOT_CONFIRMED', "Confirm the customer's payment is recorded in Zoho first (Refunds > Zoho steps), then record the refund.");
+  if (p === 'return' && !r.credit_note_checked_at) fail(409, 'CREDIT_NOTE_NOT_CONFIRMED', 'Confirm the credit note in Zoho first (Refunds > Zoho steps), then record the refund.');
 }
 
 // ── 6. Put it on Finance's list ──────────────────────────────────────────────────────────────────
-async function queueRefund({ user, id, viaApprove = false }) {
+async function queueRefund({ user, id }) {
   const r = await loadRequest(id);
-  const ready = r.stage === 'invoiced' ? r.status === 'voided' : r.status === 'approved';
-  if (!ready) fail(409, 'NOT_READY', r.stage === 'invoiced' ? 'The invoice has to be confirmed void before the refund can go to Finance.' : `This request is ${r.status}.`);
+  const p = pathOf(r);
+  const ready = p === 'return' ? ['returned', 'voided'].includes(r.status) : r.status === 'approved';
+  if (!ready) fail(409, 'NOT_READY', p === 'return' ? 'Dispatch has to check the returned goods before the refund can go to Finance.' : `This request is ${r.status}.`);
   const order = await loadOrder(r.order_id);
   const actor = await resolveActor(user, 'management');
   const now = new Date().toISOString();
@@ -333,17 +338,13 @@ async function queueRefund({ user, id, viaApprove = false }) {
     await touch(id, "status = 'queued', queued_by = ?, queued_at = ?", [actor.id, now]);
     await logEvent({
       orderId: order.id, eventType: 'REFUND_QUEUED', oldStatus: order.status, newStatus: 'cancelled', actorId: actor.id, actorName: actor.name,
-      notes: `Order cancelled and ${peso(r.requested_amount)} put on Finance's refund list by ${actor.name}${viaApprove ? '' : ' (the invoice is void in Zoho)'}: ${r.reason}`,
-      metadata: { requestId: id, stage: r.stage, amount: r.requested_amount }
+      notes: `Order cancelled and ${peso(r.requested_amount)} put on Finance's refund list by ${actor.name}${p === 'return' ? ' (goods back and checked)' : ''}: ${r.reason}`,
+      metadata: { requestId: id, stage: r.stage, path: p, amount: r.requested_amount }
     });
   })();
-  await notify({ orderId: order.id, recipientIds: await getUserIdsByRole('finance', 'admin'), message: `Refund to arrange: ${order.getmeds_order_id} (${peso(r.requested_amount)}, ${r.stage === 'invoiced' ? `invoice ${r.zoho_invoice_number} void` : r.stage === 'so' ? 'Sales Order' : 'draft'}). Reason: ${r.reason}`, eventType: 'REFUND_QUEUED', orderData: order });
+  const step = p === 'return' ? 'create the credit note in Zoho' : p === 'payment' ? "record the customer's payment in Zoho, then refund it there" : null;
+  await notify({ orderId: order.id, recipientIds: await getUserIdsByRole('finance', 'admin'), message: `Refund to arrange: ${order.getmeds_order_id} (${peso(r.requested_amount)}${r.zoho_invoice_number ? `, ${r.zoho_invoice_number}` : ''}). ${step ? `First ${step}. ` : ''}Reason: ${r.reason}`, eventType: 'REFUND_QUEUED', orderData: order });
   await notify({ orderId: order.id, recipientIds: [r.requested_by, order.medrep_id].filter(Boolean), message: `Refund for ${order.getmeds_order_id} is with Finance now (${peso(r.requested_amount)}). You will see the status on the order.`, eventType: 'REFUND_QUEUED', orderData: order });
-
-  // Case B: Dispatch is asked to close the Sales Order in Zoho (does not hold the refund up).
-  if (r.stage === 'so') {
-    await notify({ orderId: order.id, recipientIds: await getUserIdsByRole('dispatch'), message: `Void or cancel ${order.zoho_so_number} in Zoho (${order.getmeds_order_id}): refund approved, its stock is still committed.`, eventType: 'VOID_REQUESTED', orderData: order });
-  }
   return shaped(id);
 }
 
@@ -358,65 +359,60 @@ const BASE_SELECT = `
     LEFT JOIN users mu ON mu.id = o.medrep_id
     LEFT JOIN users du ON du.id = rr.decided_by`;
 
-const SHAPE = (r) => ({
-  ...r,
-  requested_amount: num(r.requested_amount), amount_paid: num(r.amount_paid), total_amount: num(r.total_amount),
-  needs_goods: GOODS_NEED_RETURN.includes(r.goods_status) && !r.goods_returned_at,
-  needs_payment_removed: r.payment_applied !== false && !r.payment_removed_at && r.status === 'approved' && r.stage === 'invoiced',
-  next: nextStep(r)
-});
-
 /** What this request is waiting for, as one short word the screens use. */
 function nextStep(r) {
+  const p = pathOf(r);
   if (r.status === 'requested') return 'management_decision';
-  if (r.status === 'approved' && r.stage === 'invoiced') {
-    if (r.payment_applied !== false && !r.payment_removed_at) return 'finance_payment';
-    if (GOODS_NEED_RETURN.includes(r.goods_status) && !r.goods_returned_at) return 'dispatch_goods';
-    return 'dispatch_void';
+  if (r.status === 'approved' && p === 'return') return 'dispatch_goods';
+  if (['returned', 'voided'].includes(r.status)) return 'management_refund';
+  if (r.status === 'queued') {
+    if (p === 'payment' && !r.payment_recorded_at) return 'finance_payment';
+    if (p === 'return' && !r.credit_note_checked_at) return 'finance_credit_note';
+    return 'finance_refund';
   }
-  if (r.status === 'voided') return 'management_refund';
-  if (r.status === 'queued') return 'finance_refund';
   return null;
 }
+
+const SHAPE = (r) => ({ ...r, requested_amount: num(r.requested_amount), amount_paid: num(r.amount_paid), total_amount: num(r.total_amount), path: pathOf(r), next: nextStep(r) });
 
 async function listForManagement(tab) {
   const where = {
     needs_decision: "rr.status = 'requested'",
     waiting: "rr.status = 'approved'",
-    ready: "rr.status = 'voided'",
+    ready: "rr.status IN ('returned', 'voided')",
     done: "rr.status IN ('queued', 'done', 'not_due', 'rejected', 'withdrawn')"
   }[tab] || '1 = 1';
   const rows = await db.prepare(`${BASE_SELECT} WHERE ${where} ORDER BY rr.requested_at DESC LIMIT 300`).all();
   const counts = await db.prepare(
     `SELECT COUNT(*) FILTER (WHERE status = 'requested') AS needs_decision, COUNT(*) FILTER (WHERE status = 'approved') AS waiting,
-            COUNT(*) FILTER (WHERE status = 'voided') AS ready FROM refund_requests`
+            COUNT(*) FILTER (WHERE status IN ('returned', 'voided')) AS ready FROM refund_requests`
   ).get();
   return { requests: rows.map(SHAPE), counts: { needs_decision: Number(counts.needs_decision), waiting: Number(counts.waiting), ready: Number(counts.ready) } };
 }
 
-/** Dispatch's card: invoiced requests waiting on the void, and case B Sales Orders still to close. */
-async function listVoidRequests() {
+/** Dispatch: approved refunds whose goods are coming back and have to be checked when they arrive. */
+async function listReturnChecks() {
   const rows = await db.prepare(
-    `${BASE_SELECT}
-      WHERE (rr.stage = 'invoiced' AND rr.status = 'approved')
-         OR (rr.stage = 'so' AND rr.status = 'queued' AND rr.so_closed_at IS NULL)
-      ORDER BY rr.decided_at ASC LIMIT 100`
+    `${BASE_SELECT} WHERE rr.status = 'approved' AND rr.stage <> 'draft' AND rr.goods_status IN ('returning', 'customer_returns') ORDER BY rr.decided_at ASC LIMIT 100`
   ).all();
   return rows.map(SHAPE);
 }
 
-/** Heads-up for Dispatch: invoiced or Sales Order requests still waiting for Management. Nothing to do yet. */
+/** Heads-up for Dispatch: a return still waiting for Management's decision. Nothing to do yet. */
 async function listUpcoming() {
   const rows = await db.prepare(
-    `${BASE_SELECT} WHERE rr.status = 'requested' AND rr.stage IN ('invoiced', 'so') ORDER BY rr.requested_at ASC LIMIT 50`
+    `${BASE_SELECT} WHERE rr.status = 'requested' AND rr.stage <> 'draft' AND rr.goods_status IN ('returning', 'customer_returns') ORDER BY rr.requested_at ASC LIMIT 50`
   ).all();
   return rows.map(SHAPE);
 }
 
-async function listPaymentsToRemove() {
+/** Finance: refunds on its list that still need a Zoho step (record the payment, or the credit note). */
+async function listFinanceSteps() {
   const rows = await db.prepare(
-    `${BASE_SELECT} WHERE rr.stage = 'invoiced' AND rr.status = 'approved' AND rr.payment_applied IS NOT FALSE AND rr.payment_removed_at IS NULL
-      ORDER BY rr.decided_at ASC LIMIT 100`
+    `${BASE_SELECT} WHERE rr.status = 'queued' AND rr.stage <> 'draft'
+        AND ((rr.goods_status NOT IN ('returning', 'customer_returns') AND rr.payment_recorded_at IS NULL)
+          OR (rr.goods_status IN ('returning', 'customer_returns') AND rr.credit_note_checked_at IS NULL))
+      ORDER BY rr.queued_at ASC LIMIT 100`
   ).all();
   return rows.map(SHAPE);
 }
@@ -427,7 +423,7 @@ async function latestForOrder(orderId) {
 }
 
 module.exports = {
-  RefundError, OPEN, GOODS, stageOf, canRequest, zohoInvoiceState,
-  create, withdraw, reject, approve, paymentRemoved, goodsReturned, checkVoid, checkSalesOrderClosed, queueRefund,
-  listForManagement, listVoidRequests, listUpcoming, listPaymentsToRemove, latestForOrder, loadRequest
+  RefundError, OPEN, GOODS, stageOf, pathOf, canRequest, zohoInvoiceState,
+  create, withdraw, reject, approve, goodsChecked, paymentRecorded, creditNoteChecked, assertReadyToPay, queueRefund,
+  listForManagement, listReturnChecks, listUpcoming, listFinanceSteps, latestForOrder, loadRequest
 };

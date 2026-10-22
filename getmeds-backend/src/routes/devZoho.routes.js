@@ -26,4 +26,17 @@ router.post('/invoice', (req, res) => {
   }
 });
 
+router.post('/credit-note', (req, res) => {
+  if (String(process.env.ZOHO_MODE || 'mock').toLowerCase() !== 'mock') {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only available against the mock Zoho.' } });
+  }
+  try {
+    const b = req.body || {};
+    const cn = zoho.getZohoAdapter().setDevCreditNote(String(b.so_id || ''), { total: b.total, status: b.status });
+    res.json({ success: true, data: { credit_note: cn } });
+  } catch (err) {
+    res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: err.message } });
+  }
+});
+
 module.exports = router;

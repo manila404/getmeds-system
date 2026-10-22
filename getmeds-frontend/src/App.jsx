@@ -25,7 +25,7 @@ import SalespersonMappingPage from './pages/management/SalespersonMappingPage';
 import PendingCustomersPage from './pages/management/PendingCustomersPage';
 import RefundsPage from './pages/finance/RefundsPage';
 import RefundRequestsPage from './pages/management/RefundRequestsPage';
-import VoidRequestsPage from './pages/dispatch/VoidRequestsPage';
+import ReturnChecksPage from './pages/dispatch/ReturnChecksPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import KpiPage from './pages/admin/KpiPage';
@@ -191,12 +191,12 @@ function App() {
               </ProtectedRoute>
             }
           />
-          {/* Oct 22, 2026: refunds Management approved: void the invoice in Zoho by hand, the app checks. */}
+          {/* Oct 23, 2026: refunds Management approved where the goods are coming back: Dispatch checks the items. */}
           <Route
-            path="/dispatch/void-requests"
+            path="/dispatch/return-checks"
             element={
               <ProtectedRoute allowedRoles={['dispatch', 'admin']}>
-                <VoidRequestsPage />
+                <ReturnChecksPage />
               </ProtectedRoute>
             }
           />
