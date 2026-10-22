@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown, ZoomIn, ZoomOut, RotateCcw, Pill } from 'lucide-react';
+import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown, ZoomIn, ZoomOut, RotateCcw, RotateCw, RefreshCw, Pill } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
@@ -166,12 +166,30 @@ const Lightbox = ({ attachment, onClose }) => {
   const [zoom, setZoom] = useState(1);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(null); // { startX, startY, origX, origY } | null
+  // Oct 22, 2026: rotate in 90-degree steps (a photo taken sideways, an ID held upright).
+  const [rot, setRot] = useState(0);
+  const [fit, setFit] = useState(1); // shrinks a sideways image so it still fits the card
+  const [loaded, setLoaded] = useState(false);
+  const imgRef = useRef(null);
+  const boxRef = useRef(null);
 
-  // A fresh image starts un-zoomed and centred, whichever attachment opened.
+  // A fresh image starts un-zoomed, un-rotated and centred, whichever attachment opened.
   useEffect(() => {
     setZoom(1);
     setPos({ x: 0, y: 0 });
+    setRot(0);
+    setLoaded(false);
   }, [attachment?.id]);
+
+  // Turned a quarter, a tall photo becomes wide and would spill out of the card: scale it to fit.
+  useLayoutEffect(() => {
+    const img = imgRef.current;
+    const box = boxRef.current;
+    if (!img || !box || !loaded || rot % 180 === 0) { setFit(1); return; }
+    const w = img.offsetWidth;
+    const h = img.offsetHeight;
+    setFit(w && h ? Math.min(1, box.clientWidth / h, box.clientHeight / w) : 1);
+  }, [rot, loaded, attachment?.id]);
 
   useEffect(() => {
     if (!attachment) return undefined;
@@ -190,7 +208,8 @@ const Lightbox = ({ attachment, onClose }) => {
       if (next === ZOOM_MIN) setPos({ x: 0, y: 0 }); // back to 1x: re-centre
       return next;
     });
-  const reset = () => { setZoom(1); setPos({ x: 0, y: 0 }); };
+  const rotate = (dir) => setRot((r) => (r + dir * 90 + 360) % 360);
+  const reset = () => { setZoom(1); setPos({ x: 0, y: 0 }); setRot(0); };
 
   const onWheel = (e) => {
     e.preventDefault();
@@ -233,8 +252,14 @@ const Lightbox = ({ attachment, onClose }) => {
             <button type="button" onClick={zoomIn} disabled={zoom >= ZOOM_MAX} title="Zoom in" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary disabled:opacity-40">
               <ZoomIn className="w-4 h-4" />
             </button>
-            <button type="button" onClick={reset} disabled={zoom === 1 && !pos.x && !pos.y} title="Reset" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary disabled:opacity-40">
+            <button type="button" onClick={() => rotate(-1)} title="Rotate left" aria-label="Rotate left" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary">
               <RotateCcw className="w-4 h-4" />
+            </button>
+            <button type="button" onClick={() => rotate(1)} title="Rotate right" aria-label="Rotate right" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary">
+              <RotateCw className="w-4 h-4" />
+            </button>
+            <button type="button" onClick={reset} disabled={zoom === 1 && !pos.x && !pos.y && rot === 0} title="Reset zoom and rotation" aria-label="Reset zoom and rotation" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary disabled:opacity-40">
+              <RefreshCw className="w-4 h-4" />
             </button>
             {attachment.downloadUrl && (
               <a href={attachment.downloadUrl} title="Download" className="p-1.5 rounded-md text-ink-secondary hover:bg-slate-100 hover:text-ink-primary">
@@ -247,15 +272,17 @@ const Lightbox = ({ attachment, onClose }) => {
             </button>
           </div>
         </div>
-        <div className="flex-1 min-h-0 overflow-hidden flex items-center justify-center bg-surface" onWheel={onWheel}>
+        <div ref={boxRef} className="flex-1 min-h-0 overflow-hidden flex items-center justify-center bg-surface" onWheel={onWheel}>
           <img
+            ref={imgRef}
+            onLoad={() => setLoaded(true)}
             src={attachment.viewUrl}
             alt={attachment.file_name}
             onMouseDown={onMouseDown}
             onDoubleClick={() => (zoom > 1 ? reset() : zoomIn())}
             draggable={false}
             style={{
-              transform: `translate(${pos.x}px, ${pos.y}px) scale(${zoom})`,
+              transform: `translate(${pos.x}px, ${pos.y}px) rotate(${rot}deg) scale(${zoom * fit})`,
               cursor: zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'zoom-in',
               transition: dragging ? 'none' : 'transform 0.15s ease-out'
             }}
