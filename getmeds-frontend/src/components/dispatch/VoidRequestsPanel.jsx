@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { Ban, Check, Clock, Loader2, Lock } from 'lucide-react';
 import client from '../../api/client';
 import DevZohoButtons from '../finance/DevZohoButtons';
+import { useVoidRequests } from '../../hooks/useVoidRequests';
 
 /**
  * Dispatch's checklist for refunds Management approved. Oct 22, 2026.
@@ -86,21 +87,18 @@ const VoidCard = ({ r, onDone }) => {
   );
 };
 
-// Shared by the checklist below and the attention banner at the top of the page (one request, one cache entry).
-export const useVoidRequests = () => useQuery({
-  queryKey: ['void-requests'],
-  // { requests: approved, to act on; upcoming: still waiting for Management (heads-up only) }
-  queryFn: () => client.get('/api/refund-requests/void-requests').then((r) => ({ requests: r.data?.data?.requests || [], upcoming: r.data?.data?.upcoming || [] })),
-  refetchInterval: 60000
-});
-
 export const VOID_REQUESTS_ID = 'void-requests';
 
-const VoidRequestsPanel = () => {
+const VoidRequestsPanel = ({ alwaysShow = false }) => {
   const qc = useQueryClient();
   const { data, isLoading } = useVoidRequests();
   const rows = data?.requests || [];
-  if (isLoading || rows.length === 0) return null;
+  if (isLoading) return alwaysShow ? <p className="text-sm text-ink-secondary flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Loading…</p> : null;
+  if (rows.length === 0) {
+    return alwaysShow ? (
+      <div className="rounded-lg border border-slate-200 bg-white px-4 py-8 text-center text-sm text-ink-secondary">No refund is waiting for Dispatch right now.</div>
+    ) : null;
+  }
   const refresh = () => { qc.invalidateQueries({ queryKey: ['void-requests'] }); qc.invalidateQueries({ queryKey: ['payments-to-remove'] }); };
   return (
     <div id={VOID_REQUESTS_ID} className="bg-white shadow rounded-lg border border-amber-300 overflow-hidden scroll-mt-4">

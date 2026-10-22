@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, ArrowDown, Clock } from 'lucide-react';
-import { useVoidRequests, VOID_REQUESTS_ID } from './VoidRequestsPanel';
+import { AlertTriangle, ArrowRight, Clock } from 'lucide-react';
+import { useVoidRequests } from '../../hooks/useVoidRequests';
 
 /**
  * Top of the Dispatch page: the orders whose invoice has to be voided in Zoho for a refund, and what to do. Oct 22, 2026.
@@ -27,7 +27,6 @@ const RefundAttentionBanner = () => {
   if (rows.length === 0 && upcoming.length === 0) return null;
 
   const mine = rows.filter((r) => r.stage === 'so' || r.next === 'dispatch_goods' || r.next === 'dispatch_void').length;
-  const goDown = () => document.getElementById(VOID_REQUESTS_ID)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   return (
     <div className="space-y-2">
@@ -53,17 +52,17 @@ const RefundAttentionBanner = () => {
                 <div className="mt-2 rounded-md border border-amber-200 bg-white/70 px-3 py-2 text-[12.5px]">
                   <p className="font-semibold mb-0.5">What to do</p>
                   <ol className="list-decimal pl-5 space-y-0.5">
-                    <li>If the goods are coming back, press <b>Mark goods returned</b> in the Void requests card once they are with us.</li>
+                    <li>Open <b>Void requests</b> (sidebar). If the goods are coming back, press <b>Mark goods returned</b> once they are with us.</li>
                     <li>Void the invoice <b>in Zoho yourself</b>. Zoho will not void a paid invoice: Finance removes the payment first and the card tells you when.</li>
                     <li>Come back and press <b>I voided it, check Zoho</b>. The app only checks; it never voids anything. If Zoho does not say Void yet, it tells you and nothing moves.</li>
                   </ol>
                 </div>
               )}
             </div>
-            <button type="button" onClick={goDown}
+            <Link to="/dispatch/void-requests"
               className="shrink-0 inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700">
-              Go to Void requests <ArrowDown className="w-3.5 h-3.5" />
-            </button>
+              Open Void requests <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
           </div>
         </div>
       )}

@@ -25,6 +25,7 @@ import SalespersonMappingPage from './pages/management/SalespersonMappingPage';
 import PendingCustomersPage from './pages/management/PendingCustomersPage';
 import RefundsPage from './pages/finance/RefundsPage';
 import RefundRequestsPage from './pages/management/RefundRequestsPage';
+import VoidRequestsPage from './pages/dispatch/VoidRequestsPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import KpiPage from './pages/admin/KpiPage';
@@ -187,6 +188,15 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['dispatch', 'management', 'admin']}>
                 <PharmacyQueuePage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Oct 22, 2026: refunds Management approved: void the invoice in Zoho by hand, the app checks. */}
+          <Route
+            path="/dispatch/void-requests"
+            element={
+              <ProtectedRoute allowedRoles={['dispatch', 'admin']}>
+                <VoidRequestsPage />
               </ProtectedRoute>
             }
           />

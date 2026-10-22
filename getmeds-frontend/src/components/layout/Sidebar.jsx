@@ -2,11 +2,12 @@ import React, { useState } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useDebug } from '../../context/DebugContext';
-import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, Clock, Pill, Megaphone, Banknote, Target } from 'lucide-react';
+import { LayoutDashboard, PlusCircle, ClipboardList, CreditCard, History, Truck, MapPin, AlertTriangle, ClipboardCheck, Users, UserCog, Package, X, FlaskConical, BarChart3, Layers, Zap, PanelLeftClose, PanelLeftOpen, UserCheck, CloudOff, ChevronDown, Clock, Pill, Megaphone, Banknote, Target, Ban } from 'lucide-react';
 import getmedsLogo from '../../assets/GETMEDS PHILIPPINES LOGO.png';
 import { FINANCE_STAGES } from '../../constants/financeStages';
 import { useUnseenAnnouncementsCount } from '../stock/StockAnnouncements';
 import { useKpiStatus } from '../../hooks/useKpiStatus';
+import { useVoidRequestsCount } from '../../hooks/useVoidRequests';
 
 const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollapse }) => {
   const { user } = useAuth();
@@ -24,6 +25,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   const roleForAnnouncements = (user?.role || '').toLowerCase();
   const seesAnnouncements = ['medrep', 'management'].includes(roleForAnnouncements);
   const unseenAnnouncements = useUnseenAnnouncementsCount(seesAnnouncements);
+  // Oct 22, 2026: refunds waiting on Dispatch (badge on its Void requests link).
+  const voidCount = useVoidRequestsCount(['dispatch', 'admin'].includes(roleForAnnouncements));
   // Oct 5, 2026: the KPI page's menu item shows only while the page is switched on
   // (GETMEDS_KPI_PAGE) — see hooks/useKpiStatus.js.
   const kpi = useKpiStatus(roleForAnnouncements, user?.id);
@@ -207,6 +210,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   } else if (role === 'dispatch') {
     mainLinks.push(
       { to: '/dispatch', icon: <Truck size={19} />, label: 'Zoho Dispatch Status' },
+      // Oct 22, 2026: refunds Management approved; void the invoice in Zoho by hand, the app checks.
+      { to: '/dispatch/void-requests', icon: <Ban size={19} />, label: 'Void requests', badge: voidCount },
       // Sep 25, 2026: prescription verification, in parallel with Finance.
       { to: '/dispatch/pharmacy', icon: <Pill size={19} />, label: 'Pharmacy' },
       // Sep 15, 2026: the orders this person caters (the page's other tab is
