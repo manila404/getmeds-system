@@ -86,18 +86,23 @@ const VoidCard = ({ r, onDone }) => {
   );
 };
 
+// Shared by the checklist below and the attention banner at the top of the page (one request, one cache entry).
+export const useVoidRequests = () => useQuery({
+  queryKey: ['void-requests'],
+  queryFn: () => client.get('/api/refund-requests/void-requests').then((r) => r.data?.data?.requests || []),
+  refetchInterval: 60000
+});
+
+export const VOID_REQUESTS_ID = 'void-requests';
+
 const VoidRequestsPanel = () => {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({
-    queryKey: ['void-requests'],
-    queryFn: () => client.get('/api/refund-requests/void-requests').then((r) => r.data?.data?.requests || []),
-    refetchInterval: 60000
-  });
+  const { data, isLoading } = useVoidRequests();
   const rows = data || [];
   if (isLoading || rows.length === 0) return null;
   const refresh = () => { qc.invalidateQueries({ queryKey: ['void-requests'] }); qc.invalidateQueries({ queryKey: ['payments-to-remove'] }); };
   return (
-    <div className="bg-white shadow rounded-lg border border-amber-300 overflow-hidden">
+    <div id={VOID_REQUESTS_ID} className="bg-white shadow rounded-lg border border-amber-300 overflow-hidden scroll-mt-4">
       <div className="px-4 py-3 border-b border-amber-200 bg-amber-50">
         <h2 className="text-sm font-semibold text-ink-primary flex items-center gap-2">
           <Ban className="w-4 h-4 text-amber-700" /> Void requests

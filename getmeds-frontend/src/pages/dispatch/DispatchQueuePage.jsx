@@ -7,6 +7,7 @@ import DeliveryConfirmModal from '../../components/dispatch/DeliveryConfirmModal
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
 import VoidRequestsPanel from '../../components/dispatch/VoidRequestsPanel';
+import RefundAttentionBanner from '../../components/dispatch/RefundAttentionBanner';
 import MoreInfoMenu from '../../components/dispatch/MoreInfoMenu';
 import FilterDropdown from '../../components/dispatch/FilterDropdown';
 import DeliveryActions, { CONFIRMABLE_STATUSES, DISPATCH_PROOF_STATUSES } from '../../components/dispatch/DeliveryActions';
@@ -336,6 +337,8 @@ const DispatchQueuePage = () => {
 
   const recentAndDialog = (
     <>
+      {/* Oct 22, 2026: refunds waiting on Dispatch, and what to do about them. */}
+      <RefundAttentionBanner />
       {/* Sep 15, 2026: Dispatch announces stock to MedReps and Management. */}
       <StockAnnouncementsManager />
       {/* Sep 28, 2026: two proper dropdowns instead of up to thirteen pills in
