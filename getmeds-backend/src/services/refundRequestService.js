@@ -405,6 +405,14 @@ async function listVoidRequests() {
   return rows.map(SHAPE);
 }
 
+/** Heads-up for Dispatch: invoiced or Sales Order requests still waiting for Management. Nothing to do yet. */
+async function listUpcoming() {
+  const rows = await db.prepare(
+    `${BASE_SELECT} WHERE rr.status = 'requested' AND rr.stage IN ('invoiced', 'so') ORDER BY rr.requested_at ASC LIMIT 50`
+  ).all();
+  return rows.map(SHAPE);
+}
+
 async function listPaymentsToRemove() {
   const rows = await db.prepare(
     `${BASE_SELECT} WHERE rr.stage = 'invoiced' AND rr.status = 'approved' AND rr.payment_applied IS NOT FALSE AND rr.payment_removed_at IS NULL
@@ -421,5 +429,5 @@ async function latestForOrder(orderId) {
 module.exports = {
   RefundError, OPEN, GOODS, stageOf, canRequest, zohoInvoiceState,
   create, withdraw, reject, approve, paymentRemoved, goodsReturned, checkVoid, checkSalesOrderClosed, queueRefund,
-  listForManagement, listVoidRequests, listPaymentsToRemove, latestForOrder, loadRequest
+  listForManagement, listVoidRequests, listUpcoming, listPaymentsToRemove, latestForOrder, loadRequest
 };

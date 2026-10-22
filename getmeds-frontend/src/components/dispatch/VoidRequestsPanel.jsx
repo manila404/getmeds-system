@@ -89,7 +89,8 @@ const VoidCard = ({ r, onDone }) => {
 // Shared by the checklist below and the attention banner at the top of the page (one request, one cache entry).
 export const useVoidRequests = () => useQuery({
   queryKey: ['void-requests'],
-  queryFn: () => client.get('/api/refund-requests/void-requests').then((r) => r.data?.data?.requests || []),
+  // { requests: approved, to act on; upcoming: still waiting for Management (heads-up only) }
+  queryFn: () => client.get('/api/refund-requests/void-requests').then((r) => ({ requests: r.data?.data?.requests || [], upcoming: r.data?.data?.upcoming || [] })),
   refetchInterval: 60000
 });
 
@@ -98,7 +99,7 @@ export const VOID_REQUESTS_ID = 'void-requests';
 const VoidRequestsPanel = () => {
   const qc = useQueryClient();
   const { data, isLoading } = useVoidRequests();
-  const rows = data || [];
+  const rows = data?.requests || [];
   if (isLoading || rows.length === 0) return null;
   const refresh = () => { qc.invalidateQueries({ queryKey: ['void-requests'] }); qc.invalidateQueries({ queryKey: ['payments-to-remove'] }); };
   return (

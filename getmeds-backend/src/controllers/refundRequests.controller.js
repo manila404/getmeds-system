@@ -38,6 +38,6 @@ exports.paymentRemoved = wrap(async (req) => ({ request: await svc.paymentRemove
 exports.goodsReturned = wrap(async (req) => ({ request: await svc.goodsReturned({ user: req.user, id: id(req), note: req.body && req.body.note }) }));
 exports.checkVoid = wrap(async (req) => ({ request: await svc.checkVoid({ user: req.user, id: id(req) }) }));
 exports.checkSalesOrder = wrap(async (req) => ({ request: await svc.checkSalesOrderClosed({ user: req.user, id: id(req) }) }));
-exports.voidRequests = wrap(async () => ({ requests: await svc.listVoidRequests() }));
+exports.voidRequests = wrap(async () => ({ requests: await svc.listVoidRequests(), upcoming: await svc.listUpcoming() }));
 exports.paymentsToRemove = wrap(async () => ({ requests: await svc.listPaymentsToRemove() }));
 exports.forOrder = wrap(async (req) => ({ request: await svc.latestForOrder(Number(req.params.orderId)) }));

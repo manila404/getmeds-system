@@ -238,6 +238,20 @@ describe('refund requests', () => {
       expect((await ask(o)).body.error.code).toBe('NOT_REFUNDABLE');
     });
 
+    test('Dispatch sees a request that is still waiting for Management as a heads-up, and as work once approved', async () => {
+      const o = await order({ status: 'tracking_shared', so: true, invoiced: true });
+      const id = (await ask(o, { goods_status: 'returning' })).body.data.request.id;
+      const vr = async () => (await request(app).get('/api/refund-requests/void-requests').set(auth(dispatch))).body.data;
+      let d = await vr();
+      expect(d.upcoming.map((r) => r.id)).toContain(id);
+      expect(d.requests.map((r) => r.id)).not.toContain(id);
+      zohoSays(o, { invStatus: 'sent' });
+      await post(`/${id}/approve`, manager);
+      d = await vr();
+      expect(d.requests.map((r) => r.id)).toContain(id);
+      expect(d.upcoming.map((r) => r.id)).not.toContain(id);
+    });
+
     test('the order page carries the request', async () => {
       const o = await order({ status: 'ready_for_dispatch', so: true });
       await ask(o);
