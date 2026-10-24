@@ -4,7 +4,7 @@
  *  - HRR counts customers invoiced last month that were invoiced again this month, per salesperson;
  *  - the playbook's point bands.
  */
-const { computeNzsd, computeHrr, computeDso, computeIst, _test } = require('../src/services/kpiScorecardService');
+const { computeNzsd, computeHrr, computeDso, computeIst, computeScorecard, _test } = require('../src/services/kpiScorecardService');
 
 test('working days are Monday to Friday, up to today in the running month', () => {
   // Oct 2026: the 1st is a Thursday
@@ -109,4 +109,26 @@ test('IST: invoiced over target per person, projected to month end while the mon
 
 test('IST bands: above 90 → 50, 81–90 → 40, 71–80 → 30, 61–70 → 20, 60 and below → 0', () => {
   expect([150, 91, 90, 81, 80, 71, 70, 61, 60, 0].map(_test.istPts)).toEqual([50, 50, 40, 40, 30, 30, 20, 20, 0, 0]);
+});
+
+test('Scorecard: the four KPIs per person out of 100, IST at 0 caps the month at 40, no target is not scored', () => {
+  const ist = computeIst([
+    { user_id: 1, name: 'A', target_php: 100000, sales_php: 50000 }, // 100% projected -> 50
+    { user_id: 2, name: 'B', target_php: 100000, sales_php: 20000 }, // 40% projected -> 0, caps
+    { user_id: 3, name: 'C', target_php: 0, sales_php: 5000 },       // not scored
+  ], '2026-11', '2026-11-15');
+  const nz = { people: [{ salesperson: '1', points: 15, nzsd_pct: 100 }, { salesperson: '2', points: 15, nzsd_pct: 100 }] };
+  const hr = { people: [{ salesperson: '1', points: 12, hrr_pct: 90 }, { salesperson: '2', points: 15, hrr_pct: 100 }] };
+  const ds = { people: [{ salesperson: '1', points: 20, dso_days: 40 }, { salesperson: '2', points: 20, dso_days: 30 }] };
+  const r = computeScorecard({ ist, nz, hr, ds, accounts: new Map([[1, ['HOS | A']]]) });
+  const a = r.people.find((p) => p.name === 'A');
+  expect(a).toMatchObject({ total: 97, capped: false, status: 'strong', accounts: ['HOS | A'], points: { ist: 50, dso: 20, hrr: 12, nzsd: 15 } });
+  expect(r.people.find((p) => p.name === 'B')).toMatchObject({ total: 40, capped: true, caps_month: true, status: 'watch' });
+  expect(r.people.find((p) => p.name === 'C')).toMatchObject({ total: null, status: 'not_scored' });
+  expect(r.summary).toMatchObject({ people: 3, scored: 2, average: 69, strong: 1, capped: 1, not_scored: 1 });
+  expect(r.max_points).toBe(100);
+  // without DSO (a past month) the scorecard is out of 80
+  const past = computeScorecard({ ist, nz, hr, ds: null });
+  expect(past.max_points).toBe(80);
+  expect(past.people.find((p) => p.name === 'A')).toMatchObject({ total: 77, points: { dso: null }, status: 'strong' });
 });

@@ -291,4 +291,100 @@ async function dso({ prefix, today = manilaToday() } = {}) {
   return { month, ...computeDso(open, credit, today) };
 }
 
-module.exports = { nzsd, hrr, dso, ist, computeNzsd, computeHrr, computeDso, computeIst, _test: { workingDays, manilaDay, nzsdPts, hrrPts, dsoPts, istPts, prevMonth } };
+/**
+ * SCORECARD (Oct 24, 2026): the four KPIs in one 100-point row per PERSON, like the mock-up
+ * (kpi/kpi-admin-mockup.html). IST is per person already; DSO, HRR and NZSD are per Zoho
+ * salesperson, so each salesperson is given to the account holding it (user_salespersons,
+ * primary first) and the person's accounts are counted together: NZSD on any of their accounts
+ * that day, HRR over all their customers, DSO over all their open AR and credit sales.
+ * Total = IST + DSO + HRR + NZSD; IST at 0 points caps it at 40. People with no target are
+ * listed but not scored. DSO only exists for the running month (today's figure); a past month
+ * is scored out of 80 and says so.
+ *
+ * ist: computeIst() result; nz / hr / ds: computeNzsd / computeHrr / computeDso results keyed
+ * by person (salesperson field = String(user_id)); accounts: user_id -> [salesperson names].
+ */
+function computeScorecard({ ist: istRes, nz, hr, ds, accounts = new Map() }) {
+  const by = (res) => new Map((res ? res.people : []).map((p) => [String(p.salesperson), p]));
+  const N = by(nz), H = by(hr), D = by(ds);
+  const max = ds ? 100 : 80;
+  const rows = istRes.people.map((p) => {
+    const key = String(p.user_id);
+    const n = N.get(key), h = H.get(key), d = D.get(key);
+    const pts = {
+      ist: p.points,
+      dso: ds ? (d ? d.points : null) : null,
+      hrr: h ? h.points : null,
+      nzsd: n ? n.points : 0, // no invoice at all this month = no sales days
+    };
+    const scored = p.points != null;
+    const sum = (pts.ist || 0) + (pts.dso || 0) + (pts.hrr || 0) + (pts.nzsd || 0);
+    const capped = scored && pts.ist === 0 && sum > 40;
+    const total = scored ? (capped ? 40 : sum) : null;
+    return {
+      user_id: p.user_id, name: p.name, title: p.title, team_lead: p.team_lead, channel: p.channel,
+      accounts: accounts.get(p.user_id) || [],
+      points: pts, total, capped, caps_month: scored && pts.ist === 0,
+      status: total == null ? 'not_scored' : total >= max * 0.8 ? 'strong' : total > 0 ? 'watch' : 'review',
+      detail: {
+        ist_projected_pct: p.ist_projected_pct, ist_now_pct: p.ist_now_pct,
+        dso_days: d ? d.dso_days : null, hrr_pct: h ? h.hrr_pct : null, nzsd_pct: n ? n.nzsd_pct : 0,
+      },
+    };
+  }).sort((a, b) => (b.total ?? -1) - (a.total ?? -1) || a.name.localeCompare(b.name));
+  const scored = rows.filter((r) => r.total != null);
+  return {
+    month: istRes.month, running: istRes.running, days_so_far: istRes.days_so_far, days_in_month: istRes.days_in_month,
+    pace_pct: istRes.pace_pct, max_points: max, dso_included: !!ds,
+    summary: {
+      people: rows.length, scored: scored.length,
+      average: scored.length ? Math.round(scored.reduce((a, r) => a + r.total, 0) / scored.length) : null,
+      strong: scored.filter((r) => r.status === 'strong').length,
+      capped: scored.filter((r) => r.caps_month).length,
+      not_scored: rows.length - scored.length,
+    },
+    people: rows,
+  };
+}
+
+async function scorecard(month, { prefix, today = manilaToday(), withDso = true } = {}) {
+  const istRes = await ist(month, { prefix, today });
+  if (istRes.available === false) return istRes;
+  const accts = await q('SELECT user_id, salesperson, is_primary FROM user_salespersons ORDER BY is_primary DESC, id');
+  const owner = new Map(); // lower(salesperson) -> user_id, the primary holder first
+  const accounts = new Map(); // user_id -> [salesperson]
+  for (const a of accts) {
+    const k = String(a.salesperson || '').trim().toLowerCase();
+    if (!k) continue;
+    if (!owner.has(k)) owner.set(k, a.user_id);
+    if (!accounts.has(a.user_id)) accounts.set(a.user_id, []);
+    accounts.get(a.user_id).push(a.salesperson);
+  }
+  // Every row's salesperson becomes its person; salespersons nobody holds are left out of the scorecard.
+  const toPerson = (rows) => rows.flatMap((r) => {
+    const u = owner.get(String(r.salesperson || '').trim().toLowerCase());
+    return u == null ? [] : [{ ...r, salesperson: String(u) }];
+  });
+  const [y, m] = month.split('-').map(Number);
+  const next = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+  const end = (mm) => `${mm}-${String(daysInMonth(mm)).padStart(2, '0')}`;
+  const sp = "coalesce(salesperson_name, 'No salesperson') AS salesperson";
+  const [nzRows, lastRows, curRows] = await Promise.all([
+    q(`SELECT ${sp}, created_time FROM zoho_invoices WHERE ${COUNTED} AND created_time >= $1 AND created_time < $2`, [`${prevMonth(month)}-28`, `${next}-02`]),
+    q(`SELECT ${sp}, customer_id, customer_name, total FROM zoho_invoices WHERE ${COUNTED} AND date >= $1 AND date <= $2`, [`${prevMonth(month)}-01`, end(prevMonth(month))]),
+    q(`SELECT ${sp}, customer_id, customer_name, total FROM zoho_invoices WHERE ${COUNTED} AND date >= $1 AND date <= $2`, [`${month}-01`, end(month)]),
+  ]);
+  const nz = computeNzsd(toPerson(nzRows), month, { today });
+  const hr = computeHrr(toPerson(lastRows), toPerson(curRows), month);
+  let ds = null;
+  if (withDso && today.slice(0, 7) === month) {
+    const [open, credit] = await Promise.all([
+      q(`SELECT ${sp}, customer_name, date, balance FROM zoho_invoices WHERE ${COUNTED} AND balance > 0`),
+      q(`SELECT ${sp}, total FROM zoho_invoices WHERE ${COUNTED} AND date >= $1 AND date <= $2 AND due_date IS NOT NULL AND due_date > date`, [`${month}-01`, today]),
+    ]);
+    ds = computeDso(toPerson(open), toPerson(credit), today);
+  }
+  return computeScorecard({ ist: istRes, nz, hr, ds, accounts });
+}
+
+module.exports = { nzsd, hrr, dso, ist, scorecard, computeNzsd, computeHrr, computeDso, computeIst, computeScorecard, _test: { workingDays, manilaDay, nzsdPts, hrrPts, dsoPts, istPts, prevMonth } };

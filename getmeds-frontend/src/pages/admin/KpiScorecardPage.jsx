@@ -269,6 +269,32 @@ INFO.dso = {
   ],
 };
 
+INFO.scorecard = {
+  title: 'KPI Scorecard — how this is calculated',
+  formula: 'Total = IST (50) + DSO (20) + HRR (15) + NZSD (15) = 100 points',
+  bands: 'Strong: 80 points or more · Watch: above 0 · Review: 0 · IST at 0 points caps the month at 40',
+  source: [
+    'Each KPI is the same figure as its own tab, read from the copy of Zoho Books invoices and credit notes.',
+    'IST is per person (credited the same way as the Overview). DSO, HRR and NZSD are per Zoho salesperson; each salesperson goes to the account that holds it on GetMeds (User Management → Zoho Salesperson, primary first).',
+    'A person holding two salespersons is one row: NZSD counts a day if either account invoiced, HRR counts all their customers, DSO adds up all their open AR and credit sales.',
+  ],
+  rules: [
+    'People with no target this month are listed and not scored.',
+    'A Zoho salesperson nobody holds on GetMeds is left out of the Scorecard (it still shows on the KPI tabs).',
+    'DSO exists for the running month only (today’s figure); a past month is scored out of 80 until the daily snapshot is built.',
+    'No invoice at all this month = 0 NZSD points; no customers last month = HRR not counted (—).',
+  ],
+  check: [
+    'Open each KPI tab: for someone with one Zoho salesperson, the points there are the points here.',
+    'Download gives every person’s points and the figures behind them.',
+  ],
+  open: [
+    'Hospitals are not tagged yet, so HRR counts all customers.',
+    'Holidays are not in the NZSD working days yet.',
+    'The figures must be checked with the Team Leads of each department before the sales teams see them.',
+  ],
+};
+
 INFO.ist = {
   title: 'IST · Individual Sales Target — how this is calculated',
   formula: 'IST % = invoiced sales this month ÷ the person’s monthly target × 100',
@@ -425,18 +451,78 @@ const Ist = ({ d }) => {
   );
 };
 
+const KPI_COLORS = { ist: '#1d9fda', dso: '#7c5cff', hrr: '#34a853', nzsd: '#f29d0b' };
+const STATUS = {
+  strong: ['Strong', 'bg-state-success-light text-pharmacy-green-700'],
+  watch: ['Watch', 'bg-state-warning-light text-amber-700'],
+  review: ['Review', 'bg-state-error-light text-red-700'],
+  not_scored: ['No target', 'bg-slate-100 text-ink-secondary'],
+};
+const PtsCell = ({ v, max }) => (v == null ? <span className="text-ink-secondary">—</span> : <Pts pts={v} max={max} />);
+
+const Scorecard = ({ d }) => {
+  const s = d.summary;
+  return (
+    <>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mb-3">
+        <Card title="Average score" value={s.average == null ? '—' : `${s.average} / ${d.max_points}`} sub={`${s.scored} people scored${s.not_scored ? ` · ${s.not_scored} with no target` : ''}`} />
+        <Card title={`${Math.round(d.max_points * 0.8)} points or more`} value={`${s.strong} of ${s.scored}`} sub={d.running ? 'on track for the month' : 'for the month'} />
+        <Card title="Capped at 40" value={s.capped} sub="IST at 0 points caps the month" red />
+        <Card title="Month passed" value={`${d.pace_pct}%`} sub={`day ${d.days_so_far} of ${d.days_in_month}`} />
+      </div>
+      {!d.dso_included && (
+        <p className="mb-3 rounded-lg border border-amber-200 bg-state-warning-light p-2.5 text-[12px] text-amber-800">
+          DSO is not in this month’s score: it exists only as today’s figure (past months need the daily snapshot), or the unpaid invoices are not copied yet. Scored out of 80.
+        </p>
+      )}
+      <Panel title="Points per person" aside={<span className="flex flex-wrap gap-3">{Object.entries(KPI_COLORS).map(([k, c]) => <Legend key={k} color={c}>{k.toUpperCase()}</Legend>)}</span>}>
+        <table className="w-full">
+          <thead><tr><Th>Person</Th><Th>CHC / Zoho salesperson</Th><Th right>IST</Th><Th right>DSO</Th><Th right>HRR</Th><Th right>NZSD</Th><Th right>Total</Th><Th>Out of {d.max_points}</Th><Th>Status</Th></tr></thead>
+          <tbody>
+            {d.people.map((p) => (
+              <tr key={p.user_id}>
+                <Td strong>{p.name}{p.team_lead ? <span className="ml-1 text-[11px] font-normal text-ink-secondary">· TL {p.team_lead}</span> : null}</Td>
+                <Td wrap><span className="text-[12px] text-ink-secondary">{p.accounts.join(', ') || '—'}</span></Td>
+                <Td right><PtsCell v={p.points.ist} max={50} /></Td>
+                <Td right><PtsCell v={p.points.dso} max={20} /></Td>
+                <Td right><PtsCell v={p.points.hrr} max={15} /></Td>
+                <Td right><PtsCell v={p.points.nzsd} max={15} /></Td>
+                <Td right strong>{p.total ?? '—'}</Td>
+                <Td>
+                  {p.total == null ? null : p.capped
+                    ? <div className="h-[9px] min-w-[150px] rounded-full bg-slate-100"><div className="h-full rounded-full bg-red-500" style={{ width: `${(40 / d.max_points) * 100}%` }} /></div>
+                    : <div className="flex h-[9px] min-w-[150px] overflow-hidden rounded-full bg-slate-100">
+                        {Object.entries(KPI_COLORS).map(([k, c]) => (p.points[k] ? <span key={k} title={`${k.toUpperCase()}: ${p.points[k]}`} style={{ width: `${(p.points[k] / d.max_points) * 100}%`, background: c }} /> : null))}
+                      </div>}
+                </Td>
+                <Td>{p.capped ? <span className="text-[11px] font-semibold text-red-700">capped: IST 0</span>
+                  : <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS[p.status][1]}`}>{STATUS[p.status][0]}</span>}</Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="mt-2 px-1 text-[11px] text-ink-secondary">
+          IST is per person; DSO, HRR and NZSD add up all the Zoho salespersons the person holds. Strong = {Math.round(d.max_points * 0.8)}+ points.
+          {d.running ? ' IST uses the month-end projection while the month runs.' : ''} Open a KPI tab above for the detail behind each number.
+        </p>
+      </Panel>
+    </>
+  );
+};
+
 const TITLES = {
+  scorecard: ['KPI Scorecard', 'Each person out of 100 points: IST 50 · DSO 20 · HRR 15 · NZSD 15, from the Zoho invoice copy.'],
   nzsd: ['NZSD · No Zero Sales Days', 'Working days with at least one invoice, counted by the invoice’s creation time (it can’t be backdated).'],
   hrr: ['HRR · Hospital Retention Rate', 'Accounts invoiced last month that were invoiced again this month. All customers count until hospitals are tagged.'],
   ist: ['IST · Individual Sales Target', 'Each person’s Zoho sales with tax this month against their monthly target, credited the same way as the Overview and My KPIs.'],
   dso: ['DSO · Days Sales Outstanding', 'Open balance on each CHC’s invoices, divided by their average credit sales per day this month. Today’s figure.'],
 };
-const POINTS = { ist: 50, nzsd: 15, hrr: 15, dso: 20 };
+const POINTS = { scorecard: 100, ist: 50, nzsd: 15, hrr: 15, dso: 20 };
 
 const KpiScorecardPage = () => {
   const navigate = useNavigate();
   const { tab: tabParam } = useParams();
-  const tab = ['hrr', 'dso', 'ist'].includes(tabParam) ? tabParam : 'nzsd';
+  const tab = ['hrr', 'dso', 'ist', 'nzsd'].includes(tabParam) ? tabParam : 'scorecard';
   const [month, setMonth] = useState(manilaMonth());
   const [prefix, setPrefix] = useState('HOS');
   const [info, setInfo] = useState(null);
@@ -445,7 +531,10 @@ const KpiScorecardPage = () => {
   const download = () => {
     if (!data?.available) return;
     const head = [[`GetMeds KPI Scorecard — ${TITLES[tab][0]} — ${monthLabel(month)}${prefix ? ` — ${prefix}` : ''}`], ['From the Zoho invoice copy, as of', data.as_of || ''], []];
-    const rows = tab === 'ist'
+    const rows = tab === 'scorecard'
+      ? [['Person', 'Team lead', 'Zoho salespersons', 'IST pts', 'DSO pts', 'HRR pts', 'NZSD pts', 'Total', `Out of`, 'Capped at 40', 'IST projected %', 'DSO days', 'HRR %', 'NZSD %'],
+        ...data.people.map((p) => [p.name, p.team_lead, p.accounts.join(' / '), p.points.ist ?? '', p.points.dso ?? '', p.points.hrr ?? '', p.points.nzsd ?? '', p.total ?? 'no target', data.max_points, p.capped ? 'yes' : '', p.detail.ist_projected_pct ?? '', p.detail.dso_days ?? '', p.detail.hrr_pct ?? '', p.detail.nzsd_pct ?? ''])]
+      : tab === 'ist'
       ? [['Person', 'Title', 'Team lead', 'Channel', 'Target', 'Invoiced (Zoho, with tax)', 'Balance', 'IST now %', 'IST projected %', 'Points', 'Caps month at 40'],
         ...data.people.map((p) => [p.name, p.title, p.team_lead, p.channel, p.target_php, p.invoiced_php, p.balance_php, p.ist_now_pct ?? '', p.ist_projected_pct ?? '', p.points ?? '', p.caps_month ? 'yes' : ''])]
       : tab === 'dso'
@@ -480,7 +569,7 @@ const KpiScorecardPage = () => {
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        {[['ist', 'IST · Sales target'], ['dso', 'DSO · Collections'], ['hrr', 'HRR · Retention'], ['nzsd', 'NZSD · Zero-sales days']].map(([k, label]) => (
+        {[['scorecard', 'Scorecard'], ['ist', 'IST · Sales target'], ['dso', 'DSO · Collections'], ['hrr', 'HRR · Retention'], ['nzsd', 'NZSD · Zero-sales days']].map(([k, label]) => (
           <button key={k} type="button" onClick={() => navigate(`/admin/kpi-scorecard/${k}`)}
             className={`rounded-full border px-3 py-1 text-xs font-semibold ${tab === k ? 'border-getmeds-blue bg-getmeds-blue text-white' : 'border-slate-300 bg-white text-ink-secondary'}`}>{label}</button>
         ))}
@@ -492,7 +581,7 @@ const KpiScorecardPage = () => {
       {isLoading ? <p className="flex items-center gap-2 text-sm text-ink-secondary"><Loader2 className="h-4 w-4 animate-spin" />Loading…</p>
         : isError ? <p className="text-sm text-red-700">{error?.response?.data?.error?.message || 'Could not load the KPIs.'}</p>
           : !data?.available ? <p className="rounded-lg border border-amber-200 bg-state-warning-light p-3 text-sm text-amber-800">{data?.reason}</p>
-            : tab === 'nzsd' ? <Nzsd d={data} month={month} /> : tab === 'dso' ? <Dso d={data} /> : tab === 'ist' ? <Ist d={data} /> : <Hrr d={data} />}
+            : tab === 'scorecard' ? <Scorecard d={data} /> : tab === 'nzsd' ? <Nzsd d={data} month={month} /> : tab === 'dso' ? <Dso d={data} /> : tab === 'ist' ? <Ist d={data} /> : <Hrr d={data} />}
 
       <InfoModal kind={info} data={data} onClose={() => setInfo(null)} />
     </div>
