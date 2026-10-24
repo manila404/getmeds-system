@@ -217,6 +217,14 @@ const DELIVERY_METHOD_SUGGESTIONS = [
   'Grab Express',
   'J&T Express',
   'Lalamove',
+  // Oct 24, 2026: long-distance couriers and bus / freight lines Dispatch uses (free text in Zoho, so these are suggestions only)
+  'Air Asia',
+  'Victory Liner',
+  'Partas',
+  'Homestocks',
+  'AO Freight',
+  'Daily Overland',
+  'AP Cargo',
   'Customer Pick-up',
   'Distributor Delivery'
 ];

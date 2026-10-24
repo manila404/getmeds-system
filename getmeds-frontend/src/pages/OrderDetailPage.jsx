@@ -68,7 +68,8 @@ const SOURCE_OPTIONS = ORDER_SOURCES;
 const INVOICING_FROM_OPTIONS = ['2mg Incorporated', 'Getmeds Philippines Inc.'];
 const DELIVERY_METHOD_SUGGESTIONS = [
   'Own Rider / Company Vehicle', 'LBC Express', 'Grab Express', 'J&T Express',
-  'Lalamove', 'Customer Pick-up', 'Distributor Delivery'
+  'Lalamove', 'Air Asia', 'Victory Liner', 'Partas', 'Homestocks', 'AO Freight', 'Daily Overland', 'AP Cargo',
+  'Customer Pick-up', 'Distributor Delivery'
 ];
 // Sep 19, 2026: moved to constants/paymentTerms.js, imported below — this
 // used to be a second hand-copy of OrderForm.jsx's own list, with no shared
