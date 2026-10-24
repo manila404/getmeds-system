@@ -322,6 +322,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
           // (User Management was sharing the Users icon with Clients Directory.)
           { to: '/admin/users', icon: <UserCog size={19} />, label: 'User Management' },
           ...(kpi.canViewAll ? [{ to: '/admin/kpi', icon: <Target size={19} />, label: 'Sales KPIs' }] : []),
+          // Oct 20, 2026: the sales sheet as a page (Aaron sheet 13.6.6); same switch as Sales KPIs.
+          ...(kpi.canViewAll ? [{ to: '/admin/sales-performance', icon: <BarChart3 size={19} />, label: 'Sales Performance' }] : []),
           { to: '/management/order-ownership', icon: <UserCheck size={19} />, label: 'Order Ownership' },
           // Sep 9, 2026: the Zoho sync retry outbox — see ZohoSyncHealthPage.jsx.
           { to: '/finance/refunds', icon: <Banknote size={19} />, label: 'Refunds' },

@@ -34,6 +34,9 @@ router.get('/me', allowAsync(canSeeOwnKpisNow), c.getMyKpis);
 router.get('/settings', allow(canViewAllKpis), c.getSettings);
 router.put('/settings', allow(canViewAllKpis), c.putSettings);
 router.get('/', allow(canViewAllKpis), c.getKpis);
+// Oct 20, 2026: the sales team's sheet as a page (Aaron sheet 13.6.6). Read-only; Admin for now.
+router.get('/sales-performance', allow(canViewAllKpis), c.getSalesPerformance);
+router.get('/sales-performance/export', allow(canViewAllKpis), c.exportSalesPerformance);
 router.get('/targets', allow(canSetAnyTarget), c.getTargets);
 router.put('/targets/:month', allow(canSetAnyTarget), c.putTargets);
 router.post('/targets/:month/copy', allow(canSetAnyTarget), c.copyTargets);

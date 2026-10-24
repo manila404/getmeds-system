@@ -29,6 +29,7 @@ import ReturnChecksPage from './pages/dispatch/ReturnChecksPage';
 import UsersPage from './pages/admin/UsersPage';
 import ZohoSyncHealthPage from './pages/admin/ZohoSyncHealthPage';
 import KpiPage from './pages/admin/KpiPage';
+import SalesPerformancePage from './pages/admin/SalesPerformancePage';
 // ADMIN OVERVIEW MOCK (Oct 14, 2026): try-out page, only routed when VITE_ADMIN_OVERVIEW_MOCK=true.
 import AdminOverviewMockPage from './pages/admin/AdminOverviewMockPage';
 // KPI SCORECARD (try-out, Oct 21, 2026): NZSD and HRR; only routed when VITE_KPI_SCORECARD=true.
@@ -341,6 +342,15 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['admin']}>
                 <KpiPage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Oct 20, 2026: the sales team's sheet as a page (Aaron sheet 13.6.6). Same switch as Sales KPIs. */}
+          <Route
+            path="/admin/sales-performance"
+            element={
+              <ProtectedRoute allowedRoles={['admin']}>
+                <SalesPerformancePage />
               </ProtectedRoute>
             }
           />

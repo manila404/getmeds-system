@@ -14,6 +14,9 @@
 
 const db = require('../db/database');
 const { buildExport, monthRange, currentMonth, prevMonth } = require('../services/kpiService');
+const { buildSalesPerformance } = require('../services/salesPerformanceService');
+const { buildSalesPerformanceWorkbook } = require('../services/salesPerformanceXlsx');
+const adminOverview = require('./adminOverview.controller');
 const {
   canSetTarget, canSetAnyTarget, canViewAllKpis, canSeeOwnKpisNow, TARGET_ROLES,
   salesVisibility, setSalesVisibility, salesVisibilityChange, VISIBILITY
@@ -401,4 +404,93 @@ async function putSettings(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { getKpis, getMyKpis, getTargets, putTargets, copyTargets, targetsFromStructure, getTargetChanges, getStatus, getSettings, putSettings, _test: { parseTarget, parseMonth, clearKpiCache } };
+/**
+ * GET /api/kpi/sales-performance?month=YYYY-MM[&fresh=1]  (Aaron sheet 13.6.6, Oct 20, 2026)
+ *
+ * The sales team's own sheet as a page: one row per Zoho salesperson (territory), grouped
+ * Head > channel > manager, with Target, Achieved (Zoho Total Sales with Tax), Balance to target,
+ * Today's invoicing and %. See services/salesPerformanceService.js for every rule.
+ *
+ * Read-only: the structure comes from one READ ONLY transaction (3 small tables, 10-second limit)
+ * and the money from Zoho GET requests the Admin Overview already makes (kept 5 minutes per
+ * period, so opening the page repeatedly does not re-read Zoho; ?fresh=1 is the Refresh button).
+ */
+async function loadSalesPerformance(query) {
+  const thisMonth = currentMonth();
+  const today = adminOverview.manilaToday();
+  // Oct 24, 2026 (Aaron): a date range like Zoho's report (?from=2026-10-24&to=2026-10-24), besides a month.
+  const isDay = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) && !Number.isNaN(Date.parse(`${d}T00:00:00Z`));
+  let range = null;
+  if (query.from || query.to) {
+    if (!isDay(query.from) || !isDay(query.to)) return { error: 'from and to must look like 2026-10-24' };
+    if (query.from > query.to) return { error: 'from must be on or before to' };
+    if (query.to > today) return { error: 'to cannot be after today' };
+    range = { from: String(query.from), to: String(query.to) };
+  }
+  const month = range ? range.to.slice(0, 7) : (query.month ? parseMonth(query.month) : thisMonth);
+  if (!month) return { error: 'month must look like 2026-09' };
+  if (month > thisMonth) return { error: 'That month has not started yet' };
+  const [y, m] = month.split('-').map(Number);
+  const lastDay = `${month}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0')}`;
+  const from = range ? range.from : `${month}-01`;
+  const to = range ? range.to : (month === thisMonth ? today : lastDay);
+
+  const structure = await db.transaction(async () => {
+    await q('SET TRANSACTION READ ONLY');
+    await q('SET LOCAL statement_timeout = 10000');
+    return {
+      channels: await q('SELECT id, name, head_name, sort_order FROM sales_channels'),
+      managers: await q('SELECT id, channel_id, name, sort_order FROM sales_managers'),
+      territories: await q(
+        `SELECT id, manager_id, zoho_salesperson, zoho_alias, person_label, hq, is_vacant, target_month, target_amount, sort_order
+           FROM sales_territories`
+      ),
+      // Oct 24, 2026: the same targets as the Overview (per person, plus vacant territories').
+      targets: {
+        people: await q('SELECT k.user_id, u.name, k.target_php FROM kpi_targets k LEFT JOIN users u ON u.id = k.user_id WHERE k.month = $1', [month]),
+        accounts: await q('SELECT user_id, salesperson, is_primary FROM user_salespersons'),
+        territory: (await q("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'territory_targets'")).length
+          ? await q('SELECT territory_id, label, target_php FROM territory_targets WHERE month = $1', [month])
+          : []
+      }
+    };
+  })();
+  // Localhost testing only: scripts/dev-sales-performance.js points this at a saved copy of Zoho's sales
+  // (written by scripts/dev-sales-performance-snapshot.js), because the mock Zoho has no invoices.
+  // Never honoured when NODE_ENV is "production", so it cannot do anything on the live server.
+  const inDates = (r) => String(r.date || '').slice(0, 10) >= from && String(r.date || '').slice(0, 10) <= to;
+  const snap = (z) => ({ ...z, invoices: (z.invoices || []).filter(inDates), credit_notes: (z.credit_notes || []).filter(inDates), total_sales_with_tax: undefined, invoice_count: undefined });
+  const zoho = process.env.SALES_PERFORMANCE_ZOHO_FILE && process.env.NODE_ENV !== 'production'
+    ? snap(JSON.parse(require('fs').readFileSync(process.env.SALES_PERFORMANCE_ZOHO_FILE, 'utf8')))
+    : await adminOverview.readZohoSales(from, to, { fresh: query.fresh === '1' });
+  const data = buildSalesPerformance({ month, today, zoho, range, ...structure });
+  return { data: { ...data, currentMonth: thisMonth, generatedAt: new Date().toISOString() } };
+}
+
+async function getSalesPerformance(req, res, next) {
+  try {
+    const r = await loadSalesPerformance(req.query);
+    if (r.error) return bad(res, r.error);
+    res.json({ success: true, data: r.data });
+  } catch (err) { next(err); }
+}
+
+/**
+ * GET /api/kpi/sales-performance/export?month=YYYY-MM — the same numbers as the page, as a formatted
+ * Excel file (a CSV cannot carry widths, number formats or colours). Oct 20, 2026.
+ */
+async function exportSalesPerformance(req, res, next) {
+  try {
+    const r = await loadSalesPerformance(req.query);
+    if (r.error) return bad(res, r.error);
+    const file = await buildSalesPerformanceWorkbook(r.data);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="sales-performance-${r.data.range ? `${r.data.range.from}_${r.data.range.to}` : r.data.month}.xlsx"`,
+      'Cache-Control': 'no-store'
+    });
+    res.send(file);
+  } catch (err) { next(err); }
+}
+
+module.exports = { getKpis, getMyKpis, getSalesPerformance, exportSalesPerformance, getTargets, putTargets, copyTargets, targetsFromStructure, getTargetChanges, getStatus, getSettings, putSettings, _test: { parseTarget, parseMonth, clearKpiCache } };
