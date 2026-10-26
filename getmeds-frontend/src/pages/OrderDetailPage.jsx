@@ -880,7 +880,8 @@ const OrderDetailPage = () => {
       delivery_method: o.intake_delivery_method || '',
       terms: o.intake_terms || '',
       payment_terms: o.intake_payment_terms || '',
-      invoicing_from: o.invoicing_from || ''
+      invoicing_from: o.invoicing_from || '',
+      tin: o.intake_tin || ''
     });
     setIsEditingDetails(true);
   };
@@ -904,7 +905,8 @@ const OrderDetailPage = () => {
       ['Delivery Method', o.intake_delivery_method, draftDetails.delivery_method],
       ['Terms / Conditions', o.intake_terms, draftDetails.terms],
       ['Payment Terms', o.intake_payment_terms, draftDetails.payment_terms],
-      ['Invoicing From', o.invoicing_from, draftDetails.invoicing_from]
+      ['Invoicing From', o.invoicing_from, draftDetails.invoicing_from],
+      ['TIN', o.intake_tin, draftDetails.tin]
     ];
     if (isManagementUser) {
       rows.push(['Division', o.division, draftDetails.division]);
@@ -929,7 +931,8 @@ const OrderDetailPage = () => {
       payment_terms: draftDetails.payment_terms,
       invoicing_from: draftDetails.invoicing_from,
       sub_division: draftDetails.sub_division,
-      headquarter: draftDetails.headquarter
+      headquarter: draftDetails.headquarter,
+      customer_tin: draftDetails.tin
     };
     // Sep 7, 2026 (2): Division/Salesperson are Management-only on the
     // backend (mirrors create()'s own rule) — only send them from a
@@ -1600,6 +1603,14 @@ const OrderDetailPage = () => {
                       <option value="">-- Select invoicing entity --</option>
                       {INVOICING_FROM_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
                     </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">TIN</label>
+                    <input type="text" value={draftDetails.tin}
+                      onChange={(e) => updateDraftDetail('tin', e.target.value)}
+                      placeholder="Customer TIN"
+                      className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
                   </div>
 
                   <div className="md:col-span-2">

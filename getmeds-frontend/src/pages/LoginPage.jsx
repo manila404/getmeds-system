@@ -78,7 +78,7 @@ const LoginPage = () => {
             Getmeds System
           </h1>
           <p className="text-sm sm:text-base md:text-lg text-blue-100/90 max-w-lg font-medium mx-auto md:mx-0">
-            Your centralized portal for seamless medical supply management and operations.
+            Your centralized portal for seamless order encoding and real-time tracking
           </p>
         </div>
 
