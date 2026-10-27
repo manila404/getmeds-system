@@ -3086,15 +3086,18 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
   // doesn't do this.
   const { primaryItems, splitItems, splitInvoicingFrom } = groupItemsByInvoicingFrom(items, order.invoicing_from);
 
-  // Create Zoho SO. Done *before* opening the DB transaction below for the
-  // same reason as in `create` above — better-sqlite3 transactions can't
-  // contain an `await`, and this call is async (mock, http-mock, or live
-  // depending on ZOHO_MODE).
-  //
-  // Fail-safe, not fail-closed: a Zoho rejection here does not abort the
-  // submission or leave the order stuck — it still advances through the
-  // state machine with zoho_sync_status='failed' and gets queued for
-  // automatic background retry (see zohoRetryService).
+  // Oct 27, 2026: push intake_tin to the Zoho contact before creating the
+  // Sales Order — mirrors exactly what create() does at lines 2467–2487.
+  // Without this, orders that go through the management-approval gate never
+  // push the TIN, so Zoho rejects the SO creation with "Please Add Customer
+  // TIN". Soft-gated: a Zoho failure here never blocks the submission.
+  if (order.intake_tin && order.customer_id) {
+    const tinResult = await setCustomerTin(order.customer_id, order.intake_tin);
+    if (tinResult?.zohoError) {
+      console.warn(`[ORDERS] TIN for customer ${order.customer_id} saved locally but not pushed to Zoho (sync path): ${tinResult.zohoError}`);
+    }
+  }
+
   const zohoPayload = {
     getmeds_order_id: getmedsOrderId,
     customer_name: order.customer_name,

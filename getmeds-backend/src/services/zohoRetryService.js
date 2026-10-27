@@ -1,3 +1,4 @@
+const { setCustomerTin } = require('./customerTinService');
 const db = require('../db/database');
 const zoho = require('../integrations/zoho');
 const { logEvent } = require('./auditService');
@@ -117,6 +118,19 @@ async function processOne(row) {
     if (!payload) {
       throw new Error(`Order ${row.order_id} no longer exists — cannot retry Zoho sync.`);
     }
+
+    // Oct 27, 2026: push intake_tin to the Zoho contact before retrying SO
+    // creation — mirrors create() and syncOrderToZohoAndFinalize. A retry
+    // that skips this step would keep failing with "Please Add Customer TIN"
+    // even after the TIN was saved on the order via Edit Details.
+    const tinOrder = await db.prepare('SELECT customer_id, intake_tin FROM orders WHERE id = ?').get(row.order_id);
+    if (tinOrder?.intake_tin && tinOrder?.customer_id) {
+      const tinResult = await setCustomerTin(tinOrder.customer_id, tinOrder.intake_tin);
+      if (tinResult?.zohoError) {
+        console.warn(`[ZOHO_RETRY] TIN for customer ${tinOrder.customer_id} not pushed to Zoho: ${tinResult.zohoError}`);
+      }
+    }
+
     const zohoResult = await zoho.createSalesOrder(payload);
     const now = new Date().toISOString();
 
