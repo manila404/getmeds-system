@@ -294,10 +294,26 @@ async function creditNoteChecked({ user, id, number }) {
   const mine = order.customer_zoho_id ? usable.filter((c) => !c.customer_id || String(c.customer_id) === String(order.customer_zoho_id)) : usable;
   if (!mine.length) fail(409, 'WRONG_CUSTOMER', `That credit note belongs to another customer in Zoho, not ${order.customer_name}.`);
   const ask = Number(r.requested_amount) || 0;
-  const match = mine.find((c) => Math.abs(Number(c.total) - ask) < 0.01);
+  const paid = Number(r.amount_paid || order.total_amount) || 0;
+  const match = mine.find((c) => {
+    const total = Number(c.total) || 0;
+    const balance = Number(c.balance) || 0;
+    const refundedOnCN = Math.max(0, total - balance);
+    // 1. Exact match on CN total (credit note created specifically for the refund amount)
+    if (Math.abs(total - ask) < 0.01) return true;
+    // 2. Exact match on the refund applied to the CN in Zoho (total minus balance)
+    if (refundedOnCN > 0 && Math.abs(refundedOnCN - ask) < 0.01) return true;
+    // 3. CN created for the full order/paid amount (or invoice total) and covers the refund
+    if (total >= ask && (Math.abs(total - paid) < 0.01 || !paid)) return true;
+    return false;
+  });
   if (!match) {
-    const t = mine.map((c) => `${c.creditnote_number} ${peso(c.total)}`).join(', ');
-    fail(409, 'CREDIT_NOTE_AMOUNT', `The credit note in Zoho (${t}) is not ${peso(ask)}, the amount to refund. Fix the credit note in Zoho, or ask Management to change the amount.`);
+    const t = mine.map((c) => {
+      const tot = Number(c.total) || 0;
+      const ref = Math.max(0, tot - (Number(c.balance) || 0));
+      return ref > 0 ? `${c.creditnote_number} (${peso(tot)}, refunded ${peso(ref)})` : `${c.creditnote_number} (${peso(tot)})`;
+    }).join(', ');
+    fail(409, 'CREDIT_NOTE_AMOUNT', `The credit note in Zoho (${t}) does not match the refund amount of ${peso(ask)}. Fix the credit note in Zoho, or ask Management to change the amount.`);
   }
   const actor = await resolveActor(user, 'finance');
   await touch(id, 'credit_note_number = ?, credit_note_total = ?, credit_note_checked_by = ?, credit_note_checked_at = ?', [match.creditnote_number, Number(match.total), actor.id, new Date().toISOString()]);
@@ -314,18 +330,20 @@ async function assertReadyToPay(orderId, user) {
   if (!r) return;
   const p = pathOf(r);
   if (p === 'payment' && !r.payment_recorded_at) {
-    try {
-      await paymentRecorded({ user, id: r.id });
-    } catch (checkErr) {
-      if (checkErr instanceof RefundError) throw checkErr;
+    if (r.stage === 'invoiced') {
+      try {
+        await paymentRecorded({ user, id: r.id });
+      } catch (_) {}
+    }
+    const fresh = await db.prepare('SELECT payment_recorded_at FROM refund_requests WHERE id = ?').get(r.id);
+    if (!fresh || !fresh.payment_recorded_at) {
       fail(409, 'PAYMENT_NOT_CONFIRMED', "Confirm the customer's payment is recorded in Zoho first (Refunds > Zoho steps), then record the refund.");
     }
   }
   if (p === 'return' && !r.credit_note_checked_at) {
     try {
       await creditNoteChecked({ user, id: r.id });
-    } catch (checkErr) {
-      if (checkErr instanceof RefundError) throw checkErr;
+    } catch (_) {
       fail(409, 'CREDIT_NOTE_NOT_CONFIRMED', 'Confirm the credit note in Zoho first (Refunds > Zoho steps), then record the refund.');
     }
   }
