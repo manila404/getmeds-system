@@ -113,12 +113,14 @@ async function buildSalesPerformanceWorkbook(data) {
 
   for (const h of data.heads) {
     let headFirst = true;
+    const isOnline = (h.head || '').toLowerCase() === 'online';
     for (const g of h.groups) {
       let groupFirst = true;
       for (const m of g.managers) {
         let mgrFirst = true;
+        const isMgrOnline = (m.manager || '').toLowerCase() === 'online';
         for (const r of m.rows) {
-          const row = addValues(ws, [headFirst ? h.head : '', groupFirst ? g.label : '', mgrFirst ? m.manager : '', r.person, r.zoho_name, r.hq], r);
+          const row = addValues(ws, [headFirst ? (isOnline ? '' : h.head) : '', groupFirst ? g.label : '', mgrFirst ? (isMgrOnline ? '' : m.manager) : '', r.person, r.zoho_name, r.hq], r);
           row.getCell(1).font = { bold: true };
           row.getCell(2).font = { bold: true };
           if (r.vacant) [4, 5].forEach((n) => { row.getCell(n).font = { color: { argb: 'FFC00000' } }; });
@@ -129,7 +131,7 @@ async function buildSalesPerformanceWorkbook(data) {
       }
       total('group', g.total_label, g.total);
     }
-    total('head', `${h.head.toUpperCase()} Total`, h.total);
+    if (h.head && !isOnline) total('head', `${h.head.toUpperCase()} Total`, h.total);
   }
   total('grand', 'Grand Total', data.grand_total);
 

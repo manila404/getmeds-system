@@ -53,19 +53,27 @@ function flatten(data) {
   const out = [];
   for (const h of data.heads) {
     let headFirst = true;
+    const isOnline = (h.head || '').toLowerCase() === 'online';
     for (const g of h.groups) {
       let groupFirst = true;
       for (const m of g.managers) {
         let mgrFirst = true;
+        const isMgrOnline = (m.manager || '').toLowerCase() === 'online';
         for (const r of m.rows) {
-          out.push({ kind: 'row', head: headFirst ? h.head : '', channel: groupFirst ? g.label : '', manager: mgrFirst ? m.manager : '', ...r });
+          out.push({
+            kind: 'row',
+            head: headFirst ? (isOnline ? '' : h.head) : '',
+            channel: groupFirst ? g.label : '',
+            manager: mgrFirst ? (isMgrOnline ? '' : m.manager) : '',
+            ...r
+          });
           headFirst = false; groupFirst = false; mgrFirst = false;
         }
         if (m.subtotal) out.push({ kind: 'sub', label: 'TOTAL', manager: m.manager, ...m.subtotal });
       }
       out.push({ kind: 'group', label: g.total_label, ...g.total });
     }
-    out.push({ kind: 'head', label: `${h.head.toUpperCase()} Total`, ...h.total });
+    if (h.head && !isOnline) out.push({ kind: 'head', label: `${h.head.toUpperCase()} Total`, ...h.total });
   }
   out.push({ kind: 'grand', label: 'Grand Total', ...data.grand_total });
   return out;

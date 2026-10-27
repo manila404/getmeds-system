@@ -245,9 +245,9 @@
      "acts_as_head": false,
      "territories": [
       {
-       "zoho_salesperson": "B2C | CJ Gutierrez",
-       "alias": null,
-       "person": "B2C | CJ",
+       "zoho_salesperson": "B2C | Rachelle Upao",
+       "alias": "B2C | CJ Gutierrez",
+       "person": "B2C | Rachelle Upao",
        "hq": "ON SITE",
        "target": 500000,
        "achieved": 11370,
@@ -344,6 +344,15 @@
        "zoho_salesperson": "B2B | MANI MISHRA",
        "alias": null,
        "person": "B2B | MANI MISHRA",
+       "hq": "ON SITE",
+       "target": 0,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "B2B | FAITH",
+       "alias": null,
+       "person": "B2B | FAITH",
        "hq": "ON SITE",
        "target": 0,
        "achieved": 0,
@@ -766,6 +775,37 @@
        "person": "MT | JASPER",
        "hq": "ON SITE",
        "target": 500000,
+       "achieved": 0,
+       "vacant": false
+      }
+     ]
+    }
+   ],
+   "approvers": []
+  },
+  {
+   "name": "Online",
+   "head": "Online",
+   "managers": [
+    {
+     "name": "Online",
+     "acts_as_head": true,
+     "territories": [
+      {
+       "zoho_salesperson": "B2C | WEB",
+       "alias": "WEB",
+       "person": "B2C | WEB",
+       "hq": "ON SITE",
+       "target": 0,
+       "achieved": 0,
+       "vacant": false
+      },
+      {
+       "zoho_salesperson": "Lazada",
+       "alias": null,
+       "person": "Lazada",
+       "hq": "ON SITE",
+       "target": 0,
        "achieved": 0,
        "vacant": false
       }
