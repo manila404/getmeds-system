@@ -117,6 +117,7 @@ function buildAdapter(env = process.env) {
 function buildOAuthTokenGetter(env) {
   let cachedToken = null;
   let tokenExpiresAt = 0;
+  let inFlightRefresh = null;
 
   return async () => {
     if (!env.ZOHO_CLIENT_ID || !env.ZOHO_CLIENT_SECRET || !env.ZOHO_REFRESH_TOKEN) {
@@ -133,50 +134,66 @@ function buildOAuthTokenGetter(env) {
       return cachedToken;
     }
 
-    const accountsUrl = (env.ZOHO_ACCOUNTS_URL || 'https://accounts.zoho.com').replace(/\/+$/, '');
-    const params = new URLSearchParams({
-      refresh_token: env.ZOHO_REFRESH_TOKEN,
-      client_id: env.ZOHO_CLIENT_ID,
-      client_secret: env.ZOHO_CLIENT_SECRET,
-      grant_type: 'refresh_token'
-    });
+    // Oct 27, 2026: Deduplicate concurrent refresh requests (e.g. primary and
+    // split Sales Orders running simultaneously, or concurrent orders from
+    // multiple reps). Zoho OAuth rejects simultaneous refresh requests with the
+    // same refresh token, resulting in HTTP 400 "Access Denied".
+    if (inFlightRefresh) {
+      return await inFlightRefresh;
+    }
 
-    // Sep 2, 2026: the token refresh is the FIRST network call of any sync,
-    // so when the network is the problem this is what fails — and reporting
-    // undici's bare "fetch failed" here made a DNS/proxy/TLS problem look
-    // like a Zoho or credentials problem. Name the real cause instead.
-    let res;
-    try {
-      res = await fetch(`${accountsUrl}/oauth/v2/token`, {
-        method: 'POST',
-        body: params,
-        signal: AbortSignal.timeout(Number(env.ZOHO_REQUEST_TIMEOUT_MS) || 30000)
+    inFlightRefresh = (async () => {
+      const accountsUrl = (env.ZOHO_ACCOUNTS_URL || 'https://accounts.zoho.com').replace(/\/+$/, '');
+      const params = new URLSearchParams({
+        refresh_token: env.ZOHO_REFRESH_TOKEN,
+        client_id: env.ZOHO_CLIENT_ID,
+        client_secret: env.ZOHO_CLIENT_SECRET,
+        grant_type: 'refresh_token'
       });
-    } catch (err) {
-      const cause = err?.cause;
-      const detail =
-        err?.name === 'TimeoutError'
-          ? 'timed out'
-          : [cause?.code, cause?.message].filter(Boolean).join(': ') || err?.message || 'unknown network error';
-      const wrapped = new Error(
-        `Could not reach Zoho accounts at ${accountsUrl} to refresh the access token: ${detail}. ` +
-          'This is a network/DNS/proxy problem, not a credentials one — the request never got there.'
-      );
-      wrapped.cause = err;
-      throw wrapped;
-    }
 
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) {
-      throw new Error(
-        `Failed to refresh Zoho access token: ${data.error || res.statusText} (HTTP ${res.status}). ` +
-          `Accounts domain tried: ${accountsUrl} — a token issued in one Zoho datacentre does not work against another.`
-      );
-    }
+      // Sep 2, 2026: the token refresh is the FIRST network call of any sync,
+      // so when the network is the problem this is what fails — and reporting
+      // undici's bare "fetch failed" here made a DNS/proxy/TLS problem look
+      // like a Zoho or credentials problem. Name the real cause instead.
+      let res;
+      try {
+        res = await fetch(`${accountsUrl}/oauth/v2/token`, {
+          method: 'POST',
+          body: params,
+          signal: AbortSignal.timeout(Number(env.ZOHO_REQUEST_TIMEOUT_MS) || 30000)
+        });
+      } catch (err) {
+        const cause = err?.cause;
+        const detail =
+          err?.name === 'TimeoutError'
+            ? 'timed out'
+            : [cause?.code, cause?.message].filter(Boolean).join(': ') || err?.message || 'unknown network error';
+        const wrapped = new Error(
+          `Could not reach Zoho accounts at ${accountsUrl} to refresh the access token: ${detail}. ` +
+            'This is a network/DNS/proxy problem, not a credentials one — the request never got there.'
+        );
+        wrapped.cause = err;
+        throw wrapped;
+      }
 
-    cachedToken = data.access_token;
-    tokenExpiresAt = now + (data.expires_in || 3600) * 1000;
-    return cachedToken;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) {
+        throw new Error(
+          `Failed to refresh Zoho access token: ${data.error || res.statusText} (HTTP ${res.status}). ` +
+            `Accounts domain tried: ${accountsUrl} — a token issued in one Zoho datacentre does not work against another.`
+        );
+      }
+
+      cachedToken = data.access_token;
+      tokenExpiresAt = Date.now() + (data.expires_in || 3600) * 1000;
+      return cachedToken;
+    })();
+
+    try {
+      return await inFlightRefresh;
+    } finally {
+      inFlightRefresh = null;
+    }
   };
 }
 

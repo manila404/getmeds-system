@@ -262,6 +262,16 @@ async function processSplitRetry(row) {
     if (!payload) {
       throw new Error(`Order ${row.order_id} no longer exists — cannot retry Zoho sync.`);
     }
+
+    // Push intake_tin to the Zoho contact before retrying SO creation — mirrors processOne
+    const tinOrder = await db.prepare('SELECT customer_id, intake_tin FROM orders WHERE id = ?').get(row.order_id);
+    if (tinOrder?.intake_tin && tinOrder?.customer_id) {
+      const tinResult = await setCustomerTin(tinOrder.customer_id, tinOrder.intake_tin);
+      if (tinResult?.zohoError) {
+        console.warn(`[ZOHO_RETRY] TIN for customer ${tinOrder.customer_id} not pushed to Zoho: ${tinResult.zohoError}`);
+      }
+    }
+
     const zohoResult = await zoho.createSalesOrder(payload);
     const now = new Date().toISOString();
 

@@ -1216,6 +1216,85 @@ exports.retryZohoSync = async (req, res, next) => {
     if ((req.user.role || '').toLowerCase() === 'team_lead' && !isTeamLeadsOwnOrder(req.user, order)) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
     }
+    const requestedInvoicingFrom = (req.body?.invoicing_from || req.query?.invoicing_from || '').trim() || null;
+
+    // Oct 27, 2026: If a split entity was requested, retry that split entity
+    if (requestedInvoicingFrom) {
+      const split = await db.prepare(
+        'SELECT * FROM order_split_sales_orders WHERE order_id = ? AND invoicing_from = ?'
+      ).get(order.id, requestedInvoicingFrom);
+
+      if (!split) {
+        return res.status(404).json({
+          success: false,
+          error: { code: 'NOT_FOUND', message: `No split Sales Order record found for ${requestedInvoicingFrom}` }
+        });
+      }
+
+      if (split.zoho_so_id) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'ALREADY_IN_ZOHO',
+            message: `This order already has Sales Order ${split.zoho_so_number || split.zoho_so_id} in Zoho for ${requestedInvoicingFrom}.`
+          }
+        });
+      }
+
+      let row = await db.prepare(`
+        SELECT * FROM zoho_sync_queue WHERE order_id = ? AND invoicing_from = ? ORDER BY created_at DESC LIMIT 1
+      `).get(order.id, requestedInvoicingFrom);
+
+      if (!row) {
+        await zohoRetryService.enqueue({ orderId: order.id, payload: {}, error: 'Manual retry queued', invoicingFrom: requestedInvoicingFrom });
+        row = await db.prepare(`
+          SELECT * FROM zoho_sync_queue WHERE order_id = ? AND invoicing_from = ? ORDER BY created_at DESC LIMIT 1
+        `).get(order.id, requestedInvoicingFrom);
+      }
+
+      const result = await zohoRetryService.processOne(row);
+      const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+      const updatedSplit = await db.prepare('SELECT * FROM order_split_sales_orders WHERE id = ?').get(split.id);
+
+      return res.json({ success: true, data: { order: updatedOrder, split: updatedSplit, result } });
+    }
+
+    // Oct 27, 2026: If no specific invoicing_from was requested, but the PRIMARY
+    // Sales Order already exists in Zoho and a SPLIT Sales Order is unsynced or failed,
+    // automatically target the unsynced split entity instead of rejecting with ALREADY_IN_ZOHO.
+    if (order.zoho_so_id) {
+      const unsyncedSplit = await db.prepare(
+        "SELECT * FROM order_split_sales_orders WHERE order_id = ? AND (zoho_so_id IS NULL OR zoho_sync_status = 'failed') ORDER BY id ASC LIMIT 1"
+      ).get(order.id);
+
+      if (unsyncedSplit) {
+        let row = await db.prepare(`
+          SELECT * FROM zoho_sync_queue WHERE order_id = ? AND invoicing_from = ? ORDER BY created_at DESC LIMIT 1
+        `).get(order.id, unsyncedSplit.invoicing_from);
+
+        if (!row) {
+          await zohoRetryService.enqueue({ orderId: order.id, payload: {}, error: 'Manual retry queued', invoicingFrom: unsyncedSplit.invoicing_from });
+          row = await db.prepare(`
+            SELECT * FROM zoho_sync_queue WHERE order_id = ? AND invoicing_from = ? ORDER BY created_at DESC LIMIT 1
+          `).get(order.id, unsyncedSplit.invoicing_from);
+        }
+
+        const result = await zohoRetryService.processOne(row);
+        const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+        const updatedSplit = await db.prepare('SELECT * FROM order_split_sales_orders WHERE id = ?').get(unsyncedSplit.id);
+
+        return res.json({ success: true, data: { order: updatedOrder, split: updatedSplit, result } });
+      }
+
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'ALREADY_IN_ZOHO',
+          message: `This order already has Sales Order ${order.zoho_so_number || order.zoho_so_id} in Zoho, so there is nothing to create again. What failed was confirming it — confirm it in Zoho Books.`
+        }
+      });
+    }
+
     // Oct 12, 2026: an order whose customer was not in Zoho yet stays 'pending' with a queued row,
     // and the background retry is off, so nothing ever created its Sales Order. Once the customer
     // is registered it can be created by hand, same as a failed one.
@@ -1240,21 +1319,6 @@ exports.retryZohoSync = async (req, res, next) => {
       });
     }
 
-    // Sep 14, 2026: 'failed' no longer always means "the Sales Order was never
-    // created". Finance's Verify also records 'failed' when CONFIRMING an
-    // existing Sales Order fails (finance.controller.js), and this retry
-    // re-creates — which would put a second Sales Order in Zoho and point the
-    // order at it. zohoRetryService refuses that too; this says why, here.
-    if (order.zoho_so_id) {
-      return res.status(409).json({
-        success: false,
-        error: {
-          code: 'ALREADY_IN_ZOHO',
-          message: `This order already has Sales Order ${order.zoho_so_number || order.zoho_so_id} in Zoho, so there is nothing to create again. What failed was confirming it — confirm it in Zoho Books.`
-        }
-      });
-    }
-
     // Most recent PRIMARY queue row for this order, regardless of its own
     // status — deliberately not filtered to status='pending' so a row that
     // already hit 'failed_permanent' (5 automatic attempts exhausted) can
@@ -1262,13 +1326,7 @@ exports.retryZohoSync = async (req, res, next) => {
     //
     // Sep 22, 2026: filtered to invoicing_from IS NULL — this button (and
     // the guard checks above it, which read order.zoho_sync_status/
-    // zoho_so_id) is about the PRIMARY entity only; it has no split
-    // counterpart in the UI yet. Before this filter, a split-invoicing
-    // order could have TWO queue rows (primary + split, created moments
-    // apart in orders.controller.js's create()), and "ORDER BY created_at
-    // DESC LIMIT 1" silently picked the split's row instead — retrying the
-    // wrong entity's Sales Order while the primary's own failed sync sat
-    // untouched. See orderSplitService.js.
+    // zoho_so_id) is about the PRIMARY entity only.
     const row = await db.prepare(`
       SELECT * FROM zoho_sync_queue WHERE order_id = ? AND invoicing_from IS NULL ORDER BY created_at DESC LIMIT 1
     `).get(order.id);

@@ -454,7 +454,7 @@ const OrderDetailPage = () => {
   // (see server.js) — a failed sync no longer retries itself; this button
   // is how it gets retried instead, one click at a time.
   const retryZohoSyncMutation = useMutation({
-    mutationFn: () => client.post(`/api/orders/${id}/retry-zoho-sync`).then(r => r.data),
+    mutationFn: (variables) => client.post(`/api/orders/${id}/retry-zoho-sync`, variables || {}).then(r => r.data),
     onSuccess: (res) => {
       const outcome = res?.data?.result?.outcome;
       if (outcome === 'succeeded') toast.success('Zoho Sales Order created — sync succeeded.');
@@ -1370,9 +1370,24 @@ const OrderDetailPage = () => {
                       )}
                     </>
                   ) : (
-                    <span className="text-ink-secondary">
-                      Not yet synced{s.zoho_sync_error ? ` — ${s.zoho_sync_error}` : ''}
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-ink-secondary">
+                        Not yet synced{s.zoho_sync_error ? ` — ${s.zoho_sync_error}` : ''}
+                      </span>
+                      {(s.zoho_sync_status === 'failed' ||
+                        (s.zoho_sync_status === 'pending' && !s.zoho_so_id && !['draft', 'pending_management_approval'].includes(order.status))) && (
+                        <button
+                          type="button"
+                          disabled={retryZohoSyncMutation.isPending}
+                          onClick={(e) => { e.stopPropagation(); retryZohoSyncMutation.mutate({ invoicing_from: s.invoicing_from }); }}
+                          title={`Push ${s.invoicing_from} Sales Order to Zoho again now — automatic background retry is off`}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-state-warning text-amber-900 hover:bg-state-warning-light disabled:opacity-50"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${retryZohoSyncMutation.isPending ? 'animate-spin' : ''}`} />
+                          {retryZohoSyncMutation.isPending ? 'Retrying...' : 'Retry Zoho Sync'}
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
