@@ -82,7 +82,7 @@ const MedrepDashboardPage = () => {
           on login, a popup for anything unseen — AnnouncementsPopup.jsx in
           Layout.jsx) instead of the list living on the dashboard itself. See
           StockAnnouncements.jsx. */}
-      <StockAnnouncementsBanner />
+      <StockAnnouncementsBanner variant="banner" />
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>

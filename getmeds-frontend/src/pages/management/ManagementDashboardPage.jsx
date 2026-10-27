@@ -631,7 +631,7 @@ const ManagementDashboardPage = () => {
             top, then a 3-item preview panel; Sep 28, 2026 moved the list
             itself to its own page — see StockAnnouncements.jsx) + activity. */}
         <aside className="space-y-4 min-w-0">
-          <StockAnnouncementsBanner />
+          <StockAnnouncementsBanner variant="banner" />
           <RecentActivity teamGroup={teamGroup} />
         </aside>
       </div>
