@@ -307,14 +307,28 @@ async function creditNoteChecked({ user, id, number }) {
 
 /**
  * Finance's "Record refund as done" is refused until the Zoho step is confirmed. Called by refunds.controller before a refund
- * that came from a request is marked done. No request, or a draft: nothing to check.
+ * that came from a request is marked done. If the step is in Zoho but was not confirmed yet, attempts to verify it on the fly.
  */
-async function assertReadyToPay(orderId) {
+async function assertReadyToPay(orderId, user) {
   const r = await db.prepare(`SELECT * FROM refund_requests WHERE order_id = ? AND status = 'queued' ORDER BY id DESC LIMIT 1`).get(orderId);
   if (!r) return;
   const p = pathOf(r);
-  if (p === 'payment' && !r.payment_recorded_at) fail(409, 'PAYMENT_NOT_CONFIRMED', "Confirm the customer's payment is recorded in Zoho first (Refunds > Zoho steps), then record the refund.");
-  if (p === 'return' && !r.credit_note_checked_at) fail(409, 'CREDIT_NOTE_NOT_CONFIRMED', 'Confirm the credit note in Zoho first (Refunds > Zoho steps), then record the refund.');
+  if (p === 'payment' && !r.payment_recorded_at) {
+    try {
+      await paymentRecorded({ user, id: r.id });
+    } catch (checkErr) {
+      if (checkErr instanceof RefundError) throw checkErr;
+      fail(409, 'PAYMENT_NOT_CONFIRMED', "Confirm the customer's payment is recorded in Zoho first (Refunds > Zoho steps), then record the refund.");
+    }
+  }
+  if (p === 'return' && !r.credit_note_checked_at) {
+    try {
+      await creditNoteChecked({ user, id: r.id });
+    } catch (checkErr) {
+      if (checkErr instanceof RefundError) throw checkErr;
+      fail(409, 'CREDIT_NOTE_NOT_CONFIRMED', 'Confirm the credit note in Zoho first (Refunds > Zoho steps), then record the refund.');
+    }
+  }
 }
 
 // ── 6. Put it on Finance's list ──────────────────────────────────────────────────────────────────

@@ -137,7 +137,7 @@ exports.record = async (req, res, next) => {
     // Oct 23, 2026: a refund that came from a refund request is not marked done until its Zoho step is confirmed
     // (the customer's payment recorded, or Finance's credit note found in Zoho).
     if (status === 'done' && (await hasColumn('refund_requests', 'id'))) {
-      try { await refundRequestService.assertReadyToPay(o.id); } catch (err) {
+      try { await refundRequestService.assertReadyToPay(o.id, req.user); } catch (err) {
         if (err instanceof refundRequestService.RefundError) return bad(err.code, err.message, err.status);
         throw err;
       }
