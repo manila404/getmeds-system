@@ -468,19 +468,22 @@ exports.getAllOrders = async (req, res, next) => {
     // The count joins users as well as customers now — `unassigned` filters on
     // u.role, and counting over a narrower FROM than the row query filters on
     // is how a total silently stops matching the rows under it.
-    const total = (await db.prepare(`
-      SELECT COUNT(*) as c
+    // Also computes total_amount across all matching filtered orders.
+    const summaryRow = await db.prepare(`
+      SELECT COUNT(*) as c, COALESCE(SUM(o.total_amount), 0) as total_amount
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.medrep_id = u.id
       ${whereClause}
-    `).get(...params)).c;
+    `).get(...params);
+    const total = Number(summaryRow?.c) || 0;
+    const total_amount = Number(summaryRow?.total_amount) || 0;
 
     res.json({
       success: true,
       data: {
         orders,
-        pagination: { total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) }
+        pagination: { total, total_amount, page, limit, pages: Math.max(1, Math.ceil(total / limit)) }
       }
     });
   } catch (err) { next(err); }

@@ -201,7 +201,7 @@ const ManagementDashboardPage = () => {
     placeholderData: (prev) => prev
   });
   const orders = ordersRes?.data?.orders || [];
-  const pagination = ordersRes?.data?.pagination || { total: 0, page: 1, pages: 1 };
+  const pagination = ordersRes?.data?.pagination || { total: 0, total_amount: 0, page: 1, pages: 1 };
   const hasFilters = !!(statusFilter || dateFrom || dateTo || medrepFilter || searchQ || staleHours);
 
   // The reps to filter by. Same endpoint the order form's "create this order
@@ -485,44 +485,63 @@ const ManagementDashboardPage = () => {
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="relative">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-                  <input
-                    type="search"
-                    value={searchInput}
-                    onChange={(e) => setSearchInput(e.target.value)}
-                    placeholder="Search order ID, customer or SO number"
-                    className={`${inputCls} pl-8 w-64`}
-                  />
-                </label>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="relative">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                    <input
+                      type="search"
+                      value={searchInput}
+                      onChange={(e) => setSearchInput(e.target.value)}
+                      placeholder="Search order ID, customer or SO number"
+                      className={`${inputCls} pl-8 w-64`}
+                    />
+                  </label>
 
-                {/* Sep 10, 2026: "show me this rep's orders" — the only practical
-                    way to CHECK that an Order Ownership assignment landed. */}
-                <select
-                  value={medrepFilter}
-                  onChange={(e) => update({ medrep: e.target.value })}
-                  className={inputCls}
-                  title="Filter by the MedRep an order is assigned to"
-                >
-                  <option value="">All MedReps</option>
-                  <option value="unassigned">Unassigned (still with the importer)</option>
-                  {medrepOptions.map((m) => (
-                    <option key={m.id} value={m.id}>{m.display_name || m.name}</option>
-                  ))}
-                </select>
+                  {/* Sep 10, 2026: "show me this rep's orders" — the only practical
+                      way to CHECK that an Order Ownership assignment landed. */}
+                  <select
+                    value={medrepFilter}
+                    onChange={(e) => update({ medrep: e.target.value })}
+                    className={inputCls}
+                    title="Filter by the MedRep an order is assigned to"
+                  >
+                    <option value="">All MedReps</option>
+                    <option value="unassigned">Unassigned (still with the importer)</option>
+                    {medrepOptions.map((m) => (
+                      <option key={m.id} value={m.id}>{m.display_name || m.name}</option>
+                    ))}
+                  </select>
 
-                {/* Filters on the order's created date — the same value the Date
-                    column shows — so what is filtered and what is read are the
-                    same thing. */}
-                <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-                  From
-                  <input type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => update({ from: e.target.value })} className={inputCls} />
-                </label>
-                <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-                  To
-                  <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => update({ to: e.target.value })} className={inputCls} />
-                </label>
+                  {/* Filters on the order's created date — the same value the Date
+                      column shows — so what is filtered and what is read are the
+                      same thing. */}
+                  <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+                    From
+                    <input type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => update({ from: e.target.value })} className={inputCls} />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+                    To
+                    <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => update({ to: e.target.value })} className={inputCls} />
+                  </label>
+                </div>
+
+                {/* Filtered totals: count and total order amount matching the active filters */}
+                <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs ml-auto">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-ink-secondary font-medium">{hasFilters ? 'Filtered Orders:' : 'Total Orders:'}</span>
+                    <span className="font-bold text-ink-primary tabular-nums">
+                      {loadingOrders ? '…' : (pagination.total || 0).toLocaleString()}
+                    </span>
+                  </div>
+                  <span className="text-slate-300">|</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-ink-secondary font-medium">{hasFilters ? 'Filtered Total:' : 'Total Value:'}</span>
+                    <span className="font-bold text-getmeds-blue-dark tabular-nums">
+                      {loadingOrders ? '…' : `₱${(pagination.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
 
