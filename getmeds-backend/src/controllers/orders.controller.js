@@ -1367,6 +1367,22 @@ exports.cancelDraft = async (req, res, next) => {
       if (order.stock_hold_at) {
         await db.prepare('UPDATE orders SET stock_hold_at = NULL, stock_hold_by = NULL, stock_hold_reason = NULL, stock_hold_item = NULL, stock_hold_reminded_at = NULL WHERE id = ?').run(order.id);
       }
+      // Oct 27, 2026: if a refund was already requested by the MedRep, sync it so it doesn't collide in Refund Requests vs Refunds Owed
+      if (await tableExists('refund_requests')) {
+        if (kind === 'keep_record') {
+          await db.prepare(
+            `UPDATE refund_requests
+                SET status = 'queued', queued_by = ?, queued_at = ?, decided_by = ?, decided_at = ?, decision_note = ?, updated_at = ?
+              WHERE order_id = ? AND status IN ('requested', 'approved')`
+          ).run(actor.id, now, actor.id, now, reason, now, order.id);
+        } else {
+          await db.prepare(
+            `UPDATE refund_requests
+                SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ?, updated_at = ?
+              WHERE order_id = ? AND status IN ('requested', 'approved')`
+          ).run(actor.id, now, `Draft cancelled without refund: ${reason}`, now, order.id);
+        }
+      }
       await logEvent({
         orderId: order.id,
         eventType: 'DRAFT_CANCELLED',

@@ -199,7 +199,10 @@ async function approve({ user, id, note }) {
   const r = await loadRequest(id);
   if (r.status !== 'requested') fail(409, 'NOT_PENDING', `This request is already ${r.status}.`);
   const order = await loadOrder(r.order_id);
-  if (!order || ['cancelled', 'deleted'].includes(order.status)) fail(409, 'NOT_REFUNDABLE', 'This order was cancelled in the meantime.');
+  // An order already cancelled with keep_record is waiting for refund, so allow it. Only reject if deleted or cancelled without refund.
+  if (!order || order.status === 'deleted' || (order.status === 'cancelled' && order.draft_cancel_kind !== 'keep_record')) {
+    fail(409, 'NOT_REFUNDABLE', 'This order was cancelled in the meantime.');
+  }
   const actor = await resolveActor(user, 'management');
   const decidedNote = String(note || '').trim() || null;
   const now = new Date().toISOString();
@@ -327,11 +330,19 @@ async function queueRefund({ user, id }) {
 
   await db.transaction(async () => {
     // The order is cancelled (direct update: the state machine has no cancelled edge from every stage).
-    await db.prepare(
-      `UPDATE orders SET status = 'cancelled', draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, draft_cancel_kind = 'keep_record',
-                         refund_status = 'pending', refund_received_amount = ?, refund_amount = NULL, refund_reference = NULL, refund_at = NULL,
-                         refund_note = NULL, refund_by = NULL, refund_updated_at = NULL, updated_at = ? WHERE id = ?`
-    ).run(now, actor.id, `Refund: ${r.reason}`, kept, now, order.id);
+    if (order.status !== 'cancelled' || order.draft_cancel_kind !== 'keep_record') {
+      await db.prepare(
+        `UPDATE orders SET status = 'cancelled', draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, draft_cancel_kind = 'keep_record',
+                           refund_status = 'pending', refund_received_amount = ?, refund_amount = NULL, refund_reference = NULL, refund_at = NULL,
+                           refund_note = NULL, refund_by = NULL, refund_updated_at = NULL, updated_at = ? WHERE id = ?`
+      ).run(now, actor.id, `Refund: ${r.reason}`, kept, now, order.id);
+    } else {
+      await db.prepare(
+        `UPDATE orders SET refund_status = COALESCE(refund_status, 'pending'),
+                           refund_received_amount = COALESCE(refund_received_amount, ?),
+                           updated_at = ? WHERE id = ?`
+      ).run(kept, now, order.id);
+    }
     if (order.stock_hold_at) {
       await db.prepare('UPDATE orders SET stock_hold_at = NULL, stock_hold_by = NULL, stock_hold_reason = NULL, stock_hold_item = NULL, stock_hold_reminded_at = NULL WHERE id = ?').run(order.id);
     }

@@ -97,6 +97,21 @@ describe('refund requests', () => {
       expect((await record(o, 3589)).status).toBe(200);
       expect((await reqRow(id)).status).toBe('done');
     });
+
+    test('if the draft was already cancelled with keep_record, Management approval still queues the refund request smoothly', async () => {
+      const o = await order({ status: 'draft' });
+      const res = await ask(o, { goods_status: undefined });
+      const id = res.body.data.request.id;
+
+      // Simulate draft cancelled directly with keep_record
+      await db.prepare("UPDATE orders SET status = 'cancelled', draft_cancelled_at = ?, draft_cancel_kind = 'keep_record', refund_status = 'pending' WHERE id = ?")
+        .run(new Date().toISOString(), o.id);
+
+      const ok = await post(`/${id}/approve`, manager);
+      expect(ok.status).toBe(200);
+      expect(ok.body.data.request).toMatchObject({ status: 'queued', next: 'finance_refund' });
+      expect((await reqRow(id)).status).toBe('queued');
+    });
   });
 
   describe('payment path (goods not coming back)', () => {
