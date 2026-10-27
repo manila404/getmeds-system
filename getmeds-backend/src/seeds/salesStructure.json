@@ -444,9 +444,9 @@
      "acts_as_head": true,
      "territories": [
       {
-       "zoho_salesperson": "TeleSales | Micah",
-       "alias": null,
-       "person": "TeleSales | Micah",
+       "zoho_salesperson": "TeleSales | Micah Jimena",
+       "alias": "TELESALES MICAH",
+       "person": "Micah Jimena",
        "hq": "ON SITE",
        "target": 300000,
        "achieved": 0,
