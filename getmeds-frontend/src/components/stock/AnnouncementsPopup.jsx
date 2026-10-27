@@ -8,7 +8,7 @@ import { useStockAnnouncements, useUnseenAnnouncementsCount, useMarkAnnouncement
 // MedRep and Management dashboards) — Dispatch posts these, Finance and Admin
 // never see them anywhere else, so a popup for either would be new noise
 // rather than surfacing something they already look for.
-const AUDIENCE = ['medrep', 'management'];
+const AUDIENCE = ['medrep', 'management', 'team_lead'];
 const PREVIEW = 3;
 
 /**

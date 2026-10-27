@@ -114,14 +114,12 @@ function App() {
 
           {/* Sep 28, 2026: the dedicated home for Dispatch's stock
               announcements — reached from the sidebar, the dashboard link, or
-              the post-login popup's "View all". Same audience
-              StockAnnouncements has always targeted (AnnouncementsPopup.jsx's
-              AUDIENCE) — Finance/Dispatch/Admin have no surface for these
-              elsewhere, so a route for them would be a page nothing links to. */}
+              the post-login popup's "View all". Available to all authenticated
+              roles so team leads, admins, etc. never get bounced back to dashboard. */}
           <Route
             path="/announcements"
             element={
-              <ProtectedRoute allowedRoles={['medrep', 'management']}>
+              <ProtectedRoute>
                 <AnnouncementsPage />
               </ProtectedRoute>
             }

@@ -326,6 +326,9 @@ const ManagementDashboardPage = () => {
 
   return (
     <div className="space-y-6">
+      {/* Sep 15, 2026 / Oct 27, 2026: what Dispatch has said about stock — full banner at the top */}
+      <StockAnnouncementsBanner variant="banner" />
+
       {/* ── Header ───────────────────────────────────────────────────────── */}
       <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
         <div>
@@ -627,11 +630,8 @@ const ManagementDashboardPage = () => {
           </div>
         </div>
 
-        {/* Side panel: a link to /announcements (was the full-width banner on
-            top, then a 3-item preview panel; Sep 28, 2026 moved the list
-            itself to its own page — see StockAnnouncements.jsx) + activity. */}
+        {/* Side panel: activity log */}
         <aside className="space-y-4 min-w-0">
-          <StockAnnouncementsBanner variant="banner" />
           <RecentActivity teamGroup={teamGroup} />
         </aside>
       </div>
