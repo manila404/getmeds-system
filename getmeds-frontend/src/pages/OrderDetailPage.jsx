@@ -972,6 +972,11 @@ const OrderDetailPage = () => {
     : '';
   if (!order) return null;
 
+  const userRole = String(user?.role || '').toLowerCase();
+  const isOwnerOrRaiser = (order.medrep_id != null && Number(order.medrep_id) === Number(user?.id)) ||
+                          (order.raised_by_id != null && Number(order.raised_by_id) === Number(user?.id));
+  const canActOnOrder = isManagementUser || ['medrep', 'team_lead'].includes(userRole) || isOwnerOrRaiser;
+
   // Sep 7, 2026 (2): while editing, Management changing Division live
   // updates which Sub-division list applies — same behavior as OrderForm.jsx.
   const effectiveDetailDivision = (isManagementUser && draftDetails) ? (draftDetails.division || order.division) : order.division;
@@ -1049,7 +1054,7 @@ const OrderDetailPage = () => {
               {' '}({Math.max(0, Math.floor((Date.now() - Date.parse(order.stock_hold_at)) / 86400000))} days)
             </p>
             <p className="mt-0.5 text-[12px]">This order was not cancelled and no refund was started. It continues when the stock is back.</p>
-            {(user?.id === order.medrep_id || user?.id === order.raised_by_id || ['management', 'admin'].includes(user?.role)) && (
+            {canActOnOrder && (
               <button
                 type="button"
                 disabled={stockReleaseMutation.isPending}
@@ -1705,7 +1710,7 @@ const OrderDetailPage = () => {
             could not resubmit it. A sent-back draft resubmits from the
             banner below instead. */}
         {order.status === 'draft' && !order.sent_back && !order.stock_hold_at &&
-          (user?.id === order.medrep_id || user?.id === order.raised_by_id || ['management', 'admin'].includes(user?.role)) && (
+          canActOnOrder && (
           <div className="mt-4 pt-4 border-t border-gray-100">
             <button
               disabled={submitMutation.isPending}
@@ -1764,18 +1769,10 @@ const OrderDetailPage = () => {
                     : 'Exception/Hold Reason:'}
                 </span> {order.exception_reason}
               </p>
-              {/* Oct 15, 2026: screenshots Finance attached to its hold (e.g. the customer's
-                  overdue balance), so the MedRep can see why. */}
-              {order.status === 'on_hold' && (() => {
-                const last = [...(events || [])].reverse().find((e) => e.event_type === 'FINANCE_REJECTED');
-                const ev = last ? evidenceOf(last) : [];
-                return ev.length ? <HoldEvidence orderId={order.id} evidence={ev} /> : null;
-              })()}
               {/* Sep 15, 2026: fix it, then send it back to Management from
                   here. They are told it is a resubmission, with this reason.
                   Sep 18, 2026: a supporting file can go along with it. */}
-              {order.status === 'draft' &&
-                (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+              {order.status === 'draft' && canActOnOrder && (
                 <button
                   type="button"
                   disabled={submitMutation.isPending}
@@ -1785,9 +1782,28 @@ const OrderDetailPage = () => {
                   {submitMutation.isPending ? 'Resubmitting…' : '↩ Resubmit to Management'}
                 </button>
               )}
+              {/* Sep 19, 2026: 'exception' added — resubmit used to work only
+                  for a Finance hold, so this banner showed the reason with no
+                  way back for anything Management put on. resubmittable now
+                  covers both (orders.controller.js). */}
+              {['on_hold', 'exception'].includes(order.status) && order.resubmittable && canActOnOrder && (
+                <button
+                  type="button"
+                  onClick={() => setResubmitOpen(true)}
+                  className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
+                >
+                  ↩ Re-submit to {order.resume_to ? stageLabel(order.resume_to) : 'Finance'}
+                </button>
+              )}
             </div>
-            {order.status === 'draft' &&
-              (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+            {/* Oct 15, 2026: screenshots Finance attached to its hold (e.g. the customer's
+                overdue balance), so the MedRep can see why. */}
+            {order.status === 'on_hold' && (() => {
+              const last = [...(events || [])].reverse().find((e) => e.event_type === 'FINANCE_REJECTED');
+              const ev = last ? evidenceOf(last) : [];
+              return ev.length ? <HoldEvidence orderId={order.id} evidence={ev} /> : null;
+            })()}
+            {order.status === 'draft' && canActOnOrder && (
               <AttachFileField
                 file={sentBackFile}
                 fileType={sentBackFileType}
@@ -1797,27 +1813,12 @@ const OrderDetailPage = () => {
                 label="Attach the corrected document (optional)"
               />
             )}
-            {/* Sep 19, 2026: 'exception' added — resubmit used to work only
-                for a Finance hold, so this banner showed the reason with no
-                way back for anything Management put on. resubmittable now
-                covers both (orders.controller.js). */}
-            {['on_hold', 'exception'].includes(order.status) && order.resubmittable &&
-              (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
-              <button
-                type="button"
-                onClick={() => setResubmitOpen(true)}
-                className="shrink-0 px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
-              >
-                ↩ Re-submit to {order.resume_to ? stageLabel(order.resume_to) : 'Finance'}
-              </button>
-            )}
             {/* Sep 19, 2026: resubmittable false but still held/exception —
                 say why there's no button rather than the MedRep wondering
                 whether the page is broken. Attaching from the tab above still
                 works; it just won't auto-clear this hold without a resolvable
                 prior stage. */}
-            {['on_hold', 'exception'].includes(order.status) && !order.resubmittable &&
-              (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+            {['on_hold', 'exception'].includes(order.status) && !order.resubmittable && canActOnOrder && (
               <p className="text-[11px] text-amber-900">
                 Could not tell which stage this was at before the hold, so it can't be re-submitted automatically —
                 attach what's needed above and ask Management to release it.
@@ -1839,7 +1840,7 @@ const OrderDetailPage = () => {
         {/* Sep 26, 2026: Pharmacy rejected the prescription. Answered to Pharmacy, on its own:
             Finance's hold (above) has its own "Re-submit to Finance", and neither touches the other. */}
         {order.rx?.state === 'rejected' &&
-          (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+          canActOnOrder && (
           <div className="mt-3 bg-red-50 border border-red-200 rounded p-3 text-xs text-red-950 space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p>
@@ -1864,7 +1865,7 @@ const OrderDetailPage = () => {
             Same answer path as a rejection: upload it (or explain), back to Pharmacy only.
             The order cannot go out until it is verified or Pharmacy marks it not required. */}
         {order.rx?.requested && order.rx?.state === 'none' &&
-          (isManagementUser || order.medrep_id === user?.id || order.raised_by_id === user?.id) && (
+          canActOnOrder && (
           <div className="mt-3 bg-red-50 border border-red-200 rounded p-3 text-xs text-red-950 space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p>

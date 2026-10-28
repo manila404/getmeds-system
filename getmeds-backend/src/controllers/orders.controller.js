@@ -625,8 +625,8 @@ exports.getSalespersonStatus = async (req, res, next) => {
 function canActOnOrder(user, order) {
   if (!user || !order) return false;
   if ((user.role || '').toLowerCase() !== 'medrep') return true;
-  if (order.medrep_id === user.id) return true;
-  return Boolean(order.raised_by_id) && order.raised_by_id === user.id;
+  if (order.medrep_id != null && Number(order.medrep_id) === Number(user.id)) return true;
+  return Boolean(order.raised_by_id) && Number(order.raised_by_id) === Number(user.id);
 }
 
 /**
@@ -676,7 +676,8 @@ function canEditOrder(user, order) {
  */
 function isTeamLeadsOwnOrder(user, order) {
   if (!user || !order) return false;
-  return order.raised_by_id === user.id || order.medrep_id === user.id;
+  return (order.raised_by_id != null && Number(order.raised_by_id) === Number(user.id)) ||
+    (order.medrep_id != null && Number(order.medrep_id) === Number(user.id));
 }
 
 exports.getAll = async (req, res, next) => {
@@ -3923,13 +3924,14 @@ exports.resubmit = async (req, res, next) => {
     // not Finance (they have Reopen) and not Dispatch.
     //
     // Oct 9, 2026: a Team Lead / Leader too, for an order that is theirs (they are its
-    // MedRep, or they raised it). Mitzi Francisco could not re-submit her own held order
-    // (GM-20261009-0003) because her account has the team_lead role, and this only
-    // admitted 'medrep'. Same "theirs only" rule canEditOrder already applies to team leads.
+    // MedRep, or they raised it). Oct 28, 2026: also for any MedRep on their team.
     const role = String(req.user?.role || '').toLowerCase();
+    const isTeamLeadAllowed = role === 'team_lead' && (
+      isTeamLeadsOwnOrder(req.user, order) || (await teamScopeService.canAccessOrder(req.user, order))
+    );
     const allowed = role === 'management' || role === 'admin' ||
       (role === 'medrep' && canActOnOrder(req.user, order)) ||
-      (role === 'team_lead' && isTeamLeadsOwnOrder(req.user, order));
+      isTeamLeadAllowed;
     if (!allowed) {
       return res.status(403).json({
         success: false,
@@ -3943,7 +3945,7 @@ exports.resubmit = async (req, res, next) => {
       });
     }
 
-    const actor = await resolveActor(req.user, role === 'medrep' ? 'medrep' : 'management');
+    const actor = await resolveActor(req.user, ['medrep', 'team_lead'].includes(role) ? 'medrep' : 'management');
 
     // The Finance-hold path — unchanged since Sep 15, 2026: goes back to
     // Finance specifically, via the same helper an attachment or an edit
