@@ -81,10 +81,10 @@ describe('the two kinds of cancel', () => {
     expect((await row(d.id)).status).toBe('draft');
   });
 
-  test('advance-payment terms alone, or a proof alone, are enough to protect it', async () => {
+  test('a proof alone is enough to protect it; Advanced Payment terms alone are not (Oct 29)', async () => {
     const a = await draft({ advance: true });
     const b = await draft({ proof: true });
-    expect((await cancel(a.id, { reason: 'x', kind: 'discard' })).status).toBe(409);
+    expect((await cancel(a.id, { reason: 'x', kind: 'discard' })).status).toBe(200);
     expect((await cancel(b.id, { reason: 'x', kind: 'discard' })).status).toBe(409);
   });
 

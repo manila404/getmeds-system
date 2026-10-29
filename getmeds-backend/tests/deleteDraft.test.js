@@ -10,6 +10,7 @@ const request = require('supertest');
 const app = require('../src/app');
 const db = require('../src/db/database');
 const deletedDraftPurge = require('../src/services/deletedDraftPurge');
+const zohoRetry = require('../src/services/zohoRetryService');
 
 const stamp = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
 const orderIds = [];
@@ -57,7 +58,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const id of orderIds) {
-    for (const t of ['notifications', 'order_events', 'payment_proofs']) await db.prepare(`DELETE FROM ${t} WHERE order_id = ?`).run(id);
+    for (const t of ['notifications', 'order_events', 'payment_proofs', 'zoho_sync_queue']) await db.prepare(`DELETE FROM ${t} WHERE order_id = ?`).run(id);
     await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
   }
   await db.prepare("DELETE FROM notifications WHERE order_id IS NULL AND message LIKE ?").run(`%GM-DD-${stamp}%`);
@@ -139,6 +140,34 @@ describe('delete a draft permanently', () => {
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('PAYMENT_ON_RECORD');
     expect(await exists(d.id)).toBe(true);
+  });
+
+  // Oct 29, 2026 (GM-20261029-0035): the terms say how the customer will pay, not that they did.
+  test('Advanced Payment terms with no proof and no verified payment can be deleted', async () => {
+    const d = await draft({ advance: true });
+    const res = await del(d.id, { reason: 'Double entry', confirm: d.ref });
+    expect(res.status).toBe(200);
+    expect(await statusOf(d.id)).toBe('deleted');
+  });
+
+  // Oct 29, 2026 (GM-20261027-0063): queued when its customer was registered, then sent back
+  // to draft by Management. The leftover retry row went with the delete instead of blocking it.
+  test('a leftover Zoho retry row does not block the delete, and is removed with it', async () => {
+    const d = await draft();
+    await zohoRetry.enqueue({ orderId: d.id, payload: {}, error: 'Customer was registered in Zoho — order queued for its Sales Order.' });
+    const res = await del(d.id, { reason: 'Pricing issues', confirm: d.ref });
+    expect(res.status).toBe(200);
+    expect(await db.prepare("SELECT 1 AS x FROM zoho_sync_queue WHERE order_id = ? AND status = 'pending'").get(d.id)).toBeFalsy();
+  });
+
+  test('the retry job drops, never sends, a queued order that is still a draft', async () => {
+    const d = await draft();
+    await zohoRetry.enqueue({ orderId: d.id, payload: {}, error: 'stale' });
+    const row = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(d.id);
+    const out = await zohoRetry.processOne(row);
+    expect(out.outcome).toBe('not_approved');
+    expect(await db.prepare('SELECT 1 AS x FROM zoho_sync_queue WHERE order_id = ?').get(d.id)).toBeFalsy();
+    expect((await db.prepare('SELECT zoho_so_id FROM orders WHERE id = ?').get(d.id)).zoho_so_id).toBeNull();
   });
 
   test('a draft already in Zoho is refused', async () => {

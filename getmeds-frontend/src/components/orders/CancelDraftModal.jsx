@@ -11,9 +11,9 @@ import client from '../../api/client';
  *  - Cancel and keep record: the customer paid in advance. The order is never deleted
  *    and Finance follows up the refund.
  *
- * A draft that already has a payment on record (a payment proof, Advanced Payment
- * terms or a verified payment) can only be kept; the server refuses to delete it
- * too. A reason is required: the MedRep sees it.
+ * A draft that already has a payment on record (a payment proof or a verified
+ * payment) can only be kept; the server refuses to delete it too. Advanced Payment
+ * terms alone no longer count (Oct 29, 2026). A reason is required: the MedRep sees it.
  *
  * deleteOnly: the draft was already cancelled as discard, so only deleting is offered.
  */

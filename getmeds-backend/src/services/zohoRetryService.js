@@ -66,7 +66,38 @@ async function listQueue() {
   `).all();
 }
 
+// Oct 29, 2026: an order that Management has not approved (still a draft, waiting for
+// approval, or held before approval) or that was cancelled / deleted must never be sent
+// to Zoho by a retry. A row can be left behind for one: registering a customer queues
+// every order of theirs not yet in Zoho (customerCreateService.releaseWaitingOrders), and
+// Management can send an order back to draft after that. Approval sends the order itself.
+const NOT_APPROVED_STATUSES = ['draft', 'pending_management_approval', 'cancelled', 'deleted'];
+
+async function notYetApproved(orderId) {
+  const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId);
+  if (!order) return false;
+  if (NOT_APPROVED_STATUSES.includes(order.status)) return true;
+  if (!['on_hold', 'exception'].includes(order.status)) return false;
+  // Held: the stage it was at when it went on hold.
+  const entry = await db
+    .prepare(
+      `SELECT old_status FROM order_events
+        WHERE order_id = ? AND new_status IN ('on_hold', 'exception')
+          AND old_status IS NOT NULL AND old_status NOT IN ('on_hold', 'exception')
+        ORDER BY created_at DESC, id DESC LIMIT 1`
+    )
+    .get(orderId);
+  return Boolean(entry && NOT_APPROVED_STATUSES.includes(entry.old_status));
+}
+
 async function processOne(row) {
+  // Oct 29, 2026: the row is stale, so it is removed rather than retried — see notYetApproved.
+  if (await notYetApproved(row.order_id)) {
+    await db.prepare('DELETE FROM zoho_sync_queue WHERE id = ?').run(row.id);
+    console.log(`[ZOHO_RETRY] dropped queue row ${row.id}: order ${row.order_id} is not approved for Zoho`);
+    return { orderId: row.order_id, queueId: row.id, outcome: 'not_approved' };
+  }
+
   // Sep 22, 2026: a split-invoicing entity's own retry — see
   // services/orderSplitService.js. Everything below this point is the
   // PRIMARY path, unchanged from before this branch existed; a row with no
@@ -393,4 +424,4 @@ function stop() {
   }
 }
 
-module.exports = { enqueue, listQueue, processQueue, processOne, start, stop, MAX_ATTEMPTS };
+module.exports = { enqueue, listQueue, processQueue, processOne, notYetApproved, start, stop, MAX_ATTEMPTS };

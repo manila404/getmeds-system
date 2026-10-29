@@ -464,6 +464,8 @@ async function releaseWaitingOrders(customerId, onlyOrderIds = null) {
   let released = 0;
   for (const order of waiting) {
     try {
+      // Oct 29, 2026: an order Management has not approved yet is sent by the approval itself.
+      if (await zohoRetry.notYetApproved(order.id)) continue;
       const payload = await buildZohoSalesOrderPayload(order.id);
       await zohoRetry.enqueue({
         orderId: order.id,

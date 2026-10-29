@@ -1803,10 +1803,10 @@ exports.deleteDraft = async (req, res, next) => {
     if (Number(split?.n) > 0) {
       return res.status(409).json({ success: false, error: { code: 'ALREADY_IN_ZOHO', message: 'Part of this order already has a Zoho Sales Order, so it cannot be deleted here.' } });
     }
-    const queued = await db.prepare("SELECT COUNT(*) AS n FROM zoho_sync_queue WHERE order_id = ? AND status = 'pending'").get(order.id);
-    if (Number(queued?.n) > 0) {
-      return res.status(409).json({ success: false, error: { code: 'ZOHO_SYNC_PENDING', message: 'This order is waiting to be sent to Zoho, so it cannot be deleted.' } });
-    }
+    // Oct 29, 2026: a pending Zoho retry row used to block this. On a draft it is always a
+    // leftover (queued when the customer was registered, then sent back to draft by
+    // Management) and the retry job no longer sends an unapproved order, so it goes with
+    // the delete (below) instead of blocking it.
     const money = await paymentOnRecord(order.id, order);
     if (money.has) {
       return res.status(409).json({ success: false, error: { code: 'PAYMENT_ON_RECORD', message: `This draft has a payment on record (${money.reasons.join('; ')}), so it cannot be deleted. Cancel it and keep the record, for a refund to be arranged.` } });
@@ -1826,6 +1826,7 @@ exports.deleteDraft = async (req, res, next) => {
     if (!marked.changes) {
       return res.status(409).json({ success: false, error: { code: 'ORDER_CHANGED', message: 'This order changed while you were deleting it. Reload and check it.' } });
     }
+    await db.prepare("DELETE FROM zoho_sync_queue WHERE order_id = ? AND status = 'pending'").run(order.id);
     console.log(`[ORDERS] draft ${order.getmeds_order_id} (#${order.id}, ₱${order.total_amount}) permanently deleted by ${actor.name} (#${actor.id}): ${reason}`);
 
     // No orderId: the notification must outlive the order. Its payload names the order,
