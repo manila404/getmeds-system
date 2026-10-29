@@ -103,7 +103,11 @@ async function buildExport(client, month, targetRows) {
 
   // BOOKED — one row per order, by its latest FINANCE_VERIFIED event in the month
   const booked = await q(
-    `SELECT id, medrep_id, raised_by_id, total_amount, status, division FROM (
+    `SELECT id, medrep_id, raised_by_id, total_amount, status, division,
+            -- Oct 29, 2026 (Aaron): the same order without VAT, line by line (a 12% line ÷ 1.12; "No Tax"
+            -- lines unchanged; discounts are already out of line_total). Shown on My KPI only.
+            (SELECT SUM(oi.line_total / (1 + COALESCE(oi.tax_percent, 0) / 100.0)) FROM order_items oi WHERE oi.order_id = b.id) AS net_amount
+       FROM (
         SELECT DISTINCT ON (o.id) o.id, o.medrep_id, o.raised_by_id, o.total_amount, o.status, o.division
           FROM order_events fe JOIN orders o ON o.id = fe.order_id
          WHERE fe.event_type = 'FINANCE_VERIFIED' AND ${notImported}
@@ -191,12 +195,14 @@ async function buildExport(client, month, targetRows) {
 
   // ── per-owner tallies ──
   const T = new Map();
-  const tally = (id) => { if (!T.has(id)) T.set(id, { booked: 0, bookedN: 0, completed: 0, byOthersN: 0, byOthers: 0, raisedForOthersN: 0, raisedForOthers: 0, orders: 0, held: 0, newCustomers: 0 }); return T.get(id); };
+  const tally = (id) => { if (!T.has(id)) T.set(id, { booked: 0, bookedNet: 0, bookedN: 0, completed: 0, byOthersN: 0, byOthers: 0, raisedForOthersN: 0, raisedForOthers: 0, orders: 0, held: 0, newCustomers: 0 }); return T.get(id); };
   const routing = new Map();
   for (const o of booked) {
     const amt = Number(o.total_amount) || 0;
     const t = tally(o.medrep_id);
     t.booked += amt; t.bookedN += 1;
+    // an order with no lines (should not happen) counts as its total, so nothing silently drops out
+    t.bookedNet += o.net_amount === null || o.net_amount === undefined ? amt : Number(o.net_amount) || 0;
     if (o.status === 'completed') t.completed += amt;
     if (o.raised_by_id && o.raised_by_id !== o.medrep_id) {
       t.byOthersN += 1; t.byOthers += amt;
@@ -229,7 +235,7 @@ async function buildExport(client, month, targetRows) {
       order_divisions: [...((divAmt.get(u.id) || divCnt.get(u.id)) || new Map()).entries()].sort((a, b) => b[1] - a[1]).map(([d]) => d).join(' / '),
       head: ch ? ch.head_name : '(none)',
       target_php: target === undefined ? '' : target,
-      booked_php: peso(t.booked), booked_orders: t.bookedN, pct_of_target: target ? pct(t.booked, target) : '',
+      booked_php: peso(t.booked), booked_net_php: peso(t.bookedNet), booked_orders: t.bookedN, pct_of_target: target ? pct(t.booked, target) : '',
       delivered_php: peso(t.completed), orders: t.orders, orders_held: t.held,
       booked_raised_by_others_php: peso(t.byOthers), booked_raised_by_others_orders: t.byOthersN,
       raised_for_others_info_php: peso(t.raisedForOthers),

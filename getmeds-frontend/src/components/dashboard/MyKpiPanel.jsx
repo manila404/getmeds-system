@@ -48,10 +48,19 @@ function KpiBlock({ title, sub, k, extra }) {
         {sub && <p className="text-xs text-ink-secondary">{sub}</p>}
       </div>
       <div className="mt-2 flex items-end gap-2 flex-wrap">
-        <p className="text-2xl font-bold text-ink-primary tabular-nums">{peso(k.booked_php)}</p>
-        <p className="text-xs text-ink-secondary mb-1">booked{k.target_php ? ` of ${peso(k.target_php)} target` : ''}</p>
+        {/* Oct 29, 2026 (Aaron): sales without VAT, as the Team Leads count them; with VAT shown below. */}
+        <p className="text-2xl font-bold text-ink-primary tabular-nums">{peso(k.booked_net_php ?? k.booked_php)}</p>
+        <p className="text-xs text-ink-secondary mb-1">booked, without VAT{k.target_php ? ` · of ${peso(k.target_php)} target` : ''}</p>
       </div>
+      {k.booked_net_php !== undefined && (
+        <p className="text-[11px] text-ink-secondary mt-0.5">With VAT {peso(k.booked_php)} · VAT {peso(k.vat_php)}</p>
+      )}
       <Bar pct={k.pct_of_target} />
+      {k.vacant_target_php > 0 && (
+        <p className="text-[11px] text-ink-secondary mt-1" title={(k.vacant_territories || []).join(', ')}>
+          Target includes {peso(k.vacant_target_php)} for vacant territories ({(k.vacant_territories || []).join(', ')})
+        </p>
+      )}
       <dl className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3 text-center">
         {[['Booked orders', int(k.booked_orders)], ['New customers', int(k.new_customers)], ['Orders raised', int(k.orders)], ['Orders held', int(k.orders_held)]].map(([t, v]) => (
           <div key={t} className="rounded-lg bg-slate-50 py-2">

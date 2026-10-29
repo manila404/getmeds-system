@@ -260,3 +260,24 @@ describe('pre-fill targets from the sales sheet (Oct 8, 2026)', () => {
     expect((await call(false, managerToken)).status).toBe(403);
   });
 });
+
+describe('My KPI without VAT and vacant team targets (Oct 29, 2026)', () => {
+  const { summarize } = require('../src/controllers/kpi.controller')._test;
+  const rows = [
+    { user_id: 1, target_php: 500000, booked_php: 98280, booked_net_php: 96775.71, booked_orders: 1 },
+    { user_id: 2, target_php: '', booked_php: 1000, booked_net_php: 1000, booked_orders: 1 },
+    { user_id: 3, target_php: 300000, booked_php: 112000, booked_net_php: 100000, booked_orders: 2 },
+  ];
+  const vacant = [{ user_id: 3, label: 'HOS | ZAMBOANGA', target_php: 300000 }, { user_id: 9, label: 'B&B | NCL', target_php: 500000 }];
+
+  test('own: the figure without VAT drives % of target; with VAT and the VAT are shown beside it', () => {
+    const r = summarize(rows, [1]);
+    expect(r).toMatchObject({ booked_php: 98280, booked_net_php: 96775.71, vat_php: 1504.29, target_php: 500000, pct_of_target: 19.4, vacant_target_php: 0 });
+  });
+
+  test('team: adds the vacant targets credited to anyone in the team, not others', () => {
+    const r = summarize(rows, [1, 2, 3], vacant);
+    expect(r).toMatchObject({ target_php: 1100000, vacant_target_php: 300000, vacant_territories: ['HOS | ZAMBOANGA'], booked_net_php: 197775.71 });
+    expect(r.pct_of_target).toBe(18);
+  });
+});

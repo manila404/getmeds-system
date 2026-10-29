@@ -53,24 +53,59 @@ async function monthKpis(month) {
   const result = await db.transaction(async () => {
     await q('SET TRANSACTION READ ONLY');
     await q('SET LOCAL statement_timeout = 10000');
-    return buildExport({ query: async (sql, params) => ({ rows: await q(sql, params) }) }, month);
+    const out = await buildExport({ query: async (sql, params) => ({ rows: await q(sql, params) }) }, month);
+    return { ...out, vacant: await vacantTargets(month) };
   })();
   cache.set(month, { at: Date.now(), ttl: result.partial ? 60_000 : 600_000, result });
   return result;
 }
 const clearKpiCache = () => cache.clear();
 
-/** Sums people rows (from buildExport) into one figure set. */
-function summarize(rows, ids) {
+/**
+ * Oct 29, 2026 (Aaron): the targets of vacant territories, for My Team KPI. Same rule as the Overview
+ * (adminOverview.controller): a territory_targets row counts while its territory is flagged vacant or no
+ * account holds it. Each is credited to the territory's manager, or to the channel head when the
+ * manager has no account, so a Team Lead's team target includes the vacancies under them.
+ * [] when the table is not there yet.
+ */
+async function vacantTargets(month) {
+  const has = (await q("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'territory_targets'")).length > 0;
+  if (!has) return [];
+  return q(
+    `SELECT COALESCE(m.user_id, c.head_user_id) AS user_id, tt.label, tt.target_php
+       FROM territory_targets tt
+       JOIN sales_territories t ON t.id = tt.territory_id
+       LEFT JOIN sales_managers m ON m.id = t.manager_id
+       LEFT JOIN sales_channels c ON c.id = m.channel_id
+      WHERE tt.month = $1
+        AND (t.is_vacant OR NOT EXISTS (
+              SELECT 1 FROM user_salespersons us
+               WHERE LOWER(TRIM(us.salesperson)) IN (LOWER(TRIM(t.zoho_salesperson)), LOWER(TRIM(COALESCE(t.zoho_alias, ''))))))`,
+    [month]
+  );
+}
+
+/**
+ * Sums people rows (from buildExport) into one figure set, for My KPI. Oct 29, 2026 (Aaron):
+ * booked_net_php is the same orders without VAT and % of target uses it (My KPI only; the Admin pages
+ * keep their figures). `vacant` (team only) adds the targets of vacant territories credited to anyone
+ * in `ids`.
+ */
+function summarize(rows, ids, vacant = []) {
   const set = new Set(ids);
   const mine = rows.filter((p) => set.has(p.user_id));
   const sum = (k) => Math.round(mine.reduce((a, p) => a + (Number(p[k]) || 0), 0) * 100) / 100;
   const withTarget = mine.filter((p) => p.target_php !== '');
-  const target = Math.round(withTarget.reduce((a, p) => a + Number(p.target_php), 0) * 100) / 100;
+  const vac = vacant.filter((v) => set.has(v.user_id));
+  const vacantTarget = Math.round(vac.reduce((a, v) => a + (Number(v.target_php) || 0), 0) * 100) / 100;
+  const target = Math.round((withTarget.reduce((a, p) => a + Number(p.target_php), 0) + vacantTarget) * 100) / 100;
   const booked = sum('booked_php');
+  const bookedNet = sum('booked_net_php');
   return {
     people: set.size, people_with_target: withTarget.length, target_php: target, booked_php: booked,
-    pct_of_target: target > 0 ? Math.round((booked / target) * 1000) / 10 : null,
+    booked_net_php: bookedNet, vat_php: Math.round((booked - bookedNet) * 100) / 100,
+    vacant_target_php: vacantTarget, vacant_territories: vac.map((v) => v.label),
+    pct_of_target: target > 0 ? Math.round((bookedNet / target) * 1000) / 10 : null,
     booked_orders: sum('booked_orders'), delivered_php: sum('delivered_php'), orders: sum('orders'), orders_held: sum('orders_held'),
     new_customers: sum('new_customers')
   };
@@ -106,9 +141,9 @@ async function getMyKpis(req, res, next) {
       const key = typeof req.query.team_group === 'string' ? req.query.team_group.trim() : '';
       if (key) {
         group = (await teamGroups(me)).find((g) => g.key === key) || null;
-        team = { ...summarize(result.people, group ? group.ids : []), label: group ? group.label : 'Unknown team' };
+        team = { ...summarize(result.people, group ? group.ids : [], result.vacant), label: group ? group.label : 'Unknown team' };
       } else {
-        team = { ...summarize(result.people, [me, ...below]), label: 'My team' };
+        team = { ...summarize(result.people, [me, ...below], result.vacant), label: 'My team' };
       }
     }
     res.json({ success: true, data: { month, partial: result.partial, currentMonth: thisMonth, generatedAt: new Date().toISOString(), own, team } });
@@ -493,4 +528,4 @@ async function exportSalesPerformance(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { getKpis, getMyKpis, getSalesPerformance, exportSalesPerformance, getTargets, putTargets, copyTargets, targetsFromStructure, getTargetChanges, getStatus, getSettings, putSettings, _test: { parseTarget, parseMonth, clearKpiCache } };
+module.exports = { getKpis, getMyKpis, getSalesPerformance, exportSalesPerformance, getTargets, putTargets, copyTargets, targetsFromStructure, getTargetChanges, getStatus, getSettings, putSettings, _test: { parseTarget, parseMonth, clearKpiCache, summarize } };
