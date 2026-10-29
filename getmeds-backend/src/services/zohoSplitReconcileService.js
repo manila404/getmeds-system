@@ -94,6 +94,13 @@ async function reconcileOneSplit(order, split, { actorName, source }) {
 
   const s = deriveSplitState(salesorder);
 
+  // Oct 29, 2026: 'failed' on a split that has a Sales Order is Finance's Verify failing to
+  // confirm it in Zoho. Zoho now shows it past draft, so the confirmation happened.
+  if (split.zoho_sync_status === 'failed' && !['draft', 'deleted', 'cancelled'].includes(s.soStatus)) {
+    await db.prepare("UPDATE order_split_sales_orders SET zoho_sync_status = 'synced', zoho_sync_error = NULL, updated_at = ? WHERE id = ?").run(now, split.id);
+    out.changes.push('sync ok');
+  }
+
   // Sales Order status
   if (s.soStatus !== split.zoho_so_status) {
     await db.prepare('UPDATE order_split_sales_orders SET zoho_so_status = ?, updated_at = ? WHERE id = ?').run(s.soStatus, now, split.id);

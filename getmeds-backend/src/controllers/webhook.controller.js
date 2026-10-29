@@ -192,6 +192,15 @@ async function handleSplitWebhookEvent(order, splitRow, { rawEvent, salesorder, 
     metadata: { invoicingFrom: entity, splitId: splitRow.id }
   });
 
+  // Oct 29, 2026: a split's 'failed' is left by Finance's Verify when Zoho refused to confirm
+  // its Sales Order (financeVerifySplit). The Sales Order exists; once Zoho reports it
+  // confirmed, invoiced, packed, shipped or paid, that confirmation has happened, so the
+  // 'failed' badge is cleared (as workflowV2Service does for the primary).
+  if (splitRow.zoho_sync_status === 'failed' && splitRow.zoho_so_id && !isSalesOrderDeleted && !isSalesOrderCancelled &&
+      (isSalesOrderConfirmed || isPaymentEvent || isInvoiceSent || isInvoiceDrafted || isShipmentEvent || isPackageEvent)) {
+    await db.prepare(`UPDATE order_split_sales_orders SET zoho_sync_status = 'synced', zoho_sync_error = NULL, updated_at = ? WHERE id = ?`).run(now, splitRow.id);
+  }
+
   if (isPaymentEvent) {
     await db.prepare(`UPDATE order_split_sales_orders SET zoho_paid_status = 'paid', updated_at = ? WHERE id = ?`).run(now, splitRow.id);
     await logSplitEvent('ZOHO_PAYMENT_VERIFIED', 'Payment reported by Zoho for this entity’s Invoice.');

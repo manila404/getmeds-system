@@ -145,6 +145,26 @@ describe('reconcileSplitOrders', () => {
     expect(Number(n.n)).toBe(1);
   });
 
+  // Oct 29, 2026 (GM-20261029-0031, SO-69356): Finance's Verify could not confirm the split
+  // in Zoho ("not authorized") and left 'failed'; it was confirmed in Zoho afterwards.
+  test('a "failed" left by Verify is cleared once Zoho shows the Sales Order confirmed', async () => {
+    await db.prepare("UPDATE order_split_sales_orders SET zoho_sync_status = 'failed', zoho_sync_error = 'You are not authorized to perform this operation' WHERE id = ?").run(splitId);
+    jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({ salesorder: splitSalesOrder() });
+    await reconcileSplitOrders({ orderId });
+    const row = await db.prepare('SELECT zoho_sync_status, zoho_sync_error FROM order_split_sales_orders WHERE id = ?').get(splitId);
+    expect(row.zoho_sync_status).toBe('synced');
+    expect(row.zoho_sync_error).toBeNull();
+  });
+
+  test('a "failed" stays while the Sales Order is still a draft in Zoho', async () => {
+    await db.prepare("UPDATE order_split_sales_orders SET zoho_sync_status = 'failed' WHERE id = ?").run(splitId);
+    jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({ salesorder: splitSalesOrder({ status: 'draft' }) });
+    await reconcileSplitOrders({ orderId });
+    expect((await db.prepare('SELECT zoho_sync_status FROM order_split_sales_orders WHERE id = ?').get(splitId)).zoho_sync_status).toBe('failed');
+    jest.spyOn(zoho, 'getSalesOrder').mockResolvedValue({ salesorder: splitSalesOrder() });
+    await reconcileSplitOrders({ orderId });
+  });
+
   test('a Zoho failure on the split is reported, not thrown, and nothing is changed', async () => {
     jest.spyOn(zoho, 'getSalesOrder').mockRejectedValue(new Error('Zoho is down'));
     const res = await reconcileSplitOrders({ orderId });
