@@ -4,6 +4,7 @@ import { X, Shield, Pencil, Trash2, UserCheck, Ban, UserX, Clock, Check, Briefca
 import toast from 'react-hot-toast';
 import { ROLES, roleLabel, roleCan } from '../../constants/roles';
 import { useAuth } from '../../hooks/useAuth';
+import SalesMoveDialog from './SalesMoveDialog';
 
 // Oct 6, 2026 (sales structure, sheet 12.13): Leaders and Team Leaders report to someone too
 // (Shiela to Honey, Honey to Javed), and team leads carry a display title.
@@ -151,6 +152,7 @@ const UserDetailsModal = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [showInactive, setShowInactive] = useState(false);
+  const [moving, setMoving] = useState(false);
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose(); };
@@ -557,6 +559,12 @@ const UserDetailsModal = ({
                       <UserCheck className="w-4 h-4" /> Approve after all
                     </button>
                   )}
+                  {/* Oct 30, 2026: role / department change with handover, for the Sales department. */}
+                  {status === 'active' && ['medrep', 'team_lead'].includes(roleKey) && (
+                    <button type="button" className={btnGhost} disabled={busy} onClick={() => setMoving(true)}>
+                      <Briefcase className="w-4 h-4" /> Move / change role
+                    </button>
+                  )}
                   <button type="button" className={btnPrimary} disabled={busy} onClick={startEdit}>
                     <Pencil className="w-4 h-4" /> Edit
                   </button>
@@ -566,6 +574,9 @@ const UserDetailsModal = ({
           </div>
         )}
       </div>
+      {moving && (
+        <SalesMoveDialog userId={user.id} onClose={() => setMoving(false)} onDone={async () => { setMoving(false); await onChanged(); }} />
+      )}
     </div>
   );
 };

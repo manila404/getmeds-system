@@ -29,6 +29,14 @@ router.patch('/users/:id', adminController.update);
 // account has any history — see the handler's own header.
 router.delete('/users/:id', adminController.deleteUser);
 
+// Oct 30, 2026: Move / change role for someone in the Sales department — every switch
+// (role, reports to, their people, Zoho names, orders still to act on) previewed, then
+// applied together. See services/salesMoveService.js.
+const salesMove = require('../controllers/salesMove.controller');
+router.get('/users/:id/sales-move', salesMove.describe);
+router.post('/users/:id/sales-move/preview', salesMove.preview);
+router.post('/users/:id/sales-move/apply', salesMove.apply);
+
 // Route to deactivate a user (Soft Delete): PATCH /api/admin/users/:id/deactivate
 router.patch('/users/:id/deactivate', adminController.deactivateUser);
 
