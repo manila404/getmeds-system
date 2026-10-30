@@ -103,12 +103,12 @@ async function buildExport(client, month, targetRows) {
 
   // BOOKED — one row per order, by its latest FINANCE_VERIFIED event in the month
   const booked = await q(
-    `SELECT id, medrep_id, raised_by_id, total_amount, status, division,
+    `SELECT id, medrep_id, raised_by_id, total_amount, status, division, salesperson,
             -- Oct 29, 2026 (Aaron): the same order without VAT, line by line (a 12% line ÷ 1.12; "No Tax"
             -- lines unchanged; discounts are already out of line_total). Shown on My KPI only.
             (SELECT SUM(oi.line_total / (1 + COALESCE(oi.tax_percent, 0) / 100.0)) FROM order_items oi WHERE oi.order_id = b.id) AS net_amount
        FROM (
-        SELECT DISTINCT ON (o.id) o.id, o.medrep_id, o.raised_by_id, o.total_amount, o.status, o.division
+        SELECT DISTINCT ON (o.id) o.id, o.medrep_id, o.raised_by_id, o.total_amount, o.status, o.division, o.salesperson
           FROM order_events fe JOIN orders o ON o.id = fe.order_id
          WHERE fe.event_type = 'FINANCE_VERIFIED' AND ${notImported}
            AND o.status NOT IN ('cancelled', 'deleted')
@@ -121,7 +121,7 @@ async function buildExport(client, month, targetRows) {
   // not) means it is not new. Credited to that order's owner, in the month Finance confirmed it.
   // One index lookup per booked order (orders.customer_id is indexed).
   const firstOrders = booked.length ? await q(
-    `SELECT o.id, o.medrep_id FROM orders o
+    `SELECT o.id, o.medrep_id, o.salesperson FROM orders o
       WHERE o.id = ANY($1) AND o.customer_id IS NOT NULL
         AND NOT EXISTS (
           SELECT 1 FROM orders e
@@ -131,13 +131,13 @@ async function buildExport(client, month, targetRows) {
     [booked.map((b) => b.id)]
   ) : [];
   const raised = await q(
-    `SELECT o.id, o.medrep_id, o.division FROM orders o
+    `SELECT o.id, o.medrep_id, o.division, o.salesperson FROM orders o
       WHERE o.created_at >= $1 AND o.created_at < $2 AND ${notImported}
         AND o.status NOT IN ('draft', 'cancelled', 'deleted')`,
     [fromUtc, toUtc]
   );
   const held = await q(
-    `SELECT DISTINCT o.id, o.medrep_id FROM order_events e JOIN orders o ON o.id = e.order_id
+    `SELECT DISTINCT o.id, o.medrep_id, o.salesperson FROM order_events e JOIN orders o ON o.id = e.order_id
       WHERE e.new_status = 'on_hold' AND e.old_status IS DISTINCT FROM 'on_hold'
         AND e.created_at >= $1 AND e.created_at < $2 AND ${notImported} AND o.status <> 'deleted'`,
     [fromUtc, toUtc]
@@ -159,8 +159,10 @@ async function buildExport(client, month, targetRows) {
     const t = terrBySp.get(String(a.salesperson || '').toLowerCase().trim());
     if (!t) continue;
     const m = mgrById.get(t.manager_id);
-    const p = place.get(a.user_id) || { channelIds: [], hqs: [] };
+    const p = place.get(a.user_id) || { channelIds: [], hqs: [], names: new Map() };
     if (m && !p.channelIds.includes(m.channel_id)) p.channelIds.push(m.channel_id);
+    // Oct 30, 2026: which channel each of their Zoho names is in (both spellings of a territory)
+    if (m) for (const n of [a.salesperson, t.zoho_salesperson, t.zoho_alias]) if (n) p.names.set(String(n).toLowerCase().trim(), m.channel_id);
     if (t.hq) p.hqs.push(String(t.hq).toUpperCase());
     place.set(a.user_id, p);
   }
@@ -216,6 +218,44 @@ async function buildExport(client, month, targetRows) {
   for (const o of held) tally(o.medrep_id).held += 1;
   for (const o of firstOrders) if (o.medrep_id) tally(o.medrep_id).newCustomers += 1;
 
+  // Oct 30, 2026 (Aaron): someone with Zoho names in two channels (Nicka: CLIDP | NICKA and
+  // MT | 1) gets their figures split per channel, by the Zoho Salesperson on each order; an
+  // order under a name that is not theirs, or none, counts in their primary channel. Same rule
+  // as services/splitPeopleService.js. Their own totals above are unchanged.
+  const isSplit = (uid) => (place.get(uid)?.channelIds.length || 0) > 1;
+  const splitPart = new Map(); // uid -> Map(channelId -> tally)
+  const partOf = (uid, salesperson) => {
+    const p = place.get(uid);
+    const ch = p.names.get(String(salesperson || '').toLowerCase().trim());
+    const cid = ch === undefined ? p.channelIds[0] : ch;
+    if (!splitPart.has(uid)) splitPart.set(uid, new Map(p.channelIds.map((c) => [c, { booked: 0, bookedNet: 0, bookedN: 0, completed: 0, orders: 0, held: 0, newCustomers: 0 }])));
+    return splitPart.get(uid).get(cid);
+  };
+  for (const o of booked) {
+    if (!isSplit(o.medrep_id)) continue;
+    const amt = Number(o.total_amount) || 0;
+    const s = partOf(o.medrep_id, o.salesperson);
+    s.booked += amt; s.bookedN += 1;
+    s.bookedNet += o.net_amount === null || o.net_amount === undefined ? amt : Number(o.net_amount) || 0;
+    if (o.status === 'completed') s.completed += amt;
+  }
+  for (const o of raised) if (isSplit(o.medrep_id)) partOf(o.medrep_id, o.salesperson).orders += 1;
+  for (const o of held) if (isSplit(o.medrep_id)) partOf(o.medrep_id, o.salesperson).held += 1;
+  for (const o of firstOrders) if (isSplit(o.medrep_id)) partOf(o.medrep_id, o.salesperson).newCustomers += 1;
+  const byChannel = (uid) => {
+    if (!isSplit(uid)) return null;
+    const p = place.get(uid);
+    return p.channelIds.map((cid, i) => {
+      const s = (splitPart.get(uid) && splitPart.get(uid).get(cid)) || { booked: 0, bookedNet: 0, bookedN: 0, completed: 0, orders: 0, held: 0, newCustomers: 0 };
+      const c = chById.get(cid);
+      return {
+        channel_id: cid, channel: c ? c.name : '(unknown)', head: c ? c.head_name : '(none)', primary: i === 0,
+        booked_php: peso(s.booked), booked_net_php: peso(s.bookedNet), booked_orders: s.bookedN, delivered_php: peso(s.completed),
+        orders: s.orders, orders_held: s.held, new_customers: s.newCustomers
+      };
+    });
+  };
+
   const fileMode = Array.isArray(targetRows);
   const targets = fileMode ? targetsFor(targetRows, month) : await dbTargets(q, month);
   const targetOf = (u) => (fileMode ? targets.get(String(u.email).toLowerCase()) : targets.get(u.id));
@@ -239,7 +279,8 @@ async function buildExport(client, month, targetRows) {
       delivered_php: peso(t.completed), orders: t.orders, orders_held: t.held,
       booked_raised_by_others_php: peso(t.byOthers), booked_raised_by_others_orders: t.byOthersN,
       raised_for_others_info_php: peso(t.raisedForOthers),
-      new_customers: t.newCustomers, followups_on_time: NOT_TRACKED
+      new_customers: t.newCustomers, followups_on_time: NOT_TRACKED,
+      by_channel: byChannel(u.id)
     };
   });
 
@@ -291,12 +332,19 @@ async function buildExport(client, month, targetRows) {
   };
   const peopleById = new Map(people.map((p) => [p.user_id, p]));
   const inSomeTeam = new Set();
+  // Oct 30, 2026: the channels each lead covers in the structure, for the split rule.
+  const ledChannels = new Map();
+  const addLed = (uid, cid) => { if (!uid) return; if (!ledChannels.has(uid)) ledChannels.set(uid, new Set()); ledChannels.get(uid).add(cid); };
+  for (const c of channels) addLed(c.head_user_id, c.id);
+  for (const m of managers) addLed(m.user_id, m.channel_id);
   const teams = users
     .filter((u) => u.role === 'team_lead' && below.has(u.id) && (u.is_active || T.has(u.id)))
     .map((lead) => {
       const ids = [lead.id, ...teamOf(lead.id)];
       ids.forEach((id) => inSomeTeam.add(id));
-      const rows = ids.map((id) => peopleById.get(id)).filter(Boolean).map((p) => ({ ...p, team_lead: lead.name }));
+      const rows = ids.map((id) => peopleById.get(id)).filter(Boolean)
+        .map((p) => (p.by_channel && p.user_id !== lead.id ? restrictToChannels(p, allowedFor(p, ledChannels.get(lead.id))) : p))
+        .map((p) => ({ ...p, team_lead: lead.name }));
       const [sum] = sumRows(rows.length ? rows : [{ team_lead: lead.name, booked_php: 0, booked_orders: 0, delivered_php: 0, orders: 0, orders_held: 0, booked_raised_by_others_php: 0, raised_for_others_info_php: 0, target_php: '' }], ['team_lead']);
       const chain = chainOf(lead);
       return { ...sum, people: rows.length, title: lead.sales_title || '', reports_to: chain.length > 1 ? chain[chain.length - 2] : '', level: chain.length - 1, _order: chain.join(' > ') };
@@ -305,8 +353,14 @@ async function buildExport(client, month, targetRows) {
     .map(({ _order, ...t }) => t);
   const loners = people.filter((p) => !inSomeTeam.has(p.user_id));
   if (loners.length) teams.push({ ...sumRows(loners.map((p) => ({ ...p, team_lead: '(none)' })), ['team_lead'])[0], title: '', reports_to: '', level: 0 });
-  const channelRows = sumRows(people, ['channel']);
-  const heads = sumRows(people, ['head']);
+  // Oct 30, 2026: channel and head totals take each split person's part into its own channel
+  // (their target stays with their primary channel, where it was set).
+  const perChannel = people.flatMap((p) => (!p.by_channel ? [p] : p.by_channel.map((c) => ({
+    ...p, ...c, target_php: c.primary ? p.target_php : '', booked_raised_by_others_php: c.primary ? p.booked_raised_by_others_php : 0,
+    raised_for_others_info_php: c.primary ? p.raised_for_others_info_php : 0
+  }))));
+  const channelRows = sumRows(perChannel, ['channel']);
+  const heads = sumRows(perChannel, ['head']);
 
   const routingRows = [...routing.values()].map((r) => ({
     owner_credited: byId.get(r.owner)?.name || r.owner, owner_rep_type: repType(r.owner),
@@ -328,7 +382,7 @@ async function buildExport(client, month, targetRows) {
     { check: 'Booked orders (count)', value: booked.length, note: '' },
     { check: 'Booked orders with no owner', value: noOwner, note: noOwner ? 'Not credited to anyone' : 'OK' },
     { check: 'Orders raised by someone other than the owner (booked)', value: booked.filter((o) => o.raised_by_id && o.raised_by_id !== o.medrep_id).length, note: 'Credited to the owner; see 05-routing.csv' },
-    { check: 'People counted under more than one channel', value: multi.length, note: multi.length ? `Counted once, under their primary channel: ${multi.join('; ')}` : 'OK' },
+    { check: 'People counted under more than one channel', value: multi.length, note: multi.length ? `Split per channel by the Zoho Salesperson on each order (target in their primary channel): ${multi.join('; ')}` : 'OK' },
     { check: 'People with no territory in the sales structure', value: unplaced.length, note: `placed by order division: ${unplaced.filter((p) => p.how_placed !== 'none').length}; still unplaced: ${unplaced.filter((p) => p.how_placed === 'none').length}. Listed in 07-unplaced-people.csv` },
     { check: 'Booked pesos of people with no territory', value: peso(unplaced.reduce((a, p) => a + p.booked_php, 0)), note: 'Included in channel and head totals through the order-division fallback' },
     { check: 'Booked pesos still in no channel', value: peso(people.filter((p) => p.channel === '(unplaced)').reduce((a, p) => a + p.booked_php, 0)), note: 'Their orders carry no division that matches a channel' },
@@ -350,6 +404,33 @@ const COLS = {
 };
 
 
+/**
+ * Oct 30, 2026: a split person's KPI row (one with by_channel) seen from above: the channels
+ * the viewer covers where the person sells, else the person's primary channel only. Same rule
+ * as services/splitPeopleService.js allowedChannels.
+ */
+function allowedFor(row, viewerChannels) {
+  const mine = viewerChannels || new Set();
+  const both = row.by_channel.filter((c) => mine.has(c.channel_id)).map((c) => c.channel_id);
+  return new Set(both.length ? both : row.by_channel.filter((c) => c.primary).map((c) => c.channel_id));
+}
+
+/** The row cut down to those channels' figures; the target only when the primary channel is in. */
+function restrictToChannels(row, allowed) {
+  const parts = row.by_channel.filter((c) => allowed.has(c.channel_id));
+  const sum = (k) => peso(parts.reduce((a, c) => a + (Number(c[k]) || 0), 0));
+  const withPrimary = parts.some((c) => c.primary);
+  return {
+    ...row,
+    booked_php: sum('booked_php'), booked_net_php: sum('booked_net_php'), booked_orders: sum('booked_orders'),
+    delivered_php: sum('delivered_php'), orders: sum('orders'), orders_held: sum('orders_held'), new_customers: sum('new_customers'),
+    target_php: withPrimary ? row.target_php : '',
+    booked_raised_by_others_php: withPrimary ? row.booked_raised_by_others_php : 0,
+    raised_for_others_info_php: withPrimary ? row.raised_for_others_info_php : 0,
+    by_channel: parts
+  };
+}
+
 /** The kpi_targets rows for a month, keyed by user id. */
 async function dbTargets(q, month) {
   const rows = await q('SELECT user_id, target_php FROM kpi_targets WHERE month = $1', [month]);
@@ -361,4 +442,4 @@ function currentMonth(now = new Date()) {
   return new Date(now.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 7);
 }
 
-module.exports = { MANILA, NOT_TRACKED, monthRange, prevMonth, toCsv, parseCsv, readTargets, targetsFor, copyTargets, buildExport, currentMonth, COLS };
+module.exports = { MANILA, NOT_TRACKED, monthRange, prevMonth, toCsv, parseCsv, readTargets, targetsFor, copyTargets, buildExport, currentMonth, COLS, allowedFor, restrictToChannels };

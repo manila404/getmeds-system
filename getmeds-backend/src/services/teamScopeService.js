@@ -2,6 +2,7 @@
 
 const db = require('../db/database');
 const { hasColumn } = require('./schemaColumns');
+const splitPeopleService = require('./splitPeopleService');
 
 /**
  * Which orders — and, as of Sep 22, 2026, which MedReps — a 'team_lead'
@@ -224,13 +225,36 @@ async function teamGroups(teamLeadUserId) {
  *
  * `alias` is the orders table's alias in the calling query.
  */
+// Oct 30, 2026: "these people's orders", where a person who sells in two divisions
+// (splitPeopleService) contributes only the orders in the channels this viewer covers.
+async function membersOrderSql(viewerId, ids, alias) {
+  const { split, rules } = await splitPeopleService.splitRulesFor(viewerId, ids);
+  const plain = ids.filter((id) => !rules.has(id));
+  const parts = [];
+  const params = [];
+  if (plain.length) {
+    parts.push(`${alias}.medrep_id IN (${plain.map(() => '?').join(', ')})`);
+    params.push(...plain);
+  }
+  for (const [id, allowed] of rules) {
+    const m = splitPeopleService.memberOrderSql(alias, id, split.get(id), allowed);
+    parts.push(m.sql);
+    params.push(...m.params);
+  }
+  return parts.length ? { sql: parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0], params } : { sql: '1 = 0', params: [] };
+}
+
 async function teamScopeSql(teamLeadUserId, alias = 'o', groupKey = null) {
   // Oct 6, 2026: a My Team tab narrows the team to one group (see teamGroups); an unknown
   // key matches nothing rather than falling back to the whole team.
   if (groupKey) {
     const group = (await teamGroups(teamLeadUserId)).find((g) => g.key === groupKey);
     if (!group || !group.ids.length) return { sql: '1 = 0', params: [] };
-    return { sql: `${alias}.medrep_id IN (${group.ids.map(() => '?').join(', ')})`, params: group.ids };
+    // The viewer's own orders, when they are in the group, are all theirs.
+    const others = group.ids.filter((id) => id !== teamLeadUserId);
+    const members = await membersOrderSql(teamLeadUserId, others, alias);
+    if (others.length === group.ids.length) return members;
+    return { sql: `(${alias}.medrep_id = ? OR ${members.sql})`, params: [teamLeadUserId, ...members.params] };
   }
   const ids = await teamMedrepIds(teamLeadUserId);
   // Fails closed: no user id at all means no orders, not all orders.
@@ -242,10 +266,10 @@ async function teamScopeSql(teamLeadUserId, alias = 'o', groupKey = null) {
   const own = `${alias}.medrep_id = ? OR ${alias}.raised_by_id = ?`;
   if (!ids.length) return { sql: `(${own})`, params: [teamLeadUserId, teamLeadUserId] };
 
-  const placeholders = ids.map(() => '?').join(', ');
+  const members = await membersOrderSql(teamLeadUserId, ids, alias);
   return {
-    sql: `(${alias}.medrep_id IN (${placeholders}) OR ${own})`,
-    params: [...ids, teamLeadUserId, teamLeadUserId]
+    sql: `(${members.sql} OR ${own})`,
+    params: [...members.params, teamLeadUserId, teamLeadUserId]
   };
 }
 
@@ -256,7 +280,17 @@ async function canAccessOrder(user, order) {
   if (order.medrep_id === user.id || order.raised_by_id === user.id) return true;
   if (!order.medrep_id) return false;
   const ids = await teamMedrepIds(user.id);
-  return ids.includes(order.medrep_id);
+  if (!ids.includes(order.medrep_id)) return false;
+  // Oct 30, 2026: someone selling in two divisions — only the orders in this viewer's channels.
+  const { split, rules } = await splitPeopleService.splitRulesFor(user.id, [order.medrep_id]);
+  const allowed = rules.get(order.medrep_id);
+  if (!allowed) return true;
+  let salesperson = order.salesperson;
+  if (salesperson === undefined) {
+    const row = await db.prepare('SELECT salesperson FROM orders WHERE id = ?').get(order.id);
+    salesperson = row ? row.salesperson : null;
+  }
+  return allowed.has(splitPeopleService.orderChannel(split.get(order.medrep_id), salesperson));
 }
 
 module.exports = {

@@ -74,6 +74,8 @@ const DIVISIONS = [
   'TeleSales',
   'MD Telesales',
   'PS',
+  // Oct 30, 2026: Modern Trade. Zoho's Division field is free text; Nicka's MT | 1 orders went as CLIDP.
+  'MT',
 ];
 
 // Sep 5, 2026 (2): fixed Sub-division lists, given by the user, for the only

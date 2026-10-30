@@ -512,7 +512,10 @@ const KpiPage = () => {
                   <tr key={p.email} className="hover:bg-slate-50">
                     <Td className="font-medium text-ink-primary">{p.person}<div className="text-[11px] text-ink-secondary">{p.rep_type}{p.active === 'no' ? ' · inactive' : ''}</div></Td>
                     <Td>{p.team_lead}</Td>
-                    <Td>{p.channel}{p.channel_source !== 'territory' && <div className="text-[11px] text-state-warning">{p.channel_source === 'none' ? 'no territory' : 'by order division'}</div>}</Td>
+                    <Td>{p.channel}{p.channel_source !== 'territory' && <div className="text-[11px] text-state-warning">{p.channel_source === 'none' ? 'no territory' : 'by order division'}</div>}
+                      {/* Oct 30, 2026: sells in two divisions; each one's booked share (counted there in Channels / Heads). */}
+                      {p.by_channel && <div className="text-[11px] text-ink-secondary">{p.by_channel.map((c) => `${c.channel.replace(/^RX · /, '')} ${peso(c.booked_php)}`).join(' · ')}</div>}
+                    </Td>
                     <Td right>{p.target_php === '' ? '—' : peso(p.target_php)}</Td>
                     <Td right className="font-semibold">{peso(p.booked_php)}</Td>
                     <Td><Pct value={p.pct_of_target} /></Td>

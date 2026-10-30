@@ -87,6 +87,7 @@ function channelRows(h, c, usersById) {
             key: `c${c.id}-t${t.id}-${a.id}`, level, kind: 'rep', name: a.name, user: { id: a.id, name: a.name, role: a.role },
             handles: t.person_label || '', zoho: t.zoho_salesperson, hq: t.hq, status: accStatus(a.id),
             tl: a.team_lead_matches, tlName: a.team_lead_name, act: move,
+            alsoIn: a.also_in || [],
           });
         }
       } else {
@@ -256,6 +257,8 @@ const Row = ({ r, onOpen, actions }) => {
             <span className={`text-[13px] italic truncate ${r.missing ? 'text-amber-800' : 'text-ink-secondary'}`}>{r.ghost || r.note}</span>
           )}
           {r.name && !r.user && <span className="text-[10.5px] text-ink-secondary shrink-0">no account</span>}
+          {/* Oct 30, 2026: also sells in another division (Nicka: CLIDP and MT). */}
+          {r.alsoIn?.length > 0 && <span className="text-[10.5px] font-semibold text-sky-700 shrink-0">also in {r.alsoIn.map(chLabel).join(', ')}</span>}
         </div>
       </td>
       <td className="py-2 pr-3 whitespace-nowrap">

@@ -13,7 +13,8 @@
  */
 
 const db = require('../db/database');
-const { buildExport, monthRange, currentMonth, prevMonth } = require('../services/kpiService');
+const { buildExport, monthRange, currentMonth, prevMonth, allowedFor, restrictToChannels } = require('../services/kpiService');
+const { viewerChannels } = require('../services/splitPeopleService');
 const { buildSalesPerformance } = require('../services/salesPerformanceService');
 const { buildSalesPerformanceWorkbook } = require('../services/salesPerformanceXlsx');
 const adminOverview = require('./adminOverview.controller');
@@ -135,15 +136,20 @@ async function getMyKpis(req, res, next) {
       entered_for_me_by_others_php: row ? row.booked_raised_by_others_php : 0
     };
 
+    // Oct 30, 2026: someone on the team who sells in two divisions (Nicka: CLIDP and MT) counts
+    // only in the divisions this viewer covers (see services/splitPeopleService.js).
+    if (row && row.by_channel) own.by_channel = row.by_channel;
     let team = null, group = null;
     const below = await teamMedrepIds(me);
     if (below.length) {
+      const mine = await viewerChannels(me);
+      const teamRows = result.people.map((p) => (p.by_channel && p.user_id !== me ? restrictToChannels(p, allowedFor(p, mine)) : p));
       const key = typeof req.query.team_group === 'string' ? req.query.team_group.trim() : '';
       if (key) {
         group = (await teamGroups(me)).find((g) => g.key === key) || null;
-        team = { ...summarize(result.people, group ? group.ids : [], result.vacant), label: group ? group.label : 'Unknown team' };
+        team = { ...summarize(teamRows, group ? group.ids : [], result.vacant), label: group ? group.label : 'Unknown team' };
       } else {
-        team = { ...summarize(result.people, [me, ...below], result.vacant), label: 'My team' };
+        team = { ...summarize(teamRows, [me, ...below], result.vacant), label: 'My team' };
       }
     }
     res.json({ success: true, data: { month, partial: result.partial, currentMonth: thisMonth, generatedAt: new Date().toISOString(), own, team } });

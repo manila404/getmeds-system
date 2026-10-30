@@ -108,8 +108,22 @@ const MyKpiPanel = ({ teamGroup = '' }) => {
       ) : (
         <div className={`grid gap-3 ${data.team ? 'md:grid-cols-2' : ''}`}>
           <KpiBlock title="My Own KPI" sub="orders that are yours" k={data.own}
-            extra={data.own.entered_for_others_php ? (
-              <p className="text-xs text-ink-secondary mt-3">You also entered <b className="text-ink-primary">{peso(data.own.entered_for_others_php)}</b> for others (counted on their KPI).</p>
+            extra={(data.own.entered_for_others_php || data.own.by_channel) ? (
+              <>
+                {/* Oct 30, 2026: selling in two divisions (Nicka: CLIDP and MT): each one's share, by the Zoho
+                    Salesperson on the order. */}
+                {data.own.by_channel && (
+                  <p className="text-xs text-ink-secondary mt-3">
+                    By division:{' '}
+                    {data.own.by_channel.map((c, i) => (
+                      <span key={c.channel_id}>{i > 0 && ' · '}{c.channel.replace(/^RX · /, '')} <b className="text-ink-primary">{peso(c.booked_net_php)}</b></span>
+                    ))}
+                  </p>
+                )}
+                {data.own.entered_for_others_php ? (
+                  <p className="text-xs text-ink-secondary mt-3">You also entered <b className="text-ink-primary">{peso(data.own.entered_for_others_php)}</b> for others (counted on their KPI).</p>
+                ) : null}
+              </>
             ) : null} />
           {data.team && (
             <KpiBlock title={data.team.label === 'My team' ? 'My Team KPI' : `My Team KPI · ${data.team.label}`}

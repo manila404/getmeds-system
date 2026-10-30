@@ -189,6 +189,8 @@ const ManagerCard = ({ channel, m, filter, focused }) => {
                     {a.name}
                     {a.team_lead_matches === true && <CheckCircle2 className="w-3 h-3 text-emerald-600" aria-label="Team Lead matches the sheet" />}
                     {a.team_lead_matches === false && <span className="text-amber-700 font-semibold">TL differs</span>}
+                    {/* Oct 30, 2026: also sells in another division (Nicka: CLIDP and MT). */}
+                    {a.also_in?.length > 0 && <span className="text-sky-700 font-semibold">also in {a.also_in.join(', ')}</span>}
                   </span>
                 ))}
               </div>

@@ -76,9 +76,8 @@ async function canRequest(user, order) {
   if (role === 'admin' || role === 'management') return true;
   if (role === 'medrep') return order.medrep_id === user.id || order.raised_by_id === user.id;
   if (role === 'team_lead') {
-    if (order.medrep_id === user.id || order.raised_by_id === user.id) return true;
-    const ids = await teamScopeService.teamMedrepIds(user.id);
-    return Array.isArray(ids) ? ids.includes(order.medrep_id) : Boolean(ids && ids.has && ids.has(order.medrep_id));
+    // Oct 30, 2026: the same rule as seeing the order (someone in two divisions counts per order).
+    return teamScopeService.canAccessOrder(user, order);
   }
   return false;
 }

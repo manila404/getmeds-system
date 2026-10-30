@@ -37,7 +37,29 @@ export const DIVISIONS = [
   'TeleSales',
   'MD Telesales',
   'PS',
+  // Oct 30, 2026: Modern Trade (see the backend's auth.controller.js).
+  'MT',
 ];
+
+/**
+ * Oct 30, 2026: the Division an order belongs to, from the Zoho Salesperson picked on it.
+ * Mirrors the backend's services/salespersonDivision.js exactly (see its comment): the
+ * primary name, or a name in the account's own family, keeps the account's Division;
+ * another name whose prefix is a known Division ("MT | 1" -> "MT") takes that Division.
+ */
+const lc = (v) => String(v == null ? '' : v).trim().toLowerCase();
+export const salespersonPrefix = (name) => {
+  const m = String(name || '').match(/^\s*(.+?)\s*(?:\||\sl\s)/);
+  return m ? m[1].trim() : '';
+};
+export const divisionForSalesperson = ({ salesperson, primarySalesperson, accountDivision, divisions = DIVISIONS }) => {
+  const account = accountDivision || null;
+  if (!salesperson || lc(salesperson) === lc(primarySalesperson)) return account;
+  const prefix = lc(salespersonPrefix(salesperson));
+  if (!prefix) return account;
+  if (account && lc(account).startsWith(prefix)) return account;
+  return divisions.find((d) => lc(d) === prefix) || account;
+};
 
 // Only these four Divisions have named sub-divisions. Sep 9, 2026: offered as
 // SUGGESTIONS (a datalist), never enforced — reps often cover several and the

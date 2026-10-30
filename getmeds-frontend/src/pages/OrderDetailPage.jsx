@@ -50,6 +50,8 @@ const DIVISIONS = [
   'TeleSales Anesthesia', 'URO',
   // Sep 10, 2026: already in use in Zoho — see orders.controller.js.
   'TeleSales', 'MD Telesales', 'PS',
+  // Oct 30, 2026: Modern Trade (see OrderForm.jsx).
+  'MT',
 ];
 const SUB_DIVISIONS_BY_DIVISION = {
   'B&B': ['CEBU', 'DAVAO', 'E. RODRIGUEZ', 'EAST AVE', 'NCL', 'SOUTH LUZON', 'TAFT'],

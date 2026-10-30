@@ -34,6 +34,7 @@ import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ORDER_SOURCES } from '../../constants/orderSources';
+import { divisionForSalesperson } from '../../constants/divisions';
 import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint, isPaidTerms } from '../../constants/paymentTerms';
 import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
 import StockWarningModal from './StockWarningModal';
@@ -184,6 +185,8 @@ const DIVISIONS = [
   'TeleSales',
   'MD Telesales',
   'PS',
+  // Oct 30, 2026: Modern Trade. Zoho's Division field is free text; Nicka's MT | 1 orders went as CLIDP.
+  'MT',
 ];
 
 // Oct 2, 2026: what Sub-division and Headquarter are for each Division. The form
@@ -736,6 +739,26 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   useEffect(() => {
     setSalespersonOverride(mySalesperson);
   }, [mySalesperson]);
+
+  // Oct 30, 2026: the Division follows the Zoho Salesperson picked. Nicka holds
+  // "CLIDP | NICKA" (primary) and "MT | 1"; picking MT | 1 makes this an MT order.
+  // Only a Division this effect set is put back when the name goes back to the primary,
+  // so a Division chosen by hand is left alone. See constants/divisions.js.
+  const primarySalesperson = ((actingMedrep ? actingMedrep.salesperson : (isBackOffice ? '' : user?.salesperson)) || '').trim();
+  const chosenSalesperson = ((isBackOffice ? salespersonOverride : mySalesperson) || '').trim();
+  const autoDivision = useRef('');
+  useEffect(() => {
+    const d = divisionForSalesperson({
+      salesperson: chosenSalesperson, primarySalesperson, accountDivision: myDivision, divisions: DIVISIONS
+    }) || '';
+    if (d && d !== myDivision) {
+      autoDivision.current = d;
+      setDivisionOverride(d);
+    } else if (autoDivision.current) {
+      setDivisionOverride((cur) => (cur === autoDivision.current ? myDivision : cur));
+      autoDivision.current = '';
+    }
+  }, [chosenSalesperson, primarySalesperson, myDivision]);
   // The Division actually in effect for THIS order right now — Management's
   // typed override when present, else the account value. Feeds the
   // Sub-division options below exactly like the backend's effectiveDivision

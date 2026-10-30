@@ -223,6 +223,24 @@ async function getStructure() {
     total_target: 0, total_achieved: 0, vacant_target: 0,
   };
   const noAccount = [];
+  // Oct 30, 2026: someone with names in two channels (Nicka: CLIDP and MT) is shown under each,
+  // with "also in" naming the other, instead of being treated as a mistake.
+  const chName = new Map(channels.map((c) => [c.id, c.name]));
+  const accountChannels = new Map();
+  const primaryNames = new Map();
+  for (const r of await db.prepare('SELECT user_id, salesperson FROM user_salespersons WHERE is_primary = 1').all()) primaryNames.set(r.user_id, lower(r.salesperson));
+  const primaryChannel = new Map(); // only for people in more than one channel (filled below)
+  for (const t of territories) {
+    const m = mgrById.get(t.manager_id);
+    if (!m) continue;
+    for (const a of accountsFor(t, map)) {
+      if (!accountChannels.has(a.id)) accountChannels.set(a.id, new Set());
+      accountChannels.get(a.id).add(m.channel_id);
+      const p = primaryNames.get(a.id);
+      if (p && (p === lower(t.zoho_salesperson) || p === lower(t.zoho_alias))) primaryChannel.set(a.id, m.channel_id);
+    }
+  }
+  for (const id of [...primaryChannel.keys()]) if ((accountChannels.get(id) || new Set()).size < 2) primaryChannel.delete(id);
   for (const t of territories) {
     const accounts = accountsFor(t, map);
     const status = accounts.length ? 'covered' : t.is_vacant ? 'vacant' : 'no_account';
@@ -242,7 +260,10 @@ async function getStructure() {
       accounts: accounts.map((a) => ({
         id: a.id, name: a.name, role: a.role, team_lead_id: a.team_lead_id, team_lead_name: a.team_lead_name,
         // Only meaningful for a MedRep, and only when the manager has a linked account.
-        team_lead_matches: m && m.user_id && a.role === 'medrep' ? a.team_lead_id === m.user_id : null,
+        // Oct 30, 2026: not compared under a second channel's territory (they report through their primary).
+        team_lead_matches: m && m.user_id && a.role === 'medrep' && !(primaryChannel.has(a.id) && primaryChannel.get(a.id) !== m.channel_id)
+          ? a.team_lead_id === m.user_id : null,
+        also_in: [...(accountChannels.get(a.id) || [])].filter((cid) => !m || cid !== m.channel_id).map((cid) => chName.get(cid)).filter(Boolean),
       })),
     };
     if (!terrByMgr.has(t.manager_id)) terrByMgr.set(t.manager_id, []);
@@ -319,9 +340,15 @@ async function planTeamLeads() {
 
   // account -> the managers whose territories it holds
   const byAccount = new Map();
+  // Oct 30, 2026: the manager of each account's PRIMARY name, for people in two channels.
+  const primaryNames = new Map();
+  for (const r of await db.prepare('SELECT user_id, salesperson FROM user_salespersons WHERE is_primary = 1').all()) primaryNames.set(r.user_id, lower(r.salesperson));
+  const primaryManager = new Map();
   for (const t of territories) {
     const m = mgrById.get(t.manager_id);
     for (const a of accountsFor(t, map)) {
+      const p = primaryNames.get(a.id);
+      if (p && (p === lower(t.zoho_salesperson) || p === lower(t.zoho_alias))) primaryManager.set(a.id, m);
       if (a.role !== 'medrep') continue;
       if (!byAccount.has(a.id)) byAccount.set(a.id, { account: a, managers: new Map(), territories: [] });
       const e = byAccount.get(a.id);
@@ -344,8 +371,16 @@ async function planTeamLeads() {
       current_team_lead_id: a.team_lead_id || null, current_team_lead_name: a.team_lead_name || null,
       proposed_team_lead_id: null, proposed_team_lead_name: null,
     };
-    if (ms.size > 1) { items.push({ ...base, status: 'blocked', reason: 'multiple_managers' }); continue; }
-    const m = [...ms.values()][0];
+    // Oct 30, 2026: names in different CHANNELS (Nicka: CLIDP and MT) are fine: the person
+    // reports to the manager of their primary name. Two managers in the same channel is still
+    // a question for the admin.
+    let m = [...ms.values()][0];
+    if (ms.size > 1) {
+      const sameChannel = new Set([...ms.values()].map((x) => x.channel_id)).size < ms.size;
+      const primaryMgr = primaryManager.get(a.id);
+      if (sameChannel || !primaryMgr) { items.push({ ...base, status: 'blocked', reason: 'multiple_managers' }); continue; }
+      m = primaryMgr;
+    }
     if (!m.user_id) { items.push({ ...base, status: 'blocked', reason: 'manager_has_no_account', manager: m.name }); continue; }
     const u = tlUsers.get(m.user_id);
     if (!u || !(u.is_active === 1 || u.is_active === true) || u.role !== 'team_lead') {

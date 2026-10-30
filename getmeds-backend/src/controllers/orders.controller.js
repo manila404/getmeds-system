@@ -53,6 +53,7 @@ const { setCustomerTin } = require('../services/customerTinService');
 // name>", from sign-up) and the read-only check that Zoho actually knows that
 // name. Zoho has Salesperson as a mandatory Sales Order field here.
 const salespersonService = require('../services/salespersonService');
+const { divisionForSalesperson } = require('../services/salespersonDivision');
 const { returnToFinanceIfHeld, isFinanceHold } = require('../services/financeHoldService');
 const { rxStatusForOrder } = require('../services/prescriptionService');
 // Sep 19, 2026: rebuilds a Sales Order payload fresh from the order's
@@ -149,6 +150,8 @@ const DIVISIONS = [
   'TeleSales',
   'MD Telesales',
   'PS',
+  // Oct 30, 2026: Modern Trade. Zoho's Division field is free text; Nicka's MT | 1 orders went as CLIDP.
+  'MT',
 ];
 
 /**
@@ -2241,6 +2244,23 @@ exports.create = async (req, res, next) => {
       effectiveSalesperson = choice.salesperson;
     }
 
+    // Oct 30, 2026: no Division sent, so it follows the Zoho Salesperson on the order —
+    // "MT | 1" makes an MT order even for an account whose own Division is CLIDP. The
+    // account's primary name keeps the account's Division. See salespersonDivision.js.
+    let divisionFromSalesperson = false;
+    if (cleanDivision === null) {
+      const derived = divisionForSalesperson({
+        salesperson: effectiveSalesperson,
+        primarySalesperson: medrepProfile.salesperson,
+        accountDivision: effectiveDivision,
+        divisions: DIVISIONS
+      });
+      if (derived && derived !== effectiveDivision) {
+        effectiveDivision = derived;
+        divisionFromSalesperson = true;
+      }
+    }
+
     // Sep 5, 2026 (3): resolve the Sub-division that will actually be used
     // on THIS order.
     //
@@ -2260,7 +2280,9 @@ exports.create = async (req, res, next) => {
     const cleanSubDivision = (typeof sub_division === 'string' && sub_division.trim()) ? sub_division.trim() : null;
     // Not sent — fall back to the ordering account's own value, exactly the
     // behavior this endpoint had before Sub-division became editable here.
-    const effectiveSubDivision = cleanSubDivision !== null ? cleanSubDivision : medrepProfile.sub_division;
+    // Oct 30, 2026: not the account's own either when the Division came from another
+    // division's Salesperson (above): it belongs to the account's Division, not this one.
+    const effectiveSubDivision = cleanSubDivision !== null ? cleanSubDivision : (divisionFromSalesperson ? null : medrepProfile.sub_division);
     // Sep 14, 2026: Headquarter is per order, with no account default.
     const cleanHeadquarter = (typeof headquarter === 'string' && headquarter.trim()) ? headquarter.trim() : null;
 
