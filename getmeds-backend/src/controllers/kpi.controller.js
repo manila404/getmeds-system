@@ -251,7 +251,7 @@ async function getTeamMember(req, res, next) {
     const mine = await viewerChannels(me);
     const rows = result.people.map((p) => (p.by_channel && p.user_id !== me ? restrictToChannels(p, allowedFor(p, mine)) : p));
     const [fromUtc, toUtc] = monthRange(month);
-    const { user, counts, recent, flagged } = await db.transaction(async () => {
+    const { user, counts, recent, flagged, flaggedOrders, flaggedNotes } = await db.transaction(async () => {
       await q('SET TRANSACTION READ ONLY');
       await q('SET LOCAL statement_timeout = 10000');
       const [u] = await q('SELECT id, name, role FROM users WHERE id = $1', [id]);
@@ -261,8 +261,37 @@ async function getTeamMember(req, res, next) {
            FROM orders o LEFT JOIN customers c ON c.id = o.customer_id
           WHERE o.medrep_id = $1 ORDER BY o.created_at DESC LIMIT 5`, [id]);
       const [f] = await q('SELECT COUNT(*)::int AS n FROM orders WHERE medrep_id = $1 AND status = ANY($2)', [id, PIPELINE.flagged]);
-      return { user: u, counts: c, recent: r, flagged: f ? f.n : 0 };
+      // Nov 9, 2026 (Aaron): the flagged orders themselves, so the Team Lead can see WHY (the reason) and what
+      // the MedRep, Finance, Management and Pharmacy wrote on them, and step in. Up to 10 orders; for each,
+      // the people's notes from the order history (not Zoho's or the system's own entries), newest first.
+      const fo = await q(
+        `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount, o.created_at, o.exception_reason, o.stock_hold_reason, c.name AS customer
+           FROM orders o LEFT JOIN customers c ON c.id = o.customer_id
+          WHERE o.medrep_id = $1 AND o.status = ANY($2) ORDER BY o.created_at DESC LIMIT 10`, [id, PIPELINE.flagged]);
+      const notes = fo.length ? await q(
+        `SELECT order_id, event_type, new_status, actor_name, actor_role, notes, created_at FROM (
+           SELECT e.*, ROW_NUMBER() OVER (PARTITION BY e.order_id ORDER BY e.created_at DESC) AS rn
+             FROM order_events e
+            WHERE e.order_id = ANY($1) AND e.notes IS NOT NULL AND TRIM(e.notes) <> ''
+              AND e.actor_role IS NOT NULL AND e.event_type NOT LIKE 'ZOHO\\_%') x
+          WHERE rn <= 8 ORDER BY created_at DESC`, [fo.map((o) => o.id)]) : [];
+      return { user: u, counts: c, recent: r, flagged: f ? f.n : 0, flaggedOrders: fo, flaggedNotes: notes };
     })();
+    const notesOf = new Map();
+    for (const e of flaggedNotes) {
+      if (!notesOf.has(e.order_id)) notesOf.set(e.order_id, []);
+      notesOf.get(e.order_id).push({ type: e.event_type, by: e.actor_name || '', role: e.actor_role || '', note: e.notes, at: e.created_at });
+    }
+    const flagged_orders = flaggedOrders.map((o) => {
+      const trail = notesOf.get(o.id) || [];
+      // the reason: what was set on the order, else the note on the step that flagged it
+      const flaggedBy = trail.find((t) => t.type === 'EXCEPTION_SET' || /HOLD|REJECTED|SENT_BACK/.test(t.type));
+      return {
+        id: o.id, order_no: o.getmeds_order_id, status: o.status, customer: o.customer || '', total_php: Number(o.total_amount) || 0, created_at: o.created_at,
+        reason: o.exception_reason || o.stock_hold_reason || (flaggedBy ? flaggedBy.note : '') || '',
+        notes: trail
+      };
+    });
     const n = (keys) => counts.filter((r) => keys.includes(r.status)).reduce((a, r) => a + r.n, 0);
     const pipeline = {
       submissions: counts.reduce((a, r) => a + r.n, 0),
@@ -275,7 +304,7 @@ async function getTeamMember(req, res, next) {
       data: {
         month, currentMonth: thisMonth, partial: result.partial,
         member: { user_id: id, name: user ? user.name : '', role: user ? user.role : '', channel: p ? p.channel : '' },
-        kpi: summarize(rows, [id]), pipeline, flagged,
+        kpi: summarize(rows, [id]), pipeline, flagged, flagged_orders,
         recent: recent.map((o) => ({ id: o.id, order_no: o.getmeds_order_id, status: o.status, total_php: Number(o.total_amount) || 0, created_at: o.created_at, customer: o.customer || '' }))
       }
     });

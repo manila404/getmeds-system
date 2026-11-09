@@ -177,6 +177,31 @@ describe('Team performance (Nov 9, 2026)', () => {
     expect(res.body.data.recent.map((o) => o.order_no)).toContain(`GM-MINE-${stamp}-A`);
   });
 
+  test('a flagged order opens with its reason and the notes people wrote on it (not Zoho entries)', async () => {
+    const gm = `GM-MINE-${stamp}-X`;
+    const at = '2026-05-20T03:00:00.000Z';
+    await db.prepare(
+      `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount, delivery_address, exception_reason, created_at)
+       VALUES (?, ?, ?, 'exception', 'credit', 750, '1 Mine St', 'DOUBLE ENTRY', ?)`
+    ).run(gm, customerId, P.rep2, at);
+    const oid = (await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(gm)).id;
+    created.orders.push(oid);
+    const ev = (type, role, name, notes, t) => db.prepare(
+      'INSERT INTO order_events (order_id, event_type, actor_name, actor_role, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(oid, type, name, role, notes, t);
+    await ev('MANAGEMENT_REJECTED', 'management', 'Veronica', 'Rejected by Management: DOUBLE ENTRY', '2026-05-20T04:00:00.000Z');
+    await ev('ZOHO_SO_EDITED', 'admin', 'System', 'Zoho noise', '2026-05-20T05:00:00.000Z');
+    await ev('STATUS_CHANGE', 'medrep', 'Rep Two', 'This is the same order as GM-…-B, please cancel', '2026-05-20T06:00:00.000Z');
+
+    const res = await perf('lead', `/${P.rep2}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.flagged).toBe(1);
+    const o = res.body.data.flagged_orders[0];
+    expect(o).toMatchObject({ order_no: gm, status: 'exception', reason: 'DOUBLE ENTRY' });
+    expect(o.notes.map((n) => n.role)).toEqual(['medrep', 'management']); // newest first; the Zoho entry is left out
+    expect(o.notes[0].note).toMatch(/please cancel/);
+  });
+
   test('someone outside the team cannot be opened, and a MedRep with nobody under them sees no members', async () => {
     expect((await perf('lead', `/${P.outsider}`)).status).toBe(404);
     const rep = await perf('rep1');

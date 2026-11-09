@@ -87,6 +87,66 @@ function MembersTable({ members, onOpen }) {
   );
 }
 
+/**
+ * Nov 9, 2026 (Aaron): the flagged-orders banner opens the orders themselves, with the reason and what the
+ * MedRep, Finance, Management and Pharmacy wrote on each (from the order's history), so the Team Lead can
+ * see what is blocking it and step in. View only; "Open order" goes to the order page.
+ */
+const ROLE = { medrep: 'MedRep', finance: 'Finance', management: 'Management', dispatch: 'Dispatch / Pharmacy', admin: 'Admin', team_lead: 'Team Lead' };
+const ROLE_TONE = { medrep: 'bg-getmeds-blue/15 text-getmeds-blue-dark', finance: 'bg-pharmacy-green/15 text-pharmacy-green-dark', management: 'bg-purple-100 text-purple-800', dispatch: 'bg-indigo-100 text-indigo-800', admin: 'bg-slate-200 text-slate-800', team_lead: 'bg-amber-100 text-amber-900' };
+const when = (iso) => new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Manila' });
+
+function FlaggedOrders({ name, count, orders }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="bg-state-error-light border border-state-error/30 rounded-xl">
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
+        className="w-full p-4 flex items-center gap-3 text-left">
+        <AlertCircle className="w-5 h-5 text-state-error flex-shrink-0" />
+        <p className="text-sm font-semibold text-red-950 flex-1">{name} has {count} order{count > 1 ? 's' : ''} on hold or flagged with an exception.</p>
+        <span className="text-xs font-semibold text-state-error whitespace-nowrap">{open ? 'Hide' : 'See why'} {open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <div className="px-4 pb-4 space-y-3">
+          {orders.map((o) => (
+            <div key={o.id} className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <Link to={`/orders/${o.id}`} className="font-semibold text-getmeds-blue-dark hover:underline">{o.order_no}</Link>
+                <OrderStatusBadge status={o.status} />
+                <span className="text-sm text-ink-secondary">{o.customer || '—'}</span>
+                <span className="text-sm tabular-nums text-ink-primary ml-auto">{peso(o.total_php)} · {new Date(o.created_at).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'Asia/Manila' })}</span>
+              </div>
+              <div className="mt-3 rounded-lg bg-red-50 border border-red-200 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-state-error">Reason</p>
+                <p className="text-sm text-red-950">{o.reason || 'No reason was written. Open the order to see its history.'}</p>
+              </div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-secondary mt-3 mb-1">Notes on this order (newest first)</p>
+              {o.notes.length ? (
+                <ol className="space-y-2">
+                  {o.notes.map((n, i) => (
+                    <li key={i} className="flex gap-3 text-sm">
+                      <span className="text-xs text-ink-secondary w-28 flex-shrink-0 pt-0.5">{when(n.at)}</span>
+                      <div className="min-w-0">
+                        <span className={`inline-block text-[11px] font-semibold rounded-full px-2 py-0.5 mr-2 ${ROLE_TONE[n.role] || 'bg-slate-100 text-ink-secondary'}`}>{ROLE[n.role] || n.role}</span>
+                        <b className="text-ink-primary">{n.by}</b>
+                        <p className="text-ink-secondary break-words">{n.note}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              ) : <p className="text-sm text-ink-secondary">No notes yet.</p>}
+              <div className="mt-3 flex justify-end">
+                <Link to={`/orders/${o.id}`} className="text-xs font-semibold text-getmeds-blue-dark hover:underline">Open order →</Link>
+              </div>
+            </div>
+          ))}
+          {count > orders.length && <p className="text-xs text-red-900">Showing the {orders.length} newest of {count}.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MemberView({ userId, month, list, onBack, onGo }) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['team-member', userId, month],
@@ -140,12 +200,7 @@ function MemberView({ userId, month, list, onBack, onGo }) {
                   </div>
                 ))}
               </div>
-              {data.flagged > 0 && (
-                <div className="bg-state-error-light border border-state-error/30 rounded-xl p-4 flex items-center gap-3">
-                  <AlertCircle className="w-5 h-5 text-state-error flex-shrink-0" />
-                  <p className="text-sm font-semibold text-red-950">{data.member.name.split(' ')[0]} has {data.flagged} order{data.flagged > 1 ? 's' : ''} on hold or flagged with an exception.</p>
-                </div>
-              )}
+              {data.flagged > 0 && <FlaggedOrders name={data.member.name.split(' ')[0]} count={data.flagged} orders={data.flagged_orders || []} />}
               <div className="rounded-xl border border-slate-200 bg-white overflow-x-auto">
                 <table className="w-full text-sm" style={{ minWidth: 620 }}>
                   <thead className="border-b border-slate-200 bg-slate-50"><tr className="text-left text-[11px] uppercase tracking-wide text-ink-secondary"><th className="px-3 py-2">Recent orders</th><th className="px-3 py-2">Customer</th><th className="px-3 py-2">Status</th><th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Date</th></tr></thead>
