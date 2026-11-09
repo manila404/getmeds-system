@@ -156,6 +156,132 @@ async function getMyKpis(req, res, next) {
   } catch (err) { next(err); }
 }
 
+/**
+ * TEAM PERFORMANCE (Nov 9, 2026, Aaron): the Team Lead's own page, from the approved mock
+ * (getmeds-documents/getmeds-system-mock/team-lead-member-performance-mock.html). Each member's
+ * KPI exactly as the member sees it on My KPI (same summarize, same numbers), the team's KPI per
+ * My Team tab, and one member's dashboard. View only; only people under the viewer (teamMedrepIds),
+ * the same reach as My Team. Read-only: the KPI read is the cached My KPI read; the order counts
+ * are two small READ ONLY queries.
+ */
+const PIPELINE = {
+  draft: ['draft'],
+  pending: ['submitted', 'validating', 'pending_management_approval', 'so_pending', 'ready_for_finance_verified'],
+  fulfil: ['so_created', 'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing', 'dispatched', 'tracking_shared'],
+  done: ['completed'],
+  flagged: ['on_hold', 'exception']
+};
+
+/**
+ * "Daniel Andrew Cruz" -> "Daniel", unless the account has a short name set (users.short_name, for
+ * two-word first names: "Jim Lord"). Optional column: checked directly (no warning in the logs) and
+ * the first word is used until it exists.
+ */
+async function shortNames(ids) {
+  const col = (await q("SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'users' AND column_name = 'short_name'")).length > 0;
+  const rows = ids.length ? await q(`SELECT id, name${col ? ', short_name' : ''} FROM users WHERE id = ANY($1)`, [ids]) : [];
+  return new Map(rows.map((u) => [u.id, (col && u.short_name && String(u.short_name).trim()) || String(u.name || '').trim().split(/\s+/)[0]]));
+}
+
+async function teamScope(me) {
+  const below = await teamMedrepIds(me);
+  return below.length ? [me, ...below] : [];
+}
+
+/** GET /api/kpi/team-performance?month=YYYY-MM — every member's KPI card and each team's KPI. */
+async function getTeamPerformance(req, res, next) {
+  try {
+    const thisMonth = currentMonth();
+    const month = req.query.month ? parseMonth(req.query.month) : thisMonth;
+    if (!month) return bad(res, 'month must look like 2026-09');
+    if (month > thisMonth) return bad(res, 'That month has not started yet');
+    const me = req.user.id;
+    const ids = await teamScope(me);
+    if (!ids.length) return res.json({ success: true, data: { month, currentMonth: thisMonth, partial: false, members: [], groups: [], team: null } });
+
+    const result = await monthKpis(month);
+    const mine = await viewerChannels(me);
+    const rows = result.people.map((p) => (p.by_channel && p.user_id !== me ? restrictToChannels(p, allowedFor(p, mine)) : p));
+    const byId = new Map(rows.map((p) => [p.user_id, p]));
+    const flagged = await db.transaction(async () => {
+      await q('SET TRANSACTION READ ONLY');
+      return q('SELECT medrep_id AS id, COUNT(*)::int AS n FROM orders WHERE medrep_id = ANY($1) AND status = ANY($2) GROUP BY medrep_id', [ids, PIPELINE.flagged]);
+    })();
+    const flaggedOf = new Map(flagged.map((r) => [r.id, r.n]));
+    const users = await q('SELECT id, name, role FROM users WHERE id = ANY($1)', [ids]);
+    const members = users.map((u) => {
+      const p = byId.get(u.id);
+      return {
+        user_id: u.id, name: u.name, role: u.role, channel: p ? p.channel : '',
+        kpi: summarize(rows, [u.id]), flagged: flaggedOf.get(u.id) || 0
+      };
+    }).sort((a, b) => (b.kpi.pct_of_target ?? -1) - (a.kpi.pct_of_target ?? -1) || b.kpi.booked_net_php - a.kpi.booked_net_php);
+
+    const leaderIds = [];
+    const groups = (await teamGroups(me)).map((g) => {
+      const lead = /^lead:(\d+)$/.exec(g.key);
+      if (lead) leaderIds.push(Number(lead[1]));
+      return { key: g.key, label: g.label, lead_id: lead ? Number(lead[1]) : null, ids: g.ids };
+    });
+    const short = await shortNames(leaderIds);
+    for (const g of groups) {
+      if (g.lead_id && short.has(g.lead_id)) g.label = `${short.get(g.lead_id)}'s team`;
+      g.kpi = summarize(rows, g.ids, result.vacant);
+      g.flagged = g.ids.reduce((a, id) => a + (flaggedOf.get(id) || 0), 0);
+    }
+    const team = { ...summarize(rows, ids, result.vacant), flagged: ids.reduce((a, id) => a + (flaggedOf.get(id) || 0), 0) };
+    res.json({ success: true, data: { month, currentMonth: thisMonth, partial: result.partial, generatedAt: new Date().toISOString(), team, groups, members } });
+  } catch (err) { next(err); }
+}
+
+/** GET /api/kpi/team-performance/:userId?month=YYYY-MM — one member's dashboard, as they see it. */
+async function getTeamMember(req, res, next) {
+  try {
+    const thisMonth = currentMonth();
+    const month = req.query.month ? parseMonth(req.query.month) : thisMonth;
+    if (!month) return bad(res, 'month must look like 2026-09');
+    if (month > thisMonth) return bad(res, 'That month has not started yet');
+    const me = req.user.id;
+    const id = Number(req.params.userId);
+    const ids = await teamScope(me);
+    if (!Number.isInteger(id) || !ids.includes(id)) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'That person is not on your team' } });
+    }
+    const result = await monthKpis(month);
+    const mine = await viewerChannels(me);
+    const rows = result.people.map((p) => (p.by_channel && p.user_id !== me ? restrictToChannels(p, allowedFor(p, mine)) : p));
+    const [fromUtc, toUtc] = monthRange(month);
+    const { user, counts, recent, flagged } = await db.transaction(async () => {
+      await q('SET TRANSACTION READ ONLY');
+      await q('SET LOCAL statement_timeout = 10000');
+      const [u] = await q('SELECT id, name, role FROM users WHERE id = $1', [id]);
+      const c = await q('SELECT status, COUNT(*)::int AS n, SUM(total_amount) AS amount FROM orders WHERE medrep_id = $1 AND created_at >= $2 AND created_at < $3 GROUP BY status', [id, fromUtc, toUtc]);
+      const r = await q(
+        `SELECT o.id, o.getmeds_order_id, o.status, o.total_amount, o.created_at, c.name AS customer
+           FROM orders o LEFT JOIN customers c ON c.id = o.customer_id
+          WHERE o.medrep_id = $1 ORDER BY o.created_at DESC LIMIT 5`, [id]);
+      const [f] = await q('SELECT COUNT(*)::int AS n FROM orders WHERE medrep_id = $1 AND status = ANY($2)', [id, PIPELINE.flagged]);
+      return { user: u, counts: c, recent: r, flagged: f ? f.n : 0 };
+    })();
+    const n = (keys) => counts.filter((r) => keys.includes(r.status)).reduce((a, r) => a + r.n, 0);
+    const pipeline = {
+      submissions: counts.reduce((a, r) => a + r.n, 0),
+      volume_php: Math.round(counts.filter((r) => r.status !== 'cancelled').reduce((a, r) => a + (Number(r.amount) || 0), 0) * 100) / 100,
+      drafts: n(PIPELINE.draft), pending: n(PIPELINE.pending), fulfilment: n(PIPELINE.fulfil), completed: n(PIPELINE.done)
+    };
+    const p = rows.find((x) => x.user_id === id);
+    res.json({
+      success: true,
+      data: {
+        month, currentMonth: thisMonth, partial: result.partial,
+        member: { user_id: id, name: user ? user.name : '', role: user ? user.role : '', channel: p ? p.channel : '' },
+        kpi: summarize(rows, [id]), pipeline, flagged,
+        recent: recent.map((o) => ({ id: o.id, order_no: o.getmeds_order_id, status: o.status, total_php: Number(o.total_amount) || 0, created_at: o.created_at, customer: o.customer || '' }))
+      }
+    });
+  } catch (err) { next(err); }
+}
+
 /** GET /api/kpi?month=YYYY-MM — the month's KPIs (default: this month, so far). */
 async function getKpis(req, res, next) {
   try {
@@ -534,4 +660,4 @@ async function exportSalesPerformance(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { getKpis, getMyKpis, getSalesPerformance, exportSalesPerformance, getTargets, putTargets, copyTargets, targetsFromStructure, getTargetChanges, getStatus, getSettings, putSettings, _test: { parseTarget, parseMonth, clearKpiCache, summarize } };
+module.exports = { getKpis, getMyKpis, getTeamPerformance, getTeamMember, getSalesPerformance, exportSalesPerformance, getTargets, putTargets, copyTargets, targetsFromStructure, getTargetChanges, getStatus, getSettings, putSettings, _test: { parseTarget, parseMonth, clearKpiCache, summarize } };

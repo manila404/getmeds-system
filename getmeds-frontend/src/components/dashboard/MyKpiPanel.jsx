@@ -135,4 +135,5 @@ const MyKpiPanel = ({ teamGroup = '' }) => {
   );
 };
 
+export { KpiBlock, peso as kpiPeso };
 export default MyKpiPanel;

@@ -186,7 +186,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
     // role's reach is unchanged.
     mainLinks.push(
       { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
-      { to: '/team-lead', icon: <LayoutDashboard size={19} />, label: 'My Team' }
+      { to: '/team-lead', icon: <LayoutDashboard size={19} />, label: 'My Team', exact: true },
+      // Nov 9, 2026: each member's KPI and dashboard, view only.
+      { to: '/team-lead/performance', icon: <BarChart3 size={19} />, label: 'Team performance' }
     );
   } else if (role === 'finance') {
     // Sep 12, 2026: /finance is no longer a four-status queue — it is Finance's
@@ -495,7 +497,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                           to={link.to}
                           title={link.label}
                           onClick={handleLinkClick}
-                          end={link.to === '/orders' || link.to === '/finance' || link.to === '/dispatch' || link.to === '/management'}
+                          end={link.exact || link.to === '/orders' || link.to === '/finance' || link.to === '/dispatch' || link.to === '/management'}
                           className={({ isActive: navIsActive }) => {
                             // Links with view/viewNone need custom active logic because
                             // NavLink ignores the query string for isActive.
@@ -582,7 +584,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
                               to={link.to}
                               title={link.label}
                               onClick={handleLinkClick}
-                              end={link.to === '/orders' || link.to === '/management'}
+                              end={link.exact || link.to === '/orders' || link.to === '/management'}
                               className={({ isActive }) =>
                                 `flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${centerWhenCollapsed} ${
                                   (link.stage ? isLinkActive(link) : isActive)

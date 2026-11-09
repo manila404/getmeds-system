@@ -96,6 +96,9 @@ CREATE TABLE IF NOT EXISTS users (
   -- Oct 12, 2026: a Team Lead who leads another lead's team alongside them (Claire shares
   -- Saurav's). NULL for everyone else. Adds that lead's team to this user's; moves nobody.
   shares_team_with INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  -- Nov 9, 2026: the short name shown on Team performance ("Jim Lord's team"). NULL = the first word
+  -- of the name ("Daniel Andrew Cruz" -> "Daniel"); only needed for two-word first names.
+  short_name TEXT,
   -- The name Zoho knows this person by, chosen by an admin from Zoho's own
   -- Salesperson list. NOT derived from anything here.
   --

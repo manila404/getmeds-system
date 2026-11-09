@@ -149,3 +149,39 @@ test('who may ask, and the switch', async () => {
   off();
   expect((await me('rep1')).status).toBe(404);
 });
+
+describe('Team performance (Nov 9, 2026)', () => {
+  const perf = (k, path = '') => request(app).get(`/api/kpi/team-performance${path}?month=${MONTH}`).set(auth(T[k]));
+  beforeAll(async () => {
+    on();
+    await request(app).put('/api/kpi/settings').set(auth(adminToken)).send({ sales_visibility: 'everyone' });
+  });
+
+  test("a Team Lead sees each member's own KPI, the same figures as their My KPI, and never the outsider", async () => {
+    const res = await perf('lead');
+    expect(res.status).toBe(200);
+    const ids = res.body.data.members.map((m) => m.user_id);
+    expect(ids.sort()).toEqual([P.lead, P.rep1, P.rep2].sort());
+    const rep1 = res.body.data.members.find((m) => m.user_id === P.rep1);
+    const mine = (await me('rep1')).body.data.own;
+    expect(rep1.kpi).toMatchObject({ booked_net_php: mine.booked_net_php, target_php: mine.target_php, pct_of_target: mine.pct_of_target, booked_orders: mine.booked_orders });
+    expect(rep1.kpi).toMatchObject({ booked_net_php: 1000, target_php: 2000, pct_of_target: 50 });
+    expect(res.body.data.team).toMatchObject({ booked_net_php: 1700, people: 3 });
+  });
+
+  test("one member's dashboard: their KPI, this month's pipeline and their latest orders", async () => {
+    const res = await perf('lead', `/${P.rep1}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.kpi).toMatchObject({ booked_net_php: 1000 });
+    expect(res.body.data.pipeline).toMatchObject({ submissions: 1, fulfilment: 1 });
+    expect(res.body.data.recent.map((o) => o.order_no)).toContain(`GM-MINE-${stamp}-A`);
+  });
+
+  test('someone outside the team cannot be opened, and a MedRep with nobody under them sees no members', async () => {
+    expect((await perf('lead', `/${P.outsider}`)).status).toBe(404);
+    const rep = await perf('rep1');
+    expect(rep.status).toBe(200);
+    expect(rep.body.data.members).toEqual([]);
+    expect((await perf('rep1', `/${P.rep2}`)).status).toBe(404);
+  });
+});

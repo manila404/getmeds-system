@@ -1403,6 +1403,12 @@ async function reconcileStockHoldColumns(client) {
  * Oct 12, 2026: a Team Lead can share another lead's team (users.shares_team_with). Nullable and
  * additive; see services/teamScopeService.js.
  */
+/** Nov 9, 2026: users.short_name, for Team performance ("Jim Lord's team"). Nullable, additive. */
+async function reconcileShortNameColumn(client) {
+  await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS short_name TEXT');
+  console.log('  ✔ users.short_name present');
+}
+
 async function reconcileSharedTeamColumn(client) {
   await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS shares_team_with INTEGER REFERENCES users(id) ON DELETE SET NULL');
   console.log('  ✔ users.shares_team_with present');
@@ -1566,6 +1572,7 @@ async function main() {
     await reconcileDraftCancelColumns(client);
     await reconcileFulfilWarehouseColumns(client);
     await reconcileSharedTeamColumn(client);
+    await reconcileShortNameColumn(client);
     await reconcileStockHoldColumns(client);
     await reconcileSalesTitleColumn(client);
     await reconcileKpiTargetSourceCheck(client);

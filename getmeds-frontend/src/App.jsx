@@ -12,6 +12,7 @@ import MedrepDashboardPage from './pages/medrep/MedrepDashboardPage';
 import NewOrderPage from './pages/medrep/NewOrderPage';
 import MyOrdersPage from './pages/medrep/MyOrdersPage';
 import OrderDetailPage from './pages/OrderDetailPage';
+import TeamPerformancePage from './pages/management/TeamPerformancePage';
 import FinanceQueuePage from './pages/finance/FinanceQueuePage';
 import PaymentHistoryPage from './pages/finance/PaymentHistoryPage';
 import DispatchQueuePage from './pages/dispatch/DispatchQueuePage';
@@ -232,6 +233,15 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['team_lead', 'management', 'admin']}>
                 <ManagementDashboardPage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Nov 9, 2026: Team performance — each member's KPI and dashboard (view only). */}
+          <Route
+            path="/team-lead/performance"
+            element={
+              <ProtectedRoute allowedRoles={['team_lead']}>
+                <TeamPerformancePage />
               </ProtectedRoute>
             }
           />

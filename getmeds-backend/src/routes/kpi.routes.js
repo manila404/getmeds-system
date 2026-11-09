@@ -30,6 +30,9 @@ const allowAsync = (check) => async (req, res, next) => {
   } catch (err) { return next(err); }
 };
 router.get('/me', allowAsync(canSeeOwnKpisNow), c.getMyKpis);
+// Nov 9, 2026: Team performance — each member's KPI and dashboard, for whoever has people under them.
+router.get('/team-performance', allowAsync(canSeeOwnKpisNow), c.getTeamPerformance);
+router.get('/team-performance/:userId', allowAsync(canSeeOwnKpisNow), c.getTeamMember);
 // Oct 9, 2026: Admin decides when the sales teams see their KPIs ("In progress" until then)
 router.get('/settings', allow(canViewAllKpis), c.getSettings);
 router.put('/settings', allow(canViewAllKpis), c.putSettings);
