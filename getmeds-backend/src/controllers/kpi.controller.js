@@ -13,7 +13,7 @@
  */
 
 const db = require('../db/database');
-const { buildExport, monthRange, currentMonth, prevMonth, allowedFor, restrictToChannels } = require('../services/kpiService');
+const { buildExport, monthRange, currentMonth, prevMonth, allowedFor, restrictToChannels, invoicedOrders } = require('../services/kpiService');
 const { viewerChannels } = require('../services/splitPeopleService');
 const { buildSalesPerformance } = require('../services/salesPerformanceService');
 const { buildSalesPerformanceWorkbook } = require('../services/salesPerformanceXlsx');
@@ -47,18 +47,51 @@ function parseTarget(value) {
  * month and 10 minutes for a closed one, per server instance, and dropped whenever a target
  * changes. The read itself stays READ ONLY with a 10-second limit.
  */
-const cache = new Map(); // month -> { at, ttl, result }
-async function monthKpis(month) {
-  const hit = cache.get(month);
+const cache = new Map(); // `${basis}|${month}` -> { at, ttl, result }
+// Nov 9, 2026 (Aaron): basis 'invoiced' (My KPI, My Team KPI, Team performance: an order counts on its first
+// Zoho invoice date) or 'booked' (the Admin Sales KPIs page: when Finance verified it). Cached separately.
+async function monthKpis(month, basis = 'booked') {
+  const key = `${basis}|${month}`;
+  const hit = cache.get(key);
   if (hit && Date.now() - hit.at < hit.ttl) return hit.result;
   const result = await db.transaction(async () => {
     await q('SET TRANSACTION READ ONLY');
     await q('SET LOCAL statement_timeout = 10000');
-    const out = await buildExport({ query: async (sql, params) => ({ rows: await q(sql, params) }) }, month);
+    const out = await buildExport({ query: async (sql, params) => ({ rows: await q(sql, params) }) }, month, undefined, { basis });
     return { ...out, vacant: await vacantTargets(month) };
   })();
-  cache.set(month, { at: Date.now(), ttl: result.partial ? 60_000 : 600_000, result });
+  cache.set(key, { at: Date.now(), ttl: result.partial ? 60_000 : 600_000, result });
   return result;
+}
+
+/**
+ * Nov 9, 2026 (Aaron): one day's invoiced orders (the day filter on My KPI and Team performance), by
+ * invoice date, without VAT. Kept 60 seconds (the invoice copy refreshes every 15 minutes).
+ */
+const dayCache = new Map();
+async function dayInvoiced(day) {
+  const hit = dayCache.get(day);
+  if (hit && Date.now() - hit.at < 60_000) return hit.rows;
+  const rows = await db.transaction(async () => {
+    await q('SET TRANSACTION READ ONLY');
+    await q('SET LOCAL statement_timeout = 10000');
+    return invoicedOrders({ query: async (sql, params) => ({ rows: await q(sql, params) }) }, day, day);
+  })();
+  dayCache.set(day, { at: Date.now(), rows });
+  return rows;
+}
+const parseDay = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) ? String(v) : null);
+/** { date, net_php, orders: [...] } for one person (or several) on one day. */
+function daySummary(rows, ids, day) {
+  const set = new Set(ids);
+  const mine = rows.filter((o) => set.has(o.medrep_id));
+  const net = (o) => (o.net_amount === null || o.net_amount === undefined ? Number(o.total_amount) || 0 : Number(o.net_amount) || 0);
+  return {
+    date: day,
+    net_php: Math.round(mine.reduce((a, o) => a + net(o), 0) * 100) / 100,
+    orders: mine.map((o) => ({ id: o.id, order_no: o.getmeds_order_id, invoice_numbers: o.invoice_numbers, customer: o.customer || '', invoice_date: o.invoice_date, net_php: Math.round(net(o) * 100) / 100, user_id: o.medrep_id }))
+      .sort((a, b) => b.net_php - a.net_php)
+  };
 }
 const clearKpiCache = () => cache.clear();
 
@@ -108,7 +141,8 @@ function summarize(rows, ids, vacant = []) {
     vacant_target_php: vacantTarget, vacant_territories: vac.map((v) => v.label),
     pct_of_target: target > 0 ? Math.round((bookedNet / target) * 1000) / 10 : null,
     booked_orders: sum('booked_orders'), delivered_php: sum('delivered_php'), orders: sum('orders'), orders_held: sum('orders_held'),
-    new_customers: sum('new_customers')
+    new_customers: sum('new_customers'),
+    waiting_invoice_orders: sum('waiting_invoice_orders'), waiting_invoice_php: sum('waiting_invoice_php')
   };
 }
 
@@ -127,7 +161,7 @@ async function getMyKpis(req, res, next) {
     if (!month) return bad(res, 'month must look like 2026-09');
     if (month > thisMonth) return bad(res, 'That month has not started yet');
 
-    const result = await monthKpis(month);
+    const result = await monthKpis(month, 'invoiced');
     const me = req.user.id;
     const row = result.people.find((p) => p.user_id === me);
     const own = {
@@ -152,7 +186,15 @@ async function getMyKpis(req, res, next) {
         team = { ...summarize(teamRows, [me, ...below], result.vacant), label: 'My team' };
       }
     }
-    res.json({ success: true, data: { month, partial: result.partial, currentMonth: thisMonth, generatedAt: new Date().toISOString(), own, team } });
+    // Nov 9, 2026: the day filter (?day=YYYY-MM-DD): that day's invoiced orders, own and team.
+    let day = null;
+    if (req.query.day) {
+      const d = parseDay(req.query.day);
+      if (!d) return bad(res, 'day must look like 2026-11-09');
+      const dayRows = await dayInvoiced(d);
+      day = { own: daySummary(dayRows, [me], d), team: below.length ? daySummary(dayRows, group ? group.ids : [me, ...below], d) : null };
+    }
+    res.json({ success: true, data: { month, partial: result.partial, currentMonth: thisMonth, generatedAt: new Date().toISOString(), basis: 'invoiced', own, team, day } });
   } catch (err) { next(err); }
 }
 
@@ -199,7 +241,7 @@ async function getTeamPerformance(req, res, next) {
     const ids = await teamScope(me);
     if (!ids.length) return res.json({ success: true, data: { month, currentMonth: thisMonth, partial: false, members: [], groups: [], team: null } });
 
-    const result = await monthKpis(month);
+    const result = await monthKpis(month, 'invoiced');
     const mine = await viewerChannels(me);
     const rows = result.people.map((p) => (p.by_channel && p.user_id !== me ? restrictToChannels(p, allowedFor(p, mine)) : p));
     const byId = new Map(rows.map((p) => [p.user_id, p]));
@@ -230,7 +272,15 @@ async function getTeamPerformance(req, res, next) {
       g.flagged = g.ids.reduce((a, id) => a + (flaggedOf.get(id) || 0), 0);
     }
     const team = { ...summarize(rows, ids, result.vacant), flagged: ids.reduce((a, id) => a + (flaggedOf.get(id) || 0), 0) };
-    res.json({ success: true, data: { month, currentMonth: thisMonth, partial: result.partial, generatedAt: new Date().toISOString(), team, groups, members } });
+    // Nov 9, 2026: the day filter: each member's invoiced sales that day, with the orders behind it.
+    let day = null;
+    if (req.query.day) {
+      const d = parseDay(req.query.day);
+      if (!d) return bad(res, 'day must look like 2026-11-09');
+      const dayRows = await dayInvoiced(d);
+      day = { date: d, members: ids.map((id) => ({ user_id: id, ...daySummary(dayRows, [id], d) })), total: daySummary(dayRows, ids, d) };
+    }
+    res.json({ success: true, data: { month, currentMonth: thisMonth, partial: result.partial, generatedAt: new Date().toISOString(), basis: 'invoiced', team, groups, members, day } });
   } catch (err) { next(err); }
 }
 
@@ -247,7 +297,7 @@ async function getTeamMember(req, res, next) {
     if (!Number.isInteger(id) || !ids.includes(id)) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'That person is not on your team' } });
     }
-    const result = await monthKpis(month);
+    const result = await monthKpis(month, 'invoiced');
     const mine = await viewerChannels(me);
     const rows = result.people.map((p) => (p.by_channel && p.user_id !== me ? restrictToChannels(p, allowedFor(p, mine)) : p));
     const [fromUtc, toUtc] = monthRange(month);

@@ -7,6 +7,8 @@
  *  - team = the Lead plus everyone below; the outsider is never in it;
  *  - a target change shows at once (the short cache is dropped);
  *  - off unless GETMEDS_KPI_PAGE=true; only salespeople and team leads may ask.
+ *  - Nov 9, 2026: My KPI counts an order once INVOICED (its first Zoho invoice date, from zoho_invoices),
+ *    so every test order below gets a Sales Order number and an invoice dated in the month.
  */
 const request = require('supertest');
 const app = require('../src/app');
@@ -14,7 +16,7 @@ const db = require('../src/db/database');
 
 const stamp = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
 const MONTH = '2026-05';
-const created = { users: [], orders: [] };
+const created = { users: [], orders: [], invoices: [] };
 const P = {}, T = {};
 let adminToken, managerToken, customerId;
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
@@ -37,16 +39,24 @@ async function person(key, role, leadKey = null) {
   created.users.push(P[key]);
   T[key] = await login(email);
 }
-async function booked(ref, ownerKey, total, raisedByKey = null) {
+async function booked(ref, ownerKey, total, raisedByKey = null, invoiceDate = '2026-05-15') {
   const gm = `GM-MINE-${stamp}-${ref}`;
+  const so = `SO-MINE-${stamp}-${ref}`;
   const at = '2026-05-15T03:00:00.000Z';
   await db.prepare(
-    `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, raised_by_id, status, customer_type, total_amount, delivery_address, submitted_at, created_at)
-     VALUES (?, ?, ?, ?, 'ready_for_dispatch', 'credit', ?, '1 Mine St', ?, ?)`
-  ).run(gm, customerId, P[ownerKey], raisedByKey ? P[raisedByKey] : null, total, at, at);
+    `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, raised_by_id, status, customer_type, total_amount, delivery_address, submitted_at, created_at, zoho_so_number)
+     VALUES (?, ?, ?, ?, 'ready_for_dispatch', 'credit', ?, '1 Mine St', ?, ?, ?)`
+  ).run(gm, customerId, P[ownerKey], raisedByKey ? P[raisedByKey] : null, total, at, at, so);
   const id = (await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(gm)).id;
   created.orders.push(id);
   await db.prepare("INSERT INTO order_events (order_id, event_type, created_at) VALUES (?, 'FINANCE_VERIFIED', ?)").run(id, at);
+  if (invoiceDate) {
+    const inv = `INV-MINE-${stamp}-${ref}`;
+    await db.prepare(
+      "INSERT INTO zoho_invoices (invoice_id, invoice_number, date, status, reference_number, total, balance) VALUES (?, ?, ?, 'sent', ?, ?, ?)"
+    ).run(inv, inv, invoiceDate, so, total, total);
+    created.invoices.push(inv);
+  }
 }
 const me = (k, q = '') => request(app).get(`/api/kpi/me?month=${MONTH}${q}`).set(auth(T[k]));
 
@@ -63,6 +73,8 @@ beforeAll(async () => {
   await booked('B', 'rep2', 500);
   await booked('C', 'lead', 200);
   await booked('D', 'outsider', 999);
+  await booked('W', 'rep2', 300, null, null); // verified, no invoice yet: waiting, not counted
+  await booked('T', 'rep2', 50, null, '2026-05-20'); // invoiced on another day (the day filter)
   on();
   // Oct 9, 2026: the sales teams see My KPIs only once Admin turns it on (starts "In progress")
   await request(app).put('/api/kpi/settings').set(auth(adminToken)).send({ sales_visibility: 'everyone' });
@@ -104,6 +116,7 @@ beforeEach(on);
 
 afterAll(async () => {
   off();
+  for (const inv of created.invoices) await db.prepare('DELETE FROM zoho_invoices WHERE invoice_id = ?').run(inv);
   for (const id of created.orders) {
     await db.prepare('DELETE FROM order_events WHERE order_id = ?').run(id);
     await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
@@ -126,7 +139,7 @@ test('a MedRep sees their own KPI only, including the order a Leader entered for
 test("a Lead's own KPI is their own orders; what they entered for others shows separately; the team total counts each order once", async () => {
   const r = await me('lead');
   expect(r.body.data.own).toMatchObject({ booked_php: 200, target_php: 1000, pct_of_target: 20, entered_for_others_php: 1000 });
-  expect(r.body.data.team).toMatchObject({ label: 'My team', people: 3, booked_php: 1700, booked_orders: 3, target_php: 3000, people_with_target: 2 });
+  expect(r.body.data.team).toMatchObject({ label: 'My team', people: 3, booked_php: 1750, booked_orders: 4, target_php: 3000, people_with_target: 2 });
 });
 
 test('the outsider is in no team, and a team tab the Lead does not have shows nothing', async () => {
@@ -166,7 +179,7 @@ describe('Team performance (Nov 9, 2026)', () => {
     const mine = (await me('rep1')).body.data.own;
     expect(rep1.kpi).toMatchObject({ booked_net_php: mine.booked_net_php, target_php: mine.target_php, pct_of_target: mine.pct_of_target, booked_orders: mine.booked_orders });
     expect(rep1.kpi).toMatchObject({ booked_net_php: 1000, target_php: 2000, pct_of_target: 50 });
-    expect(res.body.data.team).toMatchObject({ booked_net_php: 1700, people: 3 });
+    expect(res.body.data.team).toMatchObject({ booked_net_php: 1750, people: 3 });
   });
 
   test("one member's dashboard: their KPI, this month's pipeline and their latest orders", async () => {
@@ -208,5 +221,25 @@ describe('Team performance (Nov 9, 2026)', () => {
     expect(rep.status).toBe(200);
     expect(rep.body.data.members).toEqual([]);
     expect((await perf('rep1', `/${P.rep2}`)).status).toBe(404);
+  });
+});
+
+describe('Invoiced rule and the day filter (Nov 9, 2026)', () => {
+  test('an order counts once invoiced; verified but not invoiced shows as waiting, not counted', async () => {
+    const r = await me('rep2');
+    expect(r.status).toBe(200);
+    expect(r.body.data.own).toMatchObject({ booked_php: 550, booked_orders: 2, waiting_invoice_orders: 1, waiting_invoice_php: 300 });
+  });
+
+  test("the day filter gives that day's invoiced orders, own and team", async () => {
+    const r = await request(app).get(`/api/kpi/me?month=${MONTH}&day=2026-05-20`).set(auth(T.lead));
+    expect(r.status).toBe(200);
+    expect(r.body.data.day.own).toMatchObject({ date: '2026-05-20', net_php: 0 });
+    expect(r.body.data.day.team.net_php).toBe(50);
+    expect(r.body.data.day.team.orders.map((o) => o.order_no)).toEqual([`GM-MINE-${stamp}-T`]);
+    const tp = await request(app).get(`/api/kpi/team-performance?month=${MONTH}&day=2026-05-15`).set(auth(T.lead));
+    expect(tp.body.data.day.members.find((m) => m.user_id === P.rep1)).toMatchObject({ net_php: 1000 });
+    expect(tp.body.data.day.total.net_php).toBe(1700);
+    expect((await request(app).get(`/api/kpi/me?month=${MONTH}&day=nope`).set(auth(T.lead))).status).toBe(400);
   });
 });

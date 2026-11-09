@@ -80,11 +80,74 @@ const peso = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 1000) / 10 : '');
 
 /**
+ * INVOICED (Nov 9, 2026, Aaron): the orders whose FIRST Zoho invoice is dated between `from` and `to`
+ * ('YYYY-MM-DD', Philippine dates, inclusive). An order's invoices are found through its Sales Order
+ * numbers (its own and any split Sales Orders) in the copy of Zoho's invoices (zoho_invoices, see
+ * services/zohoInvoiceCopy.js); draft, void and deleted invoices do not count. So an order invoiced in
+ * October and again in November counts once, in October. Amount = the order without VAT, line by line,
+ * as on My KPI. Same orders the old rule left out (cancelled, deleted, imported) stay out.
+ * Used for My KPI, My Team KPI and Team performance (the month and the day filter); the Admin pages
+ * keep the Finance-verified rule.
+ */
+const invoicedOrdersSql = (notImported) => `
+  WITH sos AS (
+    SELECT o.id AS order_id, o.zoho_so_number AS so FROM orders o WHERE o.zoho_so_number IS NOT NULL
+    UNION
+    SELECT s.order_id, s.zoho_so_number FROM order_split_sales_orders s WHERE s.zoho_so_number IS NOT NULL
+  ), inv AS (
+    SELECT sos.order_id, MIN(i.date) AS invoice_date, STRING_AGG(DISTINCT i.invoice_number, ', ') AS invoice_numbers
+      FROM sos JOIN zoho_invoices i ON i.reference_number = sos.so
+     WHERE i.deleted_at IS NULL AND LOWER(COALESCE(i.status, '')) NOT IN ('draft', 'void')
+     GROUP BY sos.order_id
+  )
+  SELECT o.id, o.getmeds_order_id, o.medrep_id, o.raised_by_id, o.total_amount, o.status, o.division, o.salesperson,
+         inv.invoice_date, inv.invoice_numbers, c.name AS customer,
+         (SELECT SUM(oi.line_total / (1 + COALESCE(oi.tax_percent, 0) / 100.0)) FROM order_items oi WHERE oi.order_id = o.id) AS net_amount
+    FROM inv JOIN orders o ON o.id = inv.order_id LEFT JOIN customers c ON c.id = o.customer_id
+   WHERE inv.invoice_date >= $1 AND inv.invoice_date <= $2
+     AND o.status NOT IN ('cancelled', 'deleted') AND ${notImported}`;
+
+async function invoicedOrders(client, from, to) {
+  const { importedSql } = require('./orderOrigin');
+  return (await client.query(invoicedOrdersSql(`NOT (${importedSql('o')})`), [from, to])).rows;
+}
+
+/**
+ * Orders Finance verified (in the last 90 days) that have no invoice yet: shown on My KPI as "waiting for
+ * invoice", never counted. One row per owner: { medrep_id, n, net }.
+ */
+async function waitingForInvoice(client, sinceUtc) {
+  const { importedSql } = require('./orderOrigin');
+  // The invoiced Sales Order numbers are collected once and matched by hash, not looked up per order.
+  return (await client.query(
+    `WITH cand AS (
+       SELECT o.id, o.medrep_id, o.zoho_so_number, o.total_amount
+         FROM orders o
+        WHERE o.id IN (SELECT DISTINCT e.order_id FROM order_events e WHERE e.event_type = 'FINANCE_VERIFIED' AND e.created_at >= $1)
+          AND o.status NOT IN ('cancelled', 'deleted') AND NOT (${importedSql('o')})
+     ), inv_so AS (
+       SELECT DISTINCT i.reference_number AS so FROM zoho_invoices i
+        WHERE i.deleted_at IS NULL AND LOWER(COALESCE(i.status, '')) NOT IN ('draft', 'void') AND i.reference_number IS NOT NULL
+     ), invoiced AS (
+       SELECT c.id FROM cand c JOIN inv_so ON inv_so.so = c.zoho_so_number
+       UNION
+       SELECT c.id FROM cand c JOIN order_split_sales_orders s ON s.order_id = c.id JOIN inv_so ON inv_so.so = s.zoho_so_number
+     )
+     SELECT c.medrep_id, COUNT(*)::int AS n,
+            SUM(COALESCE((SELECT SUM(oi.line_total / (1 + COALESCE(oi.tax_percent, 0) / 100.0)) FROM order_items oi WHERE oi.order_id = c.id), c.total_amount)) AS net
+       FROM cand c
+      WHERE c.id NOT IN (SELECT id FROM invoiced)
+      GROUP BY c.medrep_id`,
+    [sinceUtc]
+  )).rows;
+}
+
+/**
  * targetRows: rows of targets.csv (email, month, target_php) — the script's file mode.
  * Leave it out to read the kpi_targets table instead (the app, and the script once the
  * table exists).
  */
-async function buildExport(client, month, targetRows) {
+async function buildExport(client, month, targetRows, opts = {}) {
   const [fromUtc, toUtc] = monthRange(month);
   const { importedSql } = require('./orderOrigin');
   const notImported = `NOT (${importedSql('o')})`;
@@ -101,8 +164,10 @@ async function buildExport(client, month, targetRows) {
   const terrs = await q('SELECT id, manager_id, zoho_salesperson, zoho_alias, hq FROM sales_territories');
   const accts = await q('SELECT user_id, salesperson, is_primary FROM user_salespersons ORDER BY is_primary DESC, id');
 
-  // BOOKED — one row per order, by its latest FINANCE_VERIFIED event in the month
-  const booked = await q(
+  // BOOKED — one row per order, by its latest FINANCE_VERIFIED event in the month.
+  // Nov 9, 2026: opts.basis === 'invoiced' (My KPI, Team performance): by the order's first invoice date instead.
+  const lastDay = `${month}-${String(new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate()).padStart(2, '0')}`;
+  const booked = opts.basis === 'invoiced' ? await invoicedOrders(client, `${month}-01`, lastDay) : await q(
     `SELECT id, medrep_id, raised_by_id, total_amount, status, division, salesperson,
             -- Oct 29, 2026 (Aaron): the same order without VAT, line by line (a 12% line ÷ 1.12; "No Tax"
             -- lines unchanged; discounts are already out of line_total). Shown on My KPI only.
@@ -264,6 +329,9 @@ async function buildExport(client, month, targetRows) {
   const ownerOnly = [...T.keys()].filter((id) => id && !personIds.has(id)).map((id) => byId.get(id)).filter(Boolean);
   const peopleList = [...salespeople, ...ownerOnly];
 
+  const waitOf = new Map(opts.basis === 'invoiced'
+    ? (await waitingForInvoice(client, new Date(new Date(fromUtc).getTime() - 90 * 86400000).toISOString())).map((w) => [w.medrep_id, w])
+    : []);
   const people = peopleList.map((u) => {
     const t = T.get(u.id) || tally(u.id);
     const lead = u.team_lead_id ? byId.get(u.team_lead_id) : null;
@@ -280,6 +348,8 @@ async function buildExport(client, month, targetRows) {
       booked_raised_by_others_php: peso(t.byOthers), booked_raised_by_others_orders: t.byOthersN,
       raised_for_others_info_php: peso(t.raisedForOthers),
       new_customers: t.newCustomers, followups_on_time: NOT_TRACKED,
+      waiting_invoice_orders: waitOf.has(u.id) ? waitOf.get(u.id).n : 0,
+      waiting_invoice_php: waitOf.has(u.id) ? peso(Number(waitOf.get(u.id).net) || 0) : 0,
       by_channel: byChannel(u.id)
     };
   });
@@ -442,4 +512,4 @@ function currentMonth(now = new Date()) {
   return new Date(now.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 7);
 }
 
-module.exports = { MANILA, NOT_TRACKED, monthRange, prevMonth, toCsv, parseCsv, readTargets, targetsFor, copyTargets, buildExport, currentMonth, COLS, allowedFor, restrictToChannels };
+module.exports = { MANILA, NOT_TRACKED, monthRange, prevMonth, toCsv, parseCsv, readTargets, targetsFor, copyTargets, buildExport, currentMonth, COLS, allowedFor, restrictToChannels, invoicedOrders };

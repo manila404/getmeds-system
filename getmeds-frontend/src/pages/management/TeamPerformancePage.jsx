@@ -7,6 +7,10 @@
  * two different figures. Clicking a card opens that member's dashboard: their KPI, their pipeline this
  * month, flagged orders and their latest orders. View only; only people under this user (the same
  * reach as My Team). Loads when opened; no automatic refresh.
+ *
+ * Nov 9, 2026 (Aaron): sales count once INVOICED (first Zoho invoice date), and a day filter
+ * (Today · Yesterday · Pick a date · This month): a day ranks every member by that day's invoiced sales,
+ * with the orders behind each figure.
  */
 import React, { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -14,7 +18,7 @@ import { Link } from 'react-router-dom';
 import { ChevronLeft, ChevronRight, ArrowLeft, AlertCircle, LayoutGrid, Table2 } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
-import { KpiBlock, kpiPeso as peso } from '../../components/dashboard/MyKpiPanel';
+import { KpiBlock, PeriodPicker, DayOrders, manilaDay, dayLabel, kpiPeso as peso } from '../../components/dashboard/MyKpiPanel';
 import OrderStatusBadge from '../../components/ui/OrderStatusBadge';
 
 const manilaNow = () => new Date(Date.now() + 8 * 3600 * 1000);
@@ -147,6 +151,44 @@ function FlaggedOrders({ name, count, orders }) {
   );
 }
 
+function DayRanking({ day, members, onOpen }) {
+  const [openId, setOpenId] = useState(null);
+  const byId = new Map(day.members.map((m) => [m.user_id, m]));
+  const rows = members.map((m) => ({ m, d: byId.get(m.user_id) || { net_php: 0, orders: [] } }))
+    .sort((a, b) => b.d.net_php - a.d.net_php || b.m.kpi.booked_net_php - a.m.kpi.booked_net_php);
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white overflow-x-auto">
+      <table className="w-full text-sm" style={{ minWidth: 720 }}>
+        <thead className="border-b border-slate-200 bg-slate-50"><tr className="text-left text-[11px] uppercase tracking-wide text-ink-secondary">
+          <th className="px-3 py-2">Salesperson</th><th className="px-3 py-2 text-right">Invoiced (without VAT)</th><th className="px-3 py-2 text-right">Orders invoiced</th><th className="px-3 py-2 text-right">Month so far</th><th className="px-3 py-2 text-right">% of month target</th><th className="px-3 py-2" />
+        </tr></thead>
+        <tbody className="divide-y divide-slate-100">
+          {rows.map(({ m, d }, i) => (
+            <React.Fragment key={m.user_id}>
+              <tr className={d.net_php ? 'cursor-pointer hover:bg-slate-50' : 'text-ink-secondary'} onClick={() => d.orders.length && setOpenId(openId === m.user_id ? null : m.user_id)}>
+                <td className="px-3 py-2">
+                  <span className={`inline-grid place-items-center w-6 h-6 rounded-full text-[11px] font-bold mr-2 ${d.net_php && i < 3 ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>{d.net_php ? i + 1 : '–'}</span>
+                  <b className={d.net_php ? 'text-ink-primary' : ''}>{m.name}</b>
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums font-semibold">{d.net_php ? peso(d.net_php) : '—'}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{d.orders.length || '—'}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{peso(m.kpi.booked_net_php)}</td>
+                <td className="px-3 py-2 text-right">{m.kpi.pct_of_target === null ? 'No target' : `${m.kpi.pct_of_target}%`}</td>
+                <td className="px-3 py-2 text-right whitespace-nowrap">
+                  <button type="button" onClick={(e) => { e.stopPropagation(); onOpen(m.user_id); }} className="text-xs font-semibold text-getmeds-blue-dark hover:underline">Dashboard →</button>
+                </td>
+              </tr>
+              {openId === m.user_id && (
+                <tr><td colSpan={6} className="px-3 pb-3 bg-slate-50/60"><DayOrders orders={d.orders} /></td></tr>
+              )}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function MemberView({ userId, month, list, onBack, onGo }) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['team-member', userId, month],
@@ -225,13 +267,16 @@ function MemberView({ userId, month, list, onBack, onGo }) {
 
 const TeamPerformancePage = () => {
   const { user } = useAuth();
-  const [month, setMonth] = useState(manilaMonth());
+  const [monthPicked, setMonth] = useState(manilaMonth());
+  // Nov 9, 2026: 'month' or one day ('YYYY-MM-DD').
+  const [period, setPeriod] = useState(manilaDay());
+  const month = period === 'month' ? monthPicked : period.slice(0, 7);
   const [group, setGroup] = useState('all');
   const [layout, setLayout] = useState('cards');
   const [open, setOpen] = useState(null);
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ['team-performance', user?.id, month],
-    queryFn: () => client.get('/api/kpi/team-performance', { params: { month } }).then((r) => r.data?.data),
+    queryKey: ['team-performance', user?.id, month, period],
+    queryFn: () => client.get('/api/kpi/team-performance', { params: { month, ...(period !== 'month' ? { day: period } : {}) } }).then((r) => r.data?.data),
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false
@@ -272,11 +317,37 @@ const TeamPerformancePage = () => {
                   ))}
                 </div>
               )}
-              <div className="flex justify-end"><MonthPicker month={month} setMonth={setMonth} thisMonth={thisMonth} partial={data.partial} /></div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <PeriodPicker period={period} setPeriod={setPeriod} />
+                {period === 'month' ? <MonthPicker month={month} setMonth={setMonth} thisMonth={thisMonth} partial={data.partial} />
+                  : <span className="text-xs text-ink-secondary">{dayLabel(period)}{period === manilaDay() ? ' · so far, refreshed every 15 minutes' : ''}</span>}
+              </div>
               {teamKpi && (
                 <KpiBlock title={current ? `${current.label} · Team KPI` : 'My Team KPI'}
                   sub={`${int(teamKpi.people)} people · ${int(teamKpi.people_with_target)} with a target${(current ? current.flagged : data.team.flagged) ? ` · ${current ? current.flagged : data.team.flagged} flagged` : ''}`} k={teamKpi} />
               )}
+              {period !== 'month' && data.day ? (() => {
+                const ids = new Set(members.map((m) => m.user_id));
+                const dayMembers = data.day.members.filter((d) => ids.has(d.user_id));
+                const total = dayMembers.reduce((a, d) => a + d.net_php, 0);
+                const n = dayMembers.reduce((a, d) => a + d.orders.length, 0);
+                const sellers = dayMembers.filter((d) => d.net_php > 0).length;
+                return (
+                  <>
+                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                      {[[period === manilaDay() ? "Today's sales" : `Sales on ${dayLabel(period)}`, peso(total), 'invoiced, without VAT'], ['Orders invoiced', int(n), `on ${dayLabel(period)}`], ['Salespeople with sales', `${sellers} of ${members.length}`, 'click a row to see the orders']].map(([t, v, x]) => (
+                        <div key={t} className="bg-white rounded-xl border border-slate-200 p-4">
+                          <p className="text-xs font-semibold uppercase text-ink-secondary tracking-wider">{t}</p>
+                          <p className="text-2xl font-bold text-ink-primary mt-1 tabular-nums">{v}</p>
+                          <p className="text-xs text-ink-secondary mt-1">{x}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <h2 className="text-base font-semibold text-ink-primary">{period === manilaDay() ? "Today's sales" : `Sales on ${dayLabel(period)}`} by salesperson</h2>
+                    <DayRanking day={data.day} members={members} onOpen={setOpen} />
+                  </>
+                );
+              })() : <>
               <div className="flex items-center justify-between">
                 <h2 className="text-base font-semibold text-ink-primary">{current ? 'Members' : 'Your members'}</h2>
                 <div className="inline-flex rounded-lg border border-slate-300 overflow-hidden text-xs font-semibold">
@@ -289,7 +360,8 @@ const TeamPerformancePage = () => {
                   {members.map((m) => <MemberCard key={m.user_id} m={m} onOpen={() => setOpen(m.user_id)} />)}
                 </div>
               ) : <MembersTable members={members} onOpen={setOpen} />}
-              <p className="text-xs text-ink-secondary">Each card is the member's own KPI, exactly as they see it: orders Finance verified this month, without VAT, against their target. Sorted by % of target.</p>
+              <p className="text-xs text-ink-secondary">Each card is the member's own KPI, exactly as they see it: orders invoiced this month, without VAT, against their target. Sorted by % of target.</p>
+              </>}
             </>
           )}
     </div>
