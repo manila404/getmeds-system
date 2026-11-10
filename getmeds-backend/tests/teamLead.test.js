@@ -223,12 +223,20 @@ describe('team_lead role', () => {
       expect(res.statusCode).toBe(403);
     });
 
-    test('POST /:id/attachments → 403', async () => {
+    test('POST /:id/attachments on out-of-team order → 403', async () => {
+      const res = await request(app)
+        .post(`/api/orders/${planted.OTHER}/attachments`)
+        .set('Authorization', `Bearer ${teamLeadToken}`)
+        .send({ storagePath: 'x', file_type: 'other' });
+      expect(res.statusCode).toBe(403);
+    });
+
+    test('POST /:id/attachments on teammate order gets past permission check', async () => {
       const res = await request(app)
         .post(`/api/orders/${planted.MINE}/attachments`)
         .set('Authorization', `Bearer ${teamLeadToken}`)
         .send({ storagePath: 'x', file_type: 'other' });
-      expect(res.statusCode).toBe(403);
+      expect(res.statusCode).toBe(400); // gets past 403 permission check to 400 storagePath validation
     });
 
     test('POST /:id/attachments/:attachmentId/decide-delete → 403', async () => {
@@ -276,10 +284,12 @@ describe('team_lead role', () => {
         expect(res.statusCode).toBe(403);
       });
 
-      test('POST /submit → 403', async () => {
+      test('POST /submit → sends it to Management for approval on behalf of teammate', async () => {
         const res = await asLead('post', 'TEAMMATE_DRAFT', '/submit');
-        expect(res.statusCode).toBe(403);
-        expect(res.body.error.code).toBe('FORBIDDEN');
+        expect(res.statusCode).toBe(200);
+        expect(res.body.data.order.status).toBe('pending_management_approval');
+        const row = await db.prepare('SELECT status FROM orders WHERE id = ?').get(planted.TEAMMATE_DRAFT);
+        expect(row.status).toBe('pending_management_approval');
       });
 
       test('POST /sync-from-zoho → 403', async () => {

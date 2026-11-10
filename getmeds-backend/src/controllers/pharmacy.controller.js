@@ -39,6 +39,7 @@ const { notify, getUserIdsByRole } = require('../services/notificationService');
 const { rxSummaries, prescriptionRows, summarize, isPharmacyReviewable, RX_FILE_TYPE, PRE_SHIP_STATUSES } = require('../services/prescriptionService');
 const { hasColumn } = require('../services/schemaColumns');
 const { syncVerifiedPrescriptionsToZoho } = require('../services/zohoAttachmentSync');
+const teamScopeService = require('../services/teamScopeService');
 
 // From "Sales Order created, waiting on Finance" until the parcel is packed.
 const PHARMACY_STATUSES = PRE_SHIP_STATUSES;
@@ -460,9 +461,15 @@ exports.resubmitPrescription = async (req, res, next) => {
 
     const role = String(req.user?.role || '').toLowerCase();
     const mine = order.medrep_id === req.user.id || (order.raised_by_id && order.raised_by_id === req.user.id);
-    // Oct 9, 2026: a Team Lead / Leader too, for an order that is theirs (same rule as
-    // orders.controller.js resubmit).
-    if (!(role === 'admin' || role === 'management' || ((role === 'medrep' || role === 'team_lead') && mine))) {
+    // Oct 9, 2026 / Nov 10, 2026: a Team Lead / Leader too, for an order that is theirs or for any MedRep on their team
+    // (same rule as orders.controller.js resubmit / submit).
+    const isTeamLeadAllowed = role === 'team_lead' && (
+      mine || (await teamScopeService.canAccessOrder(req.user, order))
+    );
+    const allowed = role === 'admin' || role === 'management' ||
+      (role === 'medrep' && mine) ||
+      isTeamLeadAllowed;
+    if (!allowed) {
       return fail(res, 403, 'FORBIDDEN', 'Only the person who owns or raised this order, or Management, can re-submit its prescription.');
     }
     if (!(await isPharmacyReviewable(order))) {

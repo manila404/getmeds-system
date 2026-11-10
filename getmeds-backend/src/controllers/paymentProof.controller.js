@@ -10,6 +10,7 @@ const { constraintAllows, hasColumn } = require('../services/schemaColumns');
 const attachmentLink = require('../services/attachmentLinkService');
 const { isPharmacyReviewable, RX_FILE_TYPE, supersededIds } = require('../services/prescriptionService');
 const { zohoFileName } = require('../services/zohoAttachmentSync');
+const teamScopeService = require('../services/teamScopeService');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -162,7 +163,7 @@ function normalizeFileType(value) {
  * make, so it has to name admin and management itself. The MedRep half is the
  * same rule and has to stay that way.
  */
-function canAttach(user, order, fileType = 'payment_proof') {
+async function canAttach(user, order, fileType = 'payment_proof') {
   if (!user) return false;
   const role = (user.role || '').toLowerCase();
   if (role === 'admin' || role === 'management') return true;
@@ -176,7 +177,12 @@ function canAttach(user, order, fileType = 'payment_proof') {
     return ['ready_for_finance_verified', 'on_hold'].includes(order.status);
   }
   if (order.medrep_id === user.id) return true;
-  return Boolean(order.raised_by_id) && order.raised_by_id === user.id;
+  if (Boolean(order.raised_by_id) && order.raised_by_id === user.id) return true;
+  // Nov 10, 2026: Team Leaders and Leaders can attach lacking documents on behalf of their team members.
+  if (role === 'team_lead') {
+    return await teamScopeService.canAccessOrder(user, order);
+  }
+  return false;
 }
 
 function forbidden(res, user, fileType) {
@@ -185,7 +191,7 @@ function forbidden(res, user, fileType) {
     ? 'Only Dispatch can attach a dispatch proof.'
     : role === 'dispatch'
       ? 'Dispatch can only attach a dispatch proof photo.'
-      : 'You can only attach a file to your own orders.';
+      : 'You can only attach a file to your own orders or your team\'s orders.';
   return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message } });
 }
 
@@ -236,7 +242,7 @@ exports.getUploadUrl = async (req, res, next) => {
     const order = await loadOrder(req.params.id);
     if (!order) return notFound(res, 'Order not found');
 
-    if (!canAttach(req.user, order, fileType)) return forbidden(res, req.user, fileType);
+    if (!(await canAttach(req.user, order, fileType))) return forbidden(res, req.user, fileType);
     const refused = await refuseDispatchProof(res, order, fileType);
     if (refused) return refused;
 
@@ -262,7 +268,7 @@ exports.attach = async (req, res, next) => {
     const order = await loadOrder(req.params.id);
     if (!order) return notFound(res, 'Order not found');
 
-    if (!canAttach(req.user, order, fileType)) return forbidden(res, req.user, fileType);
+    if (!(await canAttach(req.user, order, fileType))) return forbidden(res, req.user, fileType);
     const refused = await refuseDispatchProof(res, order, fileType);
     if (refused) return refused;
 
@@ -762,7 +768,7 @@ exports.requestDelete = async (req, res, next) => {
       .prepare('SELECT * FROM payment_proofs WHERE id = ? AND order_id = ?')
       .get(req.params.attachmentId, order.id);
     if (!attachment) return notFound(res, 'Attachment not found on this order.');
-    if (!canAttach(req.user, order, attachment.file_type)) return forbidden(res, req.user, attachment.file_type);
+    if (!(await canAttach(req.user, order, attachment.file_type))) return forbidden(res, req.user, attachment.file_type);
 
     if (attachment.deleted_at) {
       return res.status(409).json({

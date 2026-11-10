@@ -3481,7 +3481,12 @@ exports.submit = async (req, res, next) => {
 
     if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     // Sep 5, 2026: MedReps can submit only their own orders. Management can submit any.
-    if (!canEditOrder(req.user, order)) {
+    // Nov 10, 2026: Team Leaders and Leaders can also submit/resubmit orders on behalf of their salespersons.
+    const role = (req.user.role || '').toLowerCase();
+    const isTeamLeadAllowed = role === 'team_lead' && (
+      isTeamLeadsOwnOrder(req.user, order) || (await teamScopeService.canAccessOrder(req.user, order))
+    );
+    if (!canEditOrder(req.user, order) && !isTeamLeadAllowed) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Not your order' } });
     }
     if (order.status !== 'draft') {
@@ -3568,7 +3573,9 @@ exports.submit = async (req, res, next) => {
             `${sentBackReason ? ` for: ${sentBackReason}` : ''} — waiting for Management to re-check before syncing to Zoho.`
           : req.user.role === 'medrep'
             ? 'Submitted by MedRep — waiting for Management approval before syncing to Zoho.'
-            : `Submitted by ${req.user.name} — B2B order, waiting for Management approval before syncing to Zoho.`,
+            : req.user.role === 'team_lead' && isTeamLeadAllowed && Number(order.medrep_id) !== Number(req.user.id)
+              ? `Submitted by ${req.user.name} (Team Lead) on behalf of ${order.medrep_name || 'MedRep'} — waiting for Management approval before syncing to Zoho.`
+              : `Submitted by ${req.user.name} — B2B order, waiting for Management approval before syncing to Zoho.`,
         metadata: sentBack
           ? { resubmission: true, sent_back_by: sentBack.actor_name, sent_back_reason: sentBackReason }
           : undefined
@@ -3576,10 +3583,16 @@ exports.submit = async (req, res, next) => {
 
       const orderDataForNotif = { getmeds_order_id: getmedsOrderId, customer_name: order.customer_name, status: 'pending_management_approval', medrep_email: order.medrep_email };
 
+      const submitterRecipientIds = [req.user.id];
+      if (order.medrep_id && Number(order.medrep_id) !== Number(req.user.id)) {
+        submitterRecipientIds.push(order.medrep_id);
+      }
       await notify({
         orderId: order.id,
-        recipientIds: [req.user.id],
-        message: `Your order ${getmedsOrderId} for ${order.customer_name} has been submitted and is waiting for Management approval before it syncs to Zoho.`,
+        recipientIds: submitterRecipientIds,
+        message: Number(order.medrep_id) === Number(req.user.id)
+          ? `Your order ${getmedsOrderId} for ${order.customer_name} has been submitted and is waiting for Management approval before it syncs to Zoho.`
+          : `Order ${getmedsOrderId} for ${order.customer_name} has been submitted by ${req.user.name} and is waiting for Management approval before it syncs to Zoho.`,
         eventType: 'ORDER_SUBMITTED',
         orderData: orderDataForNotif
       });

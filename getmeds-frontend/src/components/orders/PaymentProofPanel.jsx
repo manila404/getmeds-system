@@ -393,10 +393,12 @@ const PaymentProofPanel = ({ orderId, order }) => {
   // this only decides whether to show the control.
   //
   // Sep 5, 2026: management added — they can create/submit an order on a
-  // MedRep's behalf, so they can also attach files to it.
   const role = (user?.role || '').toLowerCase();
+  const isOwnerOrRaiser = (order?.medrep_id != null && Number(order.medrep_id) === Number(user?.id)) ||
+                          (order?.raised_by_id != null && Number(order.raised_by_id) === Number(user?.id));
+  // Nov 10, 2026: Team Leaders / Leaders can attach lacking documents on behalf of their salespersons.
   const canUpload =
-    role === 'admin' || role === 'management' || (order?.medrep_id != null && order.medrep_id === user?.id);
+    role === 'admin' || role === 'management' || role === 'team_lead' || isOwnerOrRaiser;
 
   // A verified proof "locks" new proof-of-payment uploads the same way it
   // always has — it is the evidence Finance already cleared the order on.
@@ -575,7 +577,7 @@ const PaymentProofPanel = ({ orderId, order }) => {
             <p className="text-sm">No files attached to this order.</p>
             {!canUpload && (
               <p className="text-xs mt-1">
-                Only the MedRep who raised this order (or management) can attach one.
+                Only the MedRep who raised this order, their Team Leader, or management can attach one.
               </p>
             )}
           </div>
