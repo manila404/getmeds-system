@@ -1135,7 +1135,7 @@ const OrderDetailPage = () => {
                 className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-red-300 text-red-700 bg-white rounded hover:bg-red-100"
               >🗑 Delete permanently</button>
             )}
-            {order.draft_cancel_kind === 'keep_record' && (
+            {order.draft_cancel_kind === 'keep_record' && order.refund_status && (
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
                   order.refund_status === 'done' ? 'bg-emerald-100 text-emerald-900 border-emerald-300'

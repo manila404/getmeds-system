@@ -19,6 +19,7 @@ const CancelHeldModal = ({ order, onClose, onSuccess }) => {
   const [choice, setChoice] = useState(CANCEL_HELD_REASONS[0]);
   const [otherReason, setOtherReason] = useState('');
   const [notes, setNotes] = useState('');
+  const [needsRefund, setNeedsRefund] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const baseReason = choice === OTHER ? otherReason.trim() : choice;
@@ -34,7 +35,8 @@ const CancelHeldModal = ({ order, onClose, onSuccess }) => {
     setSaving(true);
     try {
       const res = await client.post(`/api/orders/${order.id}/cancel-held`, {
-        reason: finalReason
+        reason: finalReason,
+        needs_refund: needsRefund
       });
 
       toast.success(res.data?.data?.message || `Order ${order.getmeds_order_id} cancelled & archived.`);
@@ -116,17 +118,54 @@ const CancelHeldModal = ({ order, onClose, onSuccess }) => {
         </div>
 
         <div>
-          <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wide mb-1">
-            Additional Notes (Optional)
+          <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wide mb-1.5">
+            Is a refund required? *
           </label>
-          <textarea
-            rows={2}
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            maxLength={300}
-            placeholder="Additional context for team records..."
-            className="w-full border border-slate-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500"
-          />
+          <div className="space-y-2">
+            <label
+              className={`flex items-start gap-2.5 p-2.5 rounded-lg border text-xs cursor-pointer transition ${
+                !needsRefund
+                  ? 'border-emerald-500 bg-emerald-50/70 font-medium text-emerald-950 ring-1 ring-emerald-500'
+                  : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+              }`}
+            >
+              <input
+                type="radio"
+                name="cancel-held-needs-refund"
+                checked={!needsRefund}
+                onChange={() => setNeedsRefund(false)}
+                className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
+              />
+              <div>
+                <span className="font-semibold block text-slate-900">No refund needed</span>
+                <span className="text-[11px] text-slate-500 block mt-0.5">
+                  No money was collected, transaction was voided, or customer backed out before paying. Finance will not be tasked with a refund.
+                </span>
+              </div>
+            </label>
+
+            <label
+              className={`flex items-start gap-2.5 p-2.5 rounded-lg border text-xs cursor-pointer transition ${
+                needsRefund
+                  ? 'border-amber-500 bg-amber-50/70 font-medium text-amber-950 ring-1 ring-amber-500'
+                  : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+              }`}
+            >
+              <input
+                type="radio"
+                name="cancel-held-needs-refund"
+                checked={needsRefund}
+                onChange={() => setNeedsRefund(true)}
+                className="mt-0.5 text-amber-600 focus:ring-amber-500"
+              />
+              <div>
+                <span className="font-semibold block text-slate-900">Yes, refund is required</span>
+                <span className="text-[11px] text-slate-500 block mt-0.5">
+                  Customer already paid money that must be returned. Finance will be alerted to arrange and process the refund.
+                </span>
+              </div>
+            </label>
+          </div>
         </div>
 
         <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">

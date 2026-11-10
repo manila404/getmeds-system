@@ -393,18 +393,34 @@ describe('team_lead role', () => {
         expect(res.statusCode).toBe(403);
       });
 
-      test('POST /:id/cancel-held moves on_hold order to cancelled', async () => {
+      test('POST /:id/cancel-held moves on_hold order to cancelled (default no refund needed)', async () => {
         await db.prepare("UPDATE orders SET status = 'on_hold' WHERE id = ?").run(planted.MINE);
         const res = await request(app)
           .post(`/api/orders/${planted.MINE}/cancel-held`)
           .set('Authorization', `Bearer ${teamLeadToken}`)
-          .send({ reason: 'Customer backed out' });
+          .send({ reason: 'Customer backed out', needs_refund: false });
         expect(res.statusCode).toBe(200);
         expect(res.body.data.status).toBe('cancelled');
+        expect(res.body.data.refund_status).toBe('not_due');
 
-        const row = await db.prepare('SELECT status, draft_cancel_reason FROM orders WHERE id = ?').get(planted.MINE);
+        const row = await db.prepare('SELECT status, draft_cancel_reason, refund_status FROM orders WHERE id = ?').get(planted.MINE);
         expect(row.status).toBe('cancelled');
         expect(row.draft_cancel_reason).toBe('Customer backed out');
+        expect(row.refund_status).toBe('not_due');
+      });
+
+      test('POST /:id/cancel-held sets refund_status pending when needs_refund is true', async () => {
+        await db.prepare("UPDATE orders SET status = 'on_hold' WHERE id = ?").run(planted.MINE);
+        const res = await request(app)
+          .post(`/api/orders/${planted.MINE}/cancel-held`)
+          .set('Authorization', `Bearer ${teamLeadToken}`)
+          .send({ reason: 'Patient paid in advance', needs_refund: true });
+        expect(res.statusCode).toBe(200);
+        expect(res.body.data.status).toBe('cancelled');
+        expect(res.body.data.refund_status).toBe('pending');
+
+        const row = await db.prepare('SELECT status, refund_status FROM orders WHERE id = ?').get(planted.MINE);
+        expect(row.refund_status).toBe('pending');
       });
 
       test('POST /:id/cancel-held requires a reason (400)', async () => {

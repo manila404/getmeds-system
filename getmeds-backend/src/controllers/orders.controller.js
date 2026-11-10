@@ -4185,8 +4185,10 @@ exports.cancelHeld = async (req, res, next) => {
       });
     }
 
-    const money = await paymentOnRecord(order.id, order);
-    const kind = money.has ? 'keep_record' : 'discard';
+    const needsRefund = req.body?.needs_refund === true || req.body?.has_refund === true;
+    const kind = 'keep_record';
+    const refundStatus = needsRefund ? 'pending' : 'not_due';
+    const refundNote = needsRefund ? null : 'No refund due (specified on cancellation)';
 
     const actor = await resolveActor(req.user, ['medrep', 'team_lead'].includes(role) ? 'medrep' : 'management');
     const now = new Date().toISOString();
@@ -4195,9 +4197,25 @@ exports.cancelHeld = async (req, res, next) => {
       await setOrderStatus(order.id, order.status, 'cancelled', now);
       await db.prepare(`
         UPDATE orders 
-        SET draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, draft_cancel_kind = ?, refund_status = ?, updated_at = ?
+        SET draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, draft_cancel_kind = ?, refund_status = ?, refund_note = ?, updated_at = ?
         WHERE id = ?
-      `).run(now, actor.id, reason, kind, kind === 'keep_record' ? 'pending' : null, now, order.id);
+      `).run(now, actor.id, reason, kind, refundStatus, refundNote, now, order.id);
+
+      if (await tableExists('refund_requests')) {
+        if (needsRefund) {
+          await db.prepare(
+            `UPDATE refund_requests
+                SET status = 'queued', queued_by = ?, queued_at = ?, decided_by = ?, decided_at = ?, decision_note = ?, updated_at = ?
+              WHERE order_id = ? AND status IN ('requested', 'approved')`
+          ).run(actor.id, now, actor.id, now, reason, now, order.id);
+        } else {
+          await db.prepare(
+            `UPDATE refund_requests
+                SET status = 'not_due', decided_by = ?, decided_at = ?, decision_note = ?, updated_at = ?
+              WHERE order_id = ? AND status IN ('requested', 'approved', 'queued')`
+          ).run(actor.id, now, `Cancelled without refund: ${reason}`, now, order.id);
+        }
+      }
 
       await logEvent({
         orderId: order.id,
@@ -4207,17 +4225,17 @@ exports.cancelHeld = async (req, res, next) => {
         actorId: actor.id,
         actorName: actor.name,
         actorRole: actor.role,
-        notes: `Order cancelled & archived by ${actor.name} (${actor.role})${kind === 'keep_record' ? ' (kept on record — refund to be arranged)' : ''}: ${reason}`,
-        metadata: { reason, kind, payment_reasons: money.reasons, cancelled_from_status: order.status }
+        notes: `Order cancelled & archived by ${actor.name} (${actor.role})${needsRefund ? ' (refund requested)' : ' (no refund needed)'}: ${reason}`,
+        metadata: { reason, kind, needs_refund: needsRefund, cancelled_from_status: order.status }
       });
     })();
 
-    if (kind === 'keep_record') {
+    if (needsRefund) {
       const finance = (await getUserIdsByRole('finance', 'admin')).filter((id) => id !== actor.id);
       await notify({
         orderId: order.id,
         recipientIds: finance,
-        message: `Held order ${order.getmeds_order_id} (₱${Number(order.total_amount).toLocaleString('en-PH')}) was cancelled by ${actor.name} — a refund may be due. Reason: ${reason}`,
+        message: `Held order ${order.getmeds_order_id} (₱${Number(order.total_amount).toLocaleString('en-PH')}) was cancelled by ${actor.name} — a refund is requested. Reason: ${reason}`,
         eventType: 'DRAFT_CANCELLED_PAID',
         orderData: order
       });
@@ -4232,7 +4250,9 @@ exports.cancelHeld = async (req, res, next) => {
     await notify({
       orderId: order.id,
       recipientIds: [...recipients],
-      message: `Order ${order.getmeds_order_id} was cancelled & archived by ${actor.name}. Reason: ${reason}`,
+      message: needsRefund
+        ? `Order ${order.getmeds_order_id} was cancelled by ${actor.name}. Reason: ${reason}. A refund has been requested from Finance.`
+        : `Order ${order.getmeds_order_id} was cancelled & archived by ${actor.name}. Reason: ${reason}.`,
       eventType: 'ORDER_CANCELLED',
       orderData: order
     });
@@ -4243,7 +4263,8 @@ exports.cancelHeld = async (req, res, next) => {
       data: {
         order: updatedOrder,
         status: 'cancelled',
-        message: 'Order cancelled and archived.'
+        refund_status: refundStatus,
+        message: `Order cancelled and archived${needsRefund ? ' (refund requested)' : ' (no refund needed)'}.`
       }
     });
   } catch (err) { next(err); }
