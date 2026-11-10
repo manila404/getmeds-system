@@ -37,6 +37,8 @@ import { TRACKING_EDITABLE_STATUSES, TrackingValue } from '../components/dispatc
 import { TAX_OPTIONS, inferTaxOption } from '../utils/orderLines';
 import ZohoSalespersonCombo from '../components/orders/ZohoSalespersonCombo';
 import ConfirmChangesModal from '../components/orders/ConfirmChangesModal';
+import CompleteOrderModal from '../components/orders/CompleteOrderModal';
+import CancelHeldModal from '../components/orders/CancelHeldModal';
 
 // Sep 7, 2026 (2): mirrors orders.controller.js's / OrderForm.jsx's exact
 // lists for the new "Edit Details" panel below — kept as a duplicate
@@ -355,6 +357,9 @@ const OrderDetailPage = () => {
   // Oct 12, 2026: a draft waiting for stock (instead of cancelling it).
   const [stockHoldOpen, setStockHoldOpen] = useState(false);
   const [refundOpen, setRefundOpen] = useState(false);
+  // Nov 10, 2026: MedRep/Team Lead delivery completion and cancel-held modals
+  const [completeModalOpen, setCompleteModalOpen] = useState(false);
+  const [cancelHeldOpen, setCancelHeldOpen] = useState(false);
   // Sep 18, 2026: reason first (moves the order off the hold/exception with
   // the MedRep's own words on the trail), then the file — attaching
   // afterwards is harmless even for a Finance hold specifically, where
@@ -1037,17 +1042,53 @@ const OrderDetailPage = () => {
               </span>
               <p className="text-xl font-bold text-ink-primary">₱{(order.total_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
             </div>
-            <button
-              type="button"
-              onClick={() => setOverviewOpen(true)}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-getmeds-blue/40 bg-white text-xs font-semibold text-getmeds-blue hover:bg-getmeds-blue/5 w-full sm:w-auto"
-            >
-              📋 Order overview
-            </button>
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+              {['tracking_shared', 'dispatched'].includes(order.status) && canActOnOrder && (
+                <button
+                  type="button"
+                  onClick={() => setCompleteModalOpen(true)}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 text-xs font-semibold text-white hover:bg-emerald-700 shadow-sm"
+                  title="Confirm delivery to customer and mark order as completed"
+                >
+                  ✓ Mark Delivery Complete
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setOverviewOpen(true)}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-getmeds-blue/40 bg-white text-xs font-semibold text-getmeds-blue hover:bg-getmeds-blue/5"
+              >
+                📋 Order overview
+              </button>
+            </div>
           </div>
         </div>
         {/* Oct 22, 2026: ask for a refund on an order that is already paid for (also shows where a request is). */}
         <RefundRequestSection order={order} user={user} />
+        {['tracking_shared', 'dispatched'].includes(order.status) && (
+          <div className="mb-4 rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-[13px] text-teal-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="font-semibold flex items-center gap-1.5">
+                <span>🚚</span>
+                <span>{order.status === 'tracking_shared' ? 'Tracking Shared — Out for Delivery' : 'Order Dispatched'}</span>
+              </p>
+              <p className="mt-0.5 text-teal-900/80 text-xs">
+                {order.tracking_number ? <>Tracking Number: <code className="font-mono font-semibold bg-white px-1.5 py-0.5 rounded border border-teal-200">{order.tracking_number}</code>. </> : ''}
+                {order.intake_receiver ? <>Designated Receiver: <strong>{order.intake_receiver}</strong>. </> : ''}
+                When the client confirms receipt of the medications, you can mark the delivery as complete.
+              </p>
+            </div>
+            {canActOnOrder && (
+              <button
+                type="button"
+                onClick={() => setCompleteModalOpen(true)}
+                className="shrink-0 px-3.5 py-1.5 rounded-md bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 flex items-center gap-1.5 shadow-sm"
+              >
+                <span>✓</span> Mark Delivery Complete
+              </button>
+            )}
+          </div>
+        )}
         {order.status === 'draft' && order.stock_hold_at && !order.draft_cancelled_at && (
           <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-[13px] text-amber-950">
             <p className="font-semibold">⏳ Waiting for stock{order.stock_hold_item ? `: ${order.stock_hold_item}` : ''}</p>
@@ -1171,6 +1212,26 @@ const OrderDetailPage = () => {
           />
         )}
         {overviewOpen && <OrderOverviewModal order={order} items={items} splits={splits} onClose={() => setOverviewOpen(false)} />}
+        {completeModalOpen && (
+          <CompleteOrderModal
+            order={order}
+            onClose={() => setCompleteModalOpen(false)}
+            onSuccess={() => {
+              qc.invalidateQueries({ queryKey: ['order', id] });
+              qc.invalidateQueries({ queryKey: ['orders'] });
+            }}
+          />
+        )}
+        {cancelHeldOpen && (
+          <CancelHeldModal
+            order={order}
+            onClose={() => setCancelHeldOpen(false)}
+            onSuccess={() => {
+              qc.invalidateQueries({ queryKey: ['order', id] });
+              qc.invalidateQueries({ queryKey: ['orders'] });
+            }}
+          />
+        )}
         {pendingConfirm && (
           <ConfirmChangesModal
             title={pendingConfirm.title}
@@ -1797,6 +1858,16 @@ const OrderDetailPage = () => {
                   ↩ Re-submit to {order.resume_to ? stageLabel(order.resume_to) : 'Finance'}
                 </button>
               )}
+              {['on_hold', 'exception'].includes(order.status) && canActOnOrder && (
+                <button
+                  type="button"
+                  onClick={() => setCancelHeldOpen(true)}
+                  className="shrink-0 px-3 py-1.5 rounded-md border border-red-300 text-red-700 bg-white hover:bg-red-50 text-xs font-semibold flex items-center gap-1 shadow-sm"
+                  title="If this order cannot proceed, cancel and archive it"
+                >
+                  <span>🚫</span> Cancel & Archive
+                </button>
+              )}
             </div>
             {/* Oct 15, 2026: screenshots Finance attached to its hold (e.g. the customer's
                 overdue balance), so the MedRep can see why. */}
@@ -1857,6 +1928,14 @@ const OrderDetailPage = () => {
                   ↩ Re-submit prescription to Pharmacy
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => setCancelHeldOpen(true)}
+                className="shrink-0 px-3 py-1.5 rounded-md border border-red-300 text-red-700 bg-white hover:bg-red-50 text-xs font-semibold flex items-center gap-1 shadow-sm"
+                title="If this order cannot proceed, cancel and archive it"
+              >
+                <span>🚫</span> Cancel & Archive
+              </button>
             </div>
             <p className="text-red-900/80">
               Upload a replacement or explain what changed. This goes to Pharmacy only; it does not change anything with Finance.

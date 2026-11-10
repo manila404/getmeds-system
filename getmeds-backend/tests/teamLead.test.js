@@ -361,6 +361,79 @@ describe('team_lead role', () => {
         expect(row.status).toBe('pending_management_approval');
       });
     });
+    describe('delivery completion and cancel-held permissions', () => {
+      test('POST /:id/complete moves tracking_shared order to completed', async () => {
+        await db.prepare("UPDATE orders SET status = 'tracking_shared' WHERE id = ?").run(planted.MINE);
+        const res = await request(app)
+          .post(`/api/orders/${planted.MINE}/complete`)
+          .set('Authorization', `Bearer ${teamLeadToken}`)
+          .send({ receiver_name: 'Nurse Joy', notes: 'Delivered successfully' });
+        expect(res.statusCode).toBe(200);
+        expect(res.body.data.status).toBe('completed');
+
+        const row = await db.prepare('SELECT status FROM orders WHERE id = ?').get(planted.MINE);
+        expect(row.status).toBe('completed');
+      });
+
+      test('POST /:id/complete fails with 409 if status is not tracking_shared or dispatched', async () => {
+        await db.prepare("UPDATE orders SET status = 'ready_for_draft_invoice' WHERE id = ?").run(planted.MINE);
+        const res = await request(app)
+          .post(`/api/orders/${planted.MINE}/complete`)
+          .set('Authorization', `Bearer ${teamLeadToken}`)
+          .send({ receiver_name: 'Nurse Joy' });
+        expect(res.statusCode).toBe(409);
+      });
+
+      test('POST /:id/complete on out-of-team order is forbidden (403)', async () => {
+        await db.prepare("UPDATE orders SET status = 'tracking_shared' WHERE id = ?").run(planted.OTHER);
+        const res = await request(app)
+          .post(`/api/orders/${planted.OTHER}/complete`)
+          .set('Authorization', `Bearer ${teamLeadToken}`)
+          .send({ receiver_name: 'Nurse Joy' });
+        expect(res.statusCode).toBe(403);
+      });
+
+      test('POST /:id/cancel-held moves on_hold order to cancelled', async () => {
+        await db.prepare("UPDATE orders SET status = 'on_hold' WHERE id = ?").run(planted.MINE);
+        const res = await request(app)
+          .post(`/api/orders/${planted.MINE}/cancel-held`)
+          .set('Authorization', `Bearer ${teamLeadToken}`)
+          .send({ reason: 'Customer backed out' });
+        expect(res.statusCode).toBe(200);
+        expect(res.body.data.status).toBe('cancelled');
+
+        const row = await db.prepare('SELECT status, draft_cancel_reason FROM orders WHERE id = ?').get(planted.MINE);
+        expect(row.status).toBe('cancelled');
+        expect(row.draft_cancel_reason).toBe('Customer backed out');
+      });
+
+      test('POST /:id/cancel-held requires a reason (400)', async () => {
+        await db.prepare("UPDATE orders SET status = 'on_hold' WHERE id = ?").run(planted.MINE);
+        const res = await request(app)
+          .post(`/api/orders/${planted.MINE}/cancel-held`)
+          .set('Authorization', `Bearer ${teamLeadToken}`)
+          .send({ reason: '' });
+        expect(res.statusCode).toBe(400);
+      });
+
+      test('POST /:id/cancel-held fails with 409 if status is not on_hold or exception', async () => {
+        await db.prepare("UPDATE orders SET status = 'ready_for_dispatch' WHERE id = ?").run(planted.MINE);
+        const res = await request(app)
+          .post(`/api/orders/${planted.MINE}/cancel-held`)
+          .set('Authorization', `Bearer ${teamLeadToken}`)
+          .send({ reason: 'Not on hold' });
+        expect(res.statusCode).toBe(409);
+      });
+
+      test('POST /:id/cancel-held on out-of-team order is forbidden (403)', async () => {
+        await db.prepare("UPDATE orders SET status = 'on_hold' WHERE id = ?").run(planted.OTHER);
+        const res = await request(app)
+          .post(`/api/orders/${planted.OTHER}/cancel-held`)
+          .set('Authorization', `Bearer ${teamLeadToken}`)
+          .send({ reason: 'Out of team' });
+        expect(res.statusCode).toBe(403);
+      });
+    });
   });
 
   describe('assigning a MedRep to a Team Lead (admin.controller.js update())', () => {

@@ -4058,6 +4058,197 @@ exports.resubmit = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+/**
+ * POST /api/orders/:id/complete — MedRep, Team Lead, or Management confirms customer delivery
+ * and marks an order at 'tracking_shared' (or 'dispatched') as 'completed'.
+ */
+exports.completeOrder = async (req, res, next) => {
+  try {
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    }
+
+    const role = String(req.user?.role || '').toLowerCase();
+    const isTeamLeadAllowed = role === 'team_lead' && (
+      isTeamLeadsOwnOrder(req.user, order) || (await teamScopeService.canAccessOrder(req.user, order))
+    );
+    const allowed = role === 'management' || role === 'admin' ||
+      (role === 'medrep' && canActOnOrder(req.user, order)) ||
+      isTeamLeadAllowed;
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'You do not have permission to complete this order.' }
+      });
+    }
+
+    if (!['tracking_shared', 'dispatched'].includes(order.status)) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'INVALID_STATUS', message: `Only orders with tracking shared or dispatched can be marked as complete. This order is "${order.status}".` }
+      });
+    }
+
+    const receiverName = String(req.body?.receiver_name || order.intake_receiver || '').trim();
+    const deliveryDate = String(req.body?.delivery_date || '').trim() || new Date().toISOString().slice(0, 10);
+    const notes = String(req.body?.notes || '').trim();
+
+    const now = new Date().toISOString();
+    const actor = await resolveActor(req.user, ['medrep', 'team_lead'].includes(role) ? 'medrep' : 'management');
+
+    await db.transaction(async () => {
+      await setOrderStatus(order.id, order.status, 'completed', now);
+
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ORDER_COMPLETED',
+        oldStatus: order.status,
+        newStatus: 'completed',
+        actorId: actor.id,
+        actorName: actor.name,
+        actorRole: actor.role,
+        notes: `Delivery confirmed by ${actor.name} (${actor.role}). Received on ${deliveryDate} by: ${receiverName || 'Customer'}${notes ? `. Notes: ${notes}` : ''}`,
+        metadata: {
+          receiver_name: receiverName,
+          delivery_date: deliveryDate,
+          delivery_notes: notes,
+          confirmed_by: actor.name,
+          confirmed_role: actor.role
+        }
+      });
+    })();
+
+    const management = await getUserIdsByRole('management');
+    const recipients = new Set([order.medrep_id, order.raised_by_id, ...management]);
+    recipients.delete(actor.id);
+    recipients.delete(null);
+    recipients.delete(undefined);
+
+    await notify({
+      orderId: order.id,
+      recipientIds: [...recipients],
+      message: `Order ${order.getmeds_order_id} was marked as Completed by ${actor.name}. Received by: ${receiverName || 'Customer'}.`,
+      eventType: 'ORDER_COMPLETED',
+      orderData: order
+    });
+
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({
+      success: true,
+      data: {
+        order: updatedOrder,
+        status: 'completed',
+        message: 'Order marked as completed.'
+      }
+    });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/orders/:id/cancel-held — MedRep, Team Lead, or Management cancels and archives
+ * an order currently on hold or exception when it cannot proceed.
+ */
+exports.cancelHeld = async (req, res, next) => {
+  try {
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'A reason is required to cancel and archive this order.' }
+      });
+    }
+
+    const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    }
+
+    const role = String(req.user?.role || '').toLowerCase();
+    const isTeamLeadAllowed = role === 'team_lead' && (
+      isTeamLeadsOwnOrder(req.user, order) || (await teamScopeService.canAccessOrder(req.user, order))
+    );
+    const allowed = role === 'management' || role === 'admin' ||
+      (role === 'medrep' && canActOnOrder(req.user, order)) ||
+      isTeamLeadAllowed;
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'You do not have permission to cancel this order.' }
+      });
+    }
+
+    if (!['on_hold', 'exception'].includes(order.status)) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NOT_ON_HOLD', message: `Only orders on hold or exception can be cancelled this way. This order is "${order.status}".` }
+      });
+    }
+
+    const money = await paymentOnRecord(order.id, order);
+    const kind = money.has ? 'keep_record' : 'discard';
+
+    const actor = await resolveActor(req.user, ['medrep', 'team_lead'].includes(role) ? 'medrep' : 'management');
+    const now = new Date().toISOString();
+
+    await db.transaction(async () => {
+      await setOrderStatus(order.id, order.status, 'cancelled', now);
+      await db.prepare(`
+        UPDATE orders 
+        SET draft_cancelled_at = ?, draft_cancelled_by = ?, draft_cancel_reason = ?, draft_cancel_kind = ?, refund_status = ?, updated_at = ?
+        WHERE id = ?
+      `).run(now, actor.id, reason, kind, kind === 'keep_record' ? 'pending' : null, now, order.id);
+
+      await logEvent({
+        orderId: order.id,
+        eventType: 'ORDER_CANCELLED',
+        oldStatus: order.status,
+        newStatus: 'cancelled',
+        actorId: actor.id,
+        actorName: actor.name,
+        actorRole: actor.role,
+        notes: `Order cancelled & archived by ${actor.name} (${actor.role})${kind === 'keep_record' ? ' (kept on record — refund to be arranged)' : ''}: ${reason}`,
+        metadata: { reason, kind, payment_reasons: money.reasons, cancelled_from_status: order.status }
+      });
+    })();
+
+    if (kind === 'keep_record') {
+      const finance = (await getUserIdsByRole('finance', 'admin')).filter((id) => id !== actor.id);
+      await notify({
+        orderId: order.id,
+        recipientIds: finance,
+        message: `Held order ${order.getmeds_order_id} (₱${Number(order.total_amount).toLocaleString('en-PH')}) was cancelled by ${actor.name} — a refund may be due. Reason: ${reason}`,
+        eventType: 'DRAFT_CANCELLED_PAID',
+        orderData: order
+      });
+    }
+
+    const management = await getUserIdsByRole('management');
+    const recipients = new Set([order.medrep_id, order.raised_by_id, ...management]);
+    recipients.delete(actor.id);
+    recipients.delete(null);
+    recipients.delete(undefined);
+
+    await notify({
+      orderId: order.id,
+      recipientIds: [...recipients],
+      message: `Order ${order.getmeds_order_id} was cancelled & archived by ${actor.name}. Reason: ${reason}`,
+      eventType: 'ORDER_CANCELLED',
+      orderData: order
+    });
+
+    const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    res.json({
+      success: true,
+      data: {
+        order: updatedOrder,
+        status: 'cancelled',
+        message: 'Order cancelled and archived.'
+      }
+    });
+  } catch (err) { next(err); }
+};
+
 // ─── EDIT ORDER DETAILS (Sep 7, 2026) ──────────────────────────────────────
 //
 // updateItems() above already lets the line items be corrected before Zoho

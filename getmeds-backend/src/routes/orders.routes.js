@@ -92,6 +92,10 @@ router.post('/:id/send-back', requireRole('management', 'admin'), c.sendBack);
 // reason ("Proof of payment uploaded", or typed). Who may, and which holds,
 // is checked in the controller — see resubmit().
 router.post('/:id/resubmit', blockMedrepWritesOnImported, c.resubmit);
+// Nov 10, 2026: MedRep/Team Lead/Management confirms delivery and completes an order at tracking_shared
+router.post('/:id/complete', blockMedrepWritesOnImported, c.completeOrder);
+// Nov 10, 2026: MedRep/Team Lead/Management cancels and archives an order on hold when it cannot proceed
+router.post('/:id/cancel-held', blockMedrepWritesOnImported, c.cancelHeld);
 // Sep 26, 2026: the MedRep answers a PHARMACY rejection of the prescription. Goes to
 // Pharmacy only; Finance's track is untouched. Who may is checked in the controller.
 router.post('/:id/resubmit-prescription', blockMedrepWritesOnImported, require('../controllers/pharmacy.controller').resubmitPrescription);
