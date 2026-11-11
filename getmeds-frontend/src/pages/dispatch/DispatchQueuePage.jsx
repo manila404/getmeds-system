@@ -14,6 +14,7 @@ import HoldTrackingModal from '../../components/dispatch/HoldTrackingModal';
 import HoldOrderModal from '../../components/dispatch/HoldOrderModal';
 import { DISPATCH_WAREHOUSES } from '../../constants/dispatchWarehouses';
 import StockAnnouncementsManager from '../../components/stock/StockAnnouncementsManager';
+import DispatchLowStockChecker from '../../components/dispatch/DispatchLowStockChecker';
 
 /**
  * Sep 12, 2026: two versions of this page, chosen by the server.
@@ -338,6 +339,8 @@ const DispatchQueuePage = () => {
     <>
       {/* Oct 22, 2026: refunds waiting on Dispatch, and what to do about them. */}
       <RefundAttentionBanner />
+      {/* Dispatch low stock quick checker & stock monitor with mock simulation */}
+      <DispatchLowStockChecker />
       {/* Sep 15, 2026: Dispatch announces stock to MedReps and Management. */}
       <StockAnnouncementsManager />
       {/* Sep 28, 2026: two proper dropdowns instead of up to thirteen pills in

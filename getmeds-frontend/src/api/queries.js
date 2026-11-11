@@ -117,9 +117,10 @@ export const fetchItemBatches = async (itemId) => {
  * pagination moved to the backend so only the current page of 25 rows
  * (not all 3,446 products) travels over the wire per request.
  */
-export const fetchInventoryStatus = async ({ search = '', page = 1, limit = 25 } = {}) => {
+export const fetchInventoryStatus = async ({ search = '', page = 1, limit = 25, stock_filter = '' } = {}) => {
   const qs = new URLSearchParams();
   if (search) qs.set('search', search);
+  if (stock_filter) qs.set('stock_filter', stock_filter);
   if (page > 1)    qs.set('page',  String(page));
   if (limit !== 25) qs.set('limit', String(limit));
   const query = qs.toString();

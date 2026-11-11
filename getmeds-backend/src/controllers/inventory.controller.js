@@ -44,9 +44,11 @@ const { hasColumn } = require('../services/schemaColumns');
  */
 async function getInventoryStatus(req, res) {
   try {
-    const search = (req.query.search || '').trim();
-    const page   = Math.max(1, parseInt(req.query.page,  10) || 1);
-    const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const q = req?.query || {};
+    const search = (q.search || '').trim();
+    const stockFilter = (q.stock_filter || '').trim();
+    const page   = Math.max(1, parseInt(q.page,  10) || 1);
+    const limit  = Math.min(100, Math.max(1, parseInt(q.limit, 10) || 25));
     const offset = (page - 1) * limit;
 
     // ── 1. Global KPI summary — aggregate over all products, no search filter.
@@ -67,13 +69,37 @@ async function getInventoryStatus(req, res) {
                AND CAST(zoho_stock AS NUMERIC) != CAST(stock AS NUMERIC)
               THEN 1 ELSE 0
             END)                                                    AS mismatches,
+        SUM(CASE
+              WHEN stock IS NOT NULL AND CAST(stock AS NUMERIC) <= 15 AND CAST(stock AS NUMERIC) > 0
+              THEN 1 ELSE 0
+            END)                                                    AS low_stock,
+        SUM(CASE
+              WHEN stock IS NULL OR CAST(stock AS NUMERIC) <= 0
+              THEN 1 ELSE 0
+            END)                                                    AS out_of_stock,
         MAX(last_synced_at)                                         AS last_synced_at
       FROM products
     `).get();
 
     // ── 2. Filtered + paginated product rows.
-    const searchWhere  = search ? 'WHERE (name LIKE ? OR sku LIKE ?)' : '';
-    const searchParams = search ? [`%${search}%`, `%${search}%`]      : [];
+    const whereClauses = [];
+    const searchParams = [];
+    if (search) {
+      whereClauses.push('(name LIKE ? OR sku LIKE ?)');
+      searchParams.push(`%${search}%`, `%${search}%`);
+    }
+    if (stockFilter === 'low_stock') {
+      whereClauses.push('(stock IS NOT NULL AND CAST(stock AS NUMERIC) <= 15 AND CAST(stock AS NUMERIC) > 0)');
+    } else if (stockFilter === 'out_of_stock') {
+      whereClauses.push('(stock IS NULL OR CAST(stock AS NUMERIC) <= 0)');
+    } else if (stockFilter === 'low_or_out') {
+      whereClauses.push('(stock IS NULL OR CAST(stock AS NUMERIC) <= 15)');
+    } else if (stockFilter === 'mismatches') {
+      whereClauses.push('(zoho_item_id IS NOT NULL AND zoho_stock IS NOT NULL AND CAST(zoho_stock AS NUMERIC) != CAST(stock AS NUMERIC))');
+    } else if (stockFilter === 'in_sync') {
+      whereClauses.push('(zoho_item_id IS NOT NULL AND zoho_stock IS NOT NULL AND CAST(zoho_stock AS NUMERIC) = CAST(stock AS NUMERIC))');
+    }
+    const searchWhere = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
     // Total matching rows (for pagination metadata).
     const countRow     = await db.prepare(
@@ -115,7 +141,9 @@ async function getInventoryStatus(req, res) {
 
     // Allow a 60-second private cache at the Vercel edge so rapid page
     // navigations within the same session don't re-hit the database.
-    res.set('Cache-Control', 'private, max-age=60, stale-while-revalidate=120');
+    if (typeof res.set === 'function') {
+      res.set('Cache-Control', 'private, max-age=60, stale-while-revalidate=120');
+    }
 
     res.json({
       success: true,
@@ -126,6 +154,8 @@ async function getInventoryStatus(req, res) {
           total_products: Number(summary.total_products),
           in_sync:        Number(summary.in_sync        || 0),
           mismatches:     Number(summary.mismatches     || 0),
+          low_stock:      Number(summary.low_stock      || 0),
+          out_of_stock:   Number(summary.out_of_stock   || 0),
           not_in_zoho:    Number(summary.total_products || 0)
                           - Number(summary.in_sync      || 0)
                           - Number(summary.mismatches   || 0),

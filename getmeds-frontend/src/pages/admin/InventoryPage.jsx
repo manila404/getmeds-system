@@ -17,6 +17,7 @@ import {
   Zap,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Search,
   ChevronLeft,
   ChevronRight,
@@ -186,6 +187,7 @@ const InventoryPage = () => {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [stockFilter, setStockFilter] = useState('');
   const [page, setPage] = useState(1);
   const [expandedId, setExpandedId] = useState(null);
 
@@ -195,15 +197,20 @@ const InventoryPage = () => {
     return () => clearTimeout(t);
   }, [search]);
 
-  // Sep 29, 2026: search and page are now server-side. The backend returns only
-  // the current 25-row page — not all 3,446 products — so changing either param
-  // triggers a new, small fetch rather than a client-side re-slice of a large array.
+  // Sep 29, 2026: search and page are now server-side.
+  // Nov 11, 2026: added stockFilter for quick low-stock and out-of-stock inspection.
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['inventoryStatus', debouncedSearch, page],
-    queryFn: () => fetchInventoryStatus({ search: debouncedSearch, page }),
+    queryKey: ['inventoryStatus', debouncedSearch, page, stockFilter],
+    queryFn: () => fetchInventoryStatus({ search: debouncedSearch, page, stock_filter: stockFilter }),
     staleTime: 1000 * 60 * 5,
     keepPreviousData: true,
   });
+
+  const handleStockFilterChange = (filter) => {
+    setStockFilter((prev) => (prev === filter ? '' : filter));
+    setPage(1);
+    setExpandedId(null);
+  };
 
   // Mutations
   // Aug 27, 2026: the old "push catalog to Zoho" mutation was removed —
@@ -347,16 +354,62 @@ const InventoryPage = () => {
       </div>
 
       {/* Summary KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
+        <button
+          type="button"
+          onClick={() => handleStockFilterChange('')}
+          className={`bg-white rounded-xl border p-4 shadow-2xs text-left transition-all cursor-pointer ${
+            stockFilter === '' ? 'border-getmeds-blue ring-2 ring-getmeds-blue/20' : 'border-slate-200 hover:border-slate-300'
+          }`}
+        >
           <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 block">Total Catalog Items</span>
           <div className="flex items-baseline justify-between mt-1">
             <span className="text-2xl font-black text-slate-900">{summary.total_products || 0}</span>
             <span className="text-xs font-medium text-slate-400">Medicines</span>
           </div>
-        </div>
+        </button>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs">
+        <button
+          type="button"
+          onClick={() => handleStockFilterChange('low_stock')}
+          className={`bg-white rounded-xl border p-4 shadow-2xs text-left transition-all cursor-pointer ${
+            stockFilter === 'low_stock' ? 'border-amber-500 ring-2 ring-amber-500/20 bg-amber-50/20' : 'border-slate-200 hover:border-amber-300'
+          }`}
+          title="Click to filter products with stock ≤ 15"
+        >
+          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 block flex items-center gap-1">
+            <AlertTriangle size={12} className="text-amber-600" /> Low Stock (≤ 15)
+          </span>
+          <div className="flex items-baseline justify-between mt-1">
+            <span className="text-2xl font-black text-amber-700">{summary.low_stock || 0}</span>
+            <span className="text-xs font-semibold text-amber-700 bg-amber-100/70 px-1.5 py-0.5 rounded">Actionable</span>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleStockFilterChange('out_of_stock')}
+          className={`bg-white rounded-xl border p-4 shadow-2xs text-left transition-all cursor-pointer ${
+            stockFilter === 'out_of_stock' ? 'border-red-500 ring-2 ring-red-500/20 bg-red-50/20' : 'border-slate-200 hover:border-red-300'
+          }`}
+          title="Click to filter products with 0 stock"
+        >
+          <span className="text-[11px] font-bold uppercase tracking-wider text-red-700 block flex items-center gap-1">
+            <AlertCircle size={12} className="text-red-600" /> Out of Stock (0)
+          </span>
+          <div className="flex items-baseline justify-between mt-1">
+            <span className="text-2xl font-black text-red-700">{summary.out_of_stock || 0}</span>
+            <span className="text-xs font-semibold text-red-700 bg-red-100/70 px-1.5 py-0.5 rounded">Critical</span>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleStockFilterChange('in_sync')}
+          className={`bg-white rounded-xl border p-4 shadow-2xs text-left transition-all cursor-pointer ${
+            stockFilter === 'in_sync' ? 'border-emerald-500 ring-2 ring-emerald-500/20 bg-emerald-50/20' : 'border-slate-200 hover:border-emerald-300'
+          }`}
+        >
           <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-600 block">Fully In-Sync</span>
           <div className="flex items-baseline justify-between mt-1">
             <span className="text-2xl font-black text-emerald-700">{summary.in_sync || 0}</span>
@@ -364,46 +417,81 @@ const InventoryPage = () => {
               {summary.total_products ? Math.round(((summary.in_sync || 0) / summary.total_products) * 100) : 0}%
             </span>
           </div>
-        </div>
+        </button>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs">
+        <button
+          type="button"
+          onClick={() => handleStockFilterChange('mismatches')}
+          className={`bg-white rounded-xl border p-4 shadow-2xs text-left transition-all cursor-pointer ${
+            stockFilter === 'mismatches' ? 'border-amber-500 ring-2 ring-amber-500/20 bg-amber-50/20' : 'border-slate-200 hover:border-slate-300'
+          }`}
+        >
           <span className="text-[11px] font-semibold uppercase tracking-wider text-amber-600 block">Stock Discrepancy</span>
           <div className="flex items-baseline justify-between mt-1">
             <span className="text-2xl font-black text-amber-700">{summary.mismatches || 0}</span>
             <span className="text-xs text-amber-600">Items</span>
           </div>
-        </div>
-
-        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-purple-600 block">Zoho Integration</span>
-          <div className="flex items-baseline justify-between mt-1">
-            <span className="text-sm font-bold text-purple-900 truncate">REST OAuth 2.0</span>
-            <span className="text-[10px] font-bold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded uppercase">Active</span>
-          </div>
-        </div>
+        </button>
       </div>
 
       {/* Product Comparison & Sync Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-        <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/50">
-          <div className="relative flex-1 max-w-md">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Search by SKU or medicine name..."
-              value={search}
-              onChange={handleSearchChange}
-              className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
-            />
+        {/* Filter chips & Search bar */}
+        <div className="p-4 border-b border-slate-100 flex flex-col gap-3 bg-slate-50/50">
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
+            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mr-1 shrink-0">Filter:</span>
+            {[
+              { key: '', label: 'All Catalog' },
+              { key: 'low_stock', label: '⚠️ Low Stock (≤ 15)', tone: 'amber' },
+              { key: 'out_of_stock', label: '⛔ Out of Stock (0)', tone: 'red' },
+              { key: 'mismatches', label: '⚡ Stock Discrepancy', tone: 'amber' },
+              { key: 'in_sync', label: '✅ Fully In-Sync', tone: 'emerald' },
+            ].map((chip) => {
+              const active = stockFilter === chip.key;
+              return (
+                <button
+                  key={chip.key}
+                  type="button"
+                  onClick={() => handleStockFilterChange(chip.key)}
+                  className={`px-2.5 py-1 rounded-md text-xs font-semibold whitespace-nowrap border transition-colors cursor-pointer ${
+                    active
+                      ? chip.tone === 'red'
+                        ? 'bg-red-600 text-white border-red-600 shadow-2xs'
+                        : chip.tone === 'amber'
+                        ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
+                        : chip.tone === 'emerald'
+                        ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                        : 'bg-getmeds-blue text-white border-getmeds-blue shadow-2xs'
+                      : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              );
+            })}
           </div>
-          <div className="text-xs text-slate-500">
-            {totalItems > 0 ? (
-              <>
-                Showing <strong>{pageStart}–{pageEnd}</strong> of <strong>{totalItems}</strong> items
-              </>
-            ) : (
-              <>Showing <strong>0</strong> items</>
-            )}
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="relative flex-1 max-w-md">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search by SKU or medicine name..."
+                value={search}
+                onChange={handleSearchChange}
+                className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-getmeds-blue"
+              />
+            </div>
+            <div className="text-xs text-slate-500">
+              {totalItems > 0 ? (
+                <>
+                  Showing <strong>{pageStart}–{pageEnd}</strong> of <strong>{totalItems}</strong> items
+                  {stockFilter && <span className="ml-1 text-getmeds-blue font-semibold">(filtered)</span>}
+                </>
+              ) : (
+                <>Showing <strong>0</strong> items</>
+              )}
+            </div>
           </div>
         </div>
 
@@ -471,9 +559,20 @@ const InventoryPage = () => {
                           ₱{Number(p.unit_price).toFixed(2)} / {p.unit}
                         </td>
                         <td className="py-3 px-4 text-center">
-                          <span className="inline-block px-2.5 py-1 rounded-md font-bold text-xs bg-slate-100 text-slate-800">
-                            {p.local_stock} {p.unit}
-                          </span>
+                          {Number(p.local_stock || 0) <= 0 ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-bold text-xs bg-red-100 text-red-800 border border-red-200">
+                              0 {p.unit} (Out)
+                            </span>
+                          ) : Number(p.local_stock || 0) <= 15 ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-bold text-xs bg-amber-100 text-amber-900 border border-amber-300">
+                              <AlertTriangle size={11} className="text-amber-600 shrink-0" />
+                              {p.local_stock} {p.unit} (Low)
+                            </span>
+                          ) : (
+                            <span className="inline-block px-2.5 py-1 rounded-md font-bold text-xs bg-slate-100 text-slate-800">
+                              {p.local_stock} {p.unit}
+                            </span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-center">
                           {p.zoho_stock !== null ? (

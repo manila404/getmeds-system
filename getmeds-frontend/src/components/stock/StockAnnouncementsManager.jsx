@@ -79,7 +79,31 @@ const StockAnnouncementsManager = () => {
                 </button>
               </div>
             ) : (
-              <ProductAutocomplete products={products} onSelect={setProduct} placeholder="Search the product this is about…" />
+              <>
+                <ProductAutocomplete products={products} onSelect={setProduct} placeholder="Search the product this is about…" />
+                {products.some((p) => Number(p.stock) <= 15) && (
+                  <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                    <span className="text-[10px] uppercase font-bold text-slate-400">Low Stock Quick-Pick:</span>
+                    {products
+                      .filter((p) => Number(p.stock) <= 15)
+                      .slice(0, 4)
+                      .map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => {
+                            setProduct(p);
+                            setKind(Number(p.stock) <= 0 ? 'out_of_stock' : 'low_stock');
+                            setMessage(`Only ${p.stock || 0} ${p.unit || 'units'} left in inventory.`);
+                          }}
+                          className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-50 text-amber-900 border border-amber-200 hover:bg-amber-100 transition-colors cursor-pointer"
+                        >
+                          ⚠️ {p.name} ({p.stock} left)
+                        </button>
+                      ))}
+                  </div>
+                )}
+              </>
             )}
             <div className="flex flex-wrap gap-2">
               {Object.entries(STOCK_KINDS).map(([key, k]) => (
