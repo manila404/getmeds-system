@@ -241,7 +241,6 @@ const InventoryPage = () => {
   const summary       = inventoryData.summary    || {};
   const pagination    = inventoryData.pagination || {};
   const mode          = inventoryData.mode       || 'mock';
-  const orgId         = inventoryData.organization_id || '936158981';
 
   const totalPages  = pagination.total_pages || 1;
   const safePage    = Math.min(page, totalPages);
@@ -277,8 +276,6 @@ const InventoryPage = () => {
                   </span>
                 </h1>
                 <p className="text-xs text-ink-secondary mt-0.5 flex items-center gap-2">
-                  <span>Linked Organization: <strong className="text-slate-800 font-semibold">{orgId}</strong> (Getmeds Demo Sandbox)</span>
-                  <span>•</span>
                   <span>Currency: <strong className="text-slate-800 font-semibold">PHP (₱)</strong></span>
                 </p>
               </div>
