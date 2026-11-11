@@ -661,7 +661,16 @@ function validate(input) {
 
   if (isBusiness) {
     if (!String(c.display_name || '').trim()) problems.push('Display Name is required.');
-    // Oct 8, 2026: email, TIN and the license fields may be left out; see lackingDetails().
+    // Nov 11, 2026: BIR 2303, LTO PERMIT, BUS. PERMIT and all license/TIN details are
+    // mandatory upon creation of a new Hospital. Restricted if no details provided.
+    if (c.category === 'hospital') {
+      if (!String(c.tin || '').trim()) problems.push('TIN is mandatory for hospitals.');
+      if (!String(c.license_owner || '').trim()) problems.push('License Owner is mandatory for hospitals.');
+      if (!String(c.lto_license_number || '').trim()) problems.push('LTO Number is mandatory for hospitals.');
+      if (!String(c.lto_type || '').trim()) problems.push('LTO Type is mandatory for hospitals.');
+      if (!String(c.license_issuance_date || '').trim()) problems.push('License Issuance Date is mandatory for hospitals.');
+      if (!String(c.license_expiry_date || '').trim()) problems.push('License Expiry Date is mandatory for hospitals.');
+    }
   }
 
   if (String(c.email || '').trim() && !isEmail(c.email)) {

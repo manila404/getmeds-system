@@ -80,7 +80,15 @@ const HeldCustomerModal = ({ customerId, onClose, onChanged, onLink, onDelete, o
   }, [form]);
   const lackingLabels = (LACKABLE[form?.category] || []).filter(([k]) => lacking.includes(k)).map(([, l]) => l);
   const emailBad = !!form && !!form.email.trim() && !EMAIL_RE.test(form.email.trim());
-  const basicsOk = !!form && form.category && form.display_name.trim() && form.phone.trim() && form.billing_address.address.trim();
+  const hospitalMissing = form?.category === 'hospital' && (
+    !String(form.tin || '').trim() ||
+    !String(form.license_owner || '').trim() ||
+    !String(form.lto_license_number || '').trim() ||
+    !String(form.lto_type || '').trim() ||
+    !String(form.license_issuance_date || '').trim() ||
+    !String(form.license_expiry_date || '').trim()
+  );
+  const basicsOk = !!form && form.category && form.display_name.trim() && form.phone.trim() && form.billing_address.address.trim() && !hospitalMissing;
 
   const save = useMutation({
     mutationFn: () =>
@@ -211,9 +219,40 @@ const HeldCustomerModal = ({ customerId, onClose, onChanged, onLink, onDelete, o
                 </Field>
               </div>
 
+              {q.data?.documents?.length > 0 && (
+                <div className="border-t border-slate-100 pt-3">
+                  <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">Attached Documents</p>
+                  <div className="space-y-1.5">
+                    {q.data.documents.map((d) => (
+                      <div key={d.id} className="flex items-center justify-between text-xs bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5">
+                        <span className="font-medium text-ink-primary truncate">{d.file_name}</span>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              const { data } = await client.get(`/api/customers/${customerId}/documents/${d.id}/url`);
+                              window.open(data.data.url, '_blank', 'noopener');
+                            } catch (_) {
+                              toast.error('Could not open document.');
+                            }
+                          }}
+                          className="text-getmeds-blue hover:underline text-[11px] font-semibold ml-2 shrink-0"
+                        >
+                          View
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {emailBad ? (
                 <p className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded px-3 py-2">
                   "{form.email.trim()}" is not an email address. Type a real one, or clear it.
+                </p>
+              ) : form.category === 'hospital' && hospitalMissing ? (
+                <p className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded px-3 py-2">
+                  <strong>Hospital details restricted:</strong> TIN, License Owner, LTO Number, LTO Type, License Issuance Date, and License Expiry Date are mandatory for hospitals.
                 </p>
               ) : lackingLabels.length ? (
                 <p className="text-[12px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-3 py-2">

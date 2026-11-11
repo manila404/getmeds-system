@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw, Download, AlertTriangle, CheckCircle2, ChevronDown } from 'lucide-react';
 import toast from 'react-hot-toast';
 import client from '../../api/client';
+import { roleLabel } from '../../constants/roles';
 
 /**
  * Team Structure — Sep 26, 2026.
@@ -158,7 +159,7 @@ const ManagerCard = ({ channel, m, filter, focused }) => {
         </div>
         <p className="text-[15px] font-semibold text-ink-primary">{m.name}</p>
         <p className="text-xs text-ink-secondary">
-          {m.user ? `Account: ${m.user.name} (${String(m.user.role).replace('_', ' ')})` : 'No account linked'}
+          {m.user ? `Account: ${m.user.name} (${roleLabel(m.user.role)})` : 'No account linked'}
         </p>
         {m.scope_note && <p className="text-xs font-medium text-ink-primary">{m.scope_note}</p>}
         <p className="text-xs text-ink-secondary tabular-nums">
@@ -411,7 +412,7 @@ const TeamStructurePanel = () => {
                 {issues.accounts_outside_structure.map((a) => (
                   <tr key={a.id}>
                     <td className="py-1.5 pr-3 font-medium">{a.name}</td>
-                    <td className="py-1.5 pr-3 text-ink-secondary">{String(a.role).replace('_', ' ')}{a.division ? ` · ${a.division}` : ''}</td>
+                    <td className="py-1.5 pr-3 text-ink-secondary">{roleLabel(a.role)}{a.division ? ` · ${a.division}` : ''}</td>
                     <td className="py-1.5 font-mono text-[12px] text-ink-secondary">{a.salespersons.join(', ')}</td>
                   </tr>
                 ))}

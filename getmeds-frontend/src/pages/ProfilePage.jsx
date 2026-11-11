@@ -4,6 +4,7 @@ import client from '../api/client';
 import toast from 'react-hot-toast';
 import { UserRound, ShieldCheck, Loader2 } from 'lucide-react';
 import { DIVISIONS, SUB_DIVISIONS_BY_DIVISION } from '../constants/divisions';
+import { roleLabel } from '../constants/roles';
 
 /**
  * Profile Settings — Sep 5, 2026.
@@ -178,7 +179,7 @@ const ProfilePage = () => {
               <span className={readOnlyPillClass}>{user?.email}</span>
             </Field>
             <Field label="Role" help="Set by an administrator.">
-              <span className={`${readOnlyPillClass} capitalize`}>{user?.role}</span>
+              <span className={`${readOnlyPillClass} capitalize`}>{roleLabel(user?.role)}</span>
             </Field>
           </div>
 

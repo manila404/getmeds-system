@@ -50,7 +50,7 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   const roleLabelMap = {
     medrep: 'Medical Representative',
     finance: 'Finance & Payments',
-    dispatch: 'Logistics & Dispatch',
+    dispatch: 'Operation', // Oct 24, 2026: was 'Logistics & Dispatch'
     management: 'Operations Management',
     admin: 'System Administrator',
     team_lead: 'Team Lead',
@@ -188,7 +188,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
       { to: '/team-lead', icon: <LayoutDashboard size={19} />, label: 'My Team', exact: true },
       // Nov 9, 2026: each member's KPI and dashboard, view only.
-      { to: '/team-lead/performance', icon: <BarChart3 size={19} />, label: 'Team performance' }
+      { to: '/team-lead/performance', icon: <BarChart3 size={19} />, label: 'Team performance' },
+      { to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements', badge: unseenAnnouncements }
     );
   } else if (role === 'finance') {
     // Sep 12, 2026: /finance is no longer a four-status queue — it is Finance's

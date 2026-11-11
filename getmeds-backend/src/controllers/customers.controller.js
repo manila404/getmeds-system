@@ -963,6 +963,7 @@ const getPendingCustomer = async (req, res, next) => {
       ...details
     };
     const orders = await db.prepare('SELECT COUNT(*) AS n FROM orders WHERE customer_id = ?').get(held.id);
+    const docs = await db.prepare('SELECT id, file_name, file_size, content_type, created_at FROM customer_documents WHERE customer_id = ? ORDER BY id ASC').all(held.id);
     res.json({
       success: true,
       data: {
@@ -972,6 +973,7 @@ const getPendingCustomer = async (req, res, next) => {
         zoho_sync_error: held.zoho_sync_error,
         order_count: Number(orders?.n) || 0,
         details,
+        documents: docs || [],
         lacking: customerCreate.lackingDetails(details)
       }
     });

@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, CheckCircle2, AlertTriangle, Plus, X } from 
 import toast from 'react-hot-toast';
 import client from '../../api/client';
 import ManagerAccessTable from './ManagerAccessTable';
+import { roleLabel } from '../../constants/roles';
 
 /**
  * Accounts, by department — Sep 26, 2026.
@@ -212,7 +213,7 @@ const EditorDialog = ({ editor, users, onClose, onSaved }) => {
             <label htmlFor="ts-account" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">Account (optional)</label>
             <select id="ts-account" className={inputCls} value={userId} onChange={(e) => pickAccount(e.target.value)} disabled={saving} autoFocus>
               <option value="">No account (just a name)</option>
-              {options.map((u) => <option key={u.id} value={u.id}>{displayName(u)} · {String(u.role).replace('_', ' ')}</option>)}
+              {options.map((u) => <option key={u.id} value={u.id}>{displayName(u)} · {roleLabel(u.role)}</option>)}
             </select>
           </div>
           <div>
@@ -288,7 +289,7 @@ const HEADERS = ['Person', 'Role', 'Handles / limited to', 'Zoho territory', 'St
 // built from the channels above; the rest are simply everyone holding that role.
 const DEPTS = [
   { key: 'admin', title: 'Admin', sub: 'System administrators', roles: ['admin'] },
-  { key: 'ops', title: 'Operation Department', sub: 'Dispatch', roles: ['dispatch'] },
+  { key: 'ops', title: 'Operation Department', sub: 'Dispatch and Pharmacy', roles: ['dispatch'] },
   { key: 'finance', title: 'Finance Department', sub: 'Payment and account checks', roles: ['finance'] },
   { key: 'mgmt', title: 'Management (Approval)', sub: 'Approve orders', roles: ['management'] },
   { key: 'lead', title: 'Team Lead', sub: 'Lead a team of salespeople', roles: ['team_lead'] },
@@ -760,7 +761,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
     .filter((u) => d.roles.includes(String(u.role).toLowerCase()))
     .sort((a, b) => displayName(a).localeCompare(displayName(b)))
     .map((u) => ({
-      key: `d-${u.id}`, user: u, name: displayName(u), roleText: String(u.role).replace('_', ' '), zoho: u.salesperson || '', status: statusOf(u),
+      key: `d-${u.id}`, user: u, name: displayName(u), roleText: roleLabel(u.role), zoho: u.salesperson || '', status: statusOf(u),
       detail: d.key === 'mgmt'
         ? (approves.get(u.id) ? `Approves: ${approves.get(u.id).join(', ')}` : '')
         : d.key === 'lead' ? `${membersOf(u.id)} team member${membersOf(u.id) === 1 ? '' : 's'}${sharedNote(u.id)}` : '',

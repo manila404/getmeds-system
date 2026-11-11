@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { formatPHT } from '../../utils/dateUtils';
+import { roleLabel } from '../../constants/roles';
 
 const roleBadgeStyles = {
   medrep: 'bg-getmeds-blue/10 text-getmeds-blue-dark border-getmeds-blue/30',
@@ -402,7 +403,7 @@ const Topbar = ({ onToggleSidebar }) => {
               </span>
               <div className="hidden sm:flex items-center gap-1.5 mt-0.5">
                 <span className={`inline-flex items-center px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-bold uppercase tracking-wider border ${roleBadgeStyle}`}>
-                  {user?.role}
+                  {roleLabel(user?.role)}
                 </span>
               </div>
             </div>
@@ -419,7 +420,7 @@ const Topbar = ({ onToggleSidebar }) => {
                 <p className="text-xs text-ink-secondary truncate">{user?.email}</p>
                 <div className="mt-1 sm:hidden">
                   <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider border ${roleBadgeStyle}`}>
-                    {user?.role}
+                    {roleLabel(user?.role)}
                   </span>
                 </div>
               </div>

@@ -58,12 +58,15 @@ router.patch('/:id/pending', requireAuth, requireRole('admin', 'management'), c.
 // Sep 24, 2026: the Clients Directory's detail modal — the customer read live
 // from Zoho, plus its documents (up to 10, 10 MB each). See
 // controllers/customerDetails.controller.js.
+// Nov 11, 2026: docAccess widened to include medrep and team_lead so mandatory
+// documents (BIR 2303, LTO PERMIT, BUS. PERMIT) can be uploaded upon customer creation.
 const details = require('../controllers/customerDetails.controller');
 const detailsAccess = [requireAuth, requireRole('admin', 'management')];
+const docAccess = [requireAuth, requireRole('medrep', 'team_lead', 'admin', 'management')];
 router.get('/:id/details', ...detailsAccess, details.getDetails);
-router.post('/:id/documents/upload-url', ...detailsAccess, details.getUploadUrl);
-router.post('/:id/documents', ...detailsAccess, details.attachDocument);
-router.get('/:id/documents/:docId/url', ...detailsAccess, details.getDocumentUrl);
+router.post('/:id/documents/upload-url', ...docAccess, details.getUploadUrl);
+router.post('/:id/documents', ...docAccess, details.attachDocument);
+router.get('/:id/documents/:docId/url', ...docAccess, details.getDocumentUrl);
 router.delete('/:id/documents/:docId', ...detailsAccess, details.deleteDocument);
 
 // One grouped local query for the Clients Directory's KPI cards

@@ -13,7 +13,9 @@
 export const ROLES = [
   { value: 'medrep',     label: 'MedRep',     can: 'Raises orders and sees their own.' },
   { value: 'finance',    label: 'Finance',    can: 'Sees every order; confirms customer accounts.' },
-  { value: 'dispatch',   label: 'Dispatch',   can: 'Sees the dispatch queue and records shipments.' },
+  // Oct 24, 2026: shown as "Operation" (Dispatch and Pharmacy). Only the label changed: the stored
+  // value stays 'dispatch', so permissions, routes and the database are untouched.
+  { value: 'dispatch',   label: 'Operation',  can: 'Sees the dispatch queue and records shipments.' },
   { value: 'management', label: 'Management', can: 'Sees every order and approves what MedReps raise.' },
   { value: 'admin',      label: 'Admin',      can: 'Full access, including this Users screen.' },
   { value: 'team_lead',  label: 'Team Lead',  can: 'Sees the orders of whichever MedReps report to them, and can raise orders for themselves or for their team.' },

@@ -56,20 +56,28 @@ const MATCH_LABEL = {
 
 // Sep 29, 2026: per-type required fields. Patient/Doctor are Zoho Individuals;
 // Hospital/Distributor are Zoho Business contacts.
-// Oct 8, 2026: email, TIN and the license fields are no longer required. Left out, the
-// customer is saved and held for Management to review (push as new, link, or delete)
-// before it goes to Zoho. Mirrors lackingDetails() in customerCreateService.js.
+// Nov 11, 2026: for Hospital, BIR 2303, LTO PERMIT, BUS. PERMIT and all license/TIN
+// fields are mandatory upon creation. Restricted if no docs or details provided.
 const TYPE_REQUIRED = {
   patient:     ['first_name', 'last_name', 'phone'],
   doctor:      ['first_name', 'last_name', 'phone'],
-  hospital:    ['display_name', 'phone'],
+  hospital:    [
+    'display_name',
+    'phone',
+    'tin',
+    'license_owner',
+    'lto_license_number',
+    'lto_type',
+    'license_issuance_date',
+    'license_expiry_date'
+  ],
   distributor: ['display_name', 'phone'],
 };
 const LACKABLE_BUSINESS = [
   ['email', 'Email'], ['tin', 'TIN'], ['license_owner', 'License Owner'], ['lto_license_number', 'LTO Number'],
   ['lto_type', 'LTO Type'], ['license_issuance_date', 'License Issuance Date'], ['license_expiry_date', 'License Expiry Date'],
 ];
-const LACKABLE = { doctor: [['email', 'Email']], hospital: LACKABLE_BUSINESS, distributor: LACKABLE_BUSINESS };
+const LACKABLE = { doctor: [['email', 'Email']], hospital: [['email', 'Email']], distributor: LACKABLE_BUSINESS };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Oct 10, 2026: "n/a", "none", "-" typed for a customer with no email counts as blank (the
 // customer then goes to Management review) instead of being refused as "not an email".
@@ -88,7 +96,7 @@ const SUB_TYPE = { patient: 'individual', doctor: 'individual', hospital: 'busin
 const CATEGORIES = [
   { value: 'patient',     label: 'Patient',             hint: 'Individual — first & last name required. Maps to Zoho Individual.' },
   { value: 'doctor',      label: 'Doctor',              hint: 'Individual — "Dr." salutation pre-filled; email and hospital name optional. Maps to Zoho Individual.' },
-  { value: 'hospital',    label: 'Hospital',            hint: 'Business — all license fields required. Orders will ask for a GL Number, receiver type, and four attachments.' },
+  { value: 'hospital',    label: 'Hospital',            hint: 'Business — BIR 2303, LTO PERMIT, BUS. PERMIT and all license/TIN details are mandatory upon creation.' },
   { value: 'distributor', label: 'Distributor',         hint: 'Business — all license fields required. Maps to Zoho Business.' },
 ];
 
@@ -116,27 +124,55 @@ const Section = ({ icon: Icon, title, children }) => (
   </div>
 );
 
-const FileField = ({ label, file, onChange, required }) => (
-  <div>
-    <label className="block text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-1">
-      {label}{required && <span className="text-state-error ml-0.5">*</span>}
-    </label>
-    <label className="flex items-center gap-2 cursor-pointer">
-      <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-dashed text-[12px] transition-colors ${
-        file ? 'border-getmeds-blue bg-blue-50 text-getmeds-blue' : 'border-slate-300 bg-white text-ink-secondary hover:border-getmeds-blue hover:text-getmeds-blue'
-      }`}>
-        <FileText className="w-3.5 h-3.5 shrink-0" />
-        {file ? <span className="font-medium truncate max-w-[140px]">{file.name}</span> : <span>Choose file…</span>}
-      </span>
-      <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => onChange(e.target.files?.[0] || null)} />
-      {file && (
-        <button type="button" onClick={() => onChange(null)} className="text-slate-400 hover:text-state-error">
-          <X className="w-3.5 h-3.5" />
-        </button>
-      )}
-    </label>
-  </div>
-);
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+const ALLOWED_MIME = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+
+const FileField = ({ label, file, onChange, required, help = 'PDF or image (max 10MB)' }) => {
+  const handleFile = (e) => {
+    const selected = e.target.files?.[0];
+    e.target.value = '';
+    if (!selected) return;
+    if (selected.size > MAX_FILE_BYTES) {
+      toast.error(`${label}: File is ${(selected.size / (1024 * 1024)).toFixed(1)} MB (exceeds 10 MB limit)`);
+      return;
+    }
+    if (selected.size === 0) {
+      toast.error(`${label}: File is empty`);
+      return;
+    }
+    const ext = selected.name.split('.').pop()?.toLowerCase();
+    const validExt = ['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(ext);
+    if (!validExt && !ALLOWED_MIME.includes(selected.type)) {
+      toast.error(`${label}: Please upload a PDF or image (JPG, PNG)`);
+      return;
+    }
+    onChange(selected);
+  };
+
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-1">
+        {label}{required && <span className="text-state-error ml-0.5">*</span>}
+      </label>
+      <label className="flex items-center gap-2 cursor-pointer">
+        <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-dashed text-[12px] transition-colors ${
+          file ? 'border-getmeds-blue bg-blue-50 text-getmeds-blue' : 'border-slate-300 bg-white text-ink-secondary hover:border-getmeds-blue hover:text-getmeds-blue'
+        }`}>
+          <FileText className="w-3.5 h-3.5 shrink-0" />
+          {file ? <span className="font-medium truncate max-w-[140px]" title={file.name}>{file.name}</span> : <span>Choose file…</span>}
+        </span>
+        <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png,.webp" onChange={handleFile} />
+        {file && (
+          <button type="button" onClick={(e) => { e.preventDefault(); onChange(null); }} className="text-slate-400 hover:text-state-error" title="Remove file">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </label>
+      {help && !file && <p className="mt-1 text-[10px] text-ink-secondary">{help}</p>}
+      {file && <p className="mt-1 text-[10px] text-emerald-600 font-medium">✓ {(file.size / 1024).toFixed(0)} KB attached</p>}
+    </div>
+  );
+};
 
 const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   const [form, setForm] = useState({
@@ -164,6 +200,8 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   const [ltoFile, setLtoFile] = useState(null);
   const [birFile, setBirFile] = useState(null);
   const [mayorsPermitFile, setMayorsPermitFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState('');
   const [duplicates, setDuplicates] = useState(null);
   // Sep 18, 2026: what the fuzzy pre-check found — null until checked, []
   // once checked clean. Kept separate from `duplicates` (the EXACT-match
@@ -192,6 +230,7 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   // Oct 8, 2026: quick-fill for mock testing. import.meta.env.DEV is true only under the
   // local `npm run dev` server; the production build (Vercel) drops this and the buttons.
   // A fresh name and phone each time, so the duplicate check does not trip on the last test.
+  // Nov 11, 2026: sets mock test files for Hospital when complete is true, and clears when false.
   const devFill = (complete) => {
     const n = String(Date.now()).slice(-6);
     const phone = `+63917${n}${Math.floor(Math.random() * 10)}`;
@@ -213,6 +252,16 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
       license_expiry_date: business && complete ? '2027-12-31' : '',
       billing_address: { ...f.billing_address, address: `${n} Test Street`, city: 'Manila' }
     }));
+    if (complete && cat === 'hospital') {
+      const dummyFile = (filename) => new File(['%PDF-1.4 dummy content'], filename, { type: 'application/pdf' });
+      setBirFile(dummyFile(`BIR_2303_${n}.pdf`));
+      setLtoFile(dummyFile(`LTO_PERMIT_${n}.pdf`));
+      setMayorsPermitFile(dummyFile(`BUS_PERMIT_${n}.pdf`));
+    } else if (!complete && cat === 'hospital') {
+      setBirFile(null);
+      setLtoFile(null);
+      setMayorsPermitFile(null);
+    }
   };
 
   // Auto-fill display_name / salutation / license_owner from name fields
@@ -287,7 +336,13 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
   const billingOk = !!form.billing_address.address.trim();
   const shippingOk = sameAsBilling || !!form.shipping_address.address.trim();
   const checking = checkMutation.isPending;
-  const canSubmit = missing.length === 0 && displayNameOk && billingOk && shippingOk && !create.isPending && !checking;
+
+  // Nov 11, 2026: Hospital creation requires BIR 2303, LTO PERMIT, BUS. PERMIT and all license/TIN details.
+  const isHospital = form.category === 'hospital';
+  const hospitalDocsMissing = isHospital && (!birFile || !ltoFile || !mayorsPermitFile);
+  const hospitalRestricted = isHospital && (hospitalDocsMissing || missing.length > 0);
+
+  const canSubmit = missing.length === 0 && displayNameOk && billingOk && shippingOk && !hospitalRestricted && !create.isPending && !checking && !uploading;
   const emailRaw = String(form.email || '').trim();
   const emailTyped = NO_EMAIL_RE.test(emailRaw) ? '' : emailRaw;
   const emailBad = !!emailTyped && !EMAIL_RE.test(emailTyped);
@@ -295,24 +350,87 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
     .filter(([k]) => (k === 'email' ? !EMAIL_RE.test(emailTyped) : !String(form[k] || '').trim()))
     .map(([, label]) => label);
 
-  const doCreate = () => {
+  const doCreate = async () => {
     const phone = form.phone;
-    create.mutate({
-      ...form,
-      email: emailTyped,
-      contact_number: phone, // Zoho cf_contact_number — always required in this org
-      customer_sub_type: SUB_TYPE[form.category] || 'business',
-      is_doctor: form.category === 'doctor',
-      billing_address:  { ...form.billing_address,  phone: form.billing_address.phone  || phone },
-      shipping_address: { ...form.shipping_address, phone: form.shipping_address.phone || phone },
-      shipping_same_as_billing: sameAsBilling,
-    });
+    try {
+      const res = await create.mutateAsync({
+        ...form,
+        email: emailTyped,
+        contact_number: phone, // Zoho cf_contact_number — always required in this org
+        customer_sub_type: SUB_TYPE[form.category] || 'business',
+        is_doctor: form.category === 'doctor',
+        billing_address:  { ...form.billing_address,  phone: form.billing_address.phone  || phone },
+        shipping_address: { ...form.shipping_address, phone: form.shipping_address.phone || phone },
+        shipping_same_as_billing: sameAsBilling,
+      });
+
+      const customer = res.data?.customer;
+      const customerId = customer?.id;
+
+      // Upload documents if provided (mandatory for hospital, optional for distributor)
+      const docsToUpload = [];
+      if (birFile) docsToUpload.push({ file: birFile, label: 'BIR 2303' });
+      if (ltoFile) docsToUpload.push({ file: ltoFile, label: 'LTO PERMIT' });
+      if (mayorsPermitFile) docsToUpload.push({ file: mayorsPermitFile, label: 'BUS. PERMIT' });
+
+      if (customerId && docsToUpload.length > 0) {
+        setUploading(true);
+        const uploadedList = [];
+        for (const doc of docsToUpload) {
+          setUploadStatus(`Uploading ${doc.label}...`);
+          try {
+            const fileName = `[${doc.label}] ${doc.file.name}`;
+            const meta = {
+              file_name: fileName,
+              content_type: doc.file.type || 'application/pdf',
+              file_size: doc.file.size || 1024,
+            };
+            const { data: step1 } = await client.post(`/api/customers/${customerId}/documents/upload-url`, meta);
+            const { signedUrl, storagePath } = step1.data;
+            const put = await fetch(signedUrl, {
+              method: 'PUT',
+              headers: { 'content-type': meta.content_type },
+              body: doc.file,
+            });
+            if (!put.ok) throw new Error(`Upload of ${doc.label} failed (${put.status})`);
+            await client.post(`/api/customers/${customerId}/documents`, {
+              ...meta,
+              storage_path: storagePath,
+            });
+            uploadedList.push(doc.label);
+          } catch (uploadErr) {
+            console.error(`Failed to upload ${doc.label}:`, uploadErr);
+            toast.error(`Customer created, but failed to upload ${doc.label}: ${uploadErr.message}`);
+          }
+        }
+        setUploading(false);
+        setUploadStatus('');
+        if (uploadedList.length > 0) {
+          setOutcome((prev) => (prev ? { ...prev, uploadedDocs: uploadedList } : prev));
+        }
+      }
+    } catch (_) {
+      setUploading(false);
+      setUploadStatus('');
+    }
   };
 
   const submit = async (e) => {
     // Called from a click now rather than a form submission, but guarded so it
     // still behaves if it is ever wired to one again.
     if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (isHospital && hospitalRestricted) {
+      if (hospitalDocsMissing) {
+        const missingDocs = [];
+        if (!birFile) missingDocs.push('BIR 2303');
+        if (!ltoFile) missingDocs.push('LTO PERMIT');
+        if (!mayorsPermitFile) missingDocs.push('BUS. PERMIT');
+        toast.error(`Hospital creation restricted: ${missingDocs.join(', ')} required.`);
+      } else {
+        toast.error('Hospital creation restricted: All registration & license details are mandatory.');
+      }
+      return;
+    }
     if (!canSubmit) return;
     setDuplicates(null);
     setBlocked(null);
@@ -520,6 +638,15 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
               </>
             )}
 
+            {outcome.uploadedDocs?.length > 0 && (
+              <div className="mt-3 p-2.5 rounded-md bg-blue-50 border border-blue-200 text-[12px] text-blue-900 flex items-center gap-2">
+                <FileText className="w-4 h-4 text-getmeds-blue shrink-0" />
+                <span>
+                  <strong>Documents attached:</strong> {outcome.uploadedDocs.join(', ')}
+                </span>
+              </div>
+            )}
+
             <div className="flex justify-end mt-6">
               <button
                 type="button"
@@ -691,56 +818,94 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 </div>
               </div>
 
-              {/* Additional Info — Oct 8, 2026: not required; anything left out is reviewed by Management */}
+              {/* Registration & License Details */}
               <div className="mt-4 border-t border-slate-100 pt-3">
                 <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">
-                  Additional Info <span className="font-normal normal-case">(fill in all you have — anything missing is reviewed by Management before Zoho)</span>
+                  {isHospital ? (
+                    <span className="flex items-center gap-1.5 text-ink-primary font-bold">
+                      <span>Mandatory Hospital Registration & License Details</span>
+                      <span className="text-state-error text-xs font-semibold">*</span>
+                    </span>
+                  ) : (
+                    <span>
+                      Additional Info <span className="font-normal normal-case">(fill in all you have — anything missing is reviewed by Management before Zoho)</span>
+                    </span>
+                  )}
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <Field label="TIN">
+                  <Field label="TIN" required={isHospital}>
                     <input className={input} value={form.tin} onChange={(e) => set('tin', e.target.value)} />
                   </Field>
-                  <Field label="License Owner" help="Auto-filled from contact name. Edit if needed.">
+                  <Field label="License Owner" required={isHospital} help="Auto-filled from contact name. Edit if needed.">
                     <input className={input} value={form.license_owner} onChange={(e) => set('license_owner', e.target.value)} />
                   </Field>
-                  <Field label="LTO Number" help="Unique in Zoho.">
+                  <Field label="LTO Number" required={isHospital} help="Unique in Zoho.">
                     <input className={input} value={form.lto_license_number} onChange={(e) => set('lto_license_number', e.target.value)} />
                   </Field>
-                  <Field label="LTO Type">
+                  <Field label="LTO Type" required={isHospital}>
                     <input className={input} value={form.lto_type} onChange={(e) => set('lto_type', e.target.value)} />
                   </Field>
-                  <Field label="License Issuance Date">
+                  <Field label="License Issuance Date" required={isHospital}>
                     <input type="date" className={input} value={form.license_issuance_date} onChange={(e) => set('license_issuance_date', e.target.value)} />
                   </Field>
-                  <Field label="License Expiry Date">
+                  <Field label="License Expiry Date" required={isHospital}>
                     <input type="date" className={input} value={form.license_expiry_date} onChange={(e) => set('license_expiry_date', e.target.value)} />
                   </Field>
                 </div>
 
                 {/* Document uploads */}
-                <div className="mt-3">
-                  <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">Please Upload</p>
+                <div className="mt-4 border-t border-slate-100 pt-3">
+                  <p className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">
+                    {isHospital ? (
+                      <span className="flex items-center gap-1.5 text-ink-primary font-bold">
+                        <span>Mandatory Documents</span>
+                        <span className="text-state-error text-xs font-semibold">(All 3 required for Hospital)</span>
+                      </span>
+                    ) : (
+                      'Please Upload'
+                    )}
+                  </p>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <FileField label="LTO Attachment" file={ltoFile} onChange={setLtoFile} />
-                    <FileField label="BIR" file={birFile} onChange={setBirFile} />
-                    <FileField label="Mayor's Permit" file={mayorsPermitFile} onChange={setMayorsPermitFile} />
+                    <FileField label="BIR 2303" file={birFile} onChange={setBirFile} required={isHospital} />
+                    <FileField label="LTO PERMIT" file={ltoFile} onChange={setLtoFile} required={isHospital} />
+                    <FileField label="BUS. PERMIT" file={mayorsPermitFile} onChange={setMayorsPermitFile} required={isHospital} />
                   </div>
-                </div>
 
-                {/* Follow-up checkbox — only visible when any doc is missing */}
-                {(!ltoFile || !birFile || !mayorsPermitFile) && (
-                  <label className="inline-flex items-start gap-2 mt-3 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={form.follow_up_docs}
-                      onChange={(e) => set('follow_up_docs', e.target.checked)}
-                      className="mt-0.5 rounded text-getmeds-blue focus:ring-getmeds-blue"
-                    />
-                    <span className="text-[12px] text-ink-secondary">
-                      I'll follow up on the missing documents — <span className="text-amber-700">submit anyway</span>
-                    </span>
-                  </label>
-                )}
+                  {/* Follow-up checkbox — only for distributor, NEVER for hospital */}
+                  {!isHospital && (!ltoFile || !birFile || !mayorsPermitFile) && (
+                    <label className="inline-flex items-start gap-2 mt-3 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={form.follow_up_docs}
+                        onChange={(e) => set('follow_up_docs', e.target.checked)}
+                        className="mt-0.5 rounded text-getmeds-blue focus:ring-getmeds-blue"
+                      />
+                      <span className="text-[12px] text-ink-secondary">
+                        I'll follow up on the missing documents — <span className="text-amber-700">submit anyway</span>
+                      </span>
+                    </label>
+                  )}
+
+                  {/* Restriction banner for Hospital when missing docs or details */}
+                  {isHospital && hospitalRestricted && (
+                    <div className="mt-3 p-3 rounded-lg border border-red-300 bg-red-50 text-[12px] text-red-900">
+                      <div className="flex items-center gap-2 font-semibold text-red-800 mb-1">
+                        <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                        Hospital Creation Restricted
+                      </div>
+                      <p className="text-red-700">
+                        BIR 2303, LTO PERMIT, BUS. PERMIT documents and all registration/license details (TIN, LTO Number, LTO Type, License Owner, Issuance & Expiry Dates) are mandatory upon creation of a new Hospital.
+                      </p>
+                      {hospitalDocsMissing && (
+                        <ul className="mt-1.5 list-disc list-inside text-red-700 space-y-0.5 text-[11px]">
+                          {!birFile && <li>Missing document: <strong>BIR 2303</strong></li>}
+                          {!ltoFile && <li>Missing document: <strong>LTO PERMIT</strong></li>}
+                          {!mayorsPermitFile && <li>Missing document: <strong>BUS. PERMIT</strong></li>}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </Section>
           )}
@@ -791,7 +956,12 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
               "{emailTyped}" is not an email address. Type the customer's real email, or leave it blank if they have none.
             </p>
           )}
-          {lacking.length > 0 && !emailBad && (
+          {isHospital && hospitalRestricted && (
+            <p className="mt-4 text-[12px] text-red-800 bg-red-50 border border-red-200 rounded px-3 py-2">
+              <strong>Hospital creation restricted:</strong> Provide all mandatory documents (BIR 2303, LTO PERMIT, BUS. PERMIT) and license details to create this hospital.
+            </p>
+          )}
+          {!isHospital && lacking.length > 0 && !emailBad && (
             <p className="mt-4 text-[12px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-3 py-2">
               <strong>Missing: {lacking.join(', ')}.</strong> You can still create this customer and raise the order,
               but it goes to Management for review before it reaches Zoho. Fill in what you have.
@@ -815,8 +985,8 @@ const NewCustomerModal = ({ initialName = '', onClose, onCreated }) => {
                 disabled={!canSubmit || emailBad}
                 className="px-4 py-2 rounded-md bg-getmeds-blue text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {create.isPending ? (
-                  <><Loader2 className="w-4 h-4 animate-spin" />Creating in Zoho…</>
+                {create.isPending || uploading ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" />{uploadStatus || 'Creating in Zoho…'}</>
                 ) : checking ? (
                   <><Loader2 className="w-4 h-4 animate-spin" />Checking for duplicates…</>
                 ) : (

@@ -1,6 +1,7 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import client from '../api/client';
 import toast from 'react-hot-toast';
+import { roleLabel } from '../constants/roles';
 
 export const AuthContext = createContext();
 
@@ -91,7 +92,7 @@ export const AuthProvider = ({ children }) => {
 
           // Said out loud: the navigation and the pages available are about to
           // change, and without this it reads as the app breaking.
-          toast(`Your role is now ${fresh.role}. What you can see has changed.`, {
+          toast(`Your role is now ${roleLabel(fresh.role)}. What you can see has changed.`, {
             icon: '🔑',
             duration: 6000,
           });

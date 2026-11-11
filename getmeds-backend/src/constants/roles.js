@@ -16,7 +16,7 @@ const ROLES = ['medrep', 'finance', 'dispatch', 'management', 'admin', 'team_lea
 const ROLE_LABELS = {
   medrep: 'MedRep',
   finance: 'Finance',
-  dispatch: 'Dispatch',
+  dispatch: 'Operation', // Oct 24, 2026: label only; the stored value stays 'dispatch'
   management: 'Management',
   admin: 'Admin',
   team_lead: 'Team Lead',
