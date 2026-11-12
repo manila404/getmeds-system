@@ -9,6 +9,7 @@ import {
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
 import ClientDetailsModal from '../../components/clients/ClientDetailsModal';
 import { useSyncJobs } from '../../context/SyncJobsContext';
+import { useAuth } from '../../hooks/useAuth';
 import toast from 'react-hot-toast';
 import {
   Users,
@@ -103,6 +104,17 @@ const TinCell = ({ customer, onSave, saving }) => {
 // verification) — that behavior is untouched by this page.
 const ClientsPage = () => {
   const qc = useQueryClient();
+  // Nov 12, 2026: MedReps and Team Leads get this page read-only. Everything that writes
+  // (sync, category, TIN, the details modal) and everything that exposes Zoho internals (TIN,
+  // source, Zoho id, the KPI counts) is hidden for them here, and the server withholds the same
+  // fields regardless (customers.controller.js's SALES_VISIBLE_FIELDS), so this is presentation
+  // and not the safeguard.
+  const { user } = useAuth();
+  const viewerRole = (user?.role || '').toLowerCase();
+  const readOnly = !['admin', 'management'].includes(viewerRole);
+  // 'mine' = clients on orders in the viewer's own scope; they land on it first.
+  const [scope, setScope] = useState(readOnly ? 'mine' : 'all');
+  const mineOnly = readOnly && scope === 'mine';
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [isSuggestOpen, setIsSuggestOpen] = useState(false);
@@ -142,7 +154,7 @@ const ClientsPage = () => {
   }, []);
 
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['clients', page, search, categoryFilter, typeFilter, statusFilter],
+    queryKey: ['clients', page, search, categoryFilter, typeFilter, statusFilter, mineOnly],
     queryFn: () =>
       fetchClients({
         page,
@@ -150,7 +162,8 @@ const ClientsPage = () => {
         search: search || undefined,
         category: categoryFilter || undefined,
         type: typeFilter || undefined,
-        status: statusFilter || undefined
+        status: statusFilter || undefined,
+        mine: mineOnly ? 1 : undefined
       }),
     keepPreviousData: true
   });
@@ -161,7 +174,7 @@ const ClientsPage = () => {
   // browser just to suggest a few names.
   const showSuggestions = isSuggestOpen && search.length >= 2;
   const { data: suggestData, isFetching: isSuggestFetching } = useQuery({
-    queryKey: ['clients-suggest', search, categoryFilter, typeFilter, statusFilter],
+    queryKey: ['clients-suggest', search, categoryFilter, typeFilter, statusFilter, mineOnly],
     queryFn: () =>
       fetchClients({
         page: 1,
@@ -169,7 +182,8 @@ const ClientsPage = () => {
         search,
         category: categoryFilter || undefined,
         type: typeFilter || undefined,
-        status: statusFilter || undefined
+        status: statusFilter || undefined,
+        mine: mineOnly ? 1 : undefined
       }),
     enabled: showSuggestions,
     keepPreviousData: true
@@ -179,7 +193,8 @@ const ClientsPage = () => {
   // `?limit=1` round trips — same numbers, a quarter of the network calls.
   const { data: statsData } = useQuery({
     queryKey: ['clients-stats'],
-    queryFn: fetchClientStats
+    queryFn: fetchClientStats,
+    enabled: !readOnly
   });
 
   // Aug 28, 2026: replaced the old single blocking "Sync All Clients from
@@ -278,6 +293,11 @@ const ClientsPage = () => {
     setPage(1);
   };
 
+  const handleScopeChange = (next) => {
+    setScope(next);
+    setPage(1);
+  };
+
   const handleStatusFilterChange = (e) => {
     setStatusFilter(e.target.value);
     setPage(1);
@@ -310,8 +330,9 @@ const ClientsPage = () => {
             <div>
               <h1 className="text-xl font-semibold text-ink-primary">Clients Directory</h1>
               <p className="text-xs text-ink-secondary mt-0.5">
-                Every registered client, its Credit/Direct payment type, and its local classification.
-                Category tags are local-only and never sent to Zoho.
+                {readOnly
+                  ? 'Look up a client before raising an order. Read-only.'
+                  : 'Every registered client, its Credit/Direct payment type, and its local classification. Category tags are local-only and never sent to Zoho.'}
               </p>
             </div>
           </div>
@@ -327,6 +348,8 @@ const ClientsPage = () => {
                 Refresh
               </button>
 
+              {!readOnly && (
+                <>
               <button
                 onClick={() => startSync('customers', 'quick')}
                 disabled={syncBusy}
@@ -346,13 +369,16 @@ const ClientsPage = () => {
                 <DownloadCloud size={15} />
                 Full Resync
               </button>
+                </>
+              )}
             </div>
-            <SyncProgressIndicator job={syncJob} />
+            {!readOnly && <SyncProgressIndicator job={syncJob} />}
           </div>
         </div>
       </div>
 
-      {/* KPI Cards */}
+      {/* KPI Cards (Management/Admin only) */}
+      {!readOnly && (
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 block">Total Clients</span>
@@ -386,10 +412,27 @@ const ClientsPage = () => {
           </div>
         </div>
       </div>
+      )}
 
       {/* Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-slate-50/50">
+          {readOnly && (
+            <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-xs font-semibold self-start">
+              {[['mine', 'My customers'], ['all', 'All customers']].map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handleScopeChange(key)}
+                  className={`px-3 py-1.5 rounded-md transition-colors cursor-pointer ${
+                    scope === key ? 'bg-getmeds-blue text-white' : 'text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="relative flex-1 max-w-md" ref={searchContainerRef}>
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -480,6 +523,7 @@ const ClientsPage = () => {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {!readOnly && (
             <select
               value={statusFilter}
               onChange={handleStatusFilterChange}
@@ -490,6 +534,7 @@ const ClientsPage = () => {
               <option value="inactive">Inactive{stats.inactive ? ` (${stats.inactive})` : ''}</option>
               <option value="all">All statuses</option>
             </select>
+            )}
 
             <select
               value={typeFilter}
@@ -537,23 +582,30 @@ const ClientsPage = () => {
                 <th className="py-3 px-4">Category</th>
                 <th className="py-3 px-4">Contact</th>
                 <th className="py-3 px-4">Address</th>
-                <th className="py-3 px-4">TIN</th>
-                <th className="py-3 px-4">Source</th>
-                <th className="py-3 px-4">Zoho Contact ID</th>
+                {!readOnly && <th className="py-3 px-4">TIN</th>}
+                {!readOnly && <th className="py-3 px-4">Source</th>}
+                {!readOnly && <th className="py-3 px-4">Zoho Contact ID</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium">
               {isLoading ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-400">
+                  <td colSpan={readOnly ? 5 : 8} className="py-8 text-center text-slate-400">
                     <RefreshCw size={20} className="animate-spin mx-auto mb-2 text-getmeds-blue" />
                     Loading clients...
                   </td>
                 </tr>
               ) : clients.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-400">
-                    No clients found. Try a Quick Sync or Full Resync above, or adjust your filters.
+                  <td colSpan={readOnly ? 5 : 8} className="py-8 text-center text-slate-400">
+                    {mineOnly ? (
+                      <>
+                        No customers on your orders yet.{' '}
+                        <button type="button" onClick={() => handleScopeChange('all')} className="font-semibold text-getmeds-blue hover:underline cursor-pointer">
+                          Browse all customers
+                        </button>
+                      </>
+                    ) : readOnly ? 'No clients found. Adjust your search or filters.' : 'No clients found. Try a Quick Sync or Full Resync above, or adjust your filters.'}
                   </td>
                 </tr>
               ) : (
@@ -566,16 +618,20 @@ const ClientsPage = () => {
                     // Sep 24, 2026: the row opens the Client Details modal. The
                     // category picker and TIN box are editable in place, so
                     // their cells stop the click from also opening it.
-                    <tr key={cl.id} onClick={() => setDetailsClient(cl)} className="cursor-pointer hover:bg-slate-50/80 transition-colors">
+                    <tr key={cl.id} onClick={readOnly ? undefined : () => setDetailsClient(cl)} className={`hover:bg-slate-50/80 transition-colors ${readOnly ? '' : 'cursor-pointer'}`}>
                       <td className="py-3 px-4">
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); setDetailsClient(cl); }}
-                          title="Open client details"
-                          className={`text-left font-semibold hover:text-getmeds-blue ${cl.is_active === 0 ? 'text-slate-500' : 'text-slate-900'}`}
-                        >
-                          {cl.name}
-                        </button>
+                        {readOnly ? (
+                          <span className="text-left font-semibold text-slate-900">{cl.name}</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setDetailsClient(cl); }}
+                            title="Open client details"
+                            className={`text-left font-semibold hover:text-getmeds-blue ${cl.is_active === 0 ? 'text-slate-500' : 'text-slate-900'}`}
+                          >
+                            {cl.name}
+                          </button>
+                        )}
                         <div className="flex flex-wrap gap-1 mt-0.5">
                           {cl.is_test_customer ? (
                             <span className="text-[10px] font-bold text-amber-700 bg-amber-50 inline-block px-1.5 py-0.5 rounded">
@@ -616,6 +672,8 @@ const ClientsPage = () => {
                               <CategoryIcon size={11} /> {meta.label}
                             </span>
                           )}
+                          {readOnly && !meta && <span className="text-slate-400">—</span>}
+                          {!readOnly && (
                           <select
                             value={cl.category || ''}
                             onChange={(e) =>
@@ -632,6 +690,7 @@ const ClientsPage = () => {
                             <option value="pwd">PWD</option>
                             <option value="patient">Patient</option>
                           </select>
+                          )}
                         </div>
                       </td>
                       <td className="py-3 px-4 text-slate-700">
@@ -641,6 +700,8 @@ const ClientsPage = () => {
                       <td className="py-3 px-4 text-slate-600 max-w-xs truncate" title={cl.address || ''}>
                         {cl.address || <span className="text-slate-400">—</span>}
                       </td>
+                      {!readOnly && (
+                        <>
                       <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
                         <TinCell
                           customer={cl}
@@ -668,6 +729,8 @@ const ClientsPage = () => {
                           <span className="text-slate-400">—</span>
                         )}
                       </td>
+                        </>
+                      )}
                     </tr>
                   );
                 })
@@ -702,7 +765,7 @@ const ClientsPage = () => {
         )}
       </div>
 
-      {detailsClient && (
+      {!readOnly && detailsClient && (
         <ClientDetailsModal
           key={detailsClient.id}
           customerId={detailsClient.id}

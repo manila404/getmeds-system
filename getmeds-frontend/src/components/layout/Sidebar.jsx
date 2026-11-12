@@ -170,6 +170,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/orders/new', icon: <PlusCircle size={19} />, label: 'Create New Order', primaryAction: true },
       { to: '/medrep/dashboard', icon: <LayoutDashboard size={19} />, label: 'Dashboard' },
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Orders' },
+      // Nov 12, 2026: read-only directory, opens on the MedRep's own customers first.
+      { to: '/clients', icon: <Users size={19} />, label: 'Clients Directory' },
       // Sep 28, 2026: Dispatch's stock announcements — the badge is how many
       // this account has not acknowledged yet (StockAnnouncements.jsx).
       { to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements', badge: unseenAnnouncements }
@@ -179,7 +181,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
     // uses, scoped server-side to this account's assigned MedReps instead
     // of a division, and with nothing on it that writes anything. Nothing
     // else this role reaches: no Approval Queue, Exception Hub, Finance,
-    // Dispatch, Clients, or Inventory — see App.jsx's route table.
+    // Dispatch, or Inventory — see App.jsx's route table. (Nov 12, 2026: Clients Directory is
+    // now here, read-only.)
     // Sep 22, 2026: "Create New Order" added — a team lead can now raise
     // one for themselves or for their own team, same form everyone else
     // uses (see OrderForm.jsx's isRepChoosing). Everything else about this
@@ -189,6 +192,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/team-lead', icon: <LayoutDashboard size={19} />, label: 'My Team', exact: true },
       // Nov 9, 2026: each member's KPI and dashboard, view only.
       { to: '/team-lead/performance', icon: <BarChart3 size={19} />, label: 'Team performance' },
+      // Nov 12, 2026: read-only; "my customers" covers the lead's own and their team's orders.
+      { to: '/clients', icon: <Users size={19} />, label: 'Clients Directory' },
       { to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements', badge: unseenAnnouncements }
     );
   } else if (role === 'finance') {

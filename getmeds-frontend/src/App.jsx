@@ -321,6 +321,19 @@ function App() {
             }
           />
 
+          {/* Nov 12, 2026: the Clients Directory for MedReps and Team Leads. Same page as
+              /management/clients; it reads the viewer's role and drops every edit and sync
+              control for these two (ClientsPage.jsx's readOnly), and the server narrows the
+              data to match (customers.controller.js's SALES_VISIBLE_FIELDS). */}
+          <Route
+            path="/clients"
+            element={
+              <ProtectedRoute allowedRoles={['medrep', 'team_lead']}>
+                <ClientsPage />
+              </ProtectedRoute>
+            }
+          />
+
           {/* Admin Routes */}
           <Route
             path="/admin/users"

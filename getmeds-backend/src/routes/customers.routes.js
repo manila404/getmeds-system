@@ -8,7 +8,11 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 // one (if any) is the designated TEST customer. Not used by the MedRep
 // order form (that uses /api/orders/meta/customers instead), so it's safe
 // to restrict to admin/management.
-router.get('/', requireAuth, requireRole('admin', 'management'), c.getCustomersOverview);
+// Nov 12, 2026: MedReps and Team Leads can read the directory too (read-only). The controller
+// narrows what they get back: active clients only, no TIN / Zoho id / credit figures, and an
+// optional ?mine=1 that limits it to customers on orders in their own scope. Every write,
+// sync and detail route below stays admin/management.
+router.get('/', requireAuth, requireRole('medrep', 'team_lead', 'admin', 'management'), c.getCustomersOverview);
 
 // Sep 11, 2026: create a customer that does not exist in Zoho yet.
 //

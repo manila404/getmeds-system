@@ -6,12 +6,24 @@ const { getSyncState, setSyncState } = require('../services/syncState');
 const { setCustomerTin } = require('../services/customerTinService');
 const customerCreate = require('../services/customerCreateService');
 const customerZohoUpdate = require('../services/customerZohoUpdateService');
+const { teamScopeSql } = require('../services/teamScopeService');
 
 // Purely local classification tag for the Clients Directory (Aug 27, 2026).
 // Kept strictly separate from `type` (credit/direct), which continues to
 // drive payment-workflow routing unchanged — see schema.sql/migrate.js.
 const ALLOWED_CATEGORIES = ['doctor', 'hospital', 'distributor', 'pwd', 'patient'];
 const DEFAULT_PAGE_SIZE = 25;
+
+// Nov 12, 2026: what a MedRep or Team Lead may read about a client. An allow-list rather than
+// a deny-list so a column added to `customers` later is hidden from them until someone decides
+// otherwise. Left out on purpose: tin, zoho_contact_id, credit_limit, outstanding_receivable,
+// the pending-push payload and error, source, and last_synced_at.
+const SALES_VISIBLE_FIELDS = [
+  'id', 'name', 'type', 'category', 'contact_person', 'contact_number', 'address',
+  'email', 'is_active', 'is_test_customer'
+];
+const pickSalesFields = (row) =>
+  SALES_VISIBLE_FIELDS.reduce((out, k) => (k in row ? { ...out, [k]: row[k] } : out), {});
 
 /**
  * GET /api/customers
@@ -44,13 +56,32 @@ async function getCustomersOverview(req, res, next) {
     // `is_active` mirrors Zoho's own contact status (reconcileContacts
     // below); before that mirroring landed, every row read as active and
     // this filter would have had nothing to show.
-    const status = (req.query.status || 'active').trim().toLowerCase();
+    // Nov 12, 2026: MedReps and Team Leads get the directory read-only. They always see active
+    // clients only (the inactive filter is Management's cleanup tool, and an inactive client
+    // cannot go on a Sales Order anyway), and the row is cut down to what is needed to find and
+    // recognise a client — see SALES_VISIBLE_FIELDS.
+    const viewerRole = String((req.user && req.user.role) || '').toLowerCase();
+    const isSalesViewer = viewerRole === 'medrep' || viewerRole === 'team_lead';
+    const status = isSalesViewer ? 'active' : (req.query.status || 'active').trim().toLowerCase();
 
     const where = [];
     const params = [];
     if (status === 'active') where.push('is_active = 1');
     else if (status === 'inactive') where.push('is_active = 0');
     // 'all' adds no clause.
+
+    // ?mine=1 — "my customers": clients that appear on an order in the viewer's own scope. A
+    // customer has no owner column, so the order history is the tie. MedRep: orders they own or
+    // raised. Team Lead: their own plus their team's, via the same teamScopeSql the My Team
+    // dashboard uses, so the two screens can never disagree about whose orders count.
+    if (isSalesViewer && ['1', 'true'].includes(String(req.query.mine || '').toLowerCase())) {
+      const viewerId = req.user.id;
+      const scope = viewerRole === 'team_lead'
+        ? await teamScopeSql(viewerId, 'o')
+        : { sql: '(o.medrep_id = ? OR o.raised_by_id = ?)', params: [viewerId, viewerId] };
+      where.push(`id IN (SELECT o.customer_id FROM orders o WHERE ${scope.sql})`);
+      params.push(...scope.params);
+    }
 
     if (search) {
       where.push('((name LIKE ? OR contact_person LIKE ? OR contact_number LIKE ?) OR word_similarity(?, name) > 0.3)');
@@ -86,10 +117,10 @@ async function getCustomersOverview(req, res, next) {
     res.json({
       success: true,
       data: {
-        customers: customers.map((c) => ({
-          ...c,
-          is_test_customer: testZohoIds.includes(c.zoho_contact_id)
-        })),
+        customers: customers.map((c) => {
+          const row = { ...c, is_test_customer: testZohoIds.includes(c.zoho_contact_id) };
+          return isSalesViewer ? pickSalesFields(row) : row;
+        }),
         test_customer_gate_enabled: testZohoIds.length > 0,
         configured_test_zoho_contact_ids: testZohoIds,
         zoho_dry_run_enabled: isDryRunMode(),

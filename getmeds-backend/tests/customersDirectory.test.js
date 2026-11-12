@@ -39,11 +39,16 @@ describe('Customers — Clients Directory (pagination, filters, category)', () =
     }
   });
 
-  test('RBAC: MedRep cannot view the Clients Directory', async () => {
-    const res = await request(app)
-      .get('/api/customers')
-      .set('Authorization', `Bearer ${medrepToken}`);
-    expect(res.status).toBe(403);
+  // Nov 12, 2026: was 'MedRep cannot view the Clients Directory'. MedReps and Team Leads now read
+  // it (read-only, narrowed fields) — see the 'sales viewers' describe at the bottom. Roles that
+  // still have no business here are asserted below instead.
+  test('RBAC: Finance and Dispatch still cannot view the Clients Directory', async () => {
+    for (const email of ['finance@getmeds.ph', 'dispatch@getmeds.ph']) {
+      const login = await request(app).post('/api/auth/login').send({ email, password: 'demo123' });
+      if (login.status !== 200) continue; // seed account absent in this environment
+      const res = await request(app).get('/api/customers').set('Authorization', `Bearer ${login.body.data.token}`);
+      expect(res.status).toBe(403);
+    }
   });
 
   test('GET /api/customers defaults to 25 per page and reports pagination metadata', async () => {
@@ -213,5 +218,148 @@ describe('Customers — GET /api/customers/stats', () => {
       .get('/api/customers/stats')
       .set('Authorization', `Bearer ${medrepToken}`);
     expect(res.status).toBe(403);
+  });
+});
+
+
+/**
+ * Nov 12, 2026: MedReps and Team Leads read the Clients Directory, read-only.
+ *
+ * What must hold, and why each is asserted separately:
+ *  - they can list it (the feature),
+ *  - the row is cut down to the allow-list (a TIN or Zoho id leaking to a rep is silent: the
+ *    page looks fine and nobody notices until someone reads the network tab),
+ *  - ?mine=1 narrows to customers on orders in their scope (a MedRep: their own; a Team Lead:
+ *    their team's),
+ *  - every write and sync route stays closed to them.
+ */
+describe('Customers — Clients Directory for sales viewers (MedRep / Team Lead)', () => {
+  const created = { users: [], orders: [], customers: [] };
+  let medrepToken;
+  let medrepId;
+  let leadToken;
+  let outsiderToken;
+  let tiedId;
+  let otherId;
+  let teamTiedId;
+
+  const login = async (email) => {
+    const res = await request(app).post('/api/auth/login').send({ email, password: 'demo123' });
+    if (res.status !== 200) throw new Error(`Login failed for ${email}`);
+    return res.body.data.token;
+  };
+  const makeUser = async (role, email, name, teamLeadId = null) => {
+    const seed = await db.prepare("SELECT password_hash FROM users WHERE email = 'admin@getmeds.ph'").get();
+    const info = await db
+      .prepare(
+        `INSERT INTO users (name, email, password_hash, role, is_active, created_at, approval_status, team_lead_id)
+         VALUES (?, ?, ?, ?, 1, ?, 'approved', ?)`
+      )
+      .run(name, email, seed.password_hash, role, new Date().toISOString(), teamLeadId);
+    created.users.push(info.lastInsertRowid);
+    return info.lastInsertRowid;
+  };
+  const makeCustomer = async (name) => {
+    const info = await db
+      .prepare(
+        `INSERT INTO customers (name, type, contact_person, contact_number, source, is_active, tin, zoho_contact_id, credit_limit)
+         VALUES (?, 'direct', 'Contact', '09171234567', 'zoho', 1, 'TIN-SECRET-123', ?, 5000)`
+      )
+      .run(name, `ZOHO-SECRET-ID-${name.replace(/\s+/g, '-')}`);
+    created.customers.push(info.lastInsertRowid);
+    return info.lastInsertRowid;
+  };
+  const plantOrder = async (key, customerId, medrepId) => {
+    const now = new Date().toISOString();
+    const info = await db
+      .prepare(
+        `INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, raised_by_id, status, customer_type,
+                             total_amount, delivery_address, delivery_notes, zoho_sync_status, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, 'pending_management_approval', 'direct', 100, 'Dir Test St', 'n', 'pending', ?, ?)`
+      )
+      .run(`GM-DIRVIEW-${key}`, customerId, medrepId, now, now);
+    created.orders.push(info.lastInsertRowid);
+  };
+
+  beforeAll(async () => {
+    medrepToken = await login('medrep@getmeds.ph');
+    medrepId = (await db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get()).id;
+
+    const leadId = await makeUser('team_lead', 'dirview.lead@getmeds.ph', 'Dir View Lead');
+    const memberId = await makeUser('medrep', 'dirview.member@getmeds.ph', 'Dir View Member', leadId);
+    await makeUser('medrep', 'dirview.outsider@getmeds.ph', 'Dir View Outsider');
+    leadToken = await login('dirview.lead@getmeds.ph');
+    outsiderToken = await login('dirview.outsider@getmeds.ph');
+
+    tiedId = await makeCustomer('DirView Tied Pharmacy');
+    otherId = await makeCustomer('DirView Untied Pharmacy');
+    teamTiedId = await makeCustomer('DirView Team Pharmacy');
+    await plantOrder('own', tiedId, medrepId);
+    await plantOrder('team', teamTiedId, memberId);
+  });
+
+  afterAll(async () => {
+    for (const id of created.orders) await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+    for (const id of created.customers) await db.prepare('DELETE FROM customers WHERE id = ?').run(id);
+    // Newest first: members point at the lead through team_lead_id, so they go before it.
+    for (const id of [...created.users].reverse()) await db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  });
+
+  test('a MedRep can list the directory', async () => {
+    const res = await request(app).get('/api/customers?search=DirView').set('Authorization', `Bearer ${medrepToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.customers.map((c) => c.id)).toEqual(expect.arrayContaining([tiedId, otherId, teamTiedId]));
+  });
+
+  test('a MedRep gets only the allow-listed fields: no TIN, Zoho id or credit figures', async () => {
+    const res = await request(app).get('/api/customers?search=DirView').set('Authorization', `Bearer ${medrepToken}`);
+    const row = res.body.data.customers.find((c) => c.id === tiedId);
+    expect(row.name).toBe('DirView Tied Pharmacy');
+    for (const hidden of ['tin', 'zoho_contact_id', 'credit_limit', 'outstanding_receivable', 'source', 'zoho_pending_payload']) {
+      expect(row).not.toHaveProperty(hidden);
+    }
+    expect(JSON.stringify(res.body)).not.toMatch(/TIN-SECRET-123|ZOHO-SECRET-ID/);
+  });
+
+  test('?mine=1 returns only customers on the MedRep\'s own orders', async () => {
+    const res = await request(app).get('/api/customers?mine=1&search=DirView').set('Authorization', `Bearer ${medrepToken}`);
+    expect(res.status).toBe(200);
+    const ids = res.body.data.customers.map((c) => c.id);
+    expect(ids).toContain(tiedId);
+    expect(ids).not.toContain(otherId);
+    expect(ids).not.toContain(teamTiedId);
+  });
+
+  test('?mine=1 for a MedRep with no orders is empty, never the whole directory', async () => {
+    const res = await request(app).get('/api/customers?mine=1').set('Authorization', `Bearer ${outsiderToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.customers).toEqual([]);
+    expect(res.body.data.pagination.total).toBe(0);
+  });
+
+  test('?mine=1 for a Team Lead covers their team\'s orders, not unrelated customers', async () => {
+    const res = await request(app).get('/api/customers?mine=1&search=DirView').set('Authorization', `Bearer ${leadToken}`);
+    expect(res.status).toBe(200);
+    const ids = res.body.data.customers.map((c) => c.id);
+    expect(ids).toContain(teamTiedId);
+    expect(ids).not.toContain(tiedId); // another MedRep's, outside this lead's team
+    expect(ids).not.toContain(otherId);
+  });
+
+  test('sales viewers cannot force the inactive list', async () => {
+    const res = await request(app).get('/api/customers?status=inactive').set('Authorization', `Bearer ${medrepToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.customers.every((c) => c.is_active === 1)).toBe(true);
+  });
+
+  test('every write, sync and detail route stays closed to them', async () => {
+    for (const token of [medrepToken, leadToken]) {
+      const auth = { Authorization: `Bearer ${token}` };
+      expect((await request(app).get('/api/customers/stats').set(auth)).status).toBe(403);
+      expect((await request(app).get(`/api/customers/${tiedId}/details`).set(auth)).status).toBe(403);
+      expect((await request(app).patch(`/api/customers/${tiedId}/category`).set(auth).send({ category: 'pwd' })).status).toBe(403);
+      expect((await request(app).patch(`/api/customers/${tiedId}/tin`).set(auth).send({ tin: '1' })).status).toBe(403);
+      expect((await request(app).post('/api/customers/sync-from-zoho/start?mode=quick').set(auth)).status).toBe(403);
+    }
   });
 });
