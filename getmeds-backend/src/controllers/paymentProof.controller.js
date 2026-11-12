@@ -8,6 +8,7 @@ const { returnToFinanceIfHeld } = require('../services/financeHoldService');
 const zoho = require('../integrations/zoho');
 const { constraintAllows, hasColumn } = require('../services/schemaColumns');
 const attachmentLink = require('../services/attachmentLinkService');
+const heicImage = require('../services/heicImage');
 const { isPharmacyReviewable, RX_FILE_TYPE, supersededIds } = require('../services/prescriptionService');
 const { zohoFileName } = require('../services/zohoAttachmentSync');
 const teamScopeService = require('../services/teamScopeService');
@@ -1056,6 +1057,29 @@ exports.viewAttachment = async (req, res, next) => {
     const SKIP_TRANSFORM_BELOW_BYTES = 150 * 1024;
     const alreadySmall = Number.isFinite(attachment.file_size) && attachment.file_size > 0 && attachment.file_size <= SKIP_TRANSFORM_BELOW_BYTES;
     const transform = (w || h) && isImage && !alreadySmall ? { width: w || undefined, height: h || undefined, resize: 'cover', quality: 75 } : null;
+
+    // Nov 12, 2026: an iPhone HEIC / HEIF photo is served as a JPEG, so it shows on every device
+    // (only Apple devices can show HEIC). Thumbnails and the preview are shrunk; Download gives
+    // the full-size JPEG. Read from storage, never Zoho; the stored file is unchanged.
+    if (heicImage.isHeic(contentType, attachment.file_name)) {
+      const original = await proofStorage.downloadFile(attachment.storage_path);
+      const maxSide = (w || h) ? Math.max(w || 0, h || 0) : download ? null : 2000;
+      let jpg;
+      try {
+        jpg = await heicImage.heicToJpeg(original, { maxSide });
+      } catch (convErr) {
+        console.warn(`[ATTACHMENT_VIEW] HEIC conversion failed for payment_proofs.id=${attachment.id}, sending the original:`, convErr.message);
+      }
+      if (jpg) {
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${heicImage.jpegName(name)}"`);
+        res.setHeader('Cache-Control', `private, max-age=${attachmentLink.LONG_TTL_SECONDS}`);
+        return res.send(Buffer.from(jpg));
+      }
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${name}"`);
+      return res.send(original);
+    }
 
     if (transform) {
       // Thumbnails come from storage, not Zoho (Zoho cannot resize). Oct 6, 2026:
