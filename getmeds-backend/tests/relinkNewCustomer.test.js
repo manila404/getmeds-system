@@ -95,6 +95,21 @@ test('nothing changes when Zoho refuses to create it, or cannot be reached', asy
   expect(await zid(c)).toBe(`VEND-${stamp}-4`);
 });
 
+// Nov 12, 2026 (GM-20261112-0065, Marcelito Marcelo): the Zoho contact was deleted after the sync copied it.
+test('a contact deleted in Zoho is created again, not reported as "Zoho unreachable"', async () => {
+  const c = await customer(`GONE-${stamp}-1`);
+  const o = await order(c);
+  const gone = Object.assign(new Error("The Contact is not accessible. It may have been deleted, or you may not have permission to access it based on your organization's settings."),
+    { zohoResponse: { code: 1002 }, httpStatus: 400 });
+  getSpy.mockRejectedValue(gone);
+  const res = await call(o);
+  expect(res.status).toBe(200);
+  expect(createSpy).toHaveBeenCalledTimes(1);
+  expect(await zid(c)).toBe(res.body.data.customer.zoho_contact_id);
+  const ev = await db.prepare("SELECT notes FROM order_events WHERE order_id = ? AND event_type = 'ORDER_CUSTOMER_RELINKED'").get(o);
+  expect(ev.notes).toMatch(/old Zoho contact was deleted/);
+});
+
 test('needs a contact number when the customer has none', async () => {
   const c = await customer(`VEND-${stamp}-5`, null);
   const o = await order(c);

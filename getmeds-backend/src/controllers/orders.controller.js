@@ -1986,10 +1986,19 @@ exports.relinkToNewZohoCustomer = async (req, res, next) => {
     if (!contactNumber) return bad(400, 'VALIDATION_ERROR', 'Enter a contact number for the new customer (Zoho requires one).');
 
     // What does Zoho have now? Only replace a link that is NOT already a customer.
+    // Nov 12, 2026 (GM-20261112-0065, Marcelito Marcelo): the contact can also be GONE — deleted in
+    // Zoho after the customer sync copied it ("The Contact is not accessible", code 1002). That is
+    // a reason to create it again, not "Zoho is unreachable".
+    let contactGone = false;
     if (order.customer_zoho_contact_id) {
       let current = null;
       try { current = (await zoho.getContact(order.customer_zoho_contact_id))?.contact || null; }
-      catch (err) { return bad(502, 'ZOHO_UNREACHABLE', `Could not check this customer in Zoho right now. Nothing was changed — try again. (${err.message})`); }
+      catch (err) {
+        const code = err && err.zohoResponse && err.zohoResponse.code;
+        const msg = String((err && err.message) || '').toLowerCase();
+        contactGone = (err && err.httpStatus === 404) || code === 1002 || code === 5 || msg.includes('not accessible') || msg.includes('does not exist');
+        if (!contactGone) return bad(502, 'ZOHO_UNREACHABLE', `Could not check this customer in Zoho right now. Nothing was changed — try again. (${err.message})`);
+      }
       if (current && String(current.contact_type || 'customer').toLowerCase() === 'customer') {
         return bad(409, 'ALREADY_A_CUSTOMER', 'Zoho already has this contact as a customer, so a new one is not needed. Use Retry Zoho Sync, or pick another customer.');
       }
@@ -2023,8 +2032,9 @@ exports.relinkToNewZohoCustomer = async (req, res, next) => {
         actorId: req.user.id,
         actorName: req.user.name || req.user.email,
         actorRole,
-        notes: `${order.customer_name} created in Zoho as a NEW customer by ${req.user.name || req.user.email} (Zoho had it only as a vendor).${note ? ' ' + note : ''}`,
-        metadata: { customer_id: order.customer_id, from_zoho_contact_id: order.customer_zoho_contact_id, to_zoho_contact_id: created.contact_id, created_new: true }
+        notes: `${order.customer_name} created in Zoho as a NEW customer by ${req.user.name || req.user.email} ` +
+          `(${contactGone ? 'its old Zoho contact was deleted' : 'Zoho had it only as a vendor'}).${note ? ' ' + note : ''}`,
+        metadata: { customer_id: order.customer_id, from_zoho_contact_id: order.customer_zoho_contact_id, to_zoho_contact_id: created.contact_id, created_new: true, old_contact_gone: contactGone }
       });
     })();
 
