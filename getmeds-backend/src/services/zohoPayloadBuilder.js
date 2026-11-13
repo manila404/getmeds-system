@@ -127,7 +127,12 @@ async function buildZohoSalesOrderPayload(orderId, { items: itemsOverride, invoi
     gm_lead_id: order.gm_lead_id || null,
     // Oct 9, 2026: the warehouse Management picked at approval (orders.fulfil_warehouse_id).
     // Read fresh like everything else, so a retry or an edit sends the same one.
-    warehouse_id: order.fulfil_warehouse_id || null
+    warehouse_id: order.fulfil_warehouse_id || null,
+    // Nov 14, 2026: VAT inside the price (inclusive) or on top (exclusive). Edit Items, Edit Details
+    // and every retry build their payload here, and this was missing, so Zoho fell back to adding
+    // the VAT on top: GM-20261113-0056 went from ₱7,800 to ₱8,736 when Management edited its items.
+    // Unknown (no column) is not sent, which Zoho treats as before.
+    is_inclusive_tax: order.is_inclusive_tax == null ? undefined : Boolean(Number(order.is_inclusive_tax))
   };
 }
 

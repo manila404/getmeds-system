@@ -276,8 +276,8 @@ const OrderItemsEditor = ({
                               onChange={(e) => onChange(idx, 'taxOption', e.target.value)}
                               title={
                                 zohoPct != null
-                                  ? `Zoho has this item at ${product.tax_name || 'VAT'} (${zohoPct}%) — this only changes the price in this order`
-                                  : 'Not yet pulled from Zoho — this only changes the price in this order'
+                                  ? `Zoho has this item at ${product.tax_name || 'VAT'} (${zohoPct}%) — the tax picked here is the one sent to Zoho`
+                                  : 'Not yet pulled from Zoho — the tax picked here is the one sent to Zoho'
                               }
                               className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
                             >

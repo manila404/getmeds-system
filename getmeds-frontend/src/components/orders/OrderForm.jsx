@@ -2398,7 +2398,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                         <th className="px-3 py-3 text-right font-bold text-ink-secondary uppercase tracking-wider">Discount</th>
                         <th
                           className="px-3 py-3 text-center font-bold text-ink-secondary uppercase tracking-wider"
-                          title="Changes the price here only — Zoho still bills at the item's own configured tax once this order syncs, so the two can differ."
+                          title="The tax for each line. It is sent to Zoho with the order, so Zoho bills the same."
                         >
                           Tax <span className="text-[9px] normal-case font-medium text-ink-secondary/70">(this order only)</span>
                         </th>
@@ -2498,8 +2498,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                                 onChange={e => handleTaxOptionChange(idx, e.target.value)}
                                 title={
                                   item.zohoTaxPercent != null
-                                    ? `Zoho has this item at ${item.zohoTaxLabel || 'VAT'} (${item.zohoTaxPercent}%) — this only changes the price in this order`
-                                    : 'Not yet pulled from Zoho — this only changes the price in this order'
+                                    ? `Zoho has this item at ${item.zohoTaxLabel || 'VAT'} (${item.zohoTaxPercent}%) — the tax picked here is the one sent to Zoho`
+                                    : 'Not yet pulled from Zoho — the tax picked here is the one sent to Zoho'
                                 }
                                 className="border border-slate-300 rounded py-1 px-1 text-[11px] font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue"
                               >

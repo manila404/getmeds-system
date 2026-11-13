@@ -298,7 +298,11 @@ class LiveZohoAdapter extends ZohoAdapter {
       );
     }
 
-    const body = await this._buildSalesOrderBody(orderData);
+    // Nov 14, 2026: each line's own tax is sent on CREATE too, not only on an edit. Without it Zoho
+    // applied the item's default tax, so a line the MedRep set to "No Tax" became VAT 12% in Zoho
+    // (and the line sync then copied that back over the order): GM-20261113-0044 went from
+    // ₱910,000 to ₱1,019,200 the moment its Sales Order was created.
+    const body = await this._buildSalesOrderBody(orderData, { sendLineTax: true });
     body.customer_id = contactId;
     body.date = new Date().toISOString().slice(0, 10);
 
