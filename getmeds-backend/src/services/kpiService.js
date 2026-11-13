@@ -95,10 +95,26 @@ const invoicedOrdersSql = (notImported) => `
     UNION
     SELECT s.order_id, s.zoho_so_number FROM order_split_sales_orders s WHERE s.zoho_so_number IS NOT NULL
   ), inv AS (
-    SELECT sos.order_id, MIN(i.date) AS invoice_date, STRING_AGG(DISTINCT i.invoice_number, ', ') AS invoice_numbers
-      FROM sos JOIN zoho_invoices i ON i.reference_number = sos.so
-     WHERE i.deleted_at IS NULL AND LOWER(COALESCE(i.status, '')) NOT IN ('draft', 'void')
-     GROUP BY sos.order_id
+    SELECT x.order_id, MIN(x.invoice_date) AS invoice_date, STRING_AGG(DISTINCT x.invoice_number, ', ') AS invoice_numbers
+      FROM (
+        SELECT sos.order_id, i.date AS invoice_date, i.invoice_number
+          FROM sos JOIN zoho_invoices i ON i.reference_number = sos.so
+         WHERE i.deleted_at IS NULL AND LOWER(COALESCE(i.status, '')) NOT IN ('draft', 'void')
+        UNION ALL
+        -- Nov 13, 2026 (Aaron: "when the order is invoiced it should count"): the app's own record
+        -- of a sent invoice (Dispatch's Create invoice, or Zoho telling us), counted at once instead
+        -- of waiting up to 15 minutes for the invoice copy (GM-20261113-0056: invoiced 3:16 PM,
+        -- copied 3:30 PM). Only for an invoice sent in the last day, and only while the copy has NO
+        -- invoice for that Sales Order at all: the app's own invoice number can go stale (SO-69863
+        -- holds INV-12843786, which Zoho replaced with GPI-SI000003054), so the copy always rules.
+        SELECT o.id, to_char(MIN(e.created_at)::timestamptz AT TIME ZONE 'Asia/Manila', 'YYYY-MM-DD'), o.zoho_invoice_number
+          FROM orders o JOIN order_events e ON e.order_id = o.id AND e.event_type IN ('INVOICE_SENT', 'ZOHO_INVOICE_SENT')
+         WHERE o.zoho_invoice_number IS NOT NULL AND o.zoho_so_number IS NOT NULL
+           AND e.created_at::timestamptz >= now() - interval '1 day'
+           AND NOT EXISTS (SELECT 1 FROM zoho_invoices i WHERE i.reference_number = o.zoho_so_number OR i.invoice_number = o.zoho_invoice_number)
+         GROUP BY o.id, o.zoho_invoice_number
+      ) x
+     GROUP BY x.order_id
   )
   SELECT o.id, o.getmeds_order_id, o.medrep_id, o.raised_by_id, o.total_amount, o.status, o.division, o.salesperson,
          inv.invoice_date, inv.invoice_numbers, c.name AS customer,
@@ -132,6 +148,13 @@ async function waitingForInvoice(client, sinceUtc) {
        SELECT c.id FROM cand c JOIN inv_so ON inv_so.so = c.zoho_so_number
        UNION
        SELECT c.id FROM cand c JOIN order_split_sales_orders s ON s.order_id = c.id JOIN inv_so ON inv_so.so = s.zoho_so_number
+       UNION
+       -- Nov 13, 2026: invoiced per the app's own record, before the invoice copy has it (see invoicedOrdersSql)
+       SELECT c.id FROM cand c JOIN orders o ON o.id = c.id
+        WHERE o.zoho_invoice_number IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM zoho_invoices i WHERE i.reference_number = o.zoho_so_number OR i.invoice_number = o.zoho_invoice_number)
+          AND EXISTS (SELECT 1 FROM order_events e WHERE e.order_id = c.id AND e.event_type IN ('INVOICE_SENT', 'ZOHO_INVOICE_SENT')
+                        AND e.created_at::timestamptz >= now() - interval '1 day')
      )
      SELECT c.medrep_id, COUNT(*)::int AS n,
             SUM(COALESCE((SELECT SUM(oi.line_total / (1 + COALESCE(oi.tax_percent, 0) / 100.0)) FROM order_items oi WHERE oi.order_id = c.id), c.total_amount)) AS net
