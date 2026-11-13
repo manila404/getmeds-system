@@ -481,9 +481,11 @@ describe('Retry never creates a second Sales Order', () => {
     `).get(order.id, now, now, now);
     const create = jest.spyOn(zoho, 'createSalesOrder');
 
+    // Nov 13, 2026: Retry now CONFIRMS the existing Sales Order instead of refusing (it used to
+    // send people to Zoho Books) — still without ever creating a second one.
     const res = await request(app).post(`/api/orders/${order.id}/retry-zoho-sync`).set(as(adminToken));
-    expect(res.status).toBe(409);
-    expect(res.body.error.code).toBe('ALREADY_IN_ZOHO');
+    expect(res.status).toBe(200);
+    expect(['confirmed', 'already_confirmed']).toContain(res.body.data.result.outcome);
 
     const result = await zohoRetryService.processOne(queued);
     expect(result.outcome).toBe('already_in_zoho');

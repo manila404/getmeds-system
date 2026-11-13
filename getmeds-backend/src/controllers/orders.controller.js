@@ -7,6 +7,7 @@ const { generateOrderId } = require('../services/orderIdService');
 const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const zoho = require('../integrations/zoho');
+const { zohoWriteMode } = require('../services/zohoWriteGuard');
 const zohoRetryService = require('../services/zohoRetryService');
 const { pushUnsyncedAttachments } = require('../services/zohoAttachmentSync');
 const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
@@ -1200,6 +1201,68 @@ exports.getImportStatus = async (req, res, next) => {
 // background loop, it ignores zoho_sync_queue.next_attempt_at and
 // zoho_sync_queue.status entirely, so it works even on a row already
 // marked 'failed_permanent' after exhausting its automatic attempts).
+/**
+ * Nov 13, 2026: Retry Zoho Sync on an order whose Sales Order already exists but whose
+ * CONFIRM failed at Finance's verify (Zoho refused with "You are not authorized to perform
+ * this operation" — a cancelled access token, see LiveZohoAdapter._fetchAuthed). It used to
+ * answer "nothing to create again — confirm it in Zoho Books", so Dispatch had to go into Zoho
+ * for it. Now it confirms it: only once Finance has verified the order, reading Zoho first,
+ * and only calling confirm while the Sales Order is still a draft there.
+ * `split` = an order_split_sales_orders row, or null for the primary Sales Order.
+ */
+const FINANCE_CLEARED = ['ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing', 'dispatched', 'tracking_shared'];
+async function confirmExistingSalesOrder(req, res, order, split = null) {
+  const soId = split ? split.zoho_so_id : order.zoho_so_id;
+  const soNumber = (split ? split.zoho_so_number : order.zoho_so_number) || soId;
+  const label = split ? `${soNumber} (${split.invoicing_from})` : soNumber;
+  if (!FINANCE_CLEARED.includes(order.status)) {
+    return res.status(409).json({
+      success: false,
+      error: { code: 'NOT_VERIFIED', message: `Sales Order ${label} is confirmed when Finance verifies this order, and that has not happened yet.` }
+    });
+  }
+  const cust = await db.prepare('SELECT zoho_contact_id FROM customers WHERE id = ?').get(order.customer_id);
+  const guard = zohoWriteMode(cust && cust.zoho_contact_id);
+  if (guard && guard.mode === 'blocked') {
+    return res.status(409).json({ success: false, error: { code: 'ZOHO_WRITE_BLOCKED', message: guard.message } });
+  }
+
+  let already = false;
+  if (!(guard && guard.mode === 'dry-run')) {
+    try {
+      const so = (await zoho.getSalesOrder(soId))?.salesorder;
+      const st = String(so?.status || '').toLowerCase();
+      if (['void', 'cancelled'].includes(st)) {
+        return res.status(409).json({ success: false, error: { code: 'SO_VOID', message: `Sales Order ${label} is ${st} in Zoho, so it cannot be confirmed.` } });
+      }
+      if (st && st !== 'draft') already = true;
+      else already = Boolean((await zoho.confirmSalesOrder(soId))?.alreadyConfirmed);
+    } catch (err) {
+      return res.status(502).json({ success: false, error: { code: 'ZOHO_CONFIRM_FAILED', message: `Zoho did not confirm Sales Order ${label}: ${err.message}` } });
+    }
+  }
+
+  const now = new Date().toISOString();
+  if (split) {
+    await db.prepare("UPDATE order_split_sales_orders SET zoho_so_status = 'confirmed', zoho_sync_status = 'synced', zoho_sync_error = NULL, updated_at = ? WHERE id = ?").run(now, split.id);
+  } else {
+    await db.prepare("UPDATE orders SET zoho_so_status = 'confirmed', zoho_sync_status = 'synced', updated_at = ? WHERE id = ?").run(now, order.id);
+  }
+  await db.prepare("UPDATE zoho_sync_queue SET status = 'succeeded', updated_at = ? WHERE order_id = ? AND status = 'pending' AND invoicing_from IS NOT DISTINCT FROM ?")
+    .run(now, order.id, split ? split.invoicing_from : null);
+  await logEvent({
+    orderId: order.id, eventType: 'ZOHO_SO_CONFIRMED', oldStatus: order.status, newStatus: order.status,
+    actorId: req.user.id, actorName: req.user.name || req.user.email,
+    notes: already
+      ? `Sales Order ${label} was already confirmed in Zoho; marked as synced by Retry Zoho Sync.`
+      : `Sales Order ${label} confirmed in Zoho by Retry Zoho Sync (the confirm at Finance's verify had failed).`,
+    metadata: { zohoSalesOrderId: soId, invoicingFrom: split ? split.invoicing_from : null, alreadyConfirmed: already, via: 'retry_zoho_sync' }
+  });
+  const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+  const updatedSplit = split ? await db.prepare('SELECT * FROM order_split_sales_orders WHERE id = ?').get(split.id) : undefined;
+  return res.json({ success: true, data: { order: updatedOrder, split: updatedSplit, result: { outcome: already ? 'already_confirmed' : 'confirmed' } } });
+}
+
 exports.retryZohoSync = async (req, res, next) => {
   try {
     const order = await db.prepare(`
@@ -1235,15 +1298,8 @@ exports.retryZohoSync = async (req, res, next) => {
         });
       }
 
-      if (split.zoho_so_id) {
-        return res.status(409).json({
-          success: false,
-          error: {
-            code: 'ALREADY_IN_ZOHO',
-            message: `This order already has Sales Order ${split.zoho_so_number || split.zoho_so_id} in Zoho for ${requestedInvoicingFrom}.`
-          }
-        });
-      }
+      // Nov 13, 2026: it exists, so what is left to do is confirm it.
+      if (split.zoho_so_id) return confirmExistingSalesOrder(req, res, order, split);
 
       let row = await db.prepare(`
         SELECT * FROM zoho_sync_queue WHERE order_id = ? AND invoicing_from = ? ORDER BY created_at DESC LIMIT 1
@@ -1271,6 +1327,8 @@ exports.retryZohoSync = async (req, res, next) => {
         "SELECT * FROM order_split_sales_orders WHERE order_id = ? AND (zoho_so_id IS NULL OR zoho_sync_status = 'failed') ORDER BY id ASC LIMIT 1"
       ).get(order.id);
 
+      // Nov 13, 2026: a split that has its Sales Order failed at the confirm, not the create.
+      if (unsyncedSplit && unsyncedSplit.zoho_so_id) return confirmExistingSalesOrder(req, res, order, unsyncedSplit);
       if (unsyncedSplit) {
         let row = await db.prepare(`
           SELECT * FROM zoho_sync_queue WHERE order_id = ? AND invoicing_from = ? ORDER BY created_at DESC LIMIT 1
@@ -1290,13 +1348,8 @@ exports.retryZohoSync = async (req, res, next) => {
         return res.json({ success: true, data: { order: updatedOrder, split: updatedSplit, result } });
       }
 
-      return res.status(409).json({
-        success: false,
-        error: {
-          code: 'ALREADY_IN_ZOHO',
-          message: `This order already has Sales Order ${order.zoho_so_number || order.zoho_so_id} in Zoho, so there is nothing to create again. What failed was confirming it — confirm it in Zoho Books.`
-        }
-      });
+      // Nov 13, 2026: nothing to create again; confirm it instead of sending people to Zoho Books.
+      return confirmExistingSalesOrder(req, res, order, null);
     }
 
     // Oct 12, 2026: an order whose customer was not in Zoho yet stays 'pending' with a queued row,

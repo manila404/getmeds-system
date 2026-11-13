@@ -114,12 +114,39 @@ function buildAdapter(env = process.env) {
  * should not silently "work" against a live org with half-finished auth.
  * Fill this in only once you're pointed at an approved test/sandbox org.
  */
+// Nov 13, 2026: ONE access token for the whole app, kept in sync_state (a plain key/value
+// table) and reused by every server instance until it expires. Before, each instance minted
+// its own; Zoho keeps only a limited number active per refresh token and cancels the oldest,
+// so a busy day left some instance holding a cancelled token, and every Zoho call it made
+// failed with "You are not authorized to perform this operation" (41 creates/confirms since
+// Oct 1). Best effort: if the table cannot be read or written, each instance falls back to
+// its own token, exactly as before. Off with ZOHO_SHARED_TOKEN=off.
+const SHARED_TOKEN_KEY = 'zoho_access_token';
+async function readSharedToken() {
+  try {
+    const db = require('../../db/database');
+    const row = await db.prepare('SELECT value FROM sync_state WHERE key = ?').get(SHARED_TOKEN_KEY);
+    const v = row && row.value ? JSON.parse(row.value) : null;
+    return v && v.token && Number(v.expires_at) ? v : null;
+  } catch { return null; }
+}
+async function writeSharedToken(value) {
+  try {
+    const db = require('../../db/database');
+    await db.prepare(
+      `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`
+    ).run(SHARED_TOKEN_KEY, value === null ? null : JSON.stringify(value), new Date().toISOString());
+  } catch { /* best effort */ }
+}
+
 function buildOAuthTokenGetter(env) {
   let cachedToken = null;
   let tokenExpiresAt = 0;
   let inFlightRefresh = null;
+  const shared = String(env.ZOHO_SHARED_TOKEN || '').toLowerCase() !== 'off';
 
-  return async () => {
+  const getter = async () => {
     if (!env.ZOHO_CLIENT_ID || !env.ZOHO_CLIENT_SECRET || !env.ZOHO_REFRESH_TOKEN) {
       throw new Error(
         'ZOHO_CLIENT_ID / ZOHO_CLIENT_SECRET / ZOHO_REFRESH_TOKEN are not all set — cannot get a ' +
@@ -132,6 +159,15 @@ function buildOAuthTokenGetter(env) {
     // Return cached token if valid (with 60s safety buffer)
     if (cachedToken && now < tokenExpiresAt - 60000) {
       return cachedToken;
+    }
+    // The app-wide token, when another instance already has a good one.
+    if (shared) {
+      const s = await readSharedToken();
+      if (s && now < Number(s.expires_at) - 60000) {
+        cachedToken = s.token;
+        tokenExpiresAt = Number(s.expires_at);
+        return cachedToken;
+      }
     }
 
     // Oct 27, 2026: Deduplicate concurrent refresh requests (e.g. primary and
@@ -186,6 +222,7 @@ function buildOAuthTokenGetter(env) {
 
       cachedToken = data.access_token;
       tokenExpiresAt = Date.now() + (data.expires_in || 3600) * 1000;
+      if (shared) await writeSharedToken({ token: cachedToken, expires_at: tokenExpiresAt });
       return cachedToken;
     })();
 
@@ -195,6 +232,17 @@ function buildOAuthTokenGetter(env) {
       inFlightRefresh = null;
     }
   };
+
+  // Nov 13, 2026: Zoho rejected this token (LiveZohoAdapter._fetchAuthed). Forget it here and,
+  // if it is the app-wide one, for every instance, so the next call gets a fresh one.
+  getter.invalidate = async (badToken) => {
+    if (!badToken || cachedToken === badToken) { cachedToken = null; tokenExpiresAt = 0; }
+    if (shared) {
+      const s = await readSharedToken();
+      if (s && (!badToken || s.token === badToken)) await writeSharedToken(null);
+    }
+  };
+  return getter;
 }
 
 /**

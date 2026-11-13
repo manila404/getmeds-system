@@ -11,6 +11,19 @@ const RETRY_BASE_MS = Number(process.env.ZOHO_REQUEST_RETRY_BASE_MS) || 800;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Nov 13, 2026: did Zoho reject the access token itself? HTTP 401, or Zoho's code 57 ("You
+ * are not authorized to perform this operation"), which it also sends for a cancelled token.
+ * Reads a clone, so the caller can still read the body. See LiveZohoAdapter._fetchAuthed.
+ */
+async function isTokenRejection(resp) {
+  if (!resp || resp.ok) return false;
+  if (resp.status === 401) return true;
+  if (![400, 403].includes(resp.status)) return false;
+  const json = await resp.clone().json().catch(() => ({}));
+  return Number(json.code) === 57;
+}
+
 // Oct 15, 2026: customers whose withholding-tax (TDS) flag was already switched on by this
 // process, so a customer ordering many times is only touched once per server start.
 const tdsEnsured = new Set();
@@ -160,14 +173,36 @@ class LiveZohoAdapter extends ZohoAdapter {
     }
   }
 
+  /**
+   * Nov 13, 2026: one call to Zoho with the current access token, repeated ONCE with a fresh
+   * token when Zoho rejects the token itself (HTTP 401, or code 57 "You are not authorized to
+   * perform this operation").
+   *
+   * Why: every server instance and job takes access tokens from the same refresh token, and
+   * Zoho keeps only a limited number active per refresh token, cancelling the oldest. An
+   * instance still holding a cancelled token failed every Zoho call it made — 41 creates and
+   * confirms since Oct 1 (GM-20261113-0044 failed, then the same create worked 41 seconds
+   * later). A rejected call was not applied, so repeating it is safe, even for a POST.
+   * `doFetch(token)` must build a fresh request each time.
+   */
+  async _fetchAuthed(doFetch) {
+    let token = await this.getAccessToken();
+    let resp = await doFetch(token);
+    if (await isTokenRejection(resp)) {
+      this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] access token rejected (HTTP ${resp.status}) — retrying once with a fresh token`);
+      if (typeof this.getAccessToken.invalidate === 'function') await this.getAccessToken.invalidate(token);
+      token = await this.getAccessToken();
+      resp = await doFetch(token);
+    }
+    return resp;
+  }
+
   async _request(method, path, { query = {}, body } = {}) {
     this._assertOrgAllowed();
     this._assertCallAllowed(method, path);
     const params = new URLSearchParams({ organization_id: this.organizationId, ...query });
     const url = `${this.baseUrl}${path}?${params.toString()}`;
     this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] ${method} ${path} (org=${this.organizationId})`);
-
-    const token = await this.getAccessToken();
 
     // Sep 2, 2026: retries, but ONLY for GET.
     //
@@ -190,7 +225,7 @@ class LiveZohoAdapter extends ZohoAdapter {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       let resp;
       try {
-        resp = await fetch(url, {
+        resp = await this._fetchAuthed((token) => fetch(url, {
           method,
           headers: {
             Authorization: `Zoho-oauthtoken ${token}`,
@@ -200,7 +235,7 @@ class LiveZohoAdapter extends ZohoAdapter {
           // Without this a stalled connection hangs until Node's own
           // default gives up, with the job sitting at "running" throughout.
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-        });
+        }));
       } catch (err) {
         // `fetch failed` is undici's generic wrapper and says nothing on its
         // own — the real reason (ENOTFOUND, ECONNRESET, ConnectTimeoutError,
@@ -1136,7 +1171,6 @@ class LiveZohoAdapter extends ZohoAdapter {
 
     this._assertOrgAllowed();
     this._assertCallAllowed('POST', `/salesorders/${salesorderId}/attachment`);
-    const token = await this.getAccessToken();
     const params = new URLSearchParams({ organization_id: this.organizationId });
     const url = `${this.baseUrl}/salesorders/${salesorderId}/attachment?${params.toString()}`;
 
@@ -1154,7 +1188,7 @@ class LiveZohoAdapter extends ZohoAdapter {
 
     let resp;
     try {
-      resp = await fetch(url, {
+      resp = await this._fetchAuthed((token) => fetch(url, {
         method: 'POST',
         // No Content-Type here on purpose — fetch derives the multipart
         // boundary from the FormData body itself; setting it manually
@@ -1162,7 +1196,7 @@ class LiveZohoAdapter extends ZohoAdapter {
         headers: { Authorization: `Zoho-oauthtoken ${token}` },
         body: form,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      });
+      }));
     } catch (err) {
       // Not retried, same reasoning as createSalesOrder's POST: a network
       // error here doesn't say whether Zoho received the file, and this is
@@ -1206,7 +1240,6 @@ class LiveZohoAdapter extends ZohoAdapter {
 
     this._assertOrgAllowed();
     this._assertCallAllowed('GET', `/salesorders/${salesorderId}/attachment`);
-    const token = await this.getAccessToken();
     const params = new URLSearchParams({ organization_id: this.organizationId, document_id: documentId });
     const url = `${this.baseUrl}/salesorders/${salesorderId}/attachment?${params.toString()}`;
 
@@ -1214,10 +1247,10 @@ class LiveZohoAdapter extends ZohoAdapter {
 
     let resp;
     try {
-      resp = await fetch(url, {
+      resp = await this._fetchAuthed((token) => fetch(url, {
         headers: { Authorization: `Zoho-oauthtoken ${token}` },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      });
+      }));
     } catch (err) {
       throw describeNetworkError(err, url, 'GET');
     }
@@ -1349,7 +1382,6 @@ class LiveZohoAdapter extends ZohoAdapter {
 
     this._assertOrgAllowed();
     this._assertCallAllowed('POST', `/salesorders/${salesorderId}/status/confirmed`);
-    const token = await this.getAccessToken();
     const params = new URLSearchParams({ organization_id: this.organizationId });
     const url = `${this.baseUrl}/salesorders/${salesorderId}/status/confirmed?${params.toString()}`;
 
@@ -1360,14 +1392,14 @@ class LiveZohoAdapter extends ZohoAdapter {
 
     let resp;
     try {
-      resp = await fetch(url, {
+      resp = await this._fetchAuthed((token) => fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Zoho-oauthtoken ${token}`,
           'Content-Type': 'application/json'
         },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      });
+      }));
     } catch (err) {
       // Not retried here, same reasoning as createSalesOrder's POST: a network
       // error does not say whether Zoho applied the change, and confirming
