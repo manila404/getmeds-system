@@ -70,3 +70,55 @@ describe('an edit or retry keeps the order\'s VAT-inclusive setting', () => {
     expect((await buildZohoSalesOrderPayload(orderId)).is_inclusive_tax).toBe(false);
   });
 });
+
+// Nov 14, 2026 (Aaron): Management can change Tax Inclusive / Exclusive on an order already in
+// Zoho, and Zoho gets exactly that; only an order Zoho has invoiced is refused.
+describe('Edit Items on an order already in Zoho', () => {
+  const request = require('supertest');
+  const app = require('../src/app');
+  const stamp = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+  const made = [];
+  let token, productId, spy;
+  const mk = async (key, invoice = null) => {
+    const c = (await db.prepare('SELECT id FROM customers LIMIT 1').get()).id;
+    const m = (await db.prepare("SELECT id FROM users WHERE email = 'medrep@getmeds.ph'").get()).id;
+    const ref = `GM-TAXED-${stamp}-${key}`;
+    await db.prepare(`INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount, delivery_address, zoho_so_id, zoho_so_number, zoho_sync_status, is_inclusive_tax, zoho_invoice_number)
+                      VALUES (?, ?, ?, 'ready_for_dispatch', 'credit', 1000, 'x', ?, ?, 'synced', 1, ?)`).run(ref, c, m, `ZSO-${stamp}-${key}`, `SO-X-${key}`, invoice);
+    const id = (await db.prepare('SELECT id FROM orders WHERE getmeds_order_id = ?').get(ref)).id;
+    await db.prepare('INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal, discount_amount, tax_percent, line_total) VALUES (?, ?, 10, 100, 1000, 0, 12, 1000)').run(id, productId);
+    made.push(id);
+    return id;
+  };
+  const edit = (id, body) => request(app).patch(`/api/orders/${id}/items`).set({ Authorization: `Bearer ${token}` }).send(body);
+  beforeAll(async () => {
+    token = (await request(app).post('/api/auth/login').send({ email: 'manager@getmeds.ph', password: 'demo123' })).body.data.token;
+    productId = (await db.prepare('SELECT id FROM products WHERE is_active = 1 LIMIT 1').get()).id;
+  });
+  beforeEach(() => { spy = jest.spyOn(zoho, 'updateSalesOrder').mockResolvedValue({ code: 0, salesorder: {} }); });
+  afterEach(() => spy.mockRestore());
+  afterAll(async () => {
+    for (const id of made) {
+      for (const t of ['order_items', 'order_events', 'notifications']) await db.prepare(`DELETE FROM ${t} WHERE order_id = ?`).run(id);
+      await db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+    }
+  });
+
+  test('switching to Tax Exclusive is saved and sent to Zoho, with each line\'s tax', async () => {
+    const id = await mk('a');
+    const res = await edit(id, { is_inclusive_tax: false, items: [{ product_id: productId, quantity: 10, unit_price: 100, tax_percent: 0 }] });
+    expect(res.status).toBe(200);
+    expect((await db.prepare('SELECT is_inclusive_tax FROM orders WHERE id = ?').get(id)).is_inclusive_tax).toBe(0);
+    const payload = spy.mock.calls[0][1];
+    expect(payload.is_inclusive_tax).toBe(false);
+    expect(payload.items.map((i) => Number(i.tax_percent))).toEqual([0]);
+  });
+
+  test('refused once Zoho has invoiced the order', async () => {
+    const id = await mk('b', 'INV-TEST-1');
+    const res = await edit(id, { is_inclusive_tax: false, items: [{ product_id: productId, quantity: 10, unit_price: 100, tax_percent: 12 }] });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('TAX_PREFERENCE_LOCKED');
+    expect(spy).not.toHaveBeenCalled();
+  });
+});

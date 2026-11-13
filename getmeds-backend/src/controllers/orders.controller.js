@@ -4814,11 +4814,17 @@ exports.updateItems = async (req, res, next) => {
     // but only before the order reaches Zoho: on an existing Sales Order it changes how Zoho
     // prices every line. Lines are re-priced under the new preference.
     let taxPreferenceChanged = false;
+    // Nov 14, 2026 (Aaron): Management can change it on an order already in Zoho too; the edit
+    // pushes the setting with every line's tax (zohoPayloadBuilder / LiveZohoAdapter), so Zoho
+    // gets exactly what is set here. The lock was there because the push used to leave the setting
+    // out and Zoho put the VAT on top. Still refused once Zoho has INVOICED the order: the
+    // invoice would not follow, so the two would disagree (fix an invoice in Zoho, with a credit
+    // note).
     if (typeof req.body.is_inclusive_tax === 'boolean' && req.body.is_inclusive_tax !== isInclusiveTax) {
-      if (wasAlreadySynced) {
+      if (wasAlreadySynced && (order.zoho_invoice_id || order.zoho_invoice_number)) {
         return res.status(409).json({
           success: false,
-          error: { code: 'TAX_PREFERENCE_LOCKED', message: 'This order already has a Zoho Sales Order, so its Tax Inclusive / Exclusive setting cannot be changed here.' }
+          error: { code: 'TAX_PREFERENCE_LOCKED', message: `This order is already invoiced in Zoho (${order.zoho_invoice_number || 'invoice'}), so its Tax Inclusive / Exclusive setting cannot be changed here. Correct the invoice in Zoho.` }
         });
       }
       isInclusiveTax = req.body.is_inclusive_tax;

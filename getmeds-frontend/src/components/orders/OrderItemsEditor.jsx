@@ -137,7 +137,7 @@ const OrderItemsEditor = ({
           value={inclusive ? 'inclusive' : 'exclusive'}
           disabled={taxLocked || !onInclusiveChange}
           onChange={(e) => onInclusiveChange && onInclusiveChange(e.target.value === 'inclusive')}
-          title={taxLocked ? 'This order already has a Zoho Sales Order, so this cannot be changed' : 'Whether the rates below already include VAT'}
+          title={taxLocked ? 'This order is already invoiced in Zoho, so this cannot be changed here' : 'Whether the rates below already include VAT. Sent to Zoho with the order.'}
           className="border border-slate-300 rounded-md py-1 px-2 text-xs font-semibold text-ink-primary focus:outline-none focus:border-getmeds-blue focus:ring-1 focus:ring-getmeds-blue disabled:bg-surface disabled:text-ink-secondary"
         >
           <option value="exclusive">Tax Exclusive</option>

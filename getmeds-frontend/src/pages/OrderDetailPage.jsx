@@ -2214,7 +2214,8 @@ const OrderDetailPage = () => {
                   products={products}
                   inclusive={draftInclusive}
                   onInclusiveChange={setDraftInclusive}
-                  taxLocked={Boolean(order.zoho_so_id)}
+                  // Nov 14, 2026: only once Zoho has invoiced it; before that the setting goes to Zoho with the edit.
+                  taxLocked={Boolean(order.zoho_so_id && (order.zoho_invoice_id || order.zoho_invoice_number))}
                   canPickWarehouse={isManagementUser}
                   warehouses={stockWarehouses}
                   stockLines={stockWarehouseData?.available ? stockWarehouseData.lines : []}
