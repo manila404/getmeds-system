@@ -328,7 +328,8 @@ function App() {
           <Route
             path="/clients"
             element={
-              <ProtectedRoute allowedRoles={['medrep', 'team_lead']}>
+              // Nov 14, 2026: Dispatch too (Pharmacy backtracks clients' orders and prescriptions).
+              <ProtectedRoute allowedRoles={['medrep', 'team_lead', 'dispatch']}>
                 <ClientsPage />
               </ProtectedRoute>
             }

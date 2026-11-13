@@ -42,8 +42,9 @@ describe('Customers — Clients Directory (pagination, filters, category)', () =
   // Nov 12, 2026: was 'MedRep cannot view the Clients Directory'. MedReps and Team Leads now read
   // it (read-only, narrowed fields) — see the 'sales viewers' describe at the bottom. Roles that
   // still have no business here are asserted below instead.
-  test('RBAC: Finance and Dispatch still cannot view the Clients Directory', async () => {
-    for (const email of ['finance@getmeds.ph', 'dispatch@getmeds.ph']) {
+  // Nov 14, 2026: Dispatch (Pharmacy) reads it now, read-only — see clientsDirectoryDispatch.test.js.
+  test('RBAC: Finance still cannot view the Clients Directory', async () => {
+    for (const email of ['finance@getmeds.ph']) {
       const login = await request(app).post('/api/auth/login').send({ email, password: 'demo123' });
       if (login.status !== 200) continue; // seed account absent in this environment
       const res = await request(app).get('/api/customers').set('Authorization', `Bearer ${login.body.data.token}`);

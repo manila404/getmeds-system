@@ -62,7 +62,10 @@ async function getCustomersOverview(req, res, next) {
     // recognise a client — see SALES_VISIBLE_FIELDS.
     const viewerRole = String((req.user && req.user.role) || '').toLowerCase();
     const isSalesViewer = viewerRole === 'medrep' || viewerRole === 'team_lead';
-    const status = isSalesViewer ? 'active' : (req.query.status || 'active').trim().toLowerCase();
+    // Nov 14, 2026: Dispatch (which includes Pharmacy) reads it the same way, read-only, so the
+    // pharmacist can look a client up and backtrack their orders and prescriptions.
+    const isReadOnlyViewer = isSalesViewer || viewerRole === 'dispatch';
+    const status = isReadOnlyViewer ? 'active' : (req.query.status || 'active').trim().toLowerCase();
 
     const where = [];
     const params = [];
@@ -100,6 +103,13 @@ async function getCustomersOverview(req, res, next) {
       where.push('type = ?');
       params.push(type);
     }
+    // Nov 14, 2026: ?rx=1 — clients with a prescription on file on any of their orders. Only about
+    // 400 of the clients carry a category tag, so for Pharmacy this is the reliable way to find
+    // the ones whose orders needed a prescription.
+    if (['1', 'true'].includes(String(req.query.rx || '').toLowerCase())) {
+      where.push(`id IN (SELECT o.customer_id FROM orders o JOIN payment_proofs p ON p.order_id = o.id
+                          WHERE p.file_type = 'prescription' AND p.deleted_at IS NULL)`);
+    }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const orderBy = search ? `word_similarity(?, name) DESC, name ASC` : `name ASC`;
@@ -119,7 +129,7 @@ async function getCustomersOverview(req, res, next) {
       data: {
         customers: customers.map((c) => {
           const row = { ...c, is_test_customer: testZohoIds.includes(c.zoho_contact_id) };
-          return isSalesViewer ? pickSalesFields(row) : row;
+          return isReadOnlyViewer ? pickSalesFields(row) : row;
         }),
         test_customer_gate_enabled: testZohoIds.length > 0,
         configured_test_zoho_contact_ids: testZohoIds,

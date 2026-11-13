@@ -8,6 +8,7 @@ import {
 } from '../../api/queries';
 import SyncProgressIndicator from '../../components/SyncProgressIndicator';
 import ClientDetailsModal from '../../components/clients/ClientDetailsModal';
+import ClientOrdersModal from '../../components/clients/ClientOrdersModal';
 import { useSyncJobs } from '../../context/SyncJobsContext';
 import { useAuth } from '../../hooks/useAuth';
 import toast from 'react-hot-toast';
@@ -113,8 +114,15 @@ const ClientsPage = () => {
   const viewerRole = (user?.role || '').toLowerCase();
   const readOnly = !['admin', 'management'].includes(viewerRole);
   // 'mine' = clients on orders in the viewer's own scope; they land on it first.
-  const [scope, setScope] = useState(readOnly ? 'mine' : 'all');
-  const mineOnly = readOnly && scope === 'mine';
+  // Nov 14, 2026: Dispatch (Pharmacy) reads the directory too, but has no "own" clients, so it
+  // starts on all of them, and a row opens that client's orders (ClientOrdersModal).
+  const canMine = ['medrep', 'team_lead'].includes(viewerRole);
+  const canSeeOrders = ['dispatch', 'admin', 'management'].includes(viewerRole);
+  const [scope, setScope] = useState(canMine ? 'mine' : 'all');
+  const mineOnly = canMine && scope === 'mine';
+  // Nov 14, 2026: only clients with a prescription on any of their orders (Pharmacy's main use).
+  const [rxOnly, setRxOnly] = useState(false);
+  const [ordersClient, setOrdersClient] = useState(null);
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [isSuggestOpen, setIsSuggestOpen] = useState(false);
@@ -154,7 +162,7 @@ const ClientsPage = () => {
   }, []);
 
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['clients', page, search, categoryFilter, typeFilter, statusFilter, mineOnly],
+    queryKey: ['clients', page, search, categoryFilter, typeFilter, statusFilter, mineOnly, rxOnly],
     queryFn: () =>
       fetchClients({
         page,
@@ -163,7 +171,8 @@ const ClientsPage = () => {
         category: categoryFilter || undefined,
         type: typeFilter || undefined,
         status: statusFilter || undefined,
-        mine: mineOnly ? 1 : undefined
+        mine: mineOnly ? 1 : undefined,
+        rx: rxOnly ? 1 : undefined
       }),
     keepPreviousData: true
   });
@@ -174,7 +183,7 @@ const ClientsPage = () => {
   // browser just to suggest a few names.
   const showSuggestions = isSuggestOpen && search.length >= 2;
   const { data: suggestData, isFetching: isSuggestFetching } = useQuery({
-    queryKey: ['clients-suggest', search, categoryFilter, typeFilter, statusFilter, mineOnly],
+    queryKey: ['clients-suggest', search, categoryFilter, typeFilter, statusFilter, mineOnly, rxOnly],
     queryFn: () =>
       fetchClients({
         page: 1,
@@ -183,7 +192,8 @@ const ClientsPage = () => {
         category: categoryFilter || undefined,
         type: typeFilter || undefined,
         status: statusFilter || undefined,
-        mine: mineOnly ? 1 : undefined
+        mine: mineOnly ? 1 : undefined,
+        rx: rxOnly ? 1 : undefined
       }),
     enabled: showSuggestions,
     keepPreviousData: true
@@ -414,10 +424,42 @@ const ClientsPage = () => {
       </div>
       )}
 
+      {/* Nov 14, 2026: one-click filters (Pharmacy asked for patients / hospitals, and the clients
+          whose orders carried a prescription). The category ones are the same as the dropdown below;
+          "With prescription" works for every client, tagged or not. */}
+      <div className="flex flex-wrap items-center gap-2">
+        {[['', 'All clients'], ['patient', 'Patients'], ['hospital', 'Hospitals'], ['doctor', 'Doctors']].map(([key, label]) => (
+          <button
+            key={key || 'all'}
+            type="button"
+            onClick={() => { setCategoryFilter(key); setPage(1); }}
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+              categoryFilter === key ? 'bg-getmeds-blue text-white border-getmeds-blue' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => { setRxOnly((v) => !v); setPage(1); }}
+          aria-pressed={rxOnly}
+          title="Clients with a prescription on any of their orders"
+          className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            rxOnly ? 'bg-pharmacy-green text-white border-pharmacy-green' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          With prescription
+        </button>
+        {categoryFilter && categoryFilter !== 'uncategorized' && (
+          <span className="text-[11px] text-slate-400">Only clients tagged with this category. Use "With prescription" to find the rest.</span>
+        )}
+      </div>
+
       {/* Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-slate-50/50">
-          {readOnly && (
+          {canMine && (
             <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-xs font-semibold self-start">
               {[['mine', 'My customers'], ['all', 'All customers']].map(([key, label]) => (
                 <button
@@ -618,10 +660,20 @@ const ClientsPage = () => {
                     // Sep 24, 2026: the row opens the Client Details modal. The
                     // category picker and TIN box are editable in place, so
                     // their cells stop the click from also opening it.
-                    <tr key={cl.id} onClick={readOnly ? undefined : () => setDetailsClient(cl)} className={`hover:bg-slate-50/80 transition-colors ${readOnly ? '' : 'cursor-pointer'}`}>
+                    <tr
+                      key={cl.id}
+                      onClick={readOnly ? (canSeeOrders ? () => setOrdersClient(cl) : undefined) : () => setDetailsClient(cl)}
+                      className={`hover:bg-slate-50/80 transition-colors ${readOnly && !canSeeOrders ? '' : 'cursor-pointer'}`}
+                    >
                       <td className="py-3 px-4">
                         {readOnly ? (
-                          <span className="text-left font-semibold text-slate-900">{cl.name}</span>
+                          canSeeOrders ? (
+                            <button type="button" title="Open this client's orders" className="text-left font-semibold text-slate-900 hover:text-getmeds-blue">
+                              {cl.name}
+                            </button>
+                          ) : (
+                            <span className="text-left font-semibold text-slate-900">{cl.name}</span>
+                          )
                         ) : (
                           <button
                             type="button"
@@ -630,6 +682,15 @@ const ClientsPage = () => {
                             className={`text-left font-semibold hover:text-getmeds-blue ${cl.is_active === 0 ? 'text-slate-500' : 'text-slate-900'}`}
                           >
                             {cl.name}
+                          </button>
+                        )}
+                        {!readOnly && canSeeOrders && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setOrdersClient(cl); }}
+                            className="ml-2 text-[11px] font-semibold text-getmeds-blue hover:underline"
+                          >
+                            Orders
                           </button>
                         )}
                         <div className="flex flex-wrap gap-1 mt-0.5">
@@ -772,6 +833,9 @@ const ClientsPage = () => {
           fallbackName={detailsClient.name}
           onClose={() => setDetailsClient(null)}
         />
+      )}
+      {ordersClient && (
+        <ClientOrdersModal key={ordersClient.id} client={ordersClient} onClose={() => setOrdersClient(null)} />
       )}
     </div>
   );

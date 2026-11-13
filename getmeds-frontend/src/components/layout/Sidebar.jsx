@@ -222,6 +222,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/dispatch/return-checks', icon: <ClipboardCheck size={19} />, label: 'Return checks', badge: returnCount },
       // Sep 25, 2026: prescription verification, in parallel with Finance.
       { to: '/dispatch/pharmacy', icon: <Pill size={19} />, label: 'Pharmacy' },
+      // Nov 14, 2026: read-only; a client opens their orders with each one's prescription state.
+      { to: '/clients', icon: <Users size={19} />, label: 'Clients Directory' },
       // Sep 15, 2026: the orders this person caters (the page's other tab is
       // the full log that "All Orders Log" used to be).
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Catered Orders' },

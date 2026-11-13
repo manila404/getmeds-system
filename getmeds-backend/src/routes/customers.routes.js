@@ -12,7 +12,13 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 // narrows what they get back: active clients only, no TIN / Zoho id / credit figures, and an
 // optional ?mine=1 that limits it to customers on orders in their own scope. Every write,
 // sync and detail route below stays admin/management.
-router.get('/', requireAuth, requireRole('medrep', 'team_lead', 'admin', 'management'), c.getCustomersOverview);
+// Nov 14, 2026: Dispatch (Pharmacy included) reads it too, read-only, the same way.
+router.get('/', requireAuth, requireRole('medrep', 'team_lead', 'dispatch', 'admin', 'management'), c.getCustomersOverview);
+
+// Nov 14, 2026: one client's order history with each order's prescription state, for Pharmacy to
+// backtrack it. Dispatch / Management / Admin only (they can open any order already). Registered
+// here, before any '/:id' route, so it is matched first. See controllers/customerOrders.controller.js.
+router.get('/:id/orders', requireAuth, requireRole('dispatch', 'admin', 'management'), require('../controllers/customerOrders.controller').getCustomerOrders);
 
 // Sep 11, 2026: create a customer that does not exist in Zoho yet.
 //
