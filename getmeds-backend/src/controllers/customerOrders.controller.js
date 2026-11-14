@@ -15,6 +15,7 @@
 
 const db = require('../db/database');
 const { rxSummaries } = require('../services/prescriptionService');
+const attachmentLink = require('../services/attachmentLinkService');
 
 const LIMIT = 200;
 
@@ -44,11 +45,73 @@ exports.getCustomerOrders = async (req, res, next) => {
       return s.state === 'none' && s.requested ? 'requested' : s.state;
     };
 
+    // Nov 14, 2026 (Aaron): what the client bought, so Pharmacy can hold it against the doctor's
+    // prescription and catch a quantity beyond it. The lines of every order, and the same lines
+    // added up per medicine.
+    const lines = ids.length ? await db.prepare(
+      `SELECT oi.order_id, oi.product_id, p.name, p.unit, oi.quantity, oi.unit_price, oi.line_total
+         FROM order_items oi JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = ANY(?)
+        ORDER BY oi.id`
+    ).all([ids]) : [];
+    const linesByOrder = new Map();
+    for (const l of lines) {
+      if (!linesByOrder.has(l.order_id)) linesByOrder.set(l.order_id, []);
+      linesByOrder.get(l.order_id).push({ product_id: l.product_id, name: l.name, unit: l.unit, quantity: Number(l.quantity), unit_price: Number(l.unit_price), line_total: Number(l.line_total) });
+    }
+
+    // The prescription files themselves (view links, signed like every other attachment link),
+    // so the pharmacist can read the prescribed quantity next to what was bought.
+    const origin = `${req.headers['x-forwarded-proto'] || req.protocol || 'http'}://${req.get('host')}`;
+    const files = ids.length ? await db.prepare(
+      `SELECT id, order_id, file_name, content_type, status, uploaded_at
+         FROM payment_proofs
+        WHERE order_id = ANY(?) AND file_type = 'prescription' AND deleted_at IS NULL
+        ORDER BY id`
+    ).all([ids]) : [];
+    const rxByOrder = new Map();
+    for (const f of files) {
+      const token = attachmentLink.sign(f.id, f.order_id);
+      if (!rxByOrder.has(f.order_id)) rxByOrder.set(f.order_id, []);
+      rxByOrder.get(f.order_id).push({
+        id: f.id, file_name: f.file_name, status: f.status, uploaded_at: f.uploaded_at,
+        is_image: String(f.content_type || '').startsWith('image/'),
+        view_url: `${origin}/api/attachment-view?token=${token}`,
+        thumb_url: `${origin}/api/attachment-view?token=${token}&w=300&h=300`
+      });
+    }
+
+    const out = orders.map((o) => ({
+      ...o, rx_files: Number(o.rx_files) || 0, rx_state: stateOf(o.id),
+      items: linesByOrder.get(o.id) || [], prescriptions: rxByOrder.get(o.id) || []
+    }));
+
+    // Per medicine: total bought, on how many orders, first and last time, and how much of it was
+    // on orders that carried a prescription. Cancelled orders do not count as bought.
+    const meds = new Map();
+    for (const o of out) {
+      if (o.status === 'cancelled') continue;
+      for (const l of o.items) {
+        // free lines (a "buy one take one" promo at ₱0) are dispensed too, so they count
+        const m = meds.get(l.product_id) || { product_id: l.product_id, name: l.name, unit: l.unit, total_qty: 0, orderIds: new Set(), rx_qty: 0, first_at: o.created_at, last_at: o.created_at, lines: [] };
+        m.total_qty += l.quantity;
+        m.orderIds.add(o.id);
+        if (['verified', 'pending', 'rejected'].includes(o.rx_state)) m.rx_qty += l.quantity;
+        if (o.created_at < m.first_at) m.first_at = o.created_at;
+        if (o.created_at > m.last_at) m.last_at = o.created_at;
+        m.lines.push({ order_id: o.id, getmeds_order_id: o.getmeds_order_id, created_at: o.created_at, quantity: l.quantity, rx_state: o.rx_state, prescriptions: o.prescriptions, doctor: o.doctor });
+        meds.set(l.product_id, m);
+      }
+    }
+
     res.json({
       success: true,
       data: {
         customer,
-        orders: orders.map((o) => ({ ...o, rx_files: Number(o.rx_files) || 0, rx_state: stateOf(o.id) })),
+        orders: out,
+        medicines: [...meds.values()]
+          .map(({ orderIds, ...m }) => ({ ...m, orders: orderIds.size }))
+          .sort((a, b) => String(b.last_at).localeCompare(String(a.last_at))),
         limited: orders.length === LIMIT
       }
     });

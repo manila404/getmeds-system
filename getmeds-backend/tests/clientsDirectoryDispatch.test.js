@@ -76,3 +76,21 @@ test("a MedRep cannot open a client's full order history (other reps' orders)", 
   const res = await request(app).get(`/api/customers/${customerId}/orders`).set(as(medrepToken));
   expect(res.status).toBe(403);
 });
+
+// Nov 14, 2026: "Medicines bought" — what the client bought, added up per medicine, with the part
+// that was on orders carrying a prescription, so Pharmacy can check it against the prescription.
+test('the history adds up each medicine bought, and how much was on prescription orders', async () => {
+  const p = (await db.prepare('SELECT id FROM products WHERE is_active = 1 LIMIT 1').get()).id;
+  const [a, b] = orderIds;
+  await db.prepare('INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal, line_total) VALUES (?, ?, 30, 10, 300, 300)').run(a, p);
+  await db.prepare('INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal, line_total) VALUES (?, ?, 60, 10, 600, 600)').run(b, p);
+  const res = await request(app).get(`/api/customers/${customerId}/orders`).set(as(dispatchToken));
+  const med = res.body.data.medicines.find((m) => m.product_id === p);
+  expect(med.total_qty).toBe(90);
+  expect(med.rx_qty).toBe(30);
+  expect(med.orders).toBe(2);
+  const withRx = res.body.data.orders.find((o) => o.rx_state === 'verified');
+  expect(withRx.prescriptions).toHaveLength(1);
+  expect(withRx.prescriptions[0].view_url).toMatch(/\/api\/attachment-view\?token=/);
+  for (const id of [a, b]) await db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
+});
