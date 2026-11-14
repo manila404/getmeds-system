@@ -61,6 +61,21 @@ export const divisionForSalesperson = ({ salesperson, primarySalesperson, accoun
   return divisions.find((d) => lc(d) === prefix) || account;
 };
 
+/**
+ * Nov 14, 2026 (Aaron): the other way round. When the Division on an order is changed, the
+ * Salesperson follows if the person holds a name for that Division: Nicka choosing MT gets her
+ * "MT | 1", choosing CLIDP again gets "CLIDP | NICKA". Returns that name, or '' when the current
+ * one already fits the Division or the person has none for it.
+ */
+const fitsDivision = (division, name) => {
+  const prefix = lc(salespersonPrefix(name));
+  return Boolean(prefix) && lc(division).startsWith(prefix);
+};
+export const salespersonForDivision = ({ division, current, names = [] }) => {
+  if (!division || fitsDivision(division, current)) return '';
+  return names.find((n) => fitsDivision(division, n)) || '';
+};
+
 // Only these four Divisions have named sub-divisions. Sep 9, 2026: offered as
 // SUGGESTIONS (a datalist), never enforced — reps often cover several and the
 // lists were never exhaustive, so sub-division is free text everywhere.

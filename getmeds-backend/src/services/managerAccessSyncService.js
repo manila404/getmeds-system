@@ -49,7 +49,8 @@ const CHANNEL_DIVISIONS = {
   CLIDP: ['CLIDP'],
   TELESALES: ['TeleSales', 'TeleSales Anesthesia', 'MD Telesales'],
   HOSP: ['HOS'],
-  MT: [],
+  // Nov 14, 2026 (Aaron): MT is a division now (Nicka's "MT | 1" orders), approved by Faith.
+  MT: ['MT'],
 };
 
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));

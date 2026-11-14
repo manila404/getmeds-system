@@ -34,7 +34,7 @@ import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
 import { ORDER_SOURCES } from '../../constants/orderSources';
-import { divisionForSalesperson } from '../../constants/divisions';
+import { divisionForSalesperson, salespersonForDivision } from '../../constants/divisions';
 import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint, isPaidTerms } from '../../constants/paymentTerms';
 import { useStockAnnouncements, StockAnnouncementLine } from '../stock/StockAnnouncements';
 import StockWarningModal from './StockWarningModal';
@@ -805,6 +805,21 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // Oct 2, 2026: a MedRep can change Division on THIS order too (it starts on
   // their account's value); only this order is affected, never the account.
   const effectiveDivision = divisionOverride || myDivision;
+
+  // Nov 14, 2026 (Aaron): and the Salesperson follows the Division. Nicka (CLIDP | NICKA and
+  // MT | 1) choosing Division MT used to keep CLIDP | NICKA, so the order went to Zoho as MT with
+  // her CLIDP name and counted under CLIDP. Runs only when the Division changes, so a Salesperson
+  // picked by hand afterwards is kept.
+  useEffect(() => {
+    const current = (isBackOffice ? salespersonOverride : mySalesperson) || '';
+    const names = isBackOffice ? actingMedrepSalespersons : ownerSalespersons;
+    const pick = salespersonForDivision({ division: effectiveDivision, current, names });
+    if (!pick) return;
+    if (isBackOffice) setSalespersonOverride(pick);
+    else if (isRepChoosing) setZohoSalespersonChoice(pick);
+    else setOwnSalespersonChoice(pick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveDivision]);
 
   // Sep 5, 2026 (3): Sub-division is editable ON THIS ORDER, by whoever is
   // raising it — medrep or management — unlike Division and Salesperson,
