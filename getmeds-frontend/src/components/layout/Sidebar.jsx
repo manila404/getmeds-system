@@ -255,7 +255,8 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
     // audience — Admin has no other surface for these either, so this stays
     // scoped rather than assuming Admin wants it too.
     if (role === 'management') {
-      mainLinks.push({ to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements', badge: unseenAnnouncements });
+      // Nov 14, 2026: Management posts and ends Buy 1 Take 1 promos here too (and stock news).
+      mainLinks.push({ to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements & promos', badge: unseenAnnouncements });
     }
     navGroups.push({
       key: 'operations',

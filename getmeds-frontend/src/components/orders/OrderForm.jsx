@@ -435,6 +435,31 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
       </span>
     );
   };
+  // Nov 14, 2026 (Aaron): the free item as its own line under the paid one — same medicine, same
+  // quantity, ₱0, locked (it follows the paid line's quantity). The server adds the real line on
+  // submit (services/promoService.js); these rows show it before then.
+  const FreeTag = () => (
+    <span className="inline-flex items-center gap-1 rounded-full border border-fuchsia-200 bg-fuchsia-50 px-2 py-0.5 text-[11px] font-bold text-fuchsia-800 whitespace-nowrap">
+      🎁 Free · Buy 1 Take 1
+    </span>
+  );
+  const FreeRowDesktop = ({ item }) => (
+    <tr className="bg-fuchsia-50/40">
+      <td className="px-4 py-3 min-w-[11rem]">
+        <p className="font-semibold text-ink-primary whitespace-nowrap">{item.name}</p>
+        <span className="text-[11px] font-mono text-ink-secondary">{item.sku}</span>
+        <div className="mt-0.5"><FreeTag /></div>
+      </td>
+      <td className="px-3 py-3 text-center">
+        <span className="inline-block w-16 text-center border border-slate-200 bg-slate-50 rounded py-1 text-xs font-bold text-ink-primary" title="Follows the quantity bought">{b1t1Free(item)}</span>
+      </td>
+      <td className="px-3 py-3 text-right font-mono text-xs font-bold text-ink-primary">0.00</td>
+      <td className="px-3 py-3 text-right font-mono text-xs text-ink-secondary">0</td>
+      <td className="px-3 py-3 text-center text-[11px] font-semibold text-ink-secondary">{lineTaxLabel(item)}</td>
+      <td className="px-4 py-3 text-right font-bold text-ink-primary font-mono whitespace-nowrap">{peso(0)}</td>
+      <td className="px-3 py-3 text-center text-[10px] text-ink-secondary" title="Added automatically; remove the paid line to remove it">auto</td>
+    </tr>
+  );
   // Sep 18, 2026: out_of_stock/low_stock items currently in the cart — the
   // two kinds worth stopping to ask about. back_in_stock/stock_update are
   // informational, not a problem to justify proceeding past.
@@ -2423,7 +2448,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                       {items.map((item, idx) => {
                         const line = lineAmounts[idx];
                         return (
-                          <tr key={idx} className="hover:bg-surface/50 transition-colors">
+                          <React.Fragment key={idx}>
+                          <tr className="hover:bg-surface/50 transition-colors">
                             <td className="px-4 py-3 min-w-[11rem]">
                               <p className="font-semibold text-ink-primary whitespace-nowrap">{item.name}</p>
                               <span className="text-[11px] font-mono text-ink-secondary">{item.sku}</span>
@@ -2534,6 +2560,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                               </button>
                             </td>
                           </tr>
+                          {b1t1Free(item) > 0 && <FreeRowDesktop item={item} />}
+                          </React.Fragment>
                         );
                       })}
                     </tbody>
@@ -2578,7 +2606,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                   {items.map((item, idx) => {
                     const line = lineAmounts[idx];
                     return (
-                      <div key={idx} className="p-3.5 bg-white border border-slate-200 rounded-xl space-y-3 shadow-2xs">
+                      <React.Fragment key={idx}>
+                      <div className="p-3.5 bg-white border border-slate-200 rounded-xl space-y-3 shadow-2xs">
                         {/* Header: Name, SKU, Remove */}
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
@@ -2680,6 +2709,17 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                           <span className="text-sm font-bold text-ink-primary font-mono">{peso(line.amount)}</span>
                         </div>
                       </div>
+                      {b1t1Free(item) > 0 && (
+                        <div className="p-3.5 bg-fuchsia-50/40 border border-fuchsia-200 rounded-xl space-y-1.5 shadow-2xs">
+                          <p className="font-semibold text-sm text-ink-primary leading-snug">{item.name}</p>
+                          <FreeTag />
+                          <div className="flex justify-between text-xs text-ink-secondary pt-1">
+                            <span>Qty <b className="text-ink-primary">{b1t1Free(item)}</b> · Price <b className="text-ink-primary">0.00</b> · {lineTaxLabel(item)}</span>
+                            <span className="font-bold text-ink-primary font-mono">{peso(0)}</span>
+                          </div>
+                        </div>
+                      )}
+                      </React.Fragment>
                     );
                   })}
 
@@ -3143,12 +3183,10 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                 </thead>
                 <tbody className="divide-y divide-slate-100 bg-white">
                   {items.map((item, idx) => (
-                    <tr key={idx}>
+                    <React.Fragment key={idx}>
+                    <tr>
                       <td className="px-3 py-2 font-medium text-ink-primary">
                         {item.name} <span className="text-ink-secondary">({item.sku})</span>
-                        {b1t1Free(item) > 0 && (
-                          <span className="block text-[11px] font-bold text-fuchsia-800 mt-0.5">🎁 + {b1t1Free(item)} free (Buy 1 Take 1) — added to the order at ₱0</span>
-                        )}
                         {item.priceRemark?.trim() && (
                           <span className="block text-[11px] font-normal text-ink-secondary italic mt-0.5">
                             💬 {item.priceRemark.trim()}
@@ -3163,6 +3201,20 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                         {peso(lineAmounts[idx].amount)}
                       </td>
                     </tr>
+                    {b1t1Free(item) > 0 && (
+                      <tr className="bg-fuchsia-50/40">
+                        <td className="px-3 py-2 font-medium text-ink-primary">
+                          {item.name} <span className="text-ink-secondary">({item.sku})</span>
+                          <span className="block mt-0.5"><FreeTag /></span>
+                        </td>
+                        <td className="px-2 py-2 text-center text-ink-primary font-bold">{b1t1Free(item)}</td>
+                        <td className="px-3 py-2 text-right text-ink-secondary">{peso(0)}</td>
+                        <td className="px-3 py-2 text-right text-ink-secondary">—</td>
+                        <td className="px-3 py-2 text-center text-ink-secondary">{lineTaxLabel(item)}</td>
+                        <td className="px-3 py-2 text-right font-bold text-ink-primary">{peso(0)}</td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   ))}
                 </tbody>
                 <tfoot className="bg-surface">
