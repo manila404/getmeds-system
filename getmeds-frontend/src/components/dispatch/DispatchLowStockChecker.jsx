@@ -132,8 +132,11 @@ const DispatchLowStockChecker = ({ onAnnounceProduct }) => {
   const qc = useQueryClient();
   const { data: realProducts = [], isLoading: productsLoading } = useProducts();
 
-  const [expanded, setExpanded] = useState(true);
-  const [useMockSimulation, setUseMockSimulation] = useState(true);
+  // Nov 14, 2026 (Aaron): collapsed until opened, so it does not push the Dispatch list down. And the
+  // made-up demo items are on only in local development: on live they were listed as real stock
+  // (tagged "SIMULATED MOCK") for everyone. The toggle still turns them on by hand.
+  const [expanded, setExpanded] = useState(false);
+  const [useMockSimulation, setUseMockSimulation] = useState(Boolean(import.meta.env.DEV));
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('all_low'); // 'all_low' | 'out_of_stock' | 'low_stock' | 'search_all'
   const [customThreshold, setCustomThreshold] = useState(LOW_STOCK_THRESHOLD);

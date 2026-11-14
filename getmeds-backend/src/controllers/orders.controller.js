@@ -9,6 +9,7 @@ const { notify, getUserIdsByRole } = require('../services/notificationService');
 const zoho = require('../integrations/zoho');
 const { zohoWriteMode } = require('../services/zohoWriteGuard');
 const { applyB1T1, activeB1T1ProductIds } = require('../services/promoService');
+const { isSalespersonRole, salespersonLineProblem } = require('../services/orderLineRules');
 const zohoRetryService = require('../services/zohoRetryService');
 const { pushUnsyncedAttachments } = require('../services/zohoAttachmentSync');
 const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
@@ -2540,7 +2541,14 @@ exports.create = async (req, res, next) => {
     // Nov 14, 2026: Buy 1 Take 1. Each product on an open promo gets the same quantity again,
     // free, whatever the form sent (see services/promoService.js). Free lines are ₱0, so the
     // total does not change.
-    const promo = applyB1T1(resolvedItems, await activeB1T1ProductIds());
+    const promoIds = await activeB1T1ProductIds();
+    // Nov 14, 2026 (Aaron): a salesperson gets one line per medicine and no ₱0 price — see
+    // services/orderLineRules.js.
+    if (isSalespersonRole(req.user.role)) {
+      const problem = salespersonLineProblem(resolvedItems, promoIds);
+      if (problem) return res.status(400).json({ success: false, error: { code: 'INVALID_LINE', message: problem } });
+    }
+    const promo = applyB1T1(resolvedItems, promoIds);
     if (promo.added.length) resolvedItems.splice(0, resolvedItems.length, ...promo.lines);
 
     // Sep 22, 2026: split off any items explicitly set to the OTHER
@@ -4922,6 +4930,17 @@ exports.updateItems = async (req, res, next) => {
           ? ((typeof item.warehouse_name === 'string' && item.warehouse_name.trim()) ? item.warehouse_name.trim().slice(0, 120) : null)
           : (keptWarehouse.get(item.product_id)?.fulfil_warehouse_name || null)
       });
+    }
+
+    // Nov 14, 2026 (Aaron): same line rules as create for a salesperson. A ₱0 line already on
+    // the order (its Buy 1 Take 1 free line) may stay even after the promo has ended.
+    if (isSalespersonRole(req.user.role)) {
+      const freeAllowed = await activeB1T1ProductIds();
+      for (const old of await db.prepare('SELECT product_id FROM order_items WHERE order_id = ? AND unit_price <= 0').all(order.id)) {
+        freeAllowed.add(Number(old.product_id));
+      }
+      const problem = salespersonLineProblem(resolvedItems, freeAllowed);
+      if (problem) return res.status(400).json({ success: false, error: { code: 'INVALID_LINE', message: problem } });
     }
 
     if (isManagementCaller) {

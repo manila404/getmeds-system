@@ -640,6 +640,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // them. Naming it after one role was what made an admin's version of this
   // form silently behave like a MedRep's.
   const isBackOffice = ['management', 'admin'].includes((user?.role || '').toLowerCase());
+  // Nov 14, 2026 (Aaron): a MedRep / Team Lead cannot price a line at ₱0. Free goods come only
+  // from a Buy 1 Take 1 promo, whose free line the system adds; Management can still use ₱0.
+  const isSalesperson = ['medrep', 'team_lead'].includes((user?.role || '').toLowerCase());
   // Sep 5, 2026 (4): Zoho's own known Salesperson names, for the manual
   // Salesperson field below — same gate as medrepOptions above (server
   // decides via `enabled`), so this is empty for anyone who can't use it.
@@ -1054,6 +1057,11 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         return { ...row, quantity: Number.isFinite(q) && q >= 1 ? q : 1 };
       }
       const n = Number(row[field]);
+      if (field === 'rate' && isSalesperson && !(Number.isFinite(n) && n > 0)) {
+        const catalog = Number(products.find((p) => String(p.id) === String(row.productId))?.unit_price || 0);
+        toast.error(`The price of ${row.name} cannot be ₱0. Free Buy 1 Take 1 lines are added automatically.`);
+        return { ...row, rate: catalog };
+      }
       return { ...row, [field]: Number.isFinite(n) && n >= 0 ? n : 0 };
     }));
   };
@@ -1269,6 +1277,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // Finance's panel still points out any hospital document not attached.
   if (items.length === 0) missingFields.push('At least one order item');
   else if (!items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0)) missingFields.push('Valid quantity & price on every item');
+  else if (isSalesperson && items.some(i => !(Number(i.rate) > 0))) missingFields.push('A price above ₱0 on every item (free Buy 1 Take 1 lines are added automatically)');
   // Sep 4, 2026: a proof of payment, or a reason there is none. Never neither,
   // so Finance always gets either evidence or an explanation rather than a
   // blank. Like Source and Invoicing From above, this is a client-side UX
