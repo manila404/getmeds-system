@@ -8,6 +8,7 @@ const { logEvent, resolveActor } = require('../services/auditService');
 const { notify, getUserIdsByRole } = require('../services/notificationService');
 const zoho = require('../integrations/zoho');
 const { zohoWriteMode } = require('../services/zohoWriteGuard');
+const { applyB1T1, activeB1T1ProductIds } = require('../services/promoService');
 const zohoRetryService = require('../services/zohoRetryService');
 const { pushUnsyncedAttachments } = require('../services/zohoAttachmentSync');
 const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
@@ -2535,6 +2536,12 @@ exports.create = async (req, res, next) => {
         invoicing_from: clean(item.invoicing_from) || null
       });
     }
+
+    // Nov 14, 2026: Buy 1 Take 1. Each product on an open promo gets the same quantity again,
+    // free, whatever the form sent (see services/promoService.js). Free lines are ₱0, so the
+    // total does not change.
+    const promo = applyB1T1(resolvedItems, await activeB1T1ProductIds());
+    if (promo.added.length) resolvedItems.splice(0, resolvedItems.length, ...promo.lines);
 
     // Sep 22, 2026: split off any items explicitly set to the OTHER
     // invoicing_from entity — see services/orderSplitService.js. splitItems

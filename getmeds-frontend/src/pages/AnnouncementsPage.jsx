@@ -5,6 +5,8 @@ import {
   useMarkAnnouncementsSeen,
   StockAnnouncementLine
 } from '../components/stock/StockAnnouncements';
+import StockAnnouncementsManager from '../components/stock/StockAnnouncementsManager';
+import { useAuth } from '../hooks/useAuth';
 
 /**
  * Sep 28, 2026: the permanent home for stock announcements — reached from the
@@ -19,6 +21,10 @@ import {
 const AnnouncementsPage = () => {
   const { data = [], isLoading, refetch, isFetching } = useStockAnnouncements();
   const markSeen = useMarkAnnouncementsSeen();
+  // Nov 14, 2026: Dispatch, Finance (promos only) and Management post from here too.
+  const { user } = useAuth();
+  const role = String(user?.role || '').toLowerCase();
+  const canPost = ['dispatch', 'finance', 'management', 'admin'].includes(role);
 
   useEffect(() => {
     markSeen.mutate();
@@ -35,7 +41,7 @@ const AnnouncementsPage = () => {
             Announcements
           </h1>
           <p className="text-sm text-ink-secondary mt-1">
-            What Dispatch has said about stock — every open one, newest first. Taken down once Dispatch resolves it.
+            Stock news from Dispatch and Buy 1 Take 1 promos — every open one, newest first. Taken down once it is resolved or the promo ends.
           </p>
         </div>
         <button
@@ -45,6 +51,8 @@ const AnnouncementsPage = () => {
           <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
         </button>
       </div>
+
+      {canPost && <StockAnnouncementsManager promoOnly={role === 'finance'} startOpen />}
 
       {isLoading ? (
         <div className="flex justify-center py-16">

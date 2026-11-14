@@ -422,6 +422,19 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // Sep 15, 2026: Dispatch's open stock announcements, for the warning under
   // the product search when an item in this order is flagged.
   const { data: stockAnnouncements = [] } = useStockAnnouncements();
+  // Nov 14, 2026: products on an open Buy 1 Take 1 promo (Dispatch / Finance). The server adds the
+  // free line (same quantity, ₱0) when the order is created; the form shows it before submitting.
+  const b1t1Ids = new Set((stockAnnouncements || []).filter((a) => a.kind === 'promo_b1t1').map((a) => String(a.product_id)));
+  const b1t1Free = (item) => (b1t1Ids.has(String(item.productId)) && Number(item.rate) > 0 ? Number(item.quantity) || 0 : 0);
+  const B1T1Badge = ({ item }) => {
+    const free = b1t1Free(item);
+    if (!free) return null;
+    return (
+      <span className="mt-0.5 inline-flex items-center gap-1 rounded-full border border-fuchsia-200 bg-fuchsia-50 px-2 py-0.5 text-[11px] font-bold text-fuchsia-800 whitespace-nowrap">
+        🎁 Buy 1 Take 1 · +{free} free
+      </span>
+    );
+  };
   // Sep 18, 2026: out_of_stock/low_stock items currently in the cart — the
   // two kinds worth stopping to ask about. back_in_stock/stock_update are
   // informational, not a problem to justify proceeding past.
@@ -2328,7 +2341,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
               if (!notices.length) return null;
               return (
                 <div className="space-y-1.5">
-                  <p className="text-[11px] font-bold uppercase tracking-wide text-ink-secondary">📢 Dispatch says about items in this order</p>
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-ink-secondary">📢 Announcements about items in this order</p>
                   {notices.map((a) => <StockAnnouncementLine key={a.id} a={a} />)}
                 </div>
               );
@@ -2414,6 +2427,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                             <td className="px-4 py-3 min-w-[11rem]">
                               <p className="font-semibold text-ink-primary whitespace-nowrap">{item.name}</p>
                               <span className="text-[11px] font-mono text-ink-secondary">{item.sku}</span>
+                              <div><B1T1Badge item={item} /></div>
                               {/* Sep 18, 2026: why THIS line is priced the way it is — a
                                   discount agreed with the customer, a rate override —
                                   so Management and Finance see the reason, not just the
@@ -2570,6 +2584,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                           <div className="min-w-0">
                             <p className="font-semibold text-sm text-ink-primary leading-snug">{item.name}</p>
                             <span className="text-[11px] font-mono text-ink-secondary">{item.sku}</span>
+                            <div><B1T1Badge item={item} /></div>
                           </div>
                           <button
                             type="button"
@@ -3131,6 +3146,9 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                     <tr key={idx}>
                       <td className="px-3 py-2 font-medium text-ink-primary">
                         {item.name} <span className="text-ink-secondary">({item.sku})</span>
+                        {b1t1Free(item) > 0 && (
+                          <span className="block text-[11px] font-bold text-fuchsia-800 mt-0.5">🎁 + {b1t1Free(item)} free (Buy 1 Take 1) — added to the order at ₱0</span>
+                        )}
                         {item.priceRemark?.trim() && (
                           <span className="block text-[11px] font-normal text-ink-secondary italic mt-0.5">
                             💬 {item.priceRemark.trim()}

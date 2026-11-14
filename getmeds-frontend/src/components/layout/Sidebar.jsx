@@ -213,7 +213,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       { to: '/finance?view=mine', view: 'mine', icon: <UserCheck size={19} />, label: 'My Confirmations' },
       { to: '/finance?view=reports', view: 'reports', icon: <BarChart3 size={19} />, label: 'Reports' },
       { to: '/finance/history', icon: <History size={19} />, label: 'Payment History' },
-      { to: '/finance/refunds', icon: <Banknote size={19} />, label: 'Refunds' }
+      { to: '/finance/refunds', icon: <Banknote size={19} />, label: 'Refunds' },
+      // Nov 14, 2026: Finance announces and ends Buy 1 Take 1 promos here.
+      { to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements & promos' }
     );
   } else if (role === 'dispatch') {
     mainLinks.push(
@@ -228,7 +230,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       // the full log that "All Orders Log" used to be).
       { to: '/orders', icon: <ClipboardList size={19} />, label: 'My Catered Orders' },
       { to: '/dispatch/history', icon: <MapPin size={19} />, label: 'Dispatched / Tracking Log' },
-      { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' }
+      { to: '/inventory', icon: <Package size={19} />, label: 'Inventory & Stock' },
+      // Nov 14, 2026: stock announcements and Buy 1 Take 1 promos.
+      { to: '/announcements', icon: <Megaphone size={19} />, label: 'Announcements & promos' }
     );
   } else if (role === 'management' || role === 'admin') {
     // Sep 24, 2026: Management and Admin used to get 11-12 flat links plus a

@@ -17,7 +17,14 @@ const { tableExists } = require('../services/schemaColumns');
  * Before the migration adds the table: the list is empty (and says why) and
  * posting answers "needs a database update", rather than a database error.
  */
-const KINDS = ['out_of_stock', 'back_in_stock', 'low_stock', 'stock_update'];
+const STOCK_KINDS = ['out_of_stock', 'back_in_stock', 'low_stock', 'stock_update'];
+// Nov 14, 2026: Buy 1 Take 1 on a product (services/promoService.js). A promo and a stock word
+// live side by side: a new stock announcement replaces only the open stock one, and a promo only
+// the open promo, so "Low stock" never ends a promo and the other way round. Finance may post and
+// end promos only; Dispatch, Management and admin may post either.
+const PROMO_KINDS = ['promo_b1t1'];
+const KINDS = [...STOCK_KINDS, ...PROMO_KINDS];
+const sameGroup = (kind) => (PROMO_KINDS.includes(kind) ? PROMO_KINDS : STOCK_KINDS);
 const TABLE = 'stock_announcements';
 
 const notReady = (res) =>
@@ -86,6 +93,9 @@ exports.create = async (req, res, next) => {
     const bad = (m) => res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: m } });
     if (!productId) return bad('Pick the product this is about.');
     if (!KINDS.includes(kind)) return bad(`kind must be one of: ${KINDS.join(', ')}`);
+    if (String(req.user.role || '').toLowerCase() === 'finance' && !PROMO_KINDS.includes(kind)) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Finance can announce promos only; stock announcements are posted by Dispatch.' } });
+    }
     if (message.length > 300) return bad('The message is too long (300 characters at most).');
 
     const product = await db.prepare('SELECT id, name FROM products WHERE id = ?').get(productId);
@@ -94,13 +104,13 @@ exports.create = async (req, res, next) => {
     const me = actorOf(req.user);
     const now = new Date().toISOString();
     await db.transaction(async () => {
-      // The newest word on a product replaces the one before it.
+      // The newest word on a product replaces the one before it — within its own group (stock or promo).
       await db
         .prepare(
           `UPDATE stock_announcements SET resolved_at = ?, resolved_by = ?, resolved_by_name = ?
-            WHERE product_id = ? AND resolved_at IS NULL`
+            WHERE product_id = ? AND resolved_at IS NULL AND kind = ANY(?)`
         )
-        .run(now, me.id, me.name, productId);
+        .run(now, me.id, me.name, productId, sameGroup(kind));
       await db
         .prepare(
           `INSERT INTO stock_announcements (product_id, kind, message, created_by, created_by_name, created_at)
@@ -109,7 +119,7 @@ exports.create = async (req, res, next) => {
         .run(productId, kind, message || null, me.id, me.name, now);
     })();
 
-    const saved = await db.prepare(`${OPEN_QUERY} AND a.product_id = ? ORDER BY a.id DESC LIMIT 1`).get(productId);
+    const saved = await db.prepare(`${OPEN_QUERY} AND a.product_id = ? AND a.kind = ? ORDER BY a.id DESC LIMIT 1`).get(productId, kind);
     res.status(201).json({ success: true, data: { announcement: saved } });
   } catch (err) { next(err); }
 };
@@ -119,12 +129,14 @@ exports.resolve = async (req, res, next) => {
   try {
     if (!(await tableExists(TABLE))) return notReady(res);
     const me = actorOf(req.user);
+    // Nov 14, 2026: Finance ends promos only.
+    const onlyPromo = String(req.user.role || '').toLowerCase() === 'finance';
     const result = await db
       .prepare(
         `UPDATE stock_announcements SET resolved_at = ?, resolved_by = ?, resolved_by_name = ?
-          WHERE id = ? AND resolved_at IS NULL`
+          WHERE id = ? AND resolved_at IS NULL${onlyPromo ? ' AND kind = ANY(?)' : ''}`
       )
-      .run(new Date().toISOString(), me.id, me.name, parseInt(req.params.id, 10));
+      .run(new Date().toISOString(), me.id, me.name, parseInt(req.params.id, 10), ...(onlyPromo ? [PROMO_KINDS] : []));
     if (!result.changes) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'No open announcement with that id.' } });
     }
@@ -133,3 +145,4 @@ exports.resolve = async (req, res, next) => {
 };
 
 exports.KINDS = KINDS;
+exports.PROMO_KINDS = PROMO_KINDS;

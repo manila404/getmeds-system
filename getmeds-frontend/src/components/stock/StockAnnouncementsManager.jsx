@@ -5,7 +5,7 @@ import { Megaphone, X } from 'lucide-react';
 import client from '../../api/client';
 import { useProducts } from '../../hooks/useOrderData';
 import ProductAutocomplete from '../orders/ProductAutocomplete';
-import { STOCK_KINDS, StockAnnouncementLine, useStockAnnouncements } from './StockAnnouncements';
+import { STOCK_KINDS, PROMO_KINDS, StockAnnouncementLine, useStockAnnouncements } from './StockAnnouncements';
 
 /**
  * Dispatch posts and resolves stock announcements (Sep 15, 2026).
@@ -15,13 +15,17 @@ import { STOCK_KINDS, StockAnnouncementLine, useStockAnnouncements } from './Sto
  * dashboards, and on the order form when they add that product, until it is
  * resolved here. Posting about a product replaces its earlier announcement.
  */
-const StockAnnouncementsManager = () => {
+// Nov 14, 2026: `promoOnly` (Finance) offers and ends Buy 1 Take 1 promos only; Dispatch and
+// Management see every kind. `startOpen` shows the form without the expand click.
+const StockAnnouncementsManager = ({ promoOnly = false, startOpen = false }) => {
   const qc = useQueryClient();
-  const { data: open = [] } = useStockAnnouncements();
+  const { data: allOpen = [] } = useStockAnnouncements();
+  const open = promoOnly ? allOpen.filter((a) => PROMO_KINDS.includes(a.kind)) : allOpen;
+  const kinds = Object.entries(STOCK_KINDS).filter(([key]) => !promoOnly || PROMO_KINDS.includes(key));
   const { data: products = [] } = useProducts();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(startOpen);
   const [product, setProduct] = useState(null);
-  const [kind, setKind] = useState('out_of_stock');
+  const [kind, setKind] = useState(promoOnly ? 'promo_b1t1' : 'out_of_stock');
   const [message, setMessage] = useState('');
 
   const refresh = () => qc.invalidateQueries({ queryKey: ['stock-announcements'] });
@@ -56,12 +60,12 @@ const StockAnnouncementsManager = () => {
       >
         <span className="text-sm font-semibold text-ink-primary flex items-center gap-2">
           <Megaphone className="w-4 h-4 text-getmeds-blue" />
-          Stock announcements
+          {promoOnly ? 'Promos' : 'Stock announcements & promos'}
           <span className={`min-w-[1.5rem] text-center rounded-full px-1.5 text-xs tabular-nums ${open.length ? 'bg-getmeds-blue text-white' : 'bg-slate-100 text-ink-secondary'}`}>
             {open.length}
           </span>
         </span>
-        <span className="text-xs font-semibold text-getmeds-blue">{expanded ? 'Hide' : 'Announce stock / manage'}</span>
+        <span className="text-xs font-semibold text-getmeds-blue">{expanded ? 'Hide' : promoOnly ? 'Announce a promo / manage' : 'Announce stock or a promo / manage'}</span>
       </button>
 
       {expanded && (
@@ -81,7 +85,7 @@ const StockAnnouncementsManager = () => {
             ) : (
               <>
                 <ProductAutocomplete products={products} onSelect={setProduct} placeholder="Search the product this is about…" />
-                {products.some((p) => Number(p.stock) <= 15) && (
+                {!promoOnly && products.some((p) => Number(p.stock) <= 15) && (
                   <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
                     <span className="text-[10px] uppercase font-bold text-slate-400">Low Stock Quick-Pick:</span>
                     {products
@@ -106,7 +110,7 @@ const StockAnnouncementsManager = () => {
               </>
             )}
             <div className="flex flex-wrap gap-2">
-              {Object.entries(STOCK_KINDS).map(([key, k]) => (
+              {kinds.map(([key, k]) => (
                 <label
                   key={key}
                   className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold cursor-pointer ${kind === key ? k.className : 'border-slate-200 bg-white text-ink-secondary'}`}
@@ -116,6 +120,11 @@ const StockAnnouncementsManager = () => {
                 </label>
               ))}
             </div>
+            {PROMO_KINDS.includes(kind) && (
+              <p className="text-[12px] text-fuchsia-900 bg-fuchsia-50 border border-fuchsia-200 rounded px-2 py-1.5">
+                🎁 While this is on, every new order with this product gets the same quantity again, free (₱0): 30 bought, 30 free. It stays on until you end it below.
+              </p>
+            )}
             <input
               value={message}
               onChange={(e) => setMessage(e.target.value)}
@@ -151,7 +160,7 @@ const StockAnnouncementsManager = () => {
                       onClick={() => resolve.mutate(a.id)}
                       className="shrink-0 px-2.5 py-1 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-secondary hover:bg-surface disabled:opacity-50"
                     >
-                      Resolved — take down
+                      {PROMO_KINDS.includes(a.kind) ? 'End promo' : 'Resolved — take down'}
                     </button>
                   }
                 />

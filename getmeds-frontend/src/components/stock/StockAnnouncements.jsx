@@ -15,8 +15,12 @@ export const STOCK_KINDS = {
   out_of_stock: { label: 'Out of stock', icon: '⛔', className: 'border-red-200 bg-red-50 text-red-900' },
   low_stock: { label: 'Low stock', icon: '⚠️', className: 'border-amber-300 bg-amber-50 text-amber-900' },
   back_in_stock: { label: 'Back in stock', icon: '✅', className: 'border-green-200 bg-green-50 text-green-900' },
-  stock_update: { label: 'Stock update', icon: '📦', className: 'border-getmeds-blue/30 bg-getmeds-blue/5 text-getmeds-blue-dark' }
+  stock_update: { label: 'Stock update', icon: '📦', className: 'border-getmeds-blue/30 bg-getmeds-blue/5 text-getmeds-blue-dark' },
+  // Nov 14, 2026: Buy 1 Take 1 on the product (posted by Dispatch or Finance). Every new order with
+  // it gets the same quantity again, free.
+  promo_b1t1: { label: 'Buy 1 Take 1', icon: '🎁', className: 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-900' }
 };
+export const PROMO_KINDS = ['promo_b1t1'];
 
 // One fetch, shared: every hook below queries this same key, so two
 // components reading different slices of the response (the list, the unseen
@@ -78,7 +82,7 @@ export const StockAnnouncementLine = ({ a, right = null }) => {
         {a.sku && <span className="ml-1 text-xs opacity-70 font-mono">{a.sku}</span>}
         {a.message && <p className="text-[13px] mt-0.5">{a.message}</p>}
         <p className="text-[11px] opacity-75 mt-0.5">
-          — {a.created_by_name || 'Dispatch'} (Dispatch), {formatPHT(a.created_at, 'short-datetime')}
+          — {a.created_by_name || 'Dispatch'}, {formatPHT(a.created_at, 'short-datetime')}
         </p>
       </div>
       {right}
@@ -111,11 +115,11 @@ const StockAnnouncementsLink = () => {
       <span className="flex-1 min-w-0">
         {unseen > 0 ? (
           <span className="font-semibold text-getmeds-blue-dark">
-            {unseen} new stock announcement{unseen === 1 ? '' : 's'} from Dispatch
+            {unseen} new announcement{unseen === 1 ? '' : 's'} (stock and promos)
           </span>
         ) : (
           <span className="text-ink-secondary">
-            {data.length} open stock announcement{data.length === 1 ? '' : 's'} — you're caught up
+            {data.length} open announcement{data.length === 1 ? '' : 's'} (stock and promos) — you're caught up
           </span>
         )}
       </span>
@@ -138,7 +142,7 @@ const StockAnnouncementsBanner = ({ variant = 'link' }) => {
   if (!data.length) return null;
   return (
     <div className="bg-white shadow rounded-lg border border-slate-200 p-4">
-      <h2 className="text-sm font-semibold text-ink-primary mb-2">📢 Stock announcements from Dispatch ({data.length})</h2>
+      <h2 className="text-sm font-semibold text-ink-primary mb-2">📢 Stock news and promos ({data.length})</h2>
       <div className="space-y-2 max-h-72 overflow-y-auto">
         {data.map((a) => <StockAnnouncementLine key={a.id} a={a} />)}
       </div>

@@ -11,7 +11,8 @@ router.get('/', c.list);
 // Sep 28, 2026: anyone can mark their own as seen — it only ever touches the
 // caller's own account (req.user.id), never anyone else's.
 router.post('/seen', c.markSeen);
-router.post('/', requireRole('dispatch', 'management', 'admin'), c.create);
-router.post('/:id/resolve', requireRole('dispatch', 'management', 'admin'), c.resolve);
+// Nov 14, 2026: Finance too, for Buy 1 Take 1 promos only (checked in the controller).
+router.post('/', requireRole('dispatch', 'finance', 'management', 'admin'), c.create);
+router.post('/:id/resolve', requireRole('dispatch', 'finance', 'management', 'admin'), c.resolve);
 
 module.exports = router;

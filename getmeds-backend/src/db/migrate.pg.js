@@ -1346,6 +1346,19 @@ async function reconcileAttachmentZohoDocumentId(client) {
  * comment on the column. Idempotent for a database that already had `users`
  * before this column existed.
  */
+/**
+ * Nov 14, 2026: stock_announcements.kind also allows 'promo_b1t1' (Buy 1 Take 1 on a product,
+ * announced by Dispatch or Finance). Same table, so it reaches salespeople the same way (popup,
+ * Announcements page, order form). Re-running just replaces the rule with the same one.
+ */
+async function reconcileStockAnnouncementPromoKind(client) {
+  const { rows } = await client.query("SELECT to_regclass('stock_announcements') IS NOT NULL AS has");
+  if (!rows[0].has) return;
+  await client.query('ALTER TABLE stock_announcements DROP CONSTRAINT IF EXISTS stock_announcements_kind_check');
+  await client.query("ALTER TABLE stock_announcements ADD CONSTRAINT stock_announcements_kind_check CHECK (kind IN ('out_of_stock','back_in_stock','low_stock','stock_update','promo_b1t1'))");
+  console.log("  ✔ stock_announcements.kind allows 'promo_b1t1'");
+}
+
 async function reconcileStockAnnouncementsSeenColumn(client) {
   await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS stock_announcements_seen_at TEXT');
   console.log('  ✔ users.stock_announcements_seen_at present');
@@ -1567,6 +1580,7 @@ async function main() {
     await reconcileCustomerCategoryCheck(client);
     await reconcileSalesManagerScopeNote(client);
     await reconcileStockAnnouncementsSeenColumn(client);
+    await reconcileStockAnnouncementPromoKind(client);
     await reconcileRxNotRequiredColumns(client);
     await reconcileNoRxReasonColumn(client);
     await reconcileDraftCancelColumns(client);

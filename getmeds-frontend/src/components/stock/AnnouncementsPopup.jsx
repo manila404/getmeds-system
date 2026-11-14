@@ -71,9 +71,9 @@ const AnnouncementsPopup = () => {
             <Megaphone className="w-5 h-5 text-getmeds-blue shrink-0" />
             <div>
               <h2 className="text-base font-bold text-ink-primary">
-                {unseen} new stock announcement{unseen === 1 ? '' : 's'}
+                {unseen} new announcement{unseen === 1 ? '' : 's'} (stock and promos)
               </h2>
-              <p className="text-xs text-ink-secondary mt-0.5">From Dispatch, since you last checked.</p>
+              <p className="text-xs text-ink-secondary mt-0.5">Stock news and Buy 1 Take 1 promos, since you last checked.</p>
             </div>
           </div>
           <button
