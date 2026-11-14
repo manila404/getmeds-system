@@ -640,9 +640,6 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // them. Naming it after one role was what made an admin's version of this
   // form silently behave like a MedRep's.
   const isBackOffice = ['management', 'admin'].includes((user?.role || '').toLowerCase());
-  // Nov 14, 2026 (Aaron): a MedRep / Team Lead cannot price a line at ₱0. Free goods come only
-  // from a Buy 1 Take 1 promo, whose free line the system adds; Management can still use ₱0.
-  const isSalesperson = ['medrep', 'team_lead'].includes((user?.role || '').toLowerCase());
   // Sep 5, 2026 (4): Zoho's own known Salesperson names, for the manual
   // Salesperson field below — same gate as medrepOptions above (server
   // decides via `enabled`), so this is empty for anyone who can't use it.
@@ -978,49 +975,44 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
 
   // Step 2: Autocomplete item selection
   const handleProductSelect = (product) => {
-    const existingIndex = items.findIndex(i => String(i.productId) === String(product.id));
-    if (existingIndex > -1) {
-      // A quantity mid-edit is a string now (see handleUpdateItemField), and
-      // "5" += 1 is "51" — so it is parsed before adding.
-      setItems((rows) => rows.map((row, i) => (i === existingIndex
-        ? { ...row, quantity: (parseInt(row.quantity, 10) || 0) + 1 }
-        : row)));
-      toast.success(`Incremented quantity for ${product.name}`);
-    } else {
-      setItems([
-        ...items,
-        {
-          productId: product.id,
-          name: product.name,
-          sku: product.sku,
-          rate: Number(product.unit_price || 0),
-          unit: product.unit || 'unit',
-          quantity: 1,
-          discount: 0,
-          // Sep 14, 2026: starts mirroring the item's own Zoho tax.
-          // Sep 18, 2026: no longer locked to it — see the Tax column's
-          // header note. `taxOption` just picks the closest preset so the
-          // select opens on a sensible default; changing it overrides both
-          // taxPercent/taxLabel below (see handleTaxOptionChange). The real
-          // Zoho tax is kept separately, unedited, so the select's tooltip
-          // can still say what it actually is.
-          taxOption: inferTaxOption(product.tax_percentage, product.tax_name),
-          taxPercent: product.tax_percentage ?? null,
-          taxLabel: product.tax_name ?? null,
-          zohoTaxPercent: product.tax_percentage ?? null,
-          zohoTaxLabel: product.tax_name ?? null,
-          // Sep 18, 2026: why this line is priced the way it is — a discount
-          // agreed with the customer, a rate override — so Management and
-          // Finance see the reason next to the number, not just the number.
-          priceRemark: '',
-          // Sep 22, 2026: '' means "follow the order's own Invoicing From" —
-          // every item's default. Set to the other entity to split this
-          // order into two Zoho Sales Orders — see the column below.
-          invoicingFrom: ''
-        }
-      ]);
-      toast.success(`Added ${product.name} to order`);
-    }
+    // Nov 14, 2026 (Aaron): the same medicine picked again is a NEW line, not +1 on the first.
+    // That is how a 2+1 or a special deal is entered: Sugamaget 2 at ₱300, then Sugamaget 1 at ₱0.
+    const alreadyIn = items.some(i => String(i.productId) === String(product.id));
+    setItems([
+      ...items,
+      {
+        productId: product.id,
+        name: product.name,
+        sku: product.sku,
+        rate: Number(product.unit_price || 0),
+        unit: product.unit || 'unit',
+        quantity: 1,
+        discount: 0,
+        // Sep 14, 2026: starts mirroring the item's own Zoho tax.
+        // Sep 18, 2026: no longer locked to it — see the Tax column's
+        // header note. `taxOption` just picks the closest preset so the
+        // select opens on a sensible default; changing it overrides both
+        // taxPercent/taxLabel below (see handleTaxOptionChange). The real
+        // Zoho tax is kept separately, unedited, so the select's tooltip
+        // can still say what it actually is.
+        taxOption: inferTaxOption(product.tax_percentage, product.tax_name),
+        taxPercent: product.tax_percentage ?? null,
+        taxLabel: product.tax_name ?? null,
+        zohoTaxPercent: product.tax_percentage ?? null,
+        zohoTaxLabel: product.tax_name ?? null,
+        // Sep 18, 2026: why this line is priced the way it is — a discount
+        // agreed with the customer, a rate override — so Management and
+        // Finance see the reason next to the number, not just the number.
+        priceRemark: '',
+        // Sep 22, 2026: '' means "follow the order's own Invoicing From" —
+        // every item's default. Set to the other entity to split this
+        // order into two Zoho Sales Orders — see the column below.
+        invoicingFrom: ''
+      }
+    ]);
+    toast.success(alreadyIn
+      ? `Added ${product.name} again, on a new line (set its quantity and price)`
+      : `Added ${product.name} to order`);
   };
 
   // Generic per-line field updater — used by Quantity, Rate, Discount, and
@@ -1057,11 +1049,6 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         return { ...row, quantity: Number.isFinite(q) && q >= 1 ? q : 1 };
       }
       const n = Number(row[field]);
-      if (field === 'rate' && isSalesperson && !(Number.isFinite(n) && n > 0)) {
-        const catalog = Number(products.find((p) => String(p.id) === String(row.productId))?.unit_price || 0);
-        toast.error(`The price of ${row.name} cannot be ₱0. Free Buy 1 Take 1 lines are added automatically.`);
-        return { ...row, rate: catalog };
-      }
       return { ...row, [field]: Number.isFinite(n) && n >= 0 ? n : 0 };
     }));
   };
@@ -1277,7 +1264,6 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // Finance's panel still points out any hospital document not attached.
   if (items.length === 0) missingFields.push('At least one order item');
   else if (!items.every(i => i.productId && Number(i.quantity) > 0 && Number(i.rate) >= 0)) missingFields.push('Valid quantity & price on every item');
-  else if (isSalesperson && items.some(i => !(Number(i.rate) > 0))) missingFields.push('A price above ₱0 on every item (free Buy 1 Take 1 lines are added automatically)');
   // Sep 4, 2026: a proof of payment, or a reason there is none. Never neither,
   // so Finance always gets either evidence or an explanation rather than a
   // blank. Like Source and Invoicing From above, this is a client-side UX

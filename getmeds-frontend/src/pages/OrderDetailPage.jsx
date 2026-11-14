@@ -774,16 +774,6 @@ const OrderDetailPage = () => {
   };
 
   const addDraftProduct = (product) => {
-    // Nov 14, 2026 (Aaron): the same medicine added again raises the quantity of its line (as on
-    // the order form) instead of adding a second line. A ₱0 Buy 1 Take 1 free line is not it.
-    const existing = draftItems.findIndex((r) => String(r.product_id) === String(product.id) && Number(r.rate) > 0);
-    if (existing > -1) {
-      setDraftItems((rows) => rows.map((row, i) => (i === existing
-        ? { ...row, quantity: (parseInt(row.quantity, 10) || 0) + 1 }
-        : row)));
-      toast.success(`${product.name} is already on the order: quantity raised by 1`);
-      return;
-    }
     setDraftItems((rows) => [...rows, {
       product_id: product.id, name: product.name, sku: product.sku, unit: product.unit,
       quantity: 1, rate: product.unit_price, discount: 0,
