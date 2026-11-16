@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import {
-  X, Trash2, RotateCcw, CheckCircle2, AlertTriangle, Printer, Copy, ShieldAlert, ArrowLeft, Layers, Truck
+  X, Trash2, RotateCcw, Check, CheckCircle2, AlertTriangle, Printer, Copy, ShieldAlert, ArrowLeft, Layers, Truck
 } from 'lucide-react';
 import client from '../../api/client';
 import DrPrintVoucherModal from './DrPrintVoucherModal';
@@ -21,6 +21,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
   const [printOpen, setPrintOpen] = useState(false);
   const [siSuffix, setSiSuffix] = useState('');
   const [finalInvoice, setFinalInvoice] = useState(null);
+  const [copiedKey, setCopiedKey] = useState(null);
 
   const loadState = async () => {
     setLoading(true);
@@ -247,6 +248,19 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
     }
   };
 
+  const copyField = async (key, label, rawValue) => {
+    const val = String(rawValue ?? '').trim();
+    if (!val || val === '—') return;
+    try {
+      await navigator.clipboard?.writeText(val);
+      setCopiedKey(key);
+      toast.success(`Copied ${label}: ${val}`);
+      setTimeout(() => setCopiedKey((prev) => (prev === key ? null : prev)), 1500);
+    } catch {
+      toast.error('Clipboard permission unavailable.');
+    }
+  };
+
   const handleCopyOojeema = () => {
     const o = batchData?.order || {};
     const lines = (batchData?.lines || []).map((ln) => {
@@ -262,7 +276,9 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
       `ITEMS:\n${lines.join('\n')}`
     ].join('\n');
     navigator.clipboard?.writeText(text);
-    toast.success('Copied Oojeema invoice details to clipboard!');
+    setCopiedKey('__all__');
+    toast.success('Copied full Oojeema summary to clipboard!');
+    setTimeout(() => setCopiedKey((prev) => (prev === '__all__' ? null : prev)), 1500);
   };
 
   const handleFinalizeInvoice = async () => {
@@ -529,15 +545,159 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                 </div>
               ) : requiresSi ? (
                 <>
-                  <div className="p-3 rounded-lg border border-blue-200 bg-blue-50 text-blue-900 text-xs flex items-center justify-between gap-2">
-                    <span>Copy these details into <b>Oojeema</b>, save the Sales Invoice, then enter the SI number below.</span>
-                    <button
-                      type="button"
-                      onClick={handleCopyOojeema}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white border border-blue-300 font-semibold text-blue-900"
-                    >
-                      <Copy className="w-3.5 h-3.5" /> Copy for Oojeema
-                    </button>
+                  <div className="rounded-lg border border-blue-200 bg-blue-50/60 overflow-hidden">
+                    <div className="px-3.5 py-2.5 bg-blue-50 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-950">
+                      <span><b>Click any field below</b> to copy it straight into <b>Oojeema</b>, save the SI there, then type the SI number below.</span>
+                      <button
+                        type="button"
+                        onClick={handleCopyOojeema}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white border border-blue-300 text-[11px] font-semibold text-blue-900 hover:bg-blue-50"
+                      >
+                        {copiedKey === '__all__' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />} Copy All
+                      </button>
+                    </div>
+                    <div className="p-3.5 space-y-3 text-xs bg-white">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {[
+                          { key: 'cust', label: 'Customer', val: o.customer_name },
+                          { key: 'tin', label: 'TIN', val: o.tin },
+                          { key: 'lto', label: 'LTO No.', val: o.lto_license_number },
+                          { key: 'terms', label: 'Terms / MOP', val: o.intake_payment_terms || 'COD' },
+                          { key: 'so', label: 'Zoho SO No.', val: o.zoho_so_number },
+                          { key: 'dr', label: 'DR No.', val: drData?.receipt?.dr_number ? `${drData.receipt.dr_number}` : null },
+                          { key: 'doc', label: 'Doctor', val: doctorName },
+                          { key: 'gl', label: 'GL No.', val: o.intake_gl_number }
+                        ].filter((f) => f.val).map((f) => (
+                          <button
+                            key={f.key}
+                            type="button"
+                            onClick={() => copyField(f.key, f.label, f.val)}
+                            title={`Click to copy ${f.label}`}
+                            className="text-left px-2.5 py-1.5 rounded border border-slate-200 bg-surface hover:border-getmeds-blue hover:bg-blue-50/50 transition-colors flex items-center justify-between gap-2"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-semibold uppercase text-ink-secondary">{f.label}</div>
+                              <div className="font-medium text-ink-primary truncate">{f.val}</div>
+                            </div>
+                            {copiedKey === f.key
+                              ? <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              : <Copy className="w-3 h-3 text-slate-400 shrink-0" />}
+                          </button>
+                        ))}
+                        {o.delivery_address && (
+                          <button
+                            type="button"
+                            onClick={() => copyField('addr', 'Address', o.delivery_address)}
+                            title="Click to copy Delivery Address"
+                            className="sm:col-span-2 lg:col-span-3 text-left px-2.5 py-1.5 rounded border border-slate-200 bg-surface hover:border-getmeds-blue hover:bg-blue-50/50 transition-colors flex items-center justify-between gap-2"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-semibold uppercase text-ink-secondary">Delivery Address</div>
+                              <div className="font-medium text-ink-primary truncate">{o.delivery_address}</div>
+                            </div>
+                            {copiedKey === 'addr'
+                              ? <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              : <Copy className="w-3 h-3 text-slate-400 shrink-0" />}
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="border border-slate-200 rounded overflow-hidden">
+                        <table className="min-w-full text-xs">
+                          <thead className="bg-surface border-b border-slate-200 text-[10px] uppercase text-ink-secondary">
+                            <tr>
+                              <th className="px-2.5 py-1.5 text-left">Medicine (click to copy)</th>
+                              <th className="px-2.5 py-1.5 text-left">Qty</th>
+                              <th className="px-2.5 py-1.5 text-left">Unit Price</th>
+                              <th className="px-2.5 py-1.5 text-left">Batch &amp; Expiry</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {(batchData?.lines || []).map((ln) => {
+                              const linePicks = picksByItem[ln.order_item_id] || [];
+                              const itemKey = `item-${ln.order_item_id}`;
+                              const qtyKey = `qty-${ln.order_item_id}`;
+                              const priceKey = `price-${ln.order_item_id}`;
+                              const priceStr = ln.unit_price != null ? Number(ln.unit_price).toFixed(2) : null;
+                              return (
+                                <tr key={ln.order_item_id}>
+                                  <td className="px-2.5 py-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => copyField(itemKey, 'Medicine', ln.product_name)}
+                                      className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded hover:bg-blue-50 font-medium text-ink-primary text-left"
+                                      title="Click to copy medicine name"
+                                    >
+                                      <span>{ln.product_name}</span>
+                                      {copiedKey === itemKey ? <Check className="w-3 h-3 text-emerald-600 shrink-0" /> : <Copy className="w-3 h-3 text-slate-400 shrink-0" />}
+                                    </button>
+                                  </td>
+                                  <td className="px-2.5 py-1.5 whitespace-nowrap">
+                                    <button
+                                      type="button"
+                                      onClick={() => copyField(qtyKey, 'Qty', String(ln.quantity))}
+                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-blue-50 font-semibold"
+                                      title="Click to copy quantity"
+                                    >
+                                      <span>{ln.quantity} {ln.unit || 'pc'}</span>
+                                      {copiedKey === qtyKey ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3 text-slate-400" />}
+                                    </button>
+                                  </td>
+                                  <td className="px-2.5 py-1.5 whitespace-nowrap">
+                                    {priceStr ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => copyField(priceKey, 'Unit Price', priceStr)}
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-blue-50 font-mono"
+                                        title="Click to copy unit price"
+                                      >
+                                        <span>₱{priceStr}</span>
+                                        {copiedKey === priceKey ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3 text-slate-400" />}
+                                      </button>
+                                    ) : '—'}
+                                  </td>
+                                  <td className="px-2.5 py-1.5">
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {linePicks.map((p, idx) => {
+                                        const bKey = `b-${ln.order_item_id}-${idx}`;
+                                        const eKey = `e-${ln.order_item_id}-${idx}`;
+                                        return (
+                                          <span key={idx} className="inline-flex items-center gap-1 bg-surface border border-slate-200 rounded px-1.5 py-0.5">
+                                            <button
+                                              type="button"
+                                              onClick={() => copyField(bKey, 'Batch #', p.batch_number)}
+                                              className="inline-flex items-center gap-1 font-mono hover:text-getmeds-blue"
+                                              title="Click to copy Batch #"
+                                            >
+                                              {p.batch_number}
+                                              {copiedKey === bKey ? <Check className="w-2.5 h-2.5 text-emerald-600" /> : <Copy className="w-2.5 h-2.5 text-slate-400" />}
+                                            </button>
+                                            {p.expiry_date && (
+                                              <>
+                                                <span className="text-slate-400">·</span>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => copyField(eKey, 'Expiry', p.expiry_date)}
+                                                  className="inline-flex items-center gap-1 text-ink-secondary hover:text-getmeds-blue"
+                                                  title="Click to copy Expiry Date"
+                                                >
+                                                  Exp {p.expiry_date}
+                                                  {copiedKey === eKey ? <Check className="w-2.5 h-2.5 text-emerald-600" /> : <Copy className="w-2.5 h-2.5 text-slate-400" />}
+                                                </button>
+                                              </>
+                                            )}
+                                          </span>
+                                        );
+                                      })}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   </div>
                   <div className="p-4 rounded-lg border border-slate-200 bg-surface space-y-2">
                     <label className="block text-xs font-semibold text-ink-secondary">Oojeema SI Number (saved to Zoho without spaces)</label>

@@ -261,7 +261,7 @@ async function loadOrderWithItemsForBatches(orderId) {
   const order = await db.prepare(`
     SELECT o.id, o.getmeds_order_id, o.status, o.division, o.intake_source, o.invoicing_from,
            o.intake_gl_number, o.intake_payment_terms, o.intake_is_doctor, o.intake_doctor,
-           o.zoho_so_id, o.zoho_so_number, o.zoho_invoice_id, o.zoho_invoice_number,
+           o.delivery_address, o.zoho_so_id, o.zoho_so_number, o.zoho_invoice_id, o.zoho_invoice_number,
            o.fulfil_warehouse_id, o.fulfil_warehouse_name, o.updated_at,
            c.name AS customer_name, c.tin, c.lto_license_number, c.category AS customer_category${drOrderCols}
       FROM orders o
@@ -271,7 +271,7 @@ async function loadOrderWithItemsForBatches(orderId) {
   if (!order) throw new DispatchBatchError(404, 'NOT_FOUND', 'Order not found.');
 
   const items = await db.prepare(`
-    SELECT oi.id, oi.order_id, oi.product_id, oi.quantity, oi.unit_price, oi.invoicing_from,
+    SELECT oi.id, oi.order_id, oi.product_id, oi.quantity, oi.unit_price, oi.subtotal, oi.invoicing_from,
            oi.fulfil_warehouse_id, oi.fulfil_warehouse_name,
            p.name AS product_name, p.sku, p.unit, p.zoho_item_id${prodHasCsp ? ', p.is_csp' : ''}
       FROM order_items oi
@@ -346,6 +346,8 @@ async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTod
       sku: it.sku,
       unit: it.unit,
       quantity: it.quantity,
+      unit_price: Number(it.unit_price || 0),
+      subtotal: Number(it.subtotal != null ? it.subtotal : Number(it.quantity || 0) * Number(it.unit_price || 0)),
       is_csp: Number(it.is_csp) === 1 || isKnownCspProductName(it.product_name),
       warehouse_id: it.effective_warehouse_id,
       warehouse_name: it.effective_warehouse_name,
