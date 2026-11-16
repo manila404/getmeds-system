@@ -84,6 +84,7 @@ describe('Dispatch: filter by warehouse', () => {
     expect(warehouseOf('TeleSales').label).toBe('MD Telesales');
     expect(warehouseOf('B2B', 'DSWD').label).toBe('PAP');
     expect(warehouseOf('B2B', 'Distributor order').label).toBe('B2B');
+    expect(warehouseOf('MT').label).toBe('MT'); // Nov 14, 2026: Modern Trade, not Unassigned
     expect(warehouseOf('PS').key).toBe('unassigned');
     expect(warehouseOf(null).key).toBe('unassigned');
   });

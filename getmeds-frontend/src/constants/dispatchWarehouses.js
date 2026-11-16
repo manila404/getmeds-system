@@ -15,6 +15,7 @@ export const DISPATCH_WAREHOUSES = [
   { key: 'anesthesia', label: 'Anesthesia Telesales', hint: 'Division TeleSales Anesthesia' },
   { key: 'md_telesales', label: 'MD Telesales', hint: 'MD Telesales and TeleSales' },
   { key: 'b2c', label: 'B2C', hint: 'Division B2C' },
+  { key: 'mt', label: 'MT', hint: 'Division MT (Modern Trade)' },
   { key: 'pap', label: 'PAP', hint: 'Source PCSO, IAPF, DSWD or Office of the President' },
   { key: 'unassigned', label: 'Unassigned', hint: 'No division, or one outside these (PS, Management)' }
 ];

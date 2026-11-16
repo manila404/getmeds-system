@@ -111,6 +111,16 @@ describe('Order SI / DR / CSP classification rules', () => {
       requires_si: true,
       requires_dr: true
     });
+    expect(classifyOrder({ order: { division: 'MT' }, customer: {} })).toMatchObject({
+      transaction_kind: 'b2b',
+      requires_si: true,
+      requires_dr: true
+    });
+    expect(classifyOrder({ order: { division: 'B2B NBD' }, customer: {} })).toMatchObject({
+      transaction_kind: 'b2b',
+      requires_si: true,
+      requires_dr: true
+    });
     expect(classifyOrder({ order: { intake_source: 'Hospital PO' }, customer: { category: 'hospital' } })).toMatchObject({
       transaction_kind: 'hospital',
       requires_si: true,

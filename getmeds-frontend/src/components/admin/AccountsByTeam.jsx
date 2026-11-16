@@ -54,6 +54,57 @@ const sortChannels = (list) => {
   return [...list].sort((p, q) => rank(p) - rank(q));
 };
 
+/**
+ * Nov 16, 2026 (Aaron): Sales (CHC) is Division > Sub-division. A channel is one sub-division:
+ *   HOS    Field Representatives (channel HOSP), Telesales (channel TELESALES)
+ *   RX     STC, BNB, URO, B2C     (channels "RX · STC" …)
+ *   B2B    NBD (channel "B2B"), CRR (channel "B2B · CRR")
+ *   BID, CLIDP, MT                one channel each, no sub-division
+ * A channel named "<Division> · <Sub>" lands under that Division, so a new sub-division is just a
+ * new channel. Channel names are unchanged in the database.
+ */
+const DIVISION_ORDER = ['HOS', 'RX', 'B2B', 'BID', 'CLIDP', 'MT'];
+const SUB_ORDER = { HOS: ['Field Representatives', 'Telesales'], RX: ['STC', 'BNB', 'URO', 'B2C'], B2B: ['NBD', 'CRR'] };
+const DIVISION_NAME = { HOS: 'Hospital', RX: 'RX Business', B2B: 'Business to Business', BID: 'Bidding', CLIDP: 'CLIDP', MT: 'Modern Trade' };
+const divisionOf = (channelName) => {
+  const n = String(channelName || '').trim();
+  if (/^hosp?$/i.test(n)) return { div: 'HOS', sub: 'Field Representatives' };
+  if (/^telesales$/i.test(n)) return { div: 'HOS', sub: 'Telesales' };
+  const m = n.match(/^(.+?)\s*·\s*(.+)$/);
+  if (m) {
+    const div = m[1].trim().toUpperCase() === 'HOSP' ? 'HOS' : m[1].trim().toUpperCase();
+    const sub = m[2].trim();
+    return { div, sub: sub === 'B&B' ? 'BNB' : sub };
+  }
+  // Nov 16, 2026 (Aaron): the original B2B channel is NBD (everyone but Fritzie). It keeps the name
+  // "B2B" in the database: the KPI scorecard finds B2B's channel by that name.
+  if (/^b2b$/i.test(n)) return { div: 'B2B', sub: 'NBD' };
+  return { div: n.toUpperCase(), sub: null };
+};
+const groupDivisions = (sections) => {
+  const map = new Map();
+  for (const s of sections) {
+    const { div, sub } = divisionOf(s.c.name);
+    if (!map.has(div)) map.set(div, { div, subs: [] });
+    map.get(div).subs.push({ ...s, sub });
+  }
+  const rankDiv = (d) => { const i = DIVISION_ORDER.indexOf(d); return i === -1 ? DIVISION_ORDER.length : i; };
+  const list = [...map.values()].sort((a, b) => rankDiv(a.div) - rankDiv(b.div) || a.div.localeCompare(b.div));
+  for (const d of list) {
+    const order = SUB_ORDER[d.div] || [];
+    const rankSub = (x) => (x.sub == null ? 999 : (order.indexOf(x.sub) === -1 ? 500 : order.indexOf(x.sub)));
+    d.subs.sort((a, b) => rankSub(a) - rankSub(b));
+    const hasNamedSubs = d.subs.some((x) => x.sub);
+    // The plain "B2B" channel next to NBD / CRR holds the people not yet placed in either.
+    for (const x of d.subs) x.label = x.sub || (hasNamedSubs ? `${d.div} · not yet placed` : d.div);
+    d.inList = DIVISION_ORDER.includes(d.div);
+    d.heads = [...new Set(d.subs.map((x) => x.c.head_name).filter(Boolean))];
+    d.territories = d.subs.reduce((n, x) => n + x.c.counts.territories, 0);
+    d.vacant = d.subs.reduce((n, x) => n + x.c.counts.vacant, 0);
+  }
+  return list;
+};
+
 /** The rows of ONE channel, each carrying what its action button needs. */
 function channelRows(h, c, usersById) {
   const rows = [];
@@ -285,15 +336,64 @@ const Row = ({ r, onOpen, actions }) => {
 
 const HEADERS = ['Person', 'Role', 'Handles / limited to', 'Zoho territory', 'Status', ''];
 
-// Sep 26, 2026: the departments, in the order the business lists them. Sales is
-// built from the channels above; the rest are simply everyone holding that role.
-const DEPTS = [
-  { key: 'admin', title: 'Admin', sub: 'System administrators', roles: ['admin'] },
-  { key: 'ops', title: 'Operation Department', sub: 'Dispatch and Pharmacy', roles: ['dispatch'] },
-  { key: 'finance', title: 'Finance Department', sub: 'Payment and account checks', roles: ['finance'] },
-  { key: 'mgmt', title: 'Management (Approval)', sub: 'Approve orders', roles: ['management'] },
-  { key: 'lead', title: 'Team Lead', sub: 'Lead a team of salespeople', roles: ['team_lead'] },
-];
+// Nov 16, 2026 (Aaron): the four main departments, in his order: Admin, Finance, Sales (CHC),
+// Operation. Management (approvers) and Team Leads now sit INSIDE Sales (CHC); Operation is split
+// into Pharmacy and Dispatcher. Departments an admin adds (PAP first) follow these.
+const ADMIN_DEPT = { key: 'admin', title: 'Admin', sub: 'System administrators', roles: ['admin'] };
+const FINANCE_DEPT = { key: 'finance', title: 'Finance', sub: 'Payment and account checks', roles: ['finance'] };
+const OPERATION_UNITS = ['Pharmacy', 'Dispatcher'];
+
+/** One name (and an optional note) for a new sub-division or department. */
+const NameDialog = ({ title, help, label, placeholder, withNote, onClose, onSave }) => {
+  const [name, setName] = useState('');
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const save = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return setError('A name is required.');
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(name.trim(), note.trim());
+      onClose();
+    } catch (err) {
+      setError(errorText(err, 'Could not save.'));
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:py-16" role="dialog" aria-modal="true" aria-labelledby="ts-name-title">
+      <div className="fixed inset-0 bg-slate-900/50" onClick={() => !saving && onClose()} aria-hidden="true" />
+      <form onSubmit={save} className="relative w-full max-w-md rounded-xl bg-white shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+          <div>
+            <h2 id="ts-name-title" className="text-base font-semibold text-ink-primary">{title}</h2>
+            <p className="text-xs text-ink-secondary mt-0.5">{help}</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label htmlFor="ts-new-name" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">{label}</label>
+            <input id="ts-new-name" autoFocus className={inputCls} value={name} disabled={saving} placeholder={placeholder} onChange={(e) => setName(e.target.value)} />
+          </div>
+          {withNote && (
+            <div>
+              <label htmlFor="ts-new-note" className="block text-[11px] font-bold uppercase tracking-wide text-ink-secondary mb-1">What it does (optional)</label>
+              <input id="ts-new-note" className={inputCls} value={note} disabled={saving} placeholder="e.g. Orders with a GL from PCSO, DSWD or the Office of the President" onChange={(e) => setNote(e.target.value)} />
+            </div>
+          )}
+          {error && <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+          <button type="button" onClick={onClose} disabled={saving} className="px-3.5 py-2 rounded-md border border-slate-200 text-sm font-medium text-ink-secondary hover:bg-surface">Cancel</button>
+          <button type="submit" disabled={saving} className="px-4 py-2 rounded-md text-sm font-semibold text-white bg-getmeds-blue hover:bg-getmeds-blue-hover disabled:opacity-60">{saving ? 'Saving…' : 'Add'}</button>
+        </div>
+      </form>
+    </div>
+  );
+};
 
 /** A department: a title bar that opens and closes its contents. */
 const DeptCard = ({ title, sub, count, open, onToggle, children }) => (
@@ -622,12 +722,27 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
   const [moving, setMoving] = useState(null); // territory id whose Move menu is open
   const [assigning, setAssigning] = useState(null); // { territory, channel } awaiting an account
   const [addingPerson, setAddingPerson] = useState(null); // { manager, channel } for new territory
+  // Nov 16, 2026: divisions inside Sales (CHC), the "add sub-division / department" dialog, and
+  // the person picker open on an added department.
+  const [openDiv, setOpenDiv] = useState({});
+  const [naming, setNaming] = useState(null); // { kind: 'sub', division } | { kind: 'dept' }
+  const [addingMember, setAddingMember] = useState(null); // department id
+
+  // Nov 16, 2026: departments added by an admin (PAP first). Empty until the migration has run.
+  const { data: deptData } = useQuery({
+    queryKey: ['departments'],
+    queryFn: () => client.get('/api/admin/departments').then((r) => r.data.data),
+    retry: false,
+  });
+  const addedDepts = deptData?.departments || [];
+  const deptsReady = Boolean(deptData?.ready);
 
   const usersById = useMemo(() => new Map(users.map((u) => [u.id, u])), [users]);
   // A change of manager (approver) also changes what Manager Access is compared against.
   const refresh = () => Promise.all([
     qc.invalidateQueries({ queryKey: ['team-structure'] }),
     qc.invalidateQueries({ queryKey: ['manager-access-plan'] }),
+    qc.invalidateQueries({ queryKey: ['departments'] }),
   ]);
 
   const built = useMemo(() => {
@@ -637,7 +752,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
     const others = users
       .filter((u) => !placed.has(u.id))
       .sort((a, b) => String(a.role).localeCompare(String(b.role)) || String(a.name).localeCompare(String(b.name)));
-    return { sections, others };
+    return { sections, others, divisions: groupDivisions(sections) };
   }, [data, users, usersById]);
 
   const run = async (fn, okMsg) => {
@@ -695,7 +810,12 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
       );
     }
     if (a.type === 'rep') {
-      const targets = s.c.managers.filter((m) => m.id !== a.from.id);
+      // Nov 16, 2026: any team lead (or head) in the same Division, so a person can move to another
+      // sub-division (B2B NBD -> CRR). Labelled with the sub-division when it is not this one.
+      const div = built.divisions.find((d) => d.subs.some((x) => x.c.id === s.c.id));
+      const targets = (div ? div.subs : [{ c: s.c, label: '' }]).flatMap((x) => x.c.managers
+        .filter((m) => m.id !== a.from.id)
+        .map((m) => ({ ...m, where: x.c.id === s.c.id ? '' : x.label })));
       const isVacant = !r.name;
       const assign = isVacant
         ? <button type="button" className={linkBtn} onClick={() => setAssigning({ territory: a.territory, channel: s.c })}>Assign account</button>
@@ -727,7 +847,7 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
           className="text-[12px] border border-slate-300 rounded px-1.5 py-1 bg-white"
         >
           <option value="">Move to…</option>
-          {targets.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+          {targets.map((m) => <option key={m.id} value={m.id}>{m.name}{m.acts_as_head ? ' (head)' : ''}{m.where ? ` · ${m.where}` : ''}</option>)}
         </select>
       );
     }
@@ -757,96 +877,336 @@ const AccountsByTeam = ({ users, onOpen, onShowList, onUsersChanged }) => {
     return me && me.shares_team_with ? ` (shares ${me.shares_team_with_name || 'another lead'}'s team)` : '';
   };
 
-  const rowsFor = (d) => users
-    .filter((u) => d.roles.includes(String(u.role).toLowerCase()))
+  const rowsFor = (roles, detailOf = () => '') => users
+    .filter((u) => roles.includes(String(u.role).toLowerCase()))
     .sort((a, b) => displayName(a).localeCompare(displayName(b)))
     .map((u) => ({
       key: `d-${u.id}`, user: u, name: displayName(u), roleText: roleLabel(u.role), zoho: u.salesperson || '', status: statusOf(u),
-      detail: d.key === 'mgmt'
-        ? (approves.get(u.id) ? `Approves: ${approves.get(u.id).join(', ')}` : '')
-        : d.key === 'lead' ? `${membersOf(u.id)} team member${membersOf(u.id) === 1 ? '' : 's'}${sharedNote(u.id)}` : '',
+      detail: detailOf(u),
     }));
+
+  const mgmtRows = rowsFor(['management'], (u) => (approves.get(u.id) ? `Approves: ${approves.get(u.id).join(', ')}` : ''));
 
   const unplacedReps = built.others.filter((u) => String(u.role).toLowerCase() === 'medrep').map((u) => ({
     key: `o-${u.id}`, user: u, name: displayName(u), roleText: 'medrep', zoho: u.salesperson || '', status: statusOf(u), detail: '',
+  }));
+  // Nov 16, 2026: Team Leads are part of Sales (CHC) now; the ones the structure does not place yet.
+  const unplacedLeads = built.others.filter((u) => String(u.role).toLowerCase() === 'team_lead').map((u) => ({
+    key: `ol-${u.id}`, user: u, name: displayName(u), roleText: roleLabel(u.role), zoho: u.salesperson || '', status: statusOf(u),
+    detail: `${u.sales_title ? `${u.sales_title} · ` : ''}${membersOf(u.id)} team member${membersOf(u.id) === 1 ? '' : 's'}${sharedNote(u.id)}`,
   }));
 
   const totalTerritories = built.sections.reduce((s, x) => s + x.c.counts.territories, 0);
   const totalVacant = built.sections.reduce((s, x) => s + x.c.counts.vacant, 0);
 
+  // Operation: Pharmacy, Dispatcher, and whoever is not marked yet.
+  const opsUsers = users.filter((u) => String(u.role).toLowerCase() === 'dispatch')
+    .sort((a, b) => displayName(a).localeCompare(displayName(b)));
+  const unitReady = users.some((u) => Object.prototype.hasOwnProperty.call(u, 'operation_unit'));
+  const opsGroups = [
+    ...OPERATION_UNITS.map((unit) => ({ unit, people: opsUsers.filter((u) => u.operation_unit === unit) })),
+    { unit: null, people: opsUsers.filter((u) => !OPERATION_UNITS.includes(u.operation_unit)) },
+  ];
+  const setUnit = (u, unit) => run(async () => {
+    await client.patch(`/api/admin/users/${u.id}/operation-unit`, { operation_unit: unit || null });
+    if (onUsersChanged) await onUsersChanged();
+  }, unit ? `${displayName(u)} is in ${unit}.` : `${displayName(u)} is no longer placed.`);
+
+  const activeUsers = users.filter((u) => (u.is_active === 1 || u.is_active === true) && u.approval_status !== 'pending' && u.approval_status !== 'rejected')
+    .sort((a, b) => displayName(a).localeCompare(displayName(b)));
+
+  const subHeadLabel = 'text-[10.5px] font-bold uppercase tracking-wide text-ink-secondary';
+
+  const channelSection = (s, label) => {
+    const isOpen = Boolean(openCh[s.c.id]);
+    return (
+      <section key={s.c.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3">
+          <button type="button" onClick={() => setOpenCh((c) => ({ ...c, [s.c.id]: !isOpen }))} aria-expanded={isOpen}
+            className="flex items-center gap-2 min-w-0 text-left">
+            {isOpen ? <ChevronDown className="w-4 h-4 text-ink-secondary shrink-0" /> : <ChevronRight className="w-4 h-4 text-ink-secondary shrink-0" />}
+            <span className="text-[15px] font-semibold text-ink-primary">{label}</span>
+            <span className="text-xs text-ink-secondary">Head: {s.c.head_name}</span>
+          </button>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span className="text-xs text-ink-secondary tabular-nums">
+              {s.c.counts.territories} territories{s.c.counts.vacant ? <span className="text-red-700"> · {s.c.counts.vacant} vacant</span> : ''}
+            </span>
+            <button type="button" className={`${linkBtn} inline-flex items-center gap-1`} onClick={() => setEditor({ mode: 'manager-add', channel: s.c })}><Plus className="w-3.5 h-3.5" />Team lead</button>
+            <button type="button" className={`${linkBtn} inline-flex items-center gap-1`} onClick={() => setEditor({ mode: 'approver-add', channel: s.c })}><Plus className="w-3.5 h-3.5" />Manager</button>
+          </div>
+        </div>
+        {isOpen && (
+          <div className="overflow-x-auto thin-scroll border-t border-slate-100">
+            <table className="w-full min-w-[960px]">
+              <thead className="bg-slate-50">
+                <tr>{HEADERS.map((h, i) => <th key={i} className="text-left px-3.5 py-2 text-[11px] uppercase tracking-wide text-ink-secondary font-semibold">{h}</th>)}</tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {s.rows.map((r) => <Row key={r.key} r={r} onOpen={onOpen} actions={actionsFor(s)} />)}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    );
+  };
+
+  const foldCard = (key, title, sub, count, body, startOpen = false) => {
+    const isOpen = Boolean(openDiv[key] ?? startOpen);
+    return (
+      <section key={key} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <button type="button" onClick={() => setOpenDiv((s) => ({ ...s, [key]: !isOpen }))} aria-expanded={isOpen}
+          className="w-full flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-3 text-left hover:bg-slate-50">
+          <span className="flex items-center gap-2 min-w-0">
+            {isOpen ? <ChevronDown className="w-4 h-4 text-ink-secondary shrink-0" /> : <ChevronRight className="w-4 h-4 text-ink-secondary shrink-0" />}
+            <span className="font-semibold text-ink-primary">{title}</span>
+            {sub && <span className="text-xs text-ink-secondary">{sub}</span>}
+          </span>
+          <span className="text-xs text-ink-secondary tabular-nums">{count}</span>
+        </button>
+        {isOpen && <div className="border-t border-slate-100">{body}</div>}
+      </section>
+    );
+  };
+
+  const adminRows = rowsFor(ADMIN_DEPT.roles);
+  const financeRows = rowsFor(FINANCE_DEPT.roles);
+
   return (
     <div className="space-y-5">
       <p className="text-sm text-ink-secondary max-w-3xl">
-        Every account, by department. Sales is arranged by channel, one section each, so each can be set up on its own: who heads it, which manager approves it, which team leads sit
-        under it and who holds each territory. The buttons here change the structure only. What a manager sees and approves is shown beside it under Management (Approval), and changes only when you press Save on that person.
+        Every account, by department: Admin, Finance, Sales (CHC) and Operation, then any department added below. Sales (CHC) is arranged by Division and Sub-division,
+        with the managers who approve each one. The buttons here change the structure only; what a manager sees and approves changes only when you press Save under
+        Management (Approval).
       </p>
 
+      <DeptCard title="Admin" sub={ADMIN_DEPT.sub} count={`${adminRows.length} account${adminRows.length === 1 ? '' : 's'}`}
+        open={Boolean(openDept.admin)} onToggle={() => toggleDept('admin', Boolean(openDept.admin))}>
+        <AccountTable rows={adminRows} onOpen={onOpen} />
+      </DeptCard>
+
+      <DeptCard title="Finance" sub={FINANCE_DEPT.sub} count={`${financeRows.length} account${financeRows.length === 1 ? '' : 's'}`}
+        open={Boolean(openDept.finance)} onToggle={() => toggleDept('finance', Boolean(openDept.finance))}>
+        <AccountTable rows={financeRows} onOpen={onOpen} />
+      </DeptCard>
+
       <DeptCard
-        title="Sales Department" open={Boolean(openDept.sales ?? true)} onToggle={() => toggleDept('sales', openDept.sales ?? true)}
-        sub={`${built.sections.length} channels`}
+        title="Sales (CHC)" sub={`Customer Happiness Coachee · ${built.divisions.filter((d) => d.inList).length} divisions`}
+        open={Boolean(openDept.sales ?? true)} onToggle={() => toggleDept('sales', openDept.sales ?? true)}
         count={<>{totalTerritories} territories{totalVacant ? <span className="text-red-700"> · {totalVacant} vacant</span> : ''}</>}
       >
-        <div className="p-4 space-y-4 bg-slate-50/50">
-          {built.sections.map((s) => {
-            const isOpen = Boolean(openCh[s.c.id]);
+        <div className="p-4 space-y-3 bg-slate-50/50">
+          {foldCard('mgmt', 'Management (Approval)', 'Approve the orders of the divisions they hold', `${mgmtRows.length} account${mgmtRows.length === 1 ? '' : 's'}`,
+            <ManagerAccessTable rows={mgmtRows} onOpen={onOpen} />)}
+
+          {built.divisions.map((d) => {
+            const single = d.subs.length === 1 && !d.subs[0].sub;
+            const subCount = d.subs.filter((x) => x.sub).length;
+            const key = `div-${d.div}`;
+            const isOpen = Boolean(openDiv[key]);
             return (
-              <section key={s.c.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3">
-                  <button type="button" onClick={() => setOpenCh((c) => ({ ...c, [s.c.id]: !isOpen }))} aria-expanded={isOpen}
-                    className="flex items-center gap-2 min-w-0 text-left">
+              <section key={key} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3 hover:bg-slate-50">
+                  <button type="button" onClick={() => setOpenDiv((s) => ({ ...s, [key]: !isOpen }))} aria-expanded={isOpen}
+                    className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0 text-left">
                     {isOpen ? <ChevronDown className="w-4 h-4 text-ink-secondary shrink-0" /> : <ChevronRight className="w-4 h-4 text-ink-secondary shrink-0" />}
-                    <span className="text-[15px] font-semibold text-ink-primary">{chLabel(s.c.name)}</span>
-                    <span className="text-xs text-ink-secondary">Head: {s.c.head_name}</span>
+                    <span className="text-[15px] font-bold text-ink-primary">{d.div}</span>
+                    {DIVISION_NAME[d.div] && DIVISION_NAME[d.div] !== d.div && <span className="text-xs text-ink-secondary">{DIVISION_NAME[d.div]}</span>}
+                    {!d.inList && <span className="text-[10.5px] font-semibold text-amber-700">not in the division list</span>}
+                    <span className="text-xs text-ink-secondary">· Head: {d.heads.join(', ') || '—'}</span>
                   </button>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                     <span className="text-xs text-ink-secondary tabular-nums">
-                      {s.c.counts.territories} territories{s.c.counts.vacant ? <span className="text-red-700"> · {s.c.counts.vacant} vacant</span> : ''}
+                      {subCount ? `${subCount} sub-division${subCount === 1 ? '' : 's'} · ` : ''}{d.territories} territories
+                      {d.vacant ? <span className="text-red-700"> · {d.vacant} vacant</span> : ''}
                     </span>
-                    <button type="button" className={`${linkBtn} inline-flex items-center gap-1`} onClick={() => setEditor({ mode: 'manager-add', channel: s.c })}><Plus className="w-3.5 h-3.5" />Team lead</button>
-                    <button type="button" className={`${linkBtn} inline-flex items-center gap-1`} onClick={() => setEditor({ mode: 'approver-add', channel: s.c })}><Plus className="w-3.5 h-3.5" />Manager</button>
+                    <button type="button" className={`${linkBtn} inline-flex items-center gap-1`} onClick={() => setNaming({ kind: 'sub', division: d })}>
+                      <Plus className="w-3.5 h-3.5" />Sub-division
+                    </button>
                   </div>
                 </div>
                 {isOpen && (
-                  <div className="overflow-x-auto thin-scroll border-t border-slate-100">
-                    <table className="w-full min-w-[960px]">
-                      <thead className="bg-slate-50">
-                        <tr>{HEADERS.map((h, i) => <th key={i} className="text-left px-3.5 py-2 text-[11px] uppercase tracking-wide text-ink-secondary font-semibold">{h}</th>)}</tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {s.rows.map((r) => <Row key={r.key} r={r} onOpen={onOpen} actions={actionsFor(s)} />)}
-                      </tbody>
-                    </table>
+                  <div className="border-t border-slate-100 p-3 space-y-3 bg-slate-50/40">
+                    {single
+                      ? channelSection(d.subs[0], d.div)
+                      : d.subs.map((x) => channelSection(x, x.label))}
                   </div>
                 )}
               </section>
             );
           })}
 
+          {foldCard('leads-out', 'Team leads not in a division', 'Their account is a Team Lead, but no division lists them yet', `${unplacedLeads.length} account${unplacedLeads.length === 1 ? '' : 's'}`,
+            <AccountTable rows={unplacedLeads} onOpen={onOpen} showDetail />)}
+
           <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <button type="button" onClick={() => setShowOthers((v) => !v)} aria-expanded={showOthers}
               className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-slate-50">
               <span className="flex items-center gap-2">
                 {showOthers ? <ChevronDown className="w-4 h-4 text-ink-secondary" /> : <ChevronRight className="w-4 h-4 text-ink-secondary" />}
-                <span className="font-semibold text-ink-primary">MedReps not in a channel</span>
+                <span className="font-semibold text-ink-primary">Salespersons not in a division</span>
               </span>
-              <span className="text-xs text-ink-secondary tabular-nums">{unplacedReps.length} accounts · their Zoho salesperson is not a territory in any channel</span>
+              <span className="text-xs text-ink-secondary tabular-nums">{unplacedReps.length} accounts · their Zoho salesperson is not a territory in any division</span>
             </button>
             {showOthers && <AccountTable rows={unplacedReps} onOpen={onOpen} />}
           </section>
         </div>
       </DeptCard>
 
-      {DEPTS.map((d) => {
-        const rows = rowsFor(d);
+      <DeptCard title="Operation" sub="Pharmacy and Dispatcher" count={`${opsUsers.length} account${opsUsers.length === 1 ? '' : 's'}`}
+        open={Boolean(openDept.ops)} onToggle={() => toggleDept('ops', Boolean(openDept.ops))}>
+        {!unitReady && (
+          <p className="px-4 pt-3 text-xs text-amber-800">Pharmacy / Dispatcher cannot be saved on this database yet: the departments migration has not run.</p>
+        )}
+        <div className="p-4 space-y-3 bg-slate-50/50">
+          {opsGroups.filter((g) => g.unit || g.people.length).map((g) => (
+            <section key={g.unit || 'none'} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 flex items-center justify-between">
+                <span className={`font-semibold ${g.unit ? 'text-ink-primary' : 'text-amber-800'}`}>{g.unit || 'Not yet placed'}</span>
+                <span className="text-xs text-ink-secondary tabular-nums">{g.people.length} account{g.people.length === 1 ? '' : 's'}</span>
+              </div>
+              {g.people.length === 0 ? (
+                <p className="px-4 pb-3 text-sm text-ink-secondary">No one yet. Use the menu on a row below to place someone here.</p>
+              ) : (
+                <table className="w-full border-t border-slate-100">
+                  <tbody className="divide-y divide-slate-100">
+                    {g.people.map((u) => (
+                      <tr key={u.id} className="hover:bg-surface">
+                        <td className="py-2 pl-4 pr-3 text-[13px] font-medium text-ink-primary cursor-pointer" onClick={() => onOpen(u.id)}>{displayName(u)}</td>
+                        <td className="py-2 pr-3 text-[12px] text-ink-secondary">{u.email}</td>
+                        <td className="py-2 pr-3"><span className={`inline-block px-2 py-0.5 rounded-full text-[10.5px] font-bold border ${TONE[statusOf(u).tone]}`}>{statusOf(u).text}</span></td>
+                        <td className="py-2 pr-4 text-right">
+                          <select
+                            aria-label={`Unit for ${displayName(u)}`}
+                            value={u.operation_unit || ''}
+                            disabled={!unitReady}
+                            onChange={(e) => setUnit(u, e.target.value)}
+                            className="text-[12px] border border-slate-300 rounded px-1.5 py-1 bg-white disabled:opacity-50"
+                          >
+                            <option value="">Not placed</option>
+                            {OPERATION_UNITS.map((x) => <option key={x} value={x}>{x}</option>)}
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+          ))}
+        </div>
+      </DeptCard>
+
+      {addedDepts.map((dep) => {
+        const memberIds = new Set(dep.members.map((m) => m.id));
         return (
-          <DeptCard key={d.key} title={d.title} sub={d.sub} count={`${rows.length} account${rows.length === 1 ? '' : 's'}`}
-            open={Boolean(openDept[d.key])} onToggle={() => toggleDept(d.key, Boolean(openDept[d.key]))}>
-            {d.key === 'mgmt'
-              ? <ManagerAccessTable rows={rows} onOpen={onOpen} />
-              : <AccountTable rows={rows} onOpen={onOpen} showDetail />}
+          <DeptCard key={`dep-${dep.id}`} title={dep.name} sub={dep.note || 'Added department'}
+            count={`${dep.members.length} account${dep.members.length === 1 ? '' : 's'}`}
+            open={Boolean(openDept[`dep-${dep.id}`])} onToggle={() => toggleDept(`dep-${dep.id}`, Boolean(openDept[`dep-${dep.id}`]))}>
+            <div className="p-4 space-y-3">
+              {dep.members.length === 0 ? (
+                <p className="text-sm text-ink-secondary">No one in this department yet.</p>
+              ) : (
+                <table className="w-full">
+                  <tbody className="divide-y divide-slate-100">
+                    {dep.members.map((m) => (
+                      <tr key={m.id} className="hover:bg-surface">
+                        <td className="py-2 pr-3 text-[13px] font-medium text-ink-primary cursor-pointer" onClick={() => onOpen(m.id)}>{m.name}</td>
+                        <td className="py-2 pr-3"><span className="inline-block px-2 py-0.5 rounded-full text-[10.5px] font-bold border bg-slate-100 text-slate-700 border-slate-200">{roleLabel(m.role)}</span></td>
+                        <td className="py-2 pr-3 text-[12px] font-mono text-ink-secondary">{m.salesperson || ''}</td>
+                        <td className="py-2 text-right">
+                          <button type="button" className="text-[12px] font-semibold text-red-700 hover:text-red-800"
+                            onClick={() => run(() => client.delete(`/api/admin/departments/${dep.id}/members/${m.id}`), `${m.name} removed from ${dep.name}.`)}>Remove</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <div className="flex flex-wrap items-center gap-3">
+                {addingMember === dep.id ? (
+                  <select
+                    autoFocus
+                    aria-label={`Add a person to ${dep.name}`}
+                    defaultValue=""
+                    onBlur={() => setAddingMember(null)}
+                    onChange={(e) => {
+                      const id = Number(e.target.value);
+                      setAddingMember(null);
+                      if (id) run(() => client.post(`/api/admin/departments/${dep.id}/members`, { user_id: id }), `Added to ${dep.name}.`);
+                    }}
+                    className="text-[12px] border border-slate-300 rounded px-1.5 py-1 bg-white"
+                  >
+                    <option value="">Pick an account…</option>
+                    {activeUsers.filter((u) => !memberIds.has(u.id)).map((u) => (
+                      <option key={u.id} value={u.id}>{displayName(u)} · {roleLabel(u.role)}{u.salesperson ? ` · ${u.salesperson}` : ''}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <button type="button" className={`${linkBtn} inline-flex items-center gap-1`} onClick={() => setAddingMember(dep.id)}><Plus className="w-3.5 h-3.5" />Person</button>
+                )}
+                {dep.members.length === 0 && (
+                  <button type="button" className="text-[12px] font-semibold text-red-700 hover:text-red-800"
+                    onClick={() => run(() => client.delete(`/api/admin/departments/${dep.id}`), `${dep.name} removed.`)}>Remove department</button>
+                )}
+              </div>
+            </div>
           </DeptCard>
         );
       })}
+
+      <div>
+        <button type="button" disabled={!deptsReady} onClick={() => setNaming({ kind: 'dept' })}
+          title={deptsReady ? '' : 'The departments migration has not run on this database yet'}
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-dashed border-slate-300 bg-white text-sm font-semibold text-getmeds-blue hover:bg-slate-50 disabled:opacity-50">
+          <Plus className="w-4 h-4" />Add department
+        </button>
+      </div>
+
+      {naming && naming.kind === 'sub' && (
+        <NameDialog
+          title={`Add a sub-division to ${naming.division.div}`}
+          help={`Headed by ${naming.division.heads[0] || 'the division head'}. Then use Move on a person in ${naming.division.div} to place them here, or add a team lead.`}
+          label="Sub-division name" placeholder={naming.division.div === 'B2B' ? 'e.g. NBD' : 'e.g. STC'}
+          onClose={() => setNaming(null)}
+          onSave={async (name) => {
+            const first = naming.division.subs[0];
+            const div = naming.division.div;
+            const headName = first?.c.head_name || div;
+            const headUserId = first?.h?.head_user_id ?? null;
+            const created = await client.post('/api/admin/team-structure/channels', {
+              name: `${div} · ${name}`, head_name: headName, head_user_id: headUserId,
+            });
+            // The head as its first lead, so people can be moved here before it has a team lead.
+            const channelId = created.data?.data?.id;
+            if (channelId) {
+              await client.post('/api/admin/team-structure/managers', {
+                channel_id: channelId, name: headName, user_id: headUserId, acts_as_head: true,
+              });
+              // Same managers (approvers) as the rest of the Division, so its orders still go to them.
+              for (const ap of first?.c.approvers || []) {
+                await client.post('/api/admin/team-structure/approvers', { channel_id: channelId, name: ap.name, user_id: ap.user ? ap.user.id : null });
+              }
+            }
+            toast.success(`${div} · ${name} added.`);
+            await refresh();
+          }}
+        />
+      )}
+      {naming && naming.kind === 'dept' && (
+        <NameDialog
+          title="Add a department"
+          help="A department next to Admin, Finance, Sales (CHC) and Operation, e.g. PAP. Adding people to it does not change their role, Zoho salesperson or what they can see."
+          label="Department name" placeholder="e.g. PAP" withNote
+          onClose={() => setNaming(null)}
+          onSave={async (name, note) => {
+            await client.post('/api/admin/departments', { name, note: note || null });
+            toast.success(`${name} added.`);
+            await refresh();
+          }}
+        />
+      )}
 
       {assigning && (
         <AssignDialog

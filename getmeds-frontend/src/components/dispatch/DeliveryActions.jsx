@@ -115,7 +115,7 @@ function slipHtml({ order }) {
  * Opens the slip in a new window and prints it. The window is opened before
  * the request, inside the click, so a pop-up blocker treats it as the user's.
  */
-export async function printDeliverySlip(orderId) {
+export async function printDeliverySlip(orderId, onSlipPrinted) {
   const win = window.open('', '_blank');
   if (!win) {
     toast.error('Allow pop-ups for this site to print the delivery slip.');
@@ -129,6 +129,11 @@ export async function printDeliverySlip(orderId) {
     win.document.close();
     win.focus();
     setTimeout(() => win.print(), 300);
+    if (import.meta.env.VITE_DR_WORKFLOW === 'true') {
+      client.post(`/api/dispatch/orders/${orderId}/slip-print`)
+        .then(() => { if (onSlipPrinted) onSlipPrinted(); })
+        .catch(() => {});
+    }
   } catch (err) {
     win.close();
     toast.error(err.response?.data?.error?.message || 'Could not load the delivery slip.');

@@ -521,7 +521,7 @@ const RecentDispatchPanel = ({
                           tone="primary"
                         />
                       )}
-                      <IconButton icon={Printer} title="Print address" onClick={() => printDeliverySlip(o.id)} />
+                      <IconButton icon={Printer} title="Print address" onClick={() => printDeliverySlip(o.id, () => qc.invalidateQueries({ queryKey: ['dispatch-recent'] }))} />
                       {canConfirm && (
                         <IconButton
                           icon={CheckCircle2}

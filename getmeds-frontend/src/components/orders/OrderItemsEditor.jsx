@@ -546,7 +546,8 @@ const OrderItemsEditor = ({
           needed={Number(rows[stockRow].quantity) || null}
           perWarehouse={stockFor(rows[stockRow]).per_warehouse.map((p) => ({
             ...p,
-            enough: p.available >= (Number(rows[stockRow].quantity) || 0)
+            // Nov 16, 2026 (Aaron): on hand decides, same as the approval stock check.
+            enough: p.on_hand >= (Number(rows[stockRow].quantity) || 0)
           }))}
           selectedId={rows[stockRow].warehouse_id || defaultWarehouseId}
           onSelect={(id, name) => onChange(stockRow, 'warehouse', { id, name })}

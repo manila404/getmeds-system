@@ -10,8 +10,9 @@ const zoho = require('../integrations/zoho');
  * warehouse, so Management can pick the warehouse the order will be sent from (and see
  * at once if it cannot be filled). Read-only: it never changes anything in Zoho or here.
  *
- * "Available for sale" is Zoho's accounting figure: stock on hand minus what is already
- * committed to other open Sales Orders. That is the number Zoho itself compares an order to.
+ * Nov 16, 2026 (Aaron): a line is "enough" when the warehouse has the quantity ON HAND. What Zoho
+ * has committed to other open Sales Orders ("available for sale" = on hand minus committed) is
+ * returned as a warning (committed_conflict), not a block: those commitments are often stale.
  *
  * Advisory by design. If Zoho cannot be reached, the answer is { available: false } and
  * approval carries on exactly as it did before this existed; a stock check must never be
@@ -113,6 +114,7 @@ async function checkOrderStock(orderId, requestedWarehouseId = null) {
     const per = warehouses.map((w) => {
       const z = (stock.get(l.zoho_item_id) || []).find((x) => String(x.warehouse_id) === w.id) || {};
       const available = num(z.warehouse_available_for_sale_stock);
+      const onHand = num(z.warehouse_stock_on_hand);
       return {
         warehouse_id: w.id,
         warehouse_name: w.name,
@@ -122,7 +124,11 @@ async function checkOrderStock(orderId, requestedWarehouseId = null) {
         physical_on_hand: num(z.warehouse_actual_available_stock),
         physical_committed: num(z.warehouse_actual_committed_stock),
         physical_available: num(z.warehouse_actual_available_for_sale_stock),
-        enough: available >= need
+        // Nov 16, 2026 (Aaron): stock ON HAND decides, not "available for sale". Boxes Zoho still
+        // holds for other open Sales Orders are often stale (an SO never shipped in Zoho), so a
+        // warehouse with enough on hand can be chosen; the commitment is shown as a warning only.
+        enough: onHand >= need,
+        committed_conflict: onHand >= need && available < need
       };
     });
     // A line with its own warehouse (set in Edit Items) is measured against that one; the rest
@@ -142,7 +148,8 @@ async function checkOrderStock(orderId, requestedWarehouseId = null) {
       warehouse_name: (known.get(effectiveId) || {}).name,
       own_warehouse: !!ownId,
       status: here && here.enough ? 'ok' : 'short',
-      short_by: here && !here.enough ? need - here.available : 0,
+      short_by: here && !here.enough ? need - here.on_hand : 0,
+      committed_conflict: !!(here && here.committed_conflict),
       per_warehouse: per
     };
   });

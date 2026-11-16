@@ -12,7 +12,7 @@ const ENTITY_KEY_BY_INVOICING_FROM = Object.freeze({
 
 const PAP_SOURCES = new Set(['pcso', 'iapf', 'dswd', 'office of the president']);
 const HOSPITAL_B2B_SOURCES = new Set(['hospital po', 'distributor order', 'bidding order']);
-const HOSPITAL_B2B_DIVISIONS = new Set(['b2b', 'bid', 'clidp', 'hos']);
+const HOSPITAL_B2B_DIVISIONS = new Set(['b2b', 'b2b nbd', 'b2b crr', 'bid', 'clidp', 'hos', 'mt']);
 const PAP_GL_REGEX = /\b(pcso|gl|guarantee\s*letter|dswd|iapf|office\s+of\s+the\s+president)\b/i;
 
 /**
@@ -109,11 +109,12 @@ function classifyOrder({ order = {}, customer = {}, items = [], paymentProofs = 
   } else if (
     custCat === 'distributor' ||
     HOSPITAL_B2B_SOURCES.has(source) ||
-    HOSPITAL_B2B_DIVISIONS.has(division)
+    HOSPITAL_B2B_DIVISIONS.has(division) ||
+    /^b2b\b/i.test(division)
   ) {
     transactionKind = 'b2b';
     defaultRequiresSi = true;
-    classificationReason = 'B2B / Distributor / Bidding order requires Oojeema SI + DR';
+    classificationReason = 'B2B / Modern Trade / Distributor / Bidding order requires Oojeema SI + DR';
   } else if (
     custCat === 'doctor' ||
     Number(order.intake_is_doctor) === 1 ||
