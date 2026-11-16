@@ -69,4 +69,9 @@ router.post('/orders/:id/pack', requireRxCleared, c.markPacked);
 router.post('/orders/:id/ship', requireRxCleared, c.ship);
 router.post('/orders/:id/deliver', c.markDelivered);
 
+// Delivery Receipt & Zoho Warehouse Batch Picker (GETMEDS_DR_WORKFLOW=true).
+router.get('/orders/:id/batches', c.getOrderBatches);
+router.post('/orders/:id/batches', requireRxCleared, c.saveOrderBatches);
+router.post('/orders/:id/slip-print', c.recordSlipPrint);
+
 module.exports = router;

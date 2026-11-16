@@ -147,6 +147,9 @@ class MockZohoAdapter extends ZohoAdapter {
       created_time: new Date().toISOString(),
       _mock: true
     };
+    (salesorder.line_items || []).forEach((li, i) => {
+      if (!li.line_item_id) li.line_item_id = `${salesorder_id}-L${i + 1}`;
+    });
 
     this._salesOrders.set(salesorder_id, salesorder);
     return { code: 0, message: 'Sales order created successfully [MOCK MODE]', salesorder };
@@ -314,8 +317,66 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success [MOCK MODE]', warehouses };
   }
 
-  async getItemBatches() {
-    return { code: 0, message: 'success [MOCK MODE]', batches: [] };
+  setItemBatchesForTest(zohoItemId, batches) {
+    if (!this._itemBatches) this._itemBatches = new Map();
+    this._itemBatches.set(String(zohoItemId), batches);
+  }
+
+  async getItemBatches(zohoItemId) {
+    if (this._itemBatches && this._itemBatches.has(String(zohoItemId))) {
+      return { code: 0, message: 'success [MOCK MODE]', batches: this._itemBatches.get(String(zohoItemId)) };
+    }
+    const idStr = String(zohoItemId || 'MOCK');
+    const batches = [
+      {
+        batch_id: `B-EXP-${idStr}`,
+        batch_in_id: `BI-EXP-${idStr}`,
+        batch_number: 'MOCK-EXPIRED-01',
+        manufacturer_batch_number: 'MOCK-EXPIRED-01',
+        manufactured_date: '2024-01-01',
+        expiry_date: '2025-01-31',
+        in_quantity: 50,
+        balance_quantity: 20,
+        warehouse_id: '',
+        associated_warehouses: [
+          { warehouse_id: 'W-MAIN', in_quantity: 50, balance_quantity: 20 }
+        ],
+        status: 'active'
+      },
+      {
+        batch_id: `B-1-${idStr}`,
+        batch_in_id: `BI-1-${idStr}`,
+        batch_number: 'MOCK-BT-A1',
+        manufacturer_batch_number: 'MOCK-BT-A1',
+        manufactured_date: '2026-01-15',
+        expiry_date: '2027-06-30',
+        in_quantity: 120,
+        balance_quantity: 80,
+        warehouse_id: '',
+        associated_warehouses: [
+          { warehouse_id: 'W-MAIN', in_quantity: 80, balance_quantity: 50 },
+          { warehouse_id: 'W-CEBU', in_quantity: 40, balance_quantity: 30 }
+        ],
+        status: 'active'
+      },
+      {
+        batch_id: `B-2-${idStr}`,
+        batch_in_id: `BI-2-${idStr}`,
+        batch_number: 'MOCK-BT-B2',
+        manufacturer_batch_number: 'MOCK-BT-B2',
+        manufactured_date: '2026-05-01',
+        expiry_date: '2028-03-31',
+        in_quantity: 200,
+        balance_quantity: 200,
+        warehouse_id: '',
+        associated_warehouses: [
+          { warehouse_id: 'W-MAIN', in_quantity: 150, balance_quantity: 150 },
+          { warehouse_id: 'W-DAVAO', in_quantity: 50, balance_quantity: 50 }
+        ],
+        status: 'active'
+      }
+    ];
+    return { code: 0, message: 'success [MOCK MODE]', batches };
   }
 
   /** The made-up Sales Order + invoice for a sample order, e.g. ZSO-DEV-0032. Only ids starting ZSO-DEV-. */
@@ -683,15 +744,33 @@ class MockZohoAdapter extends ZohoAdapter {
     if (!lines.length) throw new Error('Mock Zoho: nothing left to invoice on this Sales Order.');
 
     const n = this._nextDocNumber();
+    const batchMap = opts.batchesBySoLineItemId || {};
+    const customFields = [];
+    if (opts.doctorName) customFields.push({ customfield_id: '2254168001890600049', api_name: 'cf_doctor_name', value: opts.doctorName });
+    if (opts.invoicingFrom) customFields.push({ customfield_id: '2254168001900812588', api_name: 'cf_invoicing_from', value: opts.invoicingFrom });
+    if (opts.orderSource) customFields.push({ customfield_id: '2254168001929089197', api_name: 'cf_source', value: opts.orderSource });
     const invoice = {
       invoice_id: `MOCK-INV-${n}`,
-      invoice_number: `INV-${n}`,
+      invoice_number: opts.invoiceNumber ? String(opts.invoiceNumber).trim() : `INV-${n}`,
       status: 'draft',
       date: opts.date || new Date().toISOString().slice(0, 10),
       customer_id: so.customer_id,
-      reference_number: so.reference_number,
+      reference_number: so.salesorder_number || so.reference_number,
+      custom_fields: customFields,
       total: so.total,
-      line_items: lines.map((x) => ({ salesorder_item_id: x.li.line_item_id, quantity: x.quantity, rate: x.li.rate }))
+      line_items: lines.map((x) => {
+        const linePicks = Array.isArray(batchMap[String(x.li.line_item_id)])
+          ? batchMap[String(x.li.line_item_id)]
+          : [];
+        const warehouseId = linePicks[0]?.warehouse_id || x.li.warehouse_id || opts.warehouseId || null;
+        return {
+          salesorder_item_id: x.li.line_item_id,
+          quantity: x.quantity,
+          rate: x.li.rate,
+          ...(warehouseId ? { warehouse_id: warehouseId } : {}),
+          ...(linePicks.length ? { batches: linePicks } : {})
+        };
+      })
     };
     lines.forEach((x) => { x.li.quantity_invoiced += x.quantity; });
     so.invoices.push({ invoice_id: invoice.invoice_id, invoice_number: invoice.invoice_number, status: 'draft', date: invoice.date, total: invoice.total });
@@ -726,13 +805,25 @@ class MockZohoAdapter extends ZohoAdapter {
     if (!lines.length) throw new Error('Mock Zoho: nothing left to pack on this Sales Order.');
 
     const n = this._nextDocNumber();
+    const batchMap = opts.batchesBySoLineItemId || {};
     const pkg = {
       package_id: `MOCK-PKG-${n}`,
       package_number: `PKG-${n}`,
       salesorder_id: so.salesorder_id,
       status: 'not_shipped',
       date: opts.date || new Date().toISOString().slice(0, 10),
-      line_items: lines.map((x) => ({ so_line_item_id: x.li.line_item_id, quantity: x.quantity }))
+      line_items: lines.map((x) => {
+        const linePicks = Array.isArray(batchMap[String(x.li.line_item_id)])
+          ? batchMap[String(x.li.line_item_id)]
+          : [];
+        const warehouseId = linePicks[0]?.warehouse_id || x.li.warehouse_id || opts.warehouseId || null;
+        return {
+          so_line_item_id: x.li.line_item_id,
+          quantity: x.quantity,
+          ...(warehouseId ? { warehouse_id: warehouseId } : {}),
+          ...(linePicks.length ? { batches: linePicks } : {})
+        };
+      })
     };
     lines.forEach((x) => { x.li.quantity_packed += x.quantity; });
     so.packages.push({ package_id: pkg.package_id, package_number: pkg.package_number, status: 'not_shipped' });

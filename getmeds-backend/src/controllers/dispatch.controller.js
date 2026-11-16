@@ -1,7 +1,9 @@
 const db = require('../db/database');
 const { loadScope, scopeSql } = require('../services/orderScopeService');
 const { importedSql, originSql } = require('../services/orderOrigin');
-const { isWorkflowV2Enabled } = require('../services/workflowFlags');
+const { isWorkflowV2Enabled, isDrWorkflowEnabled } = require('../services/workflowFlags');
+const dispatchBatchService = require('../services/dispatchBatchService');
+const { DispatchBatchError } = dispatchBatchService;
 const workflow = require('../services/workflowV2Service');
 const { workflowAction } = require('./workflowAction');
 const { logEvent, resolveActor } = require('../services/auditService');
@@ -1203,3 +1205,68 @@ exports.ship = workflowAction((req) =>
 
 exports.markDelivered = workflowAction((req) =>
   workflow.markDelivered({ orderId: req.params.id, user: req.user }));
+
+function drWorkflowAction(run) {
+  return async (req, res, next) => {
+    if (!isDrWorkflowEnabled()) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'FEATURE_OFF', message: 'DR workflow is not switched on yet (GETMEDS_DR_WORKFLOW).' }
+      });
+    }
+    try {
+      const data = await run(req);
+      res.json({ success: true, data });
+    } catch (err) {
+      if (err instanceof DispatchBatchError) {
+        return res.status(err.status).json({
+          success: false,
+          error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) }
+        });
+      }
+      next(err);
+    }
+  };
+}
+
+exports.getOrderBatches = drWorkflowAction((req) =>
+  dispatchBatchService.getOrderBatchOptions({ orderId: req.params.id }));
+
+exports.saveOrderBatches = drWorkflowAction((req) =>
+  dispatchBatchService.saveOrderBatchPicks({
+    orderId: req.params.id,
+    user: req.user,
+    doctorName: req.body?.doctor_name,
+    requiresSi: req.body?.requires_si ?? null,
+    siOverrideReason: req.body?.si_override_reason ?? null,
+    picks: req.body?.picks || [],
+    expectedUpdatedAt: req.body?.expected_updated_at || null,
+    expectedCateredBy: req.body?.expected_catered_by ?? null
+  }));
+
+exports.recordSlipPrint = drWorkflowAction(async (req) => {
+  await dispatchBatchService.assertCanActOnOrder({
+    orderId: req.params.id,
+    user: req.user,
+    expectedUpdatedAt: req.body?.expected_updated_at || null,
+    expectedCateredBy: req.body?.expected_catered_by ?? null
+  });
+  const actor = resolveActor(req.user);
+  const now = new Date().toISOString();
+  if (await hasColumn('orders', 'slip_printed_at')) {
+    await db.prepare(`
+      UPDATE orders
+         SET slip_printed_by = ?, slip_printed_by_name = ?, slip_printed_at = ?,
+             slip_print_count = COALESCE(slip_print_count, 0) + 1
+       WHERE id = ?
+    `).run(actor.id, actor.name, now, req.params.id);
+  }
+  await logEvent({
+    orderId: req.params.id,
+    eventType: 'DISPATCH_SLIP_PRINTED',
+    actorId: actor.id,
+    actorName: actor.name,
+    notes: `Delivery address slip printed by ${actor.name}.`
+  });
+  return { printed_by_name: actor.name, printed_at: now };
+});
