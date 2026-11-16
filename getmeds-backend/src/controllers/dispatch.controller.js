@@ -9,6 +9,62 @@ const notificationService = require('../services/notificationService');
 const { CATERED_SUBQUERY } = require('../services/dispatchCater');
 const { warehouseOf, warehouseSql } = require('../services/dispatchWarehouses');
 const { rxSummaries, rxBadge, rxBlocks } = require('../services/prescriptionService');
+const { hasColumn } = require('../services/schemaColumns');
+const { classifyOrder } = require('../services/orderClassificationService');
+
+/**
+ * Load line items + gl proof flags for a batch of order IDs in two flat queries
+ * (zero N+1 queries) so Dispatch views carry SI/DR/CSP & entity classifications.
+ */
+async function attachClassifications(orderRows) {
+  if (!orderRows || !orderRows.length) return new Map();
+  const ids = Array.from(new Set(orderRows.map((o) => o.id).filter(Boolean)));
+  const prodHasCsp = await hasColumn('products', 'is_csp');
+  const itemRows = ids.length
+    ? await db.prepare(`
+        SELECT oi.id, oi.order_id, oi.product_id, oi.invoicing_from,
+               p.name AS product_name${prodHasCsp ? ', p.is_csp' : ''}
+          FROM order_items oi
+          LEFT JOIN products p ON p.id = oi.product_id
+         WHERE oi.order_id = ANY(?)
+      `).all([ids])
+    : [];
+  const glProofRows = ids.length
+    ? await db.prepare(`
+        SELECT DISTINCT order_id FROM payment_proofs
+         WHERE order_id = ANY(?) AND lower(file_type) = 'gl'
+      `).all([ids])
+    : [];
+  const splitRows = ids.length
+    ? await db.prepare(`
+        SELECT order_id, invoicing_from FROM order_split_sales_orders WHERE order_id = ANY(?)
+      `).all([ids])
+    : [];
+
+  const itemsByOrder = new Map();
+  for (const it of itemRows) {
+    if (!itemsByOrder.has(it.order_id)) itemsByOrder.set(it.order_id, []);
+    itemsByOrder.get(it.order_id).push(it);
+  }
+  const hasGlOrderIds = new Set(glProofRows.map((r) => r.order_id));
+  const splitsByOrder = new Map();
+  for (const s of splitRows) {
+    if (!splitsByOrder.has(s.order_id)) splitsByOrder.set(s.order_id, []);
+    splitsByOrder.get(s.order_id).push(s);
+  }
+
+  const out = new Map();
+  for (const o of orderRows) {
+    out.set(o.id, classifyOrder({
+      order: o,
+      customer: { category: o.customer_category },
+      items: itemsByOrder.get(o.id) || [],
+      paymentProofs: hasGlOrderIds.has(o.id) ? [{ file_type: 'gl' }] : [],
+      splits: splitsByOrder.get(o.id) || []
+    }));
+  }
+  return out;
+}
 
 // ─── Confirmed for delivery (Sep 15, 2026) ─────────────────────────────────
 // Dispatch prints the delivery slip, checks the address, and confirms the
@@ -211,6 +267,7 @@ exports.getQueue = async (req, res, next) => {
 
     const select = `
       SELECT o.*, c.name as customer_name, c.contact_number,
+             c.tin, c.lto_license_number, c.category as customer_category,
              u.name as medrep_name,
              d.status as dispatch_status, d.courier, d.tracking_number, d.created_at as dispatch_created_at,
              d.zoho_package_number, d.zoho_shipment_number, d.delivered_at,
@@ -335,10 +392,15 @@ exports.getQueue = async (req, res, next) => {
        LIMIT ? OFFSET ?
     `).all([...pageParams, limit, (page - 1) * limit]);
 
+    const classifications = await attachClassifications(orders);
+
     res.json({
       success: true,
       data: {
-        orders: orders.map(withConfirmation),
+        orders: orders.map((o) => ({
+          ...withConfirmation(o),
+          classification: classifications.get(o.id) || null
+        })),
         workflow_v2: v2,
         steps: v2 ? V2_STEPS : null,
         pagination: { page, limit, total, pages },
@@ -377,11 +439,21 @@ exports.getRecent = async (req, res, next) => {
     // today's work in these two lists. Not capped at 20 like "any time".
     const today = req.query.period === 'today' ? manilaTodayStartIso() : null;
     const listLimit = today ? 500 : 20;
+    const hasDrColumns = await hasColumn('orders', 'requires_si');
+    const drColsSql = hasDrColumns
+      ? `, o.requires_si, o.requires_dr, o.is_csp, o.si_override_reason,
+           o.dispatch_doctor_name, o.oojeema_si_number, o.oojeema_entity,
+           o.slip_printed_by_name, o.slip_printed_at, o.slip_print_count`
+      : '';
     const columns = `
-        o.id, o.getmeds_order_id, o.status, o.division, o.intake_source, o.total_amount, o.delivery_address, o.delivery_notes,
+        o.id, o.getmeds_order_id, o.status, o.division, o.intake_source, o.invoicing_from,
+        o.intake_gl_number, o.intake_payment_terms, o.intake_is_doctor,
+        o.fulfil_warehouse_id, o.fulfil_warehouse_name${drColsSql},
+        o.total_amount, o.delivery_address, o.delivery_notes,
         o.intake_receiver, o.intake_contact_no, o.intake_delivery_method,
         o.zoho_so_number, o.zoho_so_status, o.created_at, o.updated_at,
-        c.name AS customer_name, c.contact_number, u.name AS medrep_name,
+        c.name AS customer_name, c.contact_number, c.tin, c.lto_license_number, c.category AS customer_category,
+        u.name AS medrep_name,
         dc.delivery_confirmed_by, dc.delivery_confirmed_at, dc.delivery_confirmed_meta,
         (SELECT dr.tracking_number FROM dispatch_records dr WHERE dr.order_id = o.id) AS tracking_number,
         ${TRACKING_HOLD_COLUMNS}`;
@@ -451,7 +523,11 @@ exports.getRecent = async (req, res, next) => {
       (await db.prepare(`SELECT COUNT(*) AS total ${from} WHERE ${confirmedOrdersWhere}`).get(confirmedOrdersParams))?.total || 0
     );
 
-    const rx = await rxSummaries([...drafts, ...confirmed, ...confirmedOrdersRows].map((o) => o.id));
+    const allRecentRows = [...drafts, ...confirmed, ...confirmedOrdersRows];
+    const [rx, classifications] = await Promise.all([
+      rxSummaries(allRecentRows.map((o) => o.id)),
+      attachClassifications(allRecentRows)
+    ]);
     const withRx = (financeCleared) => (o) => {
       const s = rx.get(o.id);
       return {
@@ -460,7 +536,8 @@ exports.getRecent = async (req, res, next) => {
         // Oct 5, 2026: Pharmacy asked the MedRep for a prescription — blocks like a rejected one.
         rx_requested: s.requested || null,
         rx_badge: rxBadge(s.state, financeCleared, s.requested),
-        rx_blocking: rxBlocks(s)
+        rx_blocking: rxBlocks(s),
+        classification: classifications.get(o.id) || null
       };
     };
 
@@ -1067,11 +1144,22 @@ exports.releaseCater = async (req, res, next) => {
 /** GET /api/dispatch/orders/:id/slip — everything the printed delivery slip shows. */
 exports.getSlip = async (req, res, next) => {
   try {
+    const hasDrColumns = await hasColumn('orders', 'requires_si');
+    const prodHasCsp = await hasColumn('products', 'is_csp');
+    const drColsSql = hasDrColumns
+      ? `, o.requires_si, o.requires_dr, o.is_csp, o.si_override_reason,
+           o.dispatch_doctor_name, o.oojeema_si_number, o.oojeema_entity,
+           o.slip_printed_by_name, o.slip_printed_at, o.slip_print_count`
+      : '';
     const order = await db.prepare(`
-      SELECT o.id, o.getmeds_order_id, o.status, o.zoho_so_number, o.delivery_address, o.delivery_notes,
+      SELECT o.id, o.getmeds_order_id, o.status, o.division, o.intake_source, o.invoicing_from,
+             o.intake_gl_number, o.intake_payment_terms, o.intake_is_doctor,
+             o.fulfil_warehouse_id, o.fulfil_warehouse_name${drColsSql},
+             o.zoho_so_number, o.delivery_address, o.delivery_notes,
              o.intake_receiver, o.intake_contact_no, o.intake_delivery_method, o.sales_order_date,
              o.created_at, o.total_amount,
-             c.name AS customer_name, c.contact_number, u.name AS medrep_name,
+             c.name AS customer_name, c.contact_number, c.tin, c.lto_license_number, c.category AS customer_category,
+             u.name AS medrep_name,
              dc.delivery_confirmed_by, dc.delivery_confirmed_at, dc.delivery_confirmed_meta
         FROM orders o
         LEFT JOIN customers c ON c.id = o.customer_id
@@ -1082,12 +1170,20 @@ exports.getSlip = async (req, res, next) => {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     }
     const items = await db.prepare(`
-      SELECT p.name, p.sku, oi.quantity
+      SELECT oi.id, oi.product_id, oi.invoicing_from, oi.fulfil_warehouse_id, oi.fulfil_warehouse_name,
+             p.name, p.sku, p.unit${prodHasCsp ? ', p.is_csp' : ''}, oi.quantity
         FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id
        WHERE oi.order_id = ?
        ORDER BY oi.id
     `).all(order.id);
-    res.json({ success: true, data: { order: withConfirmation(order), items } });
+    const classifications = await attachClassifications([order]);
+    res.json({
+      success: true,
+      data: {
+        order: { ...withConfirmation(order), classification: classifications.get(order.id) || null },
+        items
+      }
+    });
   } catch (err) { next(err); }
 };
 
