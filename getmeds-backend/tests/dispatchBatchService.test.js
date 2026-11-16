@@ -60,13 +60,22 @@ describe('FEFO warehouse batch filtering & validation', () => {
     ]);
   });
 
-  it('splits required quantity FEFO across batches and skips expired lots', () => {
+  it('picks earliest valid single FEFO batch that covers full quantity and skips expired lots', () => {
     const sorted = filterAndSortBatchesForWarehouse(sampleZohoBatches, 'W-MAIN', { today: '2026-11-16' });
+    // LOT-SOONER only has 40, while LOT-LATER has 120 -> picks LOT-LATER in 1 single batch
     const suggestion = suggestFefoPicks(sorted, 100);
     expect(suggestion.unallocated_quantity).toBe(0);
+    expect(suggestion.no_single_batch).toBe(false);
     expect(suggestion.picks).toEqual([
-      expect.objectContaining({ batch_number: 'LOT-SOONER', quantity: 40 }),
-      expect.objectContaining({ batch_number: 'LOT-LATER', quantity: 60 })
+      expect.objectContaining({ batch_number: 'LOT-LATER', quantity: 100 })
+    ]);
+
+    // When no single batch covers 150, flags no_single_batch + unallocated shortfall so Dispatch can Hold or manually split
+    const shortSuggestion = suggestFefoPicks(sorted, 150);
+    expect(shortSuggestion.no_single_batch).toBe(true);
+    expect(shortSuggestion.unallocated_quantity).toBe(110);
+    expect(shortSuggestion.picks).toEqual([
+      expect.objectContaining({ batch_number: 'LOT-SOONER', quantity: 40 })
     ]);
   });
 

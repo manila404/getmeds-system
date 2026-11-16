@@ -494,7 +494,12 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                                 </div>
                                 {linePicks.length > 1 && (
                                   <p className="text-[11px] text-ink-secondary">
-                                    Split across {linePicks.length} batches (FEFO uses earliest expiry first until empty). Remove a row or click <b>Use single batch</b> if taking everything from one lot.
+                                    Manual multi-batch split ({linePicks.length} lots). Remove a row or click <b>Use single batch</b> if taking everything from one lot.
+                                  </p>
+                                )}
+                                {!singleFullBatch && qtyDiff > 0 && (
+                                  <p className="text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                                    No single batch in this warehouse has all {ln.quantity} {ln.unit || 'pc'} available. Put this order <b>On Hold</b>, or click <b>+ Split across another batch</b> only if splitting across lots is approved.
                                   </p>
                                 )}
                               </>

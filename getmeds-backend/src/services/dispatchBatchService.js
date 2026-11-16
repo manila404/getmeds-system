@@ -81,30 +81,55 @@ function filterAndSortBatchesForWarehouse(zohoBatches = [], warehouseId = null, 
 }
 
 /**
- * Greedily suggest earliest-expiry (FEFO) batch splits up to `requiredQty`, ignoring expired lots.
+ * Suggest a single valid FEFO batch that can fulfill the entire `requiredQty` (matching
+ * operational Zoho picking: 1 batch per medicine line). If no single batch covers the
+ * full quantity, return the earliest-expiring partial lot and flag `no_single_batch`
+ * so Dispatch can Hold the order or manually split only if approved.
  */
 function suggestFefoPicks(sortedBatches = [], requiredQty = 0) {
-  let remaining = Number(requiredQty || 0);
-  const picks = [];
-  for (const b of sortedBatches) {
-    if (remaining <= 0) break;
-    if (b.is_expired || Number(b.available_quantity || 0) <= 0) continue;
-    const take = Math.min(remaining, Number(b.available_quantity));
-    if (take > 0) {
-      picks.push({
-        zoho_batch_id: b.zoho_batch_id,
-        zoho_batch_in_id: b.zoho_batch_in_id,
-        batch_number: b.batch_number,
-        manufacturer_batch_no: b.manufacturer_batch_no,
-        manufactured_date: b.manufactured_date,
-        expiry_date: b.expiry_date,
-        warehouse_id: b.warehouse_id,
-        quantity: take
-      });
-      remaining -= take;
-    }
+  const req = Number(requiredQty || 0);
+  if (req <= 0) return { picks: [], unallocated_quantity: 0, no_single_batch: false };
+
+  const valid = sortedBatches.filter((b) => !b.is_expired && Number(b.available_quantity || 0) > 0);
+  if (!valid.length) return { picks: [], unallocated_quantity: req, no_single_batch: true };
+
+  // Prefer the earliest-expiring (FEFO) batch that can fulfill the entire order line in one lot.
+  const singleFull = valid.find((b) => Number(b.available_quantity || 0) >= req);
+  if (singleFull) {
+    return {
+      picks: [{
+        zoho_batch_id: singleFull.zoho_batch_id,
+        zoho_batch_in_id: singleFull.zoho_batch_in_id,
+        batch_number: singleFull.batch_number,
+        manufacturer_batch_no: singleFull.manufacturer_batch_no,
+        manufactured_date: singleFull.manufactured_date,
+        expiry_date: singleFull.expiry_date,
+        warehouse_id: singleFull.warehouse_id,
+        quantity: req
+      }],
+      unallocated_quantity: 0,
+      no_single_batch: false
+    };
   }
-  return { picks, unallocated_quantity: remaining };
+
+  // No single batch can cover the full quantity: pre-fill the first valid batch with its
+  // available qty and report the shortfall so Dispatch can Hold the order (or split manually).
+  const first = valid[0];
+  const take = Math.min(req, Number(first.available_quantity));
+  return {
+    picks: [{
+      zoho_batch_id: first.zoho_batch_id,
+      zoho_batch_in_id: first.zoho_batch_in_id,
+      batch_number: first.batch_number,
+      manufacturer_batch_no: first.manufacturer_batch_no,
+      manufactured_date: first.manufactured_date,
+      expiry_date: first.expiry_date,
+      warehouse_id: first.warehouse_id,
+      quantity: take
+    }],
+    unallocated_quantity: Math.max(0, req - take),
+    no_single_batch: true
+  };
 }
 
 /**
@@ -354,7 +379,8 @@ async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTod
       available_batches: avail,
       saved_picks: saved,
       suggested_picks: saved.length ? saved : fefo.picks,
-      unallocated_quantity: saved.length ? 0 : fefo.unallocated_quantity
+      unallocated_quantity: saved.length ? 0 : fefo.unallocated_quantity,
+      no_single_batch: saved.length ? false : Boolean(fefo.no_single_batch)
     };
   });
 
