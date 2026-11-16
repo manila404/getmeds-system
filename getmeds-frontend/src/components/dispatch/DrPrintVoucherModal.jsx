@@ -16,7 +16,10 @@ export function buildDrPrintableHtml(drData) {
         <div class="head">
           <div>
             <div class="company">${esc(profile?.legal_name || receipt.entity_key)}</div>
-            <div class="sub">${esc(profile?.tin || '')} · ${esc(profile?.address || '')}</div>
+            <div class="sub">${esc(profile?.address_line_1 || profile?.address || '')}</div>
+            ${profile?.address_line_2 ? `<div class="sub">${esc(profile.address_line_2)}</div>` : ''}
+            ${(profile?.email || profile?.tel) ? `<div class="sub">${profile?.email ? `Email: ${esc(profile.email)}` : ''}${profile?.email && profile?.tel ? ' &nbsp;&nbsp; ' : ''}${profile?.tel ? `Tel No. ${esc(profile.tel)}` : ''}</div>` : ''}
+            <div class="sub">${esc(profile?.tin || '')}</div>
           </div>
           <div class="dr-box">
             <div class="dr-label">DELIVERY RECEIPT</div>
@@ -160,7 +163,18 @@ const DrPrintVoucherModal = ({ drData, onClose, onPrinted }) => {
               <div className="flex justify-between border-b-2 border-slate-800 pb-3 mb-3">
                 <div>
                   <div className="text-base font-bold text-slate-900">{profile?.legal_name}</div>
-                  <div className="text-[11px] text-slate-600">{profile?.tin} · {profile?.address}</div>
+                  <div className="text-[11px] text-slate-700 leading-tight">{profile?.address_line_1 || profile?.address}</div>
+                  {profile?.address_line_2 && (
+                    <div className="text-[11px] text-slate-700 leading-tight">{profile.address_line_2}</div>
+                  )}
+                  {(profile?.email || profile?.tel) && (
+                    <div className="text-[11px] text-slate-700 leading-tight">
+                      {profile?.email ? `Email: ${profile.email}` : ''}
+                      {profile?.email && profile?.tel ? '   ' : ''}
+                      {profile?.tel ? `Tel No. ${profile.tel}` : ''}
+                    </div>
+                  )}
+                  <div className="text-[11px] font-medium text-slate-800 leading-tight">{profile?.tin}</div>
                 </div>
                 <div className="text-right">
                   <div className="font-bold text-[11px] text-slate-700">DELIVERY RECEIPT</div>

@@ -261,6 +261,7 @@ async function loadOrderWithItemsForBatches(orderId) {
   const order = await db.prepare(`
     SELECT o.id, o.getmeds_order_id, o.status, o.division, o.intake_source, o.invoicing_from,
            o.intake_gl_number, o.intake_payment_terms, o.intake_is_doctor, o.intake_doctor,
+           o.zoho_so_id, o.zoho_so_number, o.zoho_invoice_id, o.zoho_invoice_number,
            o.fulfil_warehouse_id, o.fulfil_warehouse_name, o.updated_at,
            c.name AS customer_name, c.tin, c.lto_license_number, c.category AS customer_category${drOrderCols}
       FROM orders o

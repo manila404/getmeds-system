@@ -21,17 +21,25 @@ const DR_ENTITY_PROFILES = Object.freeze({
     legal_name: '2MG INCORPORATED',
     short_label: '2MG',
     subtitle: '2MG INCORPORATED · Delivery Receipt',
-    tin: process.env.DR_2MG_TIN || 'VAT Reg. TIN (2MG Incorporated)',
-    address: process.env.DR_2MG_ADDRESS || '2mg Incorporated Warehouse / Office'
+    address_line_1: '17 VATICAN BLDG. VATICAN CITY DRIVE BF RESORT VILLAGE TALON DOS',
+    address_line_2: 'LAS PINAS CITY, FOURTH DISTRICT, NCR PHILIPPINES 1740',
+    address: process.env.DR_2MG_ADDRESS || '17 VATICAN BLDG. VATICAN CITY DRIVE BF RESORT VILLAGE TALON DOS, LAS PINAS CITY, FOURTH DISTRICT, NCR PHILIPPINES 1740',
+    email: process.env.DR_2MG_EMAIL || 'finance3@getmeds.ph',
+    tel: process.env.DR_2MG_TEL || '0287091617',
+    tin: process.env.DR_2MG_TIN || 'VAT-REG TIN 010-065-182-00000'
   },
   GPI: {
     entity_key: 'GPI',
     invoicing_from: 'Getmeds Philippines Inc.',
-    legal_name: 'GETMEDS PHILIPPINES INC.',
+    legal_name: 'GETMEDS PHILIPPINES INC',
     short_label: 'GPI',
-    subtitle: 'GETMEDS PHILIPPINES INC. · Delivery Receipt',
-    tin: process.env.DR_GPI_TIN || 'VAT Reg. TIN (Getmeds Philippines Inc.)',
-    address: process.env.DR_GPI_ADDRESS || 'Getmeds Philippines Inc. Warehouse / Office'
+    subtitle: 'GETMEDS PHILIPPINES INC · Delivery Receipt',
+    address_line_1: '17 VATICAN BLDG. VATICAN CITY DRIVE BF RESORT VILLAGE TALON DOS',
+    address_line_2: 'LAS PINAS CITY, FOURTH DISTRICT, NCR PHILIPPINES 1740',
+    address: process.env.DR_GPI_ADDRESS || '17 VATICAN BLDG. VATICAN CITY DRIVE BF RESORT VILLAGE TALON DOS, LAS PINAS CITY, FOURTH DISTRICT, NCR PHILIPPINES 1740',
+    email: process.env.DR_GPI_EMAIL || 'finance@2mginc.com',
+    tel: process.env.DR_GPI_TEL || '09945648231',
+    tin: process.env.DR_GPI_TIN || 'VAT-REG TIN 605-059-166-00000'
   }
 });
 
@@ -557,7 +565,8 @@ async function finalizeZohoInvoiceForOrder({
 
   try {
     let { salesorder: so } = await adapter.getSalesOrder(targetSoId);
-    if (!so && adapter.mode === 'mock' && adapter._salesOrders) {
+    const rawAdapter = typeof adapter?.getZohoAdapter === 'function' ? adapter.getZohoAdapter() : adapter;
+    if (!so && adapter.mode === 'mock' && rawAdapter?._salesOrders) {
       // Re-hydrate in-memory mock Sales Order from DB across server restarts or local simulation seeds.
       const mockSo = {
         salesorder_id: targetSoId,
@@ -580,7 +589,7 @@ async function finalizeZohoInvoiceForOrder({
             quantity_packed: 0
           }))
       };
-      adapter._salesOrders.set(targetSoId, mockSo);
+      rawAdapter._salesOrders.set(targetSoId, mockSo);
       so = mockSo;
     }
     if (!so) {

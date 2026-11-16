@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import {
-  X, CheckCircle2, AlertTriangle, Printer, Copy, ShieldAlert, ArrowLeft, Layers, Truck
+  X, Trash2, RotateCcw, CheckCircle2, AlertTriangle, Printer, Copy, ShieldAlert, ArrowLeft, Layers, Truck
 } from 'lucide-react';
 import client from '../../api/client';
 import DrPrintVoucherModal from './DrPrintVoucherModal';
@@ -36,7 +36,8 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
 
       const initPicks = {};
       for (const ln of d.lines || []) {
-        initPicks[ln.order_item_id] = (ln.suggested_picks || []).map((p) => ({
+        const seedPicks = (ln.saved_picks && ln.saved_picks.length) ? ln.saved_picks : (ln.suggested_picks || []);
+        initPicks[ln.order_item_id] = seedPicks.map((p) => ({
           order_item_id: ln.order_item_id,
           zoho_batch_id: p.zoho_batch_id,
           zoho_batch_in_id: p.zoho_batch_in_id,
@@ -55,16 +56,28 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
 
   useEffect(() => {
     loadState();
-    const onFocus = () => {
-      if (document.visibilityState === 'visible') loadState();
-    };
-    window.addEventListener('focus', onFocus);
-    document.addEventListener('visibilitychange', onFocus);
-    return () => {
-      window.removeEventListener('focus', onFocus);
-      document.removeEventListener('visibilitychange', onFocus);
-    };
   }, [order.id]);
+
+  useEffect(() => {
+    const checkFreshness = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const { data: res } = await client.get(`/api/dispatch/orders/${order.id}/batches`);
+        const latestUpdatedAt = res?.data?.order?.updated_at;
+        if (batchData?.order?.updated_at && latestUpdatedAt && latestUpdatedAt !== batchData.order.updated_at) {
+          setConflictMsg('This order changed in another tab or by another dispatcher. Review carefully before saving.');
+        }
+      } catch {
+        // Ignore silent focus check errors
+      }
+    };
+    window.addEventListener('focus', checkFreshness);
+    document.addEventListener('visibilitychange', checkFreshness);
+    return () => {
+      window.removeEventListener('focus', checkFreshness);
+      document.removeEventListener('visibilitychange', checkFreshness);
+    };
+  }, [order.id, batchData?.order?.updated_at]);
 
   const handleApiError = (err, fallback) => {
     const code = err?.response?.data?.error?.code;
@@ -104,19 +117,65 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
   const addSplitBatchRow = (line) => {
     const avail = (line.available_batches || []).filter((b) => !b.is_expired);
     if (!avail.length) return;
+    setPicksByItem((prev) => {
+      const current = prev[line.order_item_id] || [];
+      const usedNumbers = new Set(current.map((p) => p.batch_number));
+      const nextBatch = avail.find((b) => !usedNumbers.has(b.batch_number)) || avail[0];
+      const currentSum = current.reduce((s, p) => s + Number(p.quantity || 0), 0);
+      const remaining = Math.max(0, Number(line.quantity || 0) - currentSum);
+      const suggestedQty = Math.min(remaining, Number(nextBatch.available_quantity || 0));
+      return {
+        ...prev,
+        [line.order_item_id]: [
+          ...current,
+          {
+            order_item_id: line.order_item_id,
+            zoho_batch_id: nextBatch.zoho_batch_id,
+            zoho_batch_in_id: nextBatch.zoho_batch_in_id,
+            batch_number: nextBatch.batch_number,
+            expiry_date: nextBatch.expiry_date,
+            quantity: suggestedQty
+          }
+        ]
+      };
+    });
+  };
+
+  const removeBatchRow = (lineId, pickIdx) => {
+    setPicksByItem((prev) => {
+      const current = [...(prev[lineId] || [])];
+      if (current.length <= 1) return prev;
+      current.splice(pickIdx, 1);
+      return { ...prev, [lineId]: current };
+    });
+  };
+
+  const useSingleBatchFullQty = (line, batchObj) => {
+    if (!batchObj || batchObj.is_expired) return;
     setPicksByItem((prev) => ({
       ...prev,
-      [line.order_item_id]: [
-        ...(prev[line.order_item_id] || []),
-        {
-          order_item_id: line.order_item_id,
-          zoho_batch_id: avail[0].zoho_batch_id,
-          zoho_batch_in_id: avail[0].zoho_batch_in_id,
-          batch_number: avail[0].batch_number,
-          expiry_date: avail[0].expiry_date,
-          quantity: 0
-        }
-      ]
+      [line.order_item_id]: [{
+        order_item_id: line.order_item_id,
+        zoho_batch_id: batchObj.zoho_batch_id,
+        zoho_batch_in_id: batchObj.zoho_batch_in_id,
+        batch_number: batchObj.batch_number,
+        expiry_date: batchObj.expiry_date,
+        quantity: Number(line.quantity || 0)
+      }]
+    }));
+  };
+
+  const resetLineToFefo = (line) => {
+    setPicksByItem((prev) => ({
+      ...prev,
+      [line.order_item_id]: (line.suggested_picks || []).map((p) => ({
+        order_item_id: line.order_item_id,
+        zoho_batch_id: p.zoho_batch_id,
+        zoho_batch_in_id: p.zoho_batch_in_id,
+        batch_number: p.batch_number,
+        expiry_date: p.expiry_date,
+        quantity: Number(p.quantity || 0)
+      }))
     }));
   };
 
@@ -332,13 +391,17 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                   <tbody className="divide-y divide-slate-100">
                     {(batchData?.lines || []).map((ln) => {
                       const linePicks = picksByItem[ln.order_item_id] || [];
+                      const validBatches = (ln.available_batches || []).filter((b) => !b.is_expired && Number(b.available_quantity) > 0);
+                      const pickedTotal = linePicks.reduce((s, p) => s + Number(p.quantity || 0), 0);
+                      const qtyDiff = Number(ln.quantity || 0) - pickedTotal;
+                      const singleFullBatch = validBatches.find((b) => Number(b.available_quantity) >= Number(ln.quantity || 0));
                       return (
                         <tr key={ln.order_item_id}>
                           <td className="px-3 py-2.5 font-medium text-ink-primary">
                             {ln.product_name}
                             {ln.is_csp && <span className="ml-1.5 px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold">CSP</span>}
                           </td>
-                          <td className="px-3 py-2.5 font-semibold">{ln.quantity} {ln.unit || 'pc'}</td>
+                          <td className="px-3 py-2.5 font-semibold whitespace-nowrap">{ln.quantity} {ln.unit || 'pc'}</td>
                           <td className="px-3 py-2.5 space-y-1.5">
                             {ln.is_csp && !(ln.available_batches || []).length ? (
                               <span className="text-ink-secondary">CSP non-stocked item</span>
@@ -367,15 +430,57 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                                       onChange={(e) => updateBatchQty(ln.order_item_id, idx, e.target.value)}
                                       className="w-20 px-2 py-1 border border-slate-300 rounded bg-white"
                                     />
+                                    {linePicks.length > 1 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => removeBatchRow(ln.order_item_id, idx)}
+                                        title="Remove this batch row"
+                                        aria-label="Remove batch row"
+                                        className="p-1 rounded border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
                                   </div>
                                 ))}
-                                <button
-                                  type="button"
-                                  onClick={() => addSplitBatchRow(ln)}
-                                  className="text-[11px] font-semibold text-getmeds-blue hover:underline"
-                                >
-                                  + Split across another batch
-                                </button>
+                                <div className="flex flex-wrap items-center gap-3 pt-0.5 text-[11px]">
+                                  <span className={`font-semibold ${qtyDiff === 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                                    Picked: {pickedTotal} / {ln.quantity} {ln.unit || 'pc'}
+                                    {qtyDiff > 0 ? ` (need ${qtyDiff} more)` : qtyDiff < 0 ? ` (${Math.abs(qtyDiff)} over)` : ' ✓'}
+                                  </span>
+                                  {validBatches.length > 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => addSplitBatchRow(ln)}
+                                      className="font-semibold text-getmeds-blue hover:underline"
+                                    >
+                                      + Split across another batch
+                                    </button>
+                                  )}
+                                  {singleFullBatch && (linePicks.length > 1 || linePicks[0]?.batch_number !== singleFullBatch.batch_number || pickedTotal !== Number(ln.quantity || 0)) && (
+                                    <button
+                                      type="button"
+                                      onClick={() => useSingleBatchFullQty(ln, singleFullBatch)}
+                                      className="font-semibold text-indigo-700 hover:underline"
+                                    >
+                                      Use single batch ({singleFullBatch.batch_number} × {ln.quantity})
+                                    </button>
+                                  )}
+                                  {(ln.suggested_picks || []).length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => resetLineToFefo(ln)}
+                                      className="inline-flex items-center gap-1 text-slate-600 hover:text-ink-primary hover:underline"
+                                    >
+                                      <RotateCcw className="w-3 h-3" /> Reset FEFO
+                                    </button>
+                                  )}
+                                </div>
+                                {linePicks.length > 1 && (
+                                  <p className="text-[11px] text-ink-secondary">
+                                    Split across {linePicks.length} batches (FEFO uses earliest expiry first until empty). Remove a row or click <b>Use single batch</b> if taking everything from one lot.
+                                  </p>
+                                )}
                               </>
                             )}
                           </td>

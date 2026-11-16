@@ -281,4 +281,67 @@ describe('deliveryReceiptService end-to-end flows (mocked DB + MockZohoAdapter)'
     expect(dbWrites.some((w) => /UPDATE delivery_receipts SET si_number/i.test(w.sql) && w.args[0] === 'SI000004987')).toBe(true);
     expect(dbWrites.some((w) => /UPDATE delivery_receipt_items SET si_or_to_no/i.test(w.sql) && w.args[0] === 'SI000004987')).toBe(true);
   });
+
+  it('finalizeZohoInvoiceForOrder re-hydrates missing mock SO through zoho facade (Doctor/No-SI flow)', async () => {
+    jest.resetModules();
+    process.env.ZOHO_MODE = 'mock';
+    const zohoFacade = require('../src/integrations/zoho');
+    zohoFacade._resetForTest();
+
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m) { super(m); this.status = s; this.code = c; } },
+      assertCanActOnOrder: jest.fn().mockResolvedValue({ order: { id: 5 } })
+    }));
+    jest.doMock('../src/services/orderClaimService', () => ({
+      claimOrder: jest.fn().mockResolvedValue('claim-tok'),
+      releaseClaim: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: () => ({ id: 5, name: 'Ben Ramos' }),
+      logEvent: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => ({
+        get: jest.fn(async () => {
+          if (/FROM orders o/i.test(sql)) {
+            return {
+              id: 5, getmeds_order_id: 'GM-20261116-0001', status: 'ready_for_dispatch',
+              invoicing_from: '2mg Incorporated', zoho_so_id: 'MOCK-SO-SIM-0001',
+              zoho_so_number: 'SO-88410', customer_id: 5, total_amount: 10089,
+              customer_category: 'doctor', intake_is_doctor: 1, intake_source: 'Doctor order'
+            };
+          }
+          return null;
+        }),
+        all: jest.fn(async () => {
+          if (/FROM order_items oi/i.test(sql)) {
+            return [{ id: 6, product_name: 'Atorvastatin 20mg Tablet', zoho_item_id: 'MOCK-ITEM-ATO', quantity: 90, unit_price: 112.10, invoicing_from: null }];
+          }
+          if (/FROM order_item_batches/i.test(sql)) {
+            return [{ id: 2, order_item_id: 6, batch_number: 'MOCK-BT-B2', warehouse_id: 'W-MAIN', quantity: 90 }];
+          }
+          return [];
+        }),
+        run: jest.fn(async () => ({ changes: 1 }))
+      }))
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+    const res = await svc.finalizeZohoInvoiceForOrder({
+      orderId: 5,
+      entityKey: '2MG',
+      siSuffix: null,
+      doctorName: 'NNH',
+      user: { id: 5, name: 'Ben Ramos' },
+      adapter: zohoFacade
+    });
+
+    expect(res).toMatchObject({
+      entity_key: '2MG',
+      dr_number: null
+    });
+    expect(res.zoho_invoice_number).toBeTruthy();
+  });
 });
