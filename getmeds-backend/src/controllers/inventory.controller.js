@@ -3,6 +3,7 @@ const zoho = require('../integrations/zoho');
 const syncJobs = require('../services/syncJobs');
 const { getSyncState, setSyncState } = require('../services/syncState');
 const { hasColumn } = require('../services/schemaColumns');
+const { isKnownCspProductName } = require('../constants/cspCatalog');
 
 /**
  * GET /api/inventory/status
@@ -226,33 +227,23 @@ async function reconcileItems(zohoItems, opts = {}) {
   // exact statements it had before, so "Pull from Zoho" never breaks on a
   // column that is not there yet — see services/schemaColumns.js.
   const withTax = await hasColumn('products', 'tax_percentage');
+  const withCsp = await hasColumn('products', 'is_csp');
   const updateStmt = db.prepare(withTax
     ? `UPDATE products SET stock = ?, zoho_stock = ?, zoho_price = ?, zoho_item_id = ?, is_active = ?,
               zoho_tax_id = ?, tax_name = ?, tax_percentage = ?, last_synced_at = datetime('now') WHERE id = ?`
     : `UPDATE products SET stock = ?, zoho_stock = ?, zoho_price = ?, zoho_item_id = ?, is_active = ?, last_synced_at = datetime('now') WHERE id = ?`);
-  // Sep 3, 2026: ON CONFLICT DO NOTHING, rather than letting the insert throw
-  // and catching it.
-  //
-  // This is a Postgres correctness fix, not a tidy-up. The SKU collision this
-  // guards against was handled by a try/catch until today, which was correct
-  // under SQLite: the failed statement was discarded and the loop carried on.
-  // Postgres does not work that way — ANY error inside a transaction aborts
-  // the whole transaction, and every statement after it fails with "current
-  // transaction is aborted, commands ignored until end of transaction block".
-  //
-  // So on the first duplicate SKU in the live catalogue, the old code would
-  // have caught the error, incremented skippedCount, kept looping happily
-  // through the remaining items — and then failed at COMMIT, losing the entire
-  // sync. `sku` is the only UNIQUE column on this table, so naming it as the
-  // conflict target covers exactly the case the catch was written for.
-  const insertStmt = db.prepare(withTax
-    ? `INSERT INTO products (name, sku, unit_price, unit, stock, zoho_stock, zoho_price, zoho_item_id, is_active,
-                             zoho_tax_id, tax_name, tax_percentage, last_synced_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT (sku) DO NOTHING`
-    : `INSERT INTO products (name, sku, unit_price, unit, stock, zoho_stock, zoho_price, zoho_item_id, is_active, last_synced_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT (sku) DO NOTHING`);
+  // Never overwrite existing products.is_csp on update; only tag newly created items.
+  const insertCols = [
+    'name', 'sku', 'unit_price', 'unit', 'stock', 'zoho_stock', 'zoho_price', 'zoho_item_id', 'is_active',
+    ...(withTax ? ['zoho_tax_id', 'tax_name', 'tax_percentage'] : []),
+    ...(withCsp ? ['is_csp'] : [])
+  ];
+  const insertPlaceholders = insertCols.map(() => '?').join(', ');
+  const insertStmt = db.prepare(
+    `INSERT INTO products (${insertCols.join(', ')}, last_synced_at)
+     VALUES (${insertPlaceholders}, datetime('now'))
+     ON CONFLICT (sku) DO NOTHING`
+  );
 
   let updatedCount = 0;
   let createdCount = 0;
@@ -369,9 +360,12 @@ async function reconcileItems(zohoItems, opts = {}) {
       const unitPrice = Number(zohoPrice ?? 0) || 0;
       const unit = item.unit || 'pc';
 
-      const ins = await insertStmt.run(...(withTax
-        ? [name, sku, unitPrice, unit, localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho, taxId, taxName, taxPct]
-        : [name, sku, unitPrice, unit, localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho]));
+      const insertParams = [
+        name, sku, unitPrice, unit, localStock, zohoStock, zohoPrice, item.item_id || null, isActiveFromZoho,
+        ...(withTax ? [taxId, taxName, taxPct] : []),
+        ...(withCsp ? [isKnownCspProductName(name) ? 1 : 0] : [])
+      ];
+      const ins = await insertStmt.run(...insertParams);
       if (ins.changes > 0) {
         createdCount++;
         // Visible to the rest of this loop, same as the old per-item re-query

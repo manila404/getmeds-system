@@ -883,12 +883,13 @@ class LiveZohoAdapter extends ZohoAdapter {
   }
 
   /**
-   * Read-only: GET /items/{item_id}/batches — batch tracking detail for a
-   * specific item: batch number, manufactured date, expiry date, balance qty.
-   * Only returns data when batch tracking is enabled for the item in Zoho.
+   * Read-only: GET /items/batches?item_id={item_id} — batch tracking detail for
+   * a specific item: batch_id, batch_in_id, batch_number, manufactured_date,
+   * expiry_date, balance_quantity, and associated_warehouses[] per-warehouse stock.
+   * Confirmed live on org 714292728 (/items/{id}/batches returns HTTP 404).
    */
   async getItemBatches(zohoItemId) {
-    const result = await this._request('GET', `/items/${zohoItemId}/batches`);
+    const result = await this._request('GET', '/items/batches', { query: { item_id: zohoItemId } });
     return { code: 0, message: 'success', batches: result.batches || [] };
   }
 
@@ -1297,14 +1298,32 @@ class LiveZohoAdapter extends ZohoAdapter {
   // READ) on the refresh token, alongside .salesorders.
 
   async createInvoiceFromSalesOrder(salesorder, opts = {}) {
+    const batchMap = opts.batchesBySoLineItemId || {};
     const lineItems = (salesorder.line_items || [])
-      .map((li) => ({
-        salesorder_item_id: li.line_item_id,
-        item_id: li.item_id,
-        name: li.name,
-        rate: li.rate,
-        quantity: Number(li.quantity || 0) - Number(li.quantity_invoiced || 0)
-      }))
+      .map((li) => {
+        const linePicks = Array.isArray(batchMap[String(li.line_item_id)])
+          ? batchMap[String(li.line_item_id)]
+          : [];
+        const warehouseId = linePicks[0]?.warehouse_id || li.warehouse_id || opts.warehouseId || null;
+        const out = {
+          salesorder_item_id: li.line_item_id,
+          item_id: li.item_id,
+          name: li.name,
+          rate: li.rate,
+          quantity: Number(li.quantity || 0) - Number(li.quantity_invoiced || 0)
+        };
+        if (warehouseId) out.warehouse_id = warehouseId;
+        if (linePicks.length) {
+          out.batches = linePicks.map((p) => ({
+            ...(p.zoho_batch_id || p.batch_id ? { batch_id: p.zoho_batch_id || p.batch_id } : {}),
+            ...(p.zoho_batch_in_id || p.batch_in_id ? { batch_in_id: p.zoho_batch_in_id || p.batch_in_id } : {}),
+            batch_number: p.batch_number,
+            out_quantity: Number(p.quantity ?? p.out_quantity),
+            ...(p.warehouse_id || warehouseId ? { warehouse_id: p.warehouse_id || warehouseId } : {})
+          }));
+        }
+        return out;
+      })
       .filter((li) => li.quantity > 0)
       // Zoho rejects `item_id: undefined` just as it rejects a bad id, so an
       // unmapped line goes without it — the same rule createSalesOrder uses.
@@ -1313,16 +1332,30 @@ class LiveZohoAdapter extends ZohoAdapter {
       throw new Error(`Sales Order ${salesorder.salesorder_number} has nothing left to invoice.`);
     }
 
+    // Zoho UI's "Convert to Invoice" sets reference_number to the Sales Order number (SO-...),
+    // which kpiService & kpiScorecardService use to join zoho_invoices to orders.zoho_so_number.
     const body = {
       customer_id: salesorder.customer_id,
-      reference_number: salesorder.reference_number || salesorder.salesorder_number,
+      reference_number: salesorder.salesorder_number || salesorder.reference_number,
       date: opts.date,
       line_items: lineItems
     };
+    const query = {};
+    if (opts.invoiceNumber) {
+      body.invoice_number = String(opts.invoiceNumber).trim();
+      query.ignore_auto_number_generation = 'true';
+    }
+    // Invoice module custom field IDs confirmed live on org 714292728 (distinct from SO field IDs).
+    const customFields = [];
+    if (opts.doctorName) customFields.push({ customfield_id: '2254168001890600049', value: opts.doctorName });
+    if (opts.invoicingFrom) customFields.push({ customfield_id: '2254168001900812588', value: opts.invoicingFrom });
+    if (opts.orderSource) customFields.push({ customfield_id: '2254168001929089197', value: opts.orderSource });
+    if (customFields.length) body.custom_fields = customFields;
+
     if (salesorder.salesperson_id) body.salesperson_id = salesorder.salesperson_id;
     if (!body.date) delete body.date;
 
-    const result = await this._request('POST', '/invoices', { body });
+    const result = await this._request('POST', '/invoices', { query, body });
     return { code: 0, message: result.message || 'Invoice created', invoice: result.invoice };
   }
 
@@ -1332,11 +1365,29 @@ class LiveZohoAdapter extends ZohoAdapter {
   }
 
   async createPackageForSalesOrder(salesorder, opts = {}) {
+    const batchMap = opts.batchesBySoLineItemId || {};
     const lineItems = (salesorder.line_items || [])
-      .map((li) => ({
-        so_line_item_id: li.line_item_id,
-        quantity: Number(li.quantity || 0) - Number(li.quantity_packed || 0)
-      }))
+      .map((li) => {
+        const linePicks = Array.isArray(batchMap[String(li.line_item_id)])
+          ? batchMap[String(li.line_item_id)]
+          : [];
+        const warehouseId = linePicks[0]?.warehouse_id || li.warehouse_id || opts.warehouseId || null;
+        const out = {
+          so_line_item_id: li.line_item_id,
+          quantity: Number(li.quantity || 0) - Number(li.quantity_packed || 0)
+        };
+        if (warehouseId) out.warehouse_id = warehouseId;
+        if (linePicks.length) {
+          out.batches = linePicks.map((p) => ({
+            ...(p.zoho_batch_id || p.batch_id ? { batch_id: p.zoho_batch_id || p.batch_id } : {}),
+            ...(p.zoho_batch_in_id || p.batch_in_id ? { batch_in_id: p.zoho_batch_in_id || p.batch_in_id } : {}),
+            batch_number: p.batch_number,
+            out_quantity: Number(p.quantity ?? p.out_quantity),
+            ...(p.warehouse_id || warehouseId ? { warehouse_id: p.warehouse_id || warehouseId } : {})
+          }));
+        }
+        return out;
+      })
       .filter((li) => li.quantity > 0);
     if (!lineItems.length) {
       throw new Error(`Sales Order ${salesorder.salesorder_number} has nothing left to pack.`);

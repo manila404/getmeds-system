@@ -19,4 +19,12 @@ function isWorkflowV2Enabled() {
   return (process.env.GETMEDS_WORKFLOW_V2 || '').trim().toLowerCase() === 'true';
 }
 
-module.exports = { isWorkflowV2Enabled };
+/**
+ * Feature gate for the automated Delivery Receipt, Warehouse Batch Picker,
+ * and Oojeema SI bridging workflow. Stays off until GETMEDS_DR_WORKFLOW=true.
+ */
+function isDrWorkflowEnabled() {
+  return (process.env.GETMEDS_DR_WORKFLOW || '').trim().toLowerCase() === 'true';
+}
+
+module.exports = { isWorkflowV2Enabled, isDrWorkflowEnabled };

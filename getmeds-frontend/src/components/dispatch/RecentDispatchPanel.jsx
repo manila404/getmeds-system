@@ -1,12 +1,44 @@
 import React, { useEffect, useState } from 'react';
-import { useQuery, keepPreviousData } from '@tanstack/react-query';
-import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle, Search, X } from 'lucide-react';
+import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle, Search, X, Layers } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
 import DeliveryActions, { deliveryActionFlags, printDeliverySlip } from './DeliveryActions';
 import RxBadge from './RxBadge';
 import MoreInfoMenu from './MoreInfoMenu';
+import DrFulfillModal from './DrFulfillModal';
+
+const DR_WORKFLOW_UI = import.meta.env.VITE_DR_WORKFLOW === 'true';
+
+const ClassificationTags = ({ order }) => {
+  const cls = order.classification;
+  if (!cls && !order.fulfil_warehouse_name && !order.slip_printed_by_name) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {cls?.is_csp && (
+        <span className="whitespace-nowrap text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-purple-100 text-purple-800" title="CSP item — process SO in Zoho, skip printing SO">
+          CSP · Skip SO Print
+        </span>
+      )}
+      {cls && (
+        <span className={`whitespace-nowrap text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${cls.requires_si ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-800'}`}>
+          {cls.requires_si ? 'SI + DR Required' : cls.transaction_kind === 'doctor' ? 'Doctor · No SI/DR' : 'Auto Zoho Inv'}
+        </span>
+      )}
+      {order.fulfil_warehouse_name && (
+        <span className="whitespace-nowrap text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-ink-secondary">
+          {order.fulfil_warehouse_name}
+        </span>
+      )}
+      {order.slip_printed_by_name && (
+        <span className="whitespace-nowrap text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-50 text-getmeds-blue">
+          Slip printed · {order.slip_printed_by_name}
+        </span>
+      )}
+    </div>
+  );
+};
 
 /**
  * Sep 15, 2026: what is coming Dispatch's way, newest first.
@@ -106,7 +138,7 @@ const Opener = ({ order, onOpen, children }) => (
     title="View the receipt"
     onClick={() => onOpen(order)}
     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(order); } }}
-    className="min-w-0 cursor-pointer group"
+    className="min-w-0 flex-1 cursor-pointer group"
   >
     {children}
   </div>
@@ -162,6 +194,8 @@ const RecentDispatchPanel = ({
   onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, confirmingId, onOpen,
   warehouse = '', period = ''
 }) => {
+  const qc = useQueryClient();
+  const [fulfillOrder, setFulfillOrder] = useState(null);
   // Sep 15, 2026: filtered by the warehouse picked at the top of the page, and
   // by "Today" — every draft SO created today and every order Finance
   // confirmed today, not just the latest 20. "On hold" swaps both lists for
@@ -429,15 +463,16 @@ const RecentDispatchPanel = ({
                 deliveryActionFlags(o, user, { onCater, onReleaseCater, onHoldOrder, onConfirm });
               const busy = confirmingId === o.id;
               return (
-                <li key={o.id} className="px-4 py-3 space-y-1.5">
-                  <div className="flex justify-between gap-3">
+                <li key={o.id} className="px-4 py-3 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
                     <Opener order={o} onOpen={onOpen}>
-                      <p className="text-sm font-mono font-semibold text-getmeds-blue">
-                        {o.getmeds_order_id}<WarehouseTag order={o} />
+                      <p className="text-sm font-mono font-semibold text-getmeds-blue flex flex-wrap items-center gap-1">
+                        <span className="whitespace-nowrap">{o.getmeds_order_id}</span>
+                        <WarehouseTag order={o} />
                         {rxUnverified(o) && (
                           <span
                             title="⚠️ Prescription Business — Rx not yet verified by Pharmacy. Do not ship until cleared."
-                            className="inline-flex items-center ml-1.5 align-middle text-amber-500"
+                            className="inline-flex items-center align-middle text-amber-500"
                           >
                             <AlertTriangle className="w-3.5 h-3.5" />
                           </span>
@@ -449,61 +484,71 @@ const RecentDispatchPanel = ({
                         {o.delivery_address || <span className="text-red-700 font-semibold">No delivery address</span>}
                       </p>
                     </Opener>
-                    <div className="flex flex-col items-end gap-1.5 shrink-0">
-                      <p className="text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</p>
-                      <div className="flex items-center gap-1">
-                        <IconButton icon={Printer} title="Print address" onClick={() => printDeliverySlip(o.id)} />
-                        {canConfirm && (
-                          <IconButton
-                            icon={CheckCircle2}
-                            title={o.rx_blocking ? 'Confirm for delivery — the prescription has to be verified by the pharmacist first' : 'Confirm for delivery'}
-                            onClick={() => onConfirm(o)}
-                            disabled={busy || o.rx_blocking}
-                            tone="primary"
-                          />
-                        )}
-                        {canHoldOrder && (
-                          <IconButton
-                            icon={PauseCircle}
-                            title="Hold order (e.g. an item is out of stock) — it stays here, and the MedRep and Management are told"
-                            onClick={() => onHoldOrder(o)}
-                            disabled={busy}
-                            tone="amber"
-                          />
-                        )}
-                        <MoreInfoMenu
-                          title={o.getmeds_order_id}
-                          items={[
-                            { label: 'Receiver', value: o.intake_receiver },
-                            { label: 'Catering since', value: o.catered?.at ? timeAgo(o.catered.at) : null },
-                            { label: 'Prescription', value: o.rx_badge?.label }
-                          ]}
-                        />
-                      </div>
-                    </div>
+                    <p className="text-sm font-semibold text-ink-primary shrink-0">{peso(o.total_amount)}</p>
                   </div>
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-ink-secondary">Catered by <span className="font-semibold text-ink-primary">{cateredByMe ? 'You' : o.catered?.by}</span></span>
-                    {canRelease && (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => onReleaseCater(o)}
-                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 bg-white text-[11px] font-semibold text-ink-secondary hover:bg-surface disabled:opacity-50"
-                      >
-                        Release
-                      </button>
-                    )}
-                    {canTakeOver && (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => onCater(o)}
-                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-getmeds-blue bg-white text-[11px] font-semibold text-getmeds-blue hover:bg-getmeds-blue/5 disabled:opacity-50"
-                      >
-                        Take over
-                      </button>
-                    )}
+                  <ClassificationTags order={o} />
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="text-ink-secondary">Catered by <span className="font-semibold text-ink-primary">{cateredByMe ? 'You' : o.catered?.by}</span></span>
+                      {canRelease && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => onReleaseCater(o)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 bg-white text-[11px] font-semibold text-ink-secondary hover:bg-surface disabled:opacity-50"
+                        >
+                          Release
+                        </button>
+                      )}
+                      {canTakeOver && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => onCater(o)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-getmeds-blue bg-white text-[11px] font-semibold text-getmeds-blue hover:bg-getmeds-blue/5 disabled:opacity-50"
+                        >
+                          Take over
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {DR_WORKFLOW_UI && (
+                        <IconButton
+                          icon={Layers}
+                          title="Fulfill: Pick Zoho Batches, Issue DR & Oojeema SI"
+                          onClick={() => setFulfillOrder(o)}
+                          disabled={busy}
+                          tone="primary"
+                        />
+                      )}
+                      <IconButton icon={Printer} title="Print address" onClick={() => printDeliverySlip(o.id, () => qc.invalidateQueries({ queryKey: ['dispatch-recent'] }))} />
+                      {canConfirm && (
+                        <IconButton
+                          icon={CheckCircle2}
+                          title={o.rx_blocking ? 'Confirm for delivery — the prescription has to be verified by the pharmacist first' : 'Confirm for delivery'}
+                          onClick={() => onConfirm(o)}
+                          disabled={busy || o.rx_blocking}
+                          tone="primary"
+                        />
+                      )}
+                      {canHoldOrder && (
+                        <IconButton
+                          icon={PauseCircle}
+                          title="Hold order (e.g. an item is out of stock) — it stays here, and the MedRep and Management are told"
+                          onClick={() => onHoldOrder(o)}
+                          disabled={busy}
+                          tone="amber"
+                        />
+                      )}
+                      <MoreInfoMenu
+                        title={o.getmeds_order_id}
+                        items={[
+                          { label: 'Receiver', value: o.intake_receiver },
+                          { label: 'Catering since', value: o.catered?.at ? timeAgo(o.catered.at) : null },
+                          { label: 'Prescription', value: o.rx_badge?.label }
+                        ]}
+                      />
+                    </div>
                   </div>
                 </li>
               );
@@ -626,6 +671,13 @@ const RecentDispatchPanel = ({
       )}
       <Pager pagination={confirmedPagination} onPage={setConfirmedPage} />
     </div>
+    {fulfillOrder && (
+      <DrFulfillModal
+        order={fulfillOrder}
+        onClose={() => setFulfillOrder(null)}
+        onCompleted={() => qc.invalidateQueries({ queryKey: ['dispatch-recent'] })}
+      />
+    )}
     </div>
   );
 };
