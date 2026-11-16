@@ -14,6 +14,7 @@
  *   Anesthesia Telesales   TeleSales Anesthesia
  *   MD Telesales           MD Telesales, and plain TeleSales
  *   B2C                    B2C
+ *   MT                     MT (Modern Trade), added Nov 14, 2026
  *   PAP                    by SOURCE, not division: PCSO, IAPF, DSWD,
  *                          Office of the President
  *   Unassigned             everything else — no division (mostly old
@@ -35,6 +36,8 @@ const WAREHOUSES = [
   { key: 'anesthesia', label: 'Anesthesia Telesales', divisions: ['TeleSales Anesthesia'] },
   { key: 'md_telesales', label: 'MD Telesales', divisions: ['MD Telesales', 'TeleSales'] },
   { key: 'b2c', label: 'B2C', divisions: ['B2C'] },
+  // Nov 14, 2026 (Aaron): Modern Trade (Nicka's "MT | 1" orders) was falling under Unassigned.
+  { key: 'mt', label: 'MT', divisions: ['MT'] },
   { key: 'pap', label: 'PAP', sources: PAP_SOURCES }
 ];
 const UNASSIGNED = { key: 'unassigned', label: 'Unassigned' };

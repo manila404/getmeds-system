@@ -110,7 +110,7 @@ const ApproveOrderModal = ({ orderId, orderRef, onClose, onApproved }) => {
                     <tr>
                       <th className="text-left px-3 py-2 font-semibold">Item</th>
                       <th className="text-right px-3 py-2 font-semibold">Ordered</th>
-                      <th className="text-right px-3 py-2 font-semibold">Available here</th>
+                      <th className="text-right px-3 py-2 font-semibold">On hand here</th>
                       <th className="text-left px-3 py-2 font-semibold">Stock</th>
                     </tr>
                   </thead>
@@ -128,18 +128,31 @@ const ApproveOrderModal = ({ orderId, orderRef, onClose, onApproved }) => {
                               </button>
                             </td>
                             <td className="px-3 py-2 text-right tabular-nums">{fmt(l.quantity)}</td>
-                            <td className="px-3 py-2 text-right tabular-nums">{here ? fmt(here.available) : '—'}</td>
-                            <td className="px-3 py-2"><Chip status={l.status} shortBy={l.short_by} />{l.note ? <span className="block text-[11px] text-ink-secondary mt-0.5">{l.note}</span> : null}</td>
+                            <td className="px-3 py-2 text-right tabular-nums align-top">
+                              {here ? fmt(here.on_hand) : '—'}
+                              {/* Nov 16, 2026 (Aaron): stock ON HAND decides. What Zoho still holds for other open
+                                  Sales Orders is shown, but does not block (those are often never-shipped old SOs). */}
+                              {here && here.committed > 0 && (
+                                <span className="block text-[10.5px] text-ink-secondary whitespace-nowrap">{fmt(here.committed)} held for other orders</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 align-top">
+                              <Chip status={l.status} shortBy={l.short_by} />
+                              {l.note ? <span className="block text-[11px] text-ink-secondary mt-0.5">{l.note}</span> : null}
+                              {l.committed_conflict && (
+                                <span className="block text-[11px] text-amber-800 mt-0.5">On hand, but Zoho also holds it for other open Sales Orders.</span>
+                              )}
+                            </td>
                           </tr>
                           {isOpen && (
                             <tr className="bg-slate-50/60">
                               <td colSpan={4} className="px-3 pb-2.5 pt-1">
-                                <p className="text-[11px] text-ink-secondary mb-1">Available for sale in each warehouse (on hand minus already committed):</p>
+                                <p className="text-[11px] text-ink-secondary mb-1">On hand in each warehouse (and how much Zoho holds for other open Sales Orders):</p>
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0.5">
                                   {l.per_warehouse.map((p) => (
                                     <div key={p.warehouse_id} className={`flex justify-between text-[12px] ${p.warehouse_id === chosenId ? 'font-semibold text-ink-primary' : 'text-ink-secondary'}`}>
                                       <span>{p.warehouse_name}</span>
-                                      <span className="tabular-nums">{fmt(p.available)} <span className="text-[10px] font-normal">({fmt(p.on_hand)} on hand, {fmt(p.committed)} committed)</span></span>
+                                      <span className="tabular-nums">{fmt(p.on_hand)} <span className="text-[10px] font-normal">on hand{p.committed ? `, ${fmt(p.committed)} held for other orders` : ''}</span></span>
                                     </div>
                                   ))}
                                 </div>

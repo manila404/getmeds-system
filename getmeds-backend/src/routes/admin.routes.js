@@ -71,6 +71,15 @@ router.post('/team-structure/territories', structure.createTerritory);
 router.patch('/team-structure/territories/:id', structure.updateTerritory);
 router.delete('/team-structure/territories/:id', structure.removeTerritory);
 
+// Nov 16, 2026: added departments (PAP first) and Operation's Pharmacy / Dispatcher unit.
+const departments = require('../controllers/departments.controller');
+router.get('/departments', departments.list);
+router.post('/departments', departments.create);
+router.delete('/departments/:id', departments.remove);
+router.post('/departments/:id/members', departments.addMember);
+router.delete('/departments/:id/members/:userId', departments.removeMember);
+router.patch('/users/:id/operation-unit', departments.setOperationUnit);
+
 // Zoho sync retry outbox: view queued/failed syncs, or trigger an immediate retry pass
 router.get('/zoho/queue', adminController.getZohoQueue);
 router.post('/zoho/queue/retry', adminController.retryZohoQueue);

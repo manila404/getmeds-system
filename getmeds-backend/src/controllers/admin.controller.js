@@ -27,6 +27,8 @@ const getAllUsers = async (req, res, next) => {
     // assignment without a second round trip per row.
     // Oct 12, 2026: who shares whose team (users.shares_team_with), once the column exists.
     const hasShare = await hasColumn('users', 'shares_team_with');
+    // Nov 16, 2026: Operation's Pharmacy / Dispatcher (services/departmentsService.js), once the column exists.
+    const hasUnit = await hasColumn('users', 'operation_unit');
     const users = await db
       .prepare(
         `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at,
@@ -34,7 +36,7 @@ const getAllUsers = async (req, res, next) => {
                 u.display_name, u.division, u.sub_division, u.salesperson,
                 u.first_name AS stored_first_name, u.last_name AS stored_last_name,
                 u.updated_at, u.username AS stored_username,
-                u.team_lead_id, tl.name AS team_lead_name${(await hasColumn('users', 'sales_title')) ? ', u.sales_title' : ''}${hasShare ? ', u.shares_team_with, sw.name AS shares_team_with_name' : ''}
+                u.team_lead_id, tl.name AS team_lead_name${(await hasColumn('users', 'sales_title')) ? ', u.sales_title' : ''}${hasShare ? ', u.shares_team_with, sw.name AS shares_team_with_name' : ''}${hasUnit ? ', u.operation_unit' : ''}
            FROM users u
            LEFT JOIN users tl ON tl.id = u.team_lead_id${hasShare ? ' LEFT JOIN users sw ON sw.id = u.shares_team_with' : ''}
           -- Sep 24, 2026: admins first, always (the Users screen keeps them there

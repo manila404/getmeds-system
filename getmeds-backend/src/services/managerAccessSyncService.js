@@ -53,6 +53,16 @@ const CHANNEL_DIVISIONS = {
   MT: ['MT'],
 };
 
+// Nov 16, 2026: a sub-division added on User Management is a channel named "<Division> · <Sub>"
+// (e.g. "B2B · NBD"). Its orders still carry the Division, so it maps like the Division does.
+const divisionsOfChannel = (name) => {
+  if (CHANNEL_DIVISIONS[name]) return CHANNEL_DIVISIONS[name];
+  const m = String(name || '').match(/^(.+?)\s*·\s*.+$/);
+  if (!m) return [];
+  const parent = m[1].trim().toUpperCase();
+  return CHANNEL_DIVISIONS[parent === 'HOS' ? 'HOSP' : parent] || [];
+};
+
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
 const uniq = (list) => [...new Set(list)];
 
@@ -113,8 +123,8 @@ async function plan() {
       return { ...base, status: 'full_access', proposed_divisions: [] };
     }
 
-    const proposed = uniq(inChannels.flatMap((id) => CHANNEL_DIVISIONS[chName.get(id)] || [])).sort();
-    const unmapped = inChannels.map((id) => chName.get(id)).filter((n) => !(CHANNEL_DIVISIONS[n] || []).length);
+    const proposed = uniq(inChannels.flatMap((id) => divisionsOfChannel(chName.get(id)))).sort();
+    const unmapped = inChannels.map((id) => chName.get(id)).filter((n) => !divisionsOfChannel(n).length);
     if (!proposed.length) return { ...base, status: 'blocked', reason: 'no_division_for_channels', unmapped_channels: unmapped, proposed_divisions: [] };
 
     const hasSubRules = userRules.some((r) => r.sub_division);
@@ -179,4 +189,4 @@ async function apply(userIds, { confirmRestrict = false, actorId = null } = {}) 
   return { applied, skipped };
 }
 
-module.exports = { plan, apply, CHANNEL_DIVISIONS };
+module.exports = { plan, apply, CHANNEL_DIVISIONS, divisionsOfChannel };

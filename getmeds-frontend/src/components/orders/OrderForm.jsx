@@ -842,6 +842,17 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   const [papOn, setPapOn] = useState(false);
   const [papProgram, setPapProgram] = useState('');
   const papEffective = papOn && PAP_DIVISIONS.includes(effectiveDivision);
+  // Nov 16, 2026 (Aaron): someone in the PAP department (Fhaye) starts every order as a PAP order.
+  const inPapDept = (medrepPicker?.my_departments || []).some((d) => String(d).trim().toLowerCase() === 'pap');
+  const papDefaulted = useRef(false);
+  useEffect(() => {
+    if (inPapDept && !papDefaulted.current) { papDefaulted.current = true; setPapOn(true); }
+  }, [inPapDept]);
+  // The programme IS the Source in Zoho (DSWD, PCSO, Office of the President), and Source is what
+  // puts the order on Dispatch's PAP tab. Filled in when picked; still editable.
+  useEffect(() => {
+    if (papEffective && ORDER_SOURCES.includes(papProgram)) setOrderSource(papProgram);
+  }, [papEffective, papProgram]);
   const rule = divisionRule(effectiveDivision, papEffective);
   // Re-applied when the Division, PAP or the MedRep changes — not on every
   // keystroke, so a Headquarter the rep types is theirs to keep.
@@ -1247,6 +1258,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // rep's own account — right on screen, wrong person in Zoho.
   if (isRepChoosing && orderForMode === 'other' && !actingMedrepId) missingFields.push('MedRep (who this order is for)');
   if (papEffective && !papProgram) missingFields.push('Patient Assistance Program (which one)');
+  // Nov 16, 2026 (Aaron): a PAP order needs its Guarantee Letter from PCSO, DSWD or the Office of the President.
+  if (papEffective && !stagedTypes.has('gl')) missingFields.push('Guarantee Letter (GL) file (attach it below, tagged GL)');
   if (!customerId) missingFields.push('Customer');
   if (!deliveryAddress.trim()) missingFields.push('Delivery Address');
   // Sep 9, 2026: the Master Form's own required set. Same standing as Source
@@ -1977,6 +1990,13 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                     </select>
                   )}
                   {papEffective && <span className="text-[11px] text-ink-secondary">Sub-division and Headquarter are set to Telesales.</span>}
+                  {papEffective && (
+                    <span className={`basis-full text-[11.5px] font-semibold ${stagedTypes.has('gl') ? 'text-pharmacy-green-dark' : 'text-amber-800'}`}>
+                      {stagedTypes.has('gl')
+                        ? 'Guarantee Letter (GL) attached.'
+                        : 'Attach the Guarantee Letter (GL) under "Attach File(s)" below and tag it Guarantee Letter (GL). Required for a PAP order.'}
+                    </span>
+                  )}
                 </div>
               )}
 

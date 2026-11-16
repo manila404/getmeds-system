@@ -587,7 +587,11 @@ exports.getMedreps = async (req, res, next) => {
       }
     }
 
-    res.json({ success: true, data: { enabled: true, medreps, salespersons } });
+    // Nov 16, 2026 (Aaron): the added departments this account is in, so the form can start a PAP
+    // member's order as a Patient Assistance Program order. Never blocks the picker.
+    let myDepartments = [];
+    try { myDepartments = await require('../services/departmentsService').namesFor(req.user.id); } catch { myDepartments = []; }
+    res.json({ success: true, data: { enabled: true, medreps, salespersons, my_departments: myDepartments } });
   } catch (err) { next(err); }
 };
 
