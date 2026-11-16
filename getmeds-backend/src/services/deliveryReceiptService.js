@@ -556,7 +556,36 @@ async function finalizeZohoInvoiceForOrder({
   }
 
   try {
-    const { salesorder: so } = await adapter.getSalesOrder(targetSoId);
+    let { salesorder: so } = await adapter.getSalesOrder(targetSoId);
+    if (!so && adapter.mode === 'mock' && adapter._salesOrders) {
+      // Re-hydrate in-memory mock Sales Order from DB across server restarts or local simulation seeds.
+      const mockSo = {
+        salesorder_id: targetSoId,
+        salesorder_number: splitTarget?.zoho_so_number || order.zoho_so_number || `SO-${order.id}`,
+        reference_number: order.getmeds_order_id,
+        status: 'confirmed',
+        customer_id: `MOCK-CONTACT-${order.customer_id}`,
+        total: order.total_amount,
+        invoices: [],
+        packages: [],
+        line_items: orderItems
+          .filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity)
+          .map((it, idx) => ({
+            line_item_id: `${targetSoId}-L${idx + 1}`,
+            item_id: it.zoho_item_id || undefined,
+            name: it.product_name,
+            rate: it.unit_price,
+            quantity: it.quantity,
+            quantity_invoiced: 0,
+            quantity_packed: 0
+          }))
+      };
+      adapter._salesOrders.set(targetSoId, mockSo);
+      so = mockSo;
+    }
+    if (!so) {
+      throw new DispatchBatchError(404, 'ZOHO_SO_NOT_FOUND', `Zoho Sales Order ${targetSoId} could not be loaded.`);
+    }
     const savedBatches = (await hasColumn('order_item_batches', 'order_item_id'))
       ? await db.prepare('SELECT * FROM order_item_batches WHERE order_id = ? ORDER BY id').all(order.id)
       : [];
