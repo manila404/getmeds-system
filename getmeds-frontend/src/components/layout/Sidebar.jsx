@@ -83,6 +83,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
       badgeClass: 'bg-indigo-100 text-indigo-800',
       links: [
         { to: '/dispatch', icon: <Truck size={18} />, label: 'Zoho Dispatch Status', exact: true },
+        ...(import.meta.env.VITE_DR_WORKFLOW === 'true'
+          ? [{ to: '/dispatch/dr-ledger', icon: <Layers size={18} />, label: 'DR Ledger' }]
+          : []),
         { to: '/dispatch/history', icon: <MapPin size={18} />, label: 'Tracking Log' }
       ]
     },
@@ -220,6 +223,9 @@ const Sidebar = ({ isOpen = false, onClose, isCollapsed = false, onToggleCollaps
   } else if (role === 'dispatch') {
     mainLinks.push(
       { to: '/dispatch', icon: <Truck size={19} />, label: 'Zoho Dispatch Status' },
+      ...(import.meta.env.VITE_DR_WORKFLOW === 'true'
+        ? [{ to: '/dispatch/dr-ledger', icon: <Layers size={19} />, label: 'DR Ledger' }]
+        : []),
       // Oct 23, 2026: refunds Management approved where the goods are coming back: check the returned items.
       { to: '/dispatch/return-checks', icon: <ClipboardCheck size={19} />, label: 'Return checks', badge: returnCount },
       // Sep 25, 2026: prescription verification, in parallel with Finance.

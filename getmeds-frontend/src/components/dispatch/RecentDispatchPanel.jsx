@@ -1,12 +1,44 @@
 import React, { useEffect, useState } from 'react';
-import { useQuery, keepPreviousData } from '@tanstack/react-query';
-import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle, Search, X } from 'lucide-react';
+import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle, Search, X, Layers } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
 import DeliveryActions, { deliveryActionFlags, printDeliverySlip } from './DeliveryActions';
 import RxBadge from './RxBadge';
 import MoreInfoMenu from './MoreInfoMenu';
+import DrFulfillModal from './DrFulfillModal';
+
+const DR_WORKFLOW_UI = import.meta.env.VITE_DR_WORKFLOW === 'true';
+
+const ClassificationTags = ({ order }) => {
+  const cls = order.classification;
+  if (!cls && !order.fulfil_warehouse_name && !order.slip_printed_by_name) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1 mt-1">
+      {cls?.is_csp && (
+        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-purple-100 text-purple-800" title="CSP item — process SO in Zoho, skip printing SO">
+          CSP · Skip SO Print
+        </span>
+      )}
+      {cls && (
+        <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${cls.requires_si ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-800'}`}>
+          {cls.requires_si ? 'SI + DR Required' : cls.transaction_kind === 'doctor' ? 'Doctor · No SI/DR' : 'Auto Zoho Inv'}
+        </span>
+      )}
+      {order.fulfil_warehouse_name && (
+        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-ink-secondary">
+          {order.fulfil_warehouse_name}
+        </span>
+      )}
+      {order.slip_printed_by_name && (
+        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-50 text-getmeds-blue">
+          Slip printed · {order.slip_printed_by_name}
+        </span>
+      )}
+    </div>
+  );
+};
 
 /**
  * Sep 15, 2026: what is coming Dispatch's way, newest first.
@@ -162,6 +194,8 @@ const RecentDispatchPanel = ({
   onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, confirmingId, onOpen,
   warehouse = '', period = ''
 }) => {
+  const qc = useQueryClient();
+  const [fulfillOrder, setFulfillOrder] = useState(null);
   // Sep 15, 2026: filtered by the warehouse picked at the top of the page, and
   // by "Today" — every draft SO created today and every order Finance
   // confirmed today, not just the latest 20. "On hold" swaps both lists for
@@ -448,10 +482,20 @@ const RecentDispatchPanel = ({
                       <p className="text-xs text-ink-secondary truncate" title={o.delivery_address || ''}>
                         {o.delivery_address || <span className="text-red-700 font-semibold">No delivery address</span>}
                       </p>
+                      <ClassificationTags order={o} />
                     </Opener>
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
                       <p className="text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</p>
                       <div className="flex items-center gap-1">
+                        {DR_WORKFLOW_UI && (
+                          <IconButton
+                            icon={Layers}
+                            title="Fulfill: Pick Zoho Batches, Issue DR & Oojeema SI"
+                            onClick={() => setFulfillOrder(o)}
+                            disabled={busy}
+                            tone="primary"
+                          />
+                        )}
                         <IconButton icon={Printer} title="Print address" onClick={() => printDeliverySlip(o.id)} />
                         {canConfirm && (
                           <IconButton
@@ -626,6 +670,13 @@ const RecentDispatchPanel = ({
       )}
       <Pager pagination={confirmedPagination} onPage={setConfirmedPage} />
     </div>
+    {fulfillOrder && (
+      <DrFulfillModal
+        order={fulfillOrder}
+        onClose={() => setFulfillOrder(null)}
+        onCompleted={() => qc.invalidateQueries({ queryKey: ['dispatch-recent'] })}
+      />
+    )}
     </div>
   );
 };

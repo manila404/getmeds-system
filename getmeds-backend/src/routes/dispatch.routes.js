@@ -70,8 +70,17 @@ router.post('/orders/:id/ship', requireRxCleared, c.ship);
 router.post('/orders/:id/deliver', c.markDelivered);
 
 // Delivery Receipt & Zoho Warehouse Batch Picker (GETMEDS_DR_WORKFLOW=true).
+const drCtrl = require('../controllers/deliveryReceipt.controller');
 router.get('/orders/:id/batches', c.getOrderBatches);
 router.post('/orders/:id/batches', requireRxCleared, c.saveOrderBatches);
 router.post('/orders/:id/slip-print', c.recordSlipPrint);
+router.post('/orders/:id/dr', requireRxCleared, drCtrl.issueOrderDr);
+router.post('/orders/:id/finalize-invoice', requireRxCleared, drCtrl.finalizeZohoInvoice);
+router.get('/dr-ledger', drCtrl.listLedger);
+router.get('/dr-ledger/export', drCtrl.exportLedger);
+router.post('/dr-ledger/transfer-order', drCtrl.issueTransferDr);
+router.get('/dr/:drId', drCtrl.getDr);
+router.post('/dr/:drId/print', drCtrl.recordPrint);
+router.post('/dr/:drId/void', drCtrl.voidDr);
 
 module.exports = router;

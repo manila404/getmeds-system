@@ -17,6 +17,7 @@ import FinanceQueuePage from './pages/finance/FinanceQueuePage';
 import PaymentHistoryPage from './pages/finance/PaymentHistoryPage';
 import DispatchQueuePage from './pages/dispatch/DispatchQueuePage';
 import DispatchHistoryPage from './pages/dispatch/DispatchHistoryPage';
+import DrLedgerPage from './pages/dispatch/DrLedgerPage';
 import PharmacyQueuePage from './pages/dispatch/PharmacyQueuePage';
 import ManagementDashboardPage from './pages/management/ManagementDashboardPage';
 import ApprovalQueuePage from './pages/management/ApprovalQueuePage';
@@ -210,6 +211,16 @@ function App() {
               </ProtectedRoute>
             } 
           />
+          {import.meta.env.VITE_DR_WORKFLOW === 'true' && (
+            <Route
+              path="/dispatch/dr-ledger"
+              element={
+                <ProtectedRoute allowedRoles={['dispatch', 'management', 'admin']}>
+                  <DrLedgerPage />
+                </ProtectedRoute>
+              }
+            />
+          )}
           
           {/* Management Routes */}
           <Route
