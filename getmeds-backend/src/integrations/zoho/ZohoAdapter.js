@@ -499,6 +499,14 @@ class ZohoAdapter {
   }
 
   /**
+   * Update tracking / carrier details on an existing shipment (`PUT /shipmentorders/{id}`).
+   * @returns {Promise<{code:number, message:string, shipmentorder:object}>}
+   */
+  async updateShipmentTracking(shipmentId, { deliveryMethod, trackingNumber, shipmentNumber, date } = {}) {
+    throw new Error('Not implemented');
+  }
+
+  /**
    * Mark a shipment delivered (`POST /shipmentorders/{id}/status/delivered`).
    * @returns {Promise<{code:number, message:string}>}
    */

@@ -20,8 +20,14 @@ const DispatchHistoryPage = () => {
   const [courierFilter, setCourierFilter] = useState('all');
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['dispatch-history-orders'],
-    queryFn: () => client.get('/api/orders?limit=100').then(r => r.data),
+    queryKey: ['dispatch-history-orders', searchTerm.trim()],
+    queryFn: () => client.get('/api/orders', {
+      params: {
+        dispatch_history: 'true',
+        limit: 200,
+        search: searchTerm.trim() || undefined
+      }
+    }).then(r => r.data),
     refetchInterval: 60000 // was 30000 (Oct 3, 2026: lighter polling)
   });
 

@@ -1,4 +1,5 @@
 const db = require('../db/database');
+const zoho = require('../integrations/zoho');
 const { loadScope, scopeSql } = require('../services/orderScopeService');
 const { importedSql, originSql } = require('../services/orderOrigin');
 const { isWorkflowV2Enabled, isDrWorkflowEnabled } = require('../services/workflowFlags');
@@ -440,7 +441,10 @@ exports.getRecent = async (req, res, next) => {
     // order Finance confirmed today (Philippine time), so Dispatch sees all of
     // today's work in these two lists. Not capped at 20 like "any time".
     const today = req.query.period === 'today' ? manilaTodayStartIso() : null;
-    const listLimit = today ? 500 : 20;
+    // Never silently cap at 20 on All-time before splitting unconfirmed rows:
+    // more than 20 active/confirmed rows caused older uncatered or catered
+    // orders to vanish from their cards.
+    const listLimit = 500;
     const hasDrColumns = await hasColumn('orders', 'requires_si');
     const drColsSql = hasDrColumns
       ? `, o.requires_si, o.requires_dr, o.is_csp, o.si_override_reason,
@@ -453,16 +457,25 @@ exports.getRecent = async (req, res, next) => {
         o.fulfil_warehouse_id, o.fulfil_warehouse_name${drColsSql},
         o.total_amount, o.delivery_address, o.delivery_notes,
         o.intake_receiver, o.intake_contact_no, o.intake_delivery_method,
-        o.zoho_so_number, o.zoho_so_status, o.created_at, o.updated_at,
+        o.zoho_so_number, o.zoho_so_status, o.zoho_invoice_id, o.zoho_invoice_number, o.created_at, o.updated_at,
         c.name AS customer_name, c.contact_number, COALESCE(NULLIF(TRIM(c.tin), ''), NULLIF(TRIM(o.intake_tin), '')) AS tin, c.lto_license_number, c.category AS customer_category,
         u.name AS medrep_name,
         dc.delivery_confirmed_by, dc.delivery_confirmed_at, dc.delivery_confirmed_meta,
-        (SELECT dr.tracking_number FROM dispatch_records dr WHERE dr.order_id = o.id) AS tracking_number,
+        dr.tracking_number, dr.dispatch_courier, dr.dispatched_at, du.name AS dispatched_by_name,
+        dr.zoho_package_id, dr.zoho_package_number, dr.zoho_shipment_id, dr.zoho_shipment_number,
         ${TRACKING_HOLD_COLUMNS}`;
     const from = `
       FROM orders o
       LEFT JOIN customers c ON c.id = o.customer_id
-      LEFT JOIN users u ON u.id = o.medrep_id${CONFIRMATION_JOIN}${TRACKING_HOLD_JOIN}`;
+      LEFT JOIN users u ON u.id = o.medrep_id${CONFIRMATION_JOIN}${TRACKING_HOLD_JOIN}
+      LEFT JOIN LATERAL (
+        SELECT dr.tracking_number, dr.courier AS dispatch_courier, dr.dispatched_by, dr.dispatched_at,
+               dr.zoho_package_id, dr.zoho_package_number, dr.zoho_shipment_id, dr.zoho_shipment_number
+          FROM dispatch_records dr
+         WHERE dr.order_id = o.id
+         ORDER BY dr.id DESC LIMIT 1
+      ) dr ON TRUE
+      LEFT JOIN users du ON du.id = dr.dispatched_by`;
 
     // One array argument each: see db/pg.js's flatten().
     const drafts = await db.prepare(`
@@ -484,7 +497,7 @@ exports.getRecent = async (req, res, next) => {
        WHERE o.status = ANY(?)
          AND o.zoho_so_id IS NOT NULL
          AND NOT (${importedSql('o')})${scopeAnd}${whAnd}${today ? ' AND fv.finance_confirmed_at >= ?' : ''}
-       ORDER BY COALESCE(fv.finance_confirmed_at, o.updated_at) DESC
+       ORDER BY (CASE WHEN dc.delivery_confirmed_at IS NULL THEN 0 ELSE 1 END), COALESCE(fv.finance_confirmed_at, o.updated_at) DESC
        LIMIT ${listLimit}
     `).all([FINANCE_CONFIRMED, ...scopeParams, ...whParams, ...(today ? [today] : [])]);
 
@@ -493,32 +506,39 @@ exports.getRecent = async (req, res, next) => {
     // this is how Dispatch learns the order is not clear to go: see
     // services/prescriptionService.js. Orders with no prescription get nothing.
     //
-    // Sep 28, 2026: every order Dispatch has confirmed for delivery, across the
-    // whole team, not just today and not just the signed-in person's own —
-    // "Confirmed Today" read as one dispatcher's own log because it silently
-    // combined both filters. `?period=today` still narrows it to today (same
-    // switch the other two lists use), and this one is paged (15 a page,
-    // ?confirmedPage=) since dropping the today-only cutoff means it only
-    // grows from here.
+    // Sep 28, 2026: every order Dispatch has confirmed for delivery OR already
+    // fulfilled/dispatched/completed, across the whole team — finished orders
+    // without a prior green-checkmark confirmation must remain visible here
+    // rather than disappearing from all cards once shipped.
     const CONFIRMED_PAGE_SIZE = 15;
     const confirmedPage = Math.max(parseInt(req.query.confirmedPage, 10) || 1, 1);
     const confirmedOffset = (confirmedPage - 1) * CONFIRMED_PAGE_SIZE;
-    // Sep 29, 2026: free-text search across the confirmed orders table — order ID,
-    // SO number, customer name, receiver, channel (division), confirmed-by name, and
-    // tracking number. ILIKE so the search is case-insensitive.
     const rawSearch = String(req.query.confirmedSearch || '').trim();
     const searchPattern = rawSearch ? `%${rawSearch}%` : null;
     const searchAnd = searchPattern
-      ? ` AND (o.getmeds_order_id ILIKE ? OR o.zoho_so_number ILIKE ? OR c.name ILIKE ? OR o.intake_receiver ILIKE ? OR o.division ILIKE ? OR dc.delivery_confirmed_by ILIKE ? OR EXISTS (SELECT 1 FROM dispatch_records dr WHERE dr.order_id = o.id AND dr.tracking_number ILIKE ?))`
+      ? ` AND (
+          o.getmeds_order_id ILIKE ? OR o.zoho_so_number ILIKE ? OR c.name ILIKE ?
+          OR o.intake_receiver ILIKE ? OR o.division ILIKE ? OR dc.delivery_confirmed_by ILIKE ?
+          OR COALESCE(du.name, '') ILIKE ? OR COALESCE(ce.cater_by, '') ILIKE ?
+          OR COALESCE(dr.tracking_number, '') ILIKE ? OR COALESCE(dr.zoho_shipment_number, '') ILIKE ?
+          OR COALESCE(et.entered_tracking_meta, '') ILIKE ?
+        )`
       : '';
-    const searchParams = searchPattern ? Array(7).fill(searchPattern) : [];
-    const confirmedOrdersWhere = `dc.delivery_confirmed_at IS NOT NULL${scopeAnd}${whAnd}${today ? ' AND dc.delivery_confirmed_at >= ?' : ''}${searchAnd}`;
+    const searchParams = searchPattern ? Array(11).fill(searchPattern) : [];
+    const confirmedActivityAt = 'COALESCE(dc.delivery_confirmed_at, dr.dispatched_at, o.updated_at)';
+    const confirmedOrdersWhere = `(
+      dc.delivery_confirmed_at IS NOT NULL
+      OR (
+        NOT (${importedSql('o')})
+        AND (o.status IN ('dispatched', 'tracking_shared', 'completed') OR dr.zoho_shipment_id IS NOT NULL)
+      )
+    )${scopeAnd}${whAnd}${today ? ` AND ${confirmedActivityAt} >= ?` : ''}${searchAnd}`;
     const confirmedOrdersParams = [...scopeParams, ...whParams, ...(today ? [today] : []), ...searchParams];
 
     const confirmedOrdersRows = await db.prepare(`
       SELECT ${columns} ${from}
        WHERE ${confirmedOrdersWhere}
-       ORDER BY dc.delivery_confirmed_at DESC
+       ORDER BY ${confirmedActivityAt} DESC, o.id DESC
        LIMIT ${CONFIRMED_PAGE_SIZE} OFFSET ${confirmedOffset}
     `).all(confirmedOrdersParams);
     const confirmedOrdersTotal = Number(
@@ -675,7 +695,7 @@ exports.confirmDelivery = async (req, res, next) => {
 /** The order with its tracking number and current hold, for the two actions below. */
 async function loadForTracking(id) {
   const row = await db.prepare(`
-    SELECT o.*, d.tracking_number, ${TRACKING_HOLD_COLUMNS}
+    SELECT o.*, d.tracking_number, d.zoho_shipment_id, d.zoho_shipment_number, d.courier AS dispatch_courier, ${TRACKING_HOLD_COLUMNS}
       FROM orders o
       LEFT JOIN dispatch_records d ON d.order_id = o.id${TRACKING_HOLD_JOIN}
      WHERE o.id = ?
@@ -717,15 +737,40 @@ function parseHold(input) {
  * Its own event type, not TRACKING_ENTERED: that one means Zoho's shipment
  * reported a number, and the timeline reads it as the order having shipped.
  */
-async function recordTracking(order, actor, { courier, trackingNumber }, previous = null) {
+async function recordTracking(order, actor, { courier, trackingNumber }, previous = null, { syncZoho = true } = {}) {
   // An update is another entry, and the latest one counts; the one it
   // replaces stays on the timeline, named in this one's note.
   const updating = Boolean(previous?.tracking_number);
+  let zohoSynced = false;
+  let zohoSyncError = null;
+
+  if (syncZoho && order.zoho_shipment_id && !order.tracking_number) {
+    try {
+      await zoho.updateShipmentTracking(order.zoho_shipment_id, {
+        deliveryMethod: courier,
+        trackingNumber,
+        shipmentNumber: order.zoho_shipment_number || undefined
+      });
+      await db.prepare(`
+        UPDATE dispatch_records
+           SET tracking_number = ?, courier = COALESCE(NULLIF(?, ''), courier)
+         WHERE order_id = ?
+      `).run(trackingNumber, courier, order.id);
+      if (order.status === 'dispatched') {
+        await db.prepare("UPDATE orders SET status = 'tracking_shared', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(order.id);
+      }
+      zohoSynced = true;
+    } catch (err) {
+      zohoSyncError = err.message;
+      console.warn(`[DISPATCH] Could not sync tracking to Zoho shipment ${order.zoho_shipment_id} for ${order.getmeds_order_id}:`, err.message);
+    }
+  }
+
   await logEvent({
     orderId: order.id,
     eventType: 'DISPATCH_TRACKING_ADDED',
     oldStatus: order.status,
-    newStatus: order.status,
+    newStatus: zohoSynced && order.status === 'dispatched' ? 'tracking_shared' : order.status,
     actorId: actor.id,
     actorName: actor.name,
     notes: updating
@@ -734,6 +779,7 @@ async function recordTracking(order, actor, { courier, trackingNumber }, previou
     metadata: {
       courier,
       tracking_number: trackingNumber,
+      ...(zohoSynced ? { zoho_synced: true, zoho_shipment_id: order.zoho_shipment_id } : {}),
       ...(updating ? { previous: { courier: previous.courier, tracking_number: previous.tracking_number } } : {})
     }
   });
@@ -744,6 +790,7 @@ async function recordTracking(order, actor, { courier, trackingNumber }, previou
       : `Order ${order.getmeds_order_id}: tracking number ${trackingNumber} (${courier}).`,
     'DISPATCH_TRACKING_ADDED'
   );
+  return { zoho_synced: zohoSynced, zoho_sync_error: zohoSyncError };
 }
 
 async function recordHold(order, actor, { reason, note }) {
@@ -846,7 +893,7 @@ exports.addTracking = async (req, res, next) => {
     }
 
     const actor = await resolveActor(req.user, 'dispatch');
-    await recordTracking(order, actor, t, loaded.entered);
+    const syncResult = await recordTracking(order, actor, t, loaded.entered);
     const now = await loadForTracking(order.id);
     res.json({
       success: true,
@@ -854,7 +901,94 @@ exports.addTracking = async (req, res, next) => {
         id: order.id,
         entered_tracking: now.entered,
         tracking_hold: now.hold,
-        message: `${order.getmeds_order_id}: tracking ${t.trackingNumber} (${t.courier}) ${loaded.entered ? 'updated' : 'saved'} — the MedRep was told.`
+        zoho_synced: syncResult.zoho_synced,
+        zoho_sync_error: syncResult.zoho_sync_error,
+        message:
+          `${order.getmeds_order_id}: tracking ${t.trackingNumber} (${t.courier}) ${loaded.entered ? 'updated' : 'saved'}` +
+          (syncResult.zoho_synced ? ' and synced to Zoho Shipment — the MedRep was told.' : ' — the MedRep was told.')
+      }
+    });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/dispatch/orders/:id/zoho-tracking { delivery_method, tracking_number }
+ * Add or update courier + tracking number directly on an existing Zoho Shipment
+ * (for orders shipped with blank tracking or corrected later inside Fulfill).
+ */
+exports.updateZohoTracking = async (req, res, next) => {
+  try {
+    const courier = String(req.body?.delivery_method || req.body?.courier || '').trim();
+    const trackingNumber = String(req.body?.tracking_number || '').trim();
+    if (!courier || !trackingNumber) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Enter both Mode of Delivery and Tracking Number.' }
+      });
+    }
+    if (courier.length > 100 || trackingNumber.length > 500) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'The courier or tracking number is too long.' }
+      });
+    }
+
+    const loaded = await loadForTracking(req.params.id);
+    if (!loaded) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    const order = loaded.raw;
+    if (!order.zoho_shipment_id) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'NO_ZOHO_SHIPMENT', message: 'This order does not have a Zoho Shipment yet. Create the Package & Shipment first.' }
+      });
+    }
+
+    const actor = await resolveActor(req.user, 'dispatch');
+    const updated = await zoho.updateShipmentTracking(order.zoho_shipment_id, {
+      deliveryMethod: courier,
+      trackingNumber,
+      shipmentNumber: order.zoho_shipment_number || undefined
+    });
+    const nextStatus = order.status === 'dispatched' ? 'tracking_shared' : order.status;
+    await db.prepare(`
+      UPDATE dispatch_records
+         SET courier = ?, tracking_number = ?
+       WHERE order_id = ?
+    `).run(courier, trackingNumber, order.id);
+    await db.prepare(`
+      UPDATE orders
+         SET status = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?
+    `).run(nextStatus, order.id);
+
+    await logEvent({
+      orderId: order.id,
+      eventType: 'DISPATCH_TRACKING_ADDED',
+      oldStatus: order.status,
+      newStatus: nextStatus,
+      actorId: actor.id,
+      actorName: actor.name,
+      notes: `Zoho shipment tracking updated by Dispatch: ${courier} ${trackingNumber} (Shipment ${order.zoho_shipment_number || order.zoho_shipment_id}).`,
+      metadata: {
+        courier,
+        tracking_number: trackingNumber,
+        zoho_synced: true,
+        zoho_shipment_id: order.zoho_shipment_id,
+        zoho_shipment_number: updated?.shipmentorder?.shipment_number || order.zoho_shipment_number || null
+      }
+    });
+    await tellMedrep(order, `Order ${order.getmeds_order_id}: tracking number ${trackingNumber} (${courier}) updated in Zoho.`, 'DISPATCH_TRACKING_ADDED');
+
+    res.json({
+      success: true,
+      data: {
+        id: order.id,
+        status: nextStatus,
+        delivery_method: courier,
+        tracking_number: trackingNumber,
+        zoho_shipment_id: order.zoho_shipment_id,
+        zoho_shipment_number: updated?.shipmentorder?.shipment_number || order.zoho_shipment_number || null,
+        message: `${order.getmeds_order_id}: Zoho Shipment updated (${trackingNumber}).`
       }
     });
   } catch (err) { next(err); }

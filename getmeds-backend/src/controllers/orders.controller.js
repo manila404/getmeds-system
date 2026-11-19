@@ -722,7 +722,19 @@ exports.getAll = async (req, res, next) => {
     // Oct 8, 2026: a deleted draft stays in their list for one day at most, even if the
     // daily cron has not erased it yet.
     else { where.push(`NOT ${deletedDraftPurge.EXPIRED_SQL}`); params.push(deletedDraftPurge.cutoff()); }
-    if (status) { where.push('o.status = ?'); params.push(status); }
+    if (status) {
+      const statuses = String(status).split(',').map((s) => s.trim()).filter(Boolean);
+      if (statuses.length > 1) {
+        where.push('o.status = ANY(?)');
+        params.push(statuses);
+      } else if (statuses.length === 1) {
+        where.push('o.status = ?');
+        params.push(statuses[0]);
+      }
+    }
+    if (req.query.dispatch_history === 'true' || req.query.dispatch_history === '1') {
+      where.push("(o.status IN ('dispatched', 'tracking_shared', 'completed') OR COALESCE(d.tracking_number, '') <> '')");
+    }
     if (customer_type) { where.push('o.customer_type = ?'); params.push(customer_type); }
     // Sep 15, 2026: Dispatch's "My orders" — the ones they cater. See
     // services/dispatchCater.js.
@@ -772,7 +784,7 @@ exports.getAll = async (req, res, next) => {
     // Joins customers as well now: the search clause filters on c.name, and a
     // count over `orders o` alone would fail the moment anyone typed a search.
     const totalRow = await db.prepare(
-      `SELECT COUNT(*) as total FROM orders o LEFT JOIN customers c ON o.customer_id = c.id ${whereClause}`
+      `SELECT COUNT(*) as total FROM orders o LEFT JOIN customers c ON o.customer_id = c.id LEFT JOIN dispatch_records d ON o.id = d.order_id ${whereClause}`
     ).get(...params);
 
     res.json({

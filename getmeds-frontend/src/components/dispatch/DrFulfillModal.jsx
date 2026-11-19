@@ -35,6 +35,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
   const [trackingNumber, setTrackingNumber] = useState('');
   const [shipResult, setShipResult] = useState(null);
   const [shipping, setShipping] = useState(false);
+  const [editingZohoTracking, setEditingZohoTracking] = useState(false);
   const [editingCompliance, setEditingCompliance] = useState(false);
   const [tinInput, setTinInput] = useState('');
   const [ltoInput, setLtoInput] = useState('');
@@ -74,8 +75,8 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
       setSiSuffix(d.order.oojeema_si_number || '');
       setTinInput(d.order.tin || '');
       setLtoInput(d.order.lto_license_number || '');
-      setDeliveryMethod(d.order.courier || d.order.intake_delivery_method || '');
-      setTrackingNumber(d.order.tracking_number || '');
+      setDeliveryMethod(d.order.courier || d.order.entered_tracking?.courier || d.order.intake_delivery_method || '');
+      setTrackingNumber(d.order.tracking_number || d.order.entered_tracking?.tracking_number || '');
       if (d.order.zoho_invoice_number) {
         setFinalInvoice((prev) => prev || {
           entity_key: d.order.oojeema_entity || d.classification?.primary_entity || 'GPI',
@@ -86,10 +87,14 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
       if (d.order.zoho_shipment_id || d.order.zoho_shipment_number) {
         setShipResult((prev) => prev || {
           zoho_package_number: d.order.zoho_package_number,
+          zoho_shipment_id: d.order.zoho_shipment_id,
           zoho_shipment_number: d.order.zoho_shipment_number,
-          delivery_method: d.order.courier || d.order.intake_delivery_method || '',
-          tracking_number: d.order.tracking_number || ''
+          delivery_method: d.order.courier || d.order.entered_tracking?.courier || d.order.intake_delivery_method || '',
+          tracking_number: d.order.tracking_number || d.order.entered_tracking?.tracking_number || ''
         });
+      }
+      if (d.order.zoho_invoice_number || d.order.zoho_shipment_id || d.order.zoho_shipment_number) {
+        setStep(3);
       }
 
       const initPicks = {};
@@ -412,6 +417,34 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
       if (onCompleted) onCompleted();
     } catch (err) {
       handleApiError(err, 'Could not create Zoho package & shipment.');
+    } finally {
+      setShipping(false);
+    }
+  };
+
+  const handleUpdateZohoTracking = async () => {
+    if (!deliveryMethod.trim() || !trackingNumber.trim()) {
+      toast.error('Please enter both Mode of Delivery and Tracking Number.');
+      return;
+    }
+    setShipping(true);
+    try {
+      const { data: res } = await client.post(`/api/dispatch/orders/${order.id}/zoho-tracking`, {
+        delivery_method: deliveryMethod.trim(),
+        tracking_number: trackingNumber.trim()
+      });
+      setShipResult((prev) => ({
+        ...(prev || {}),
+        zoho_shipment_id: res.data.zoho_shipment_id || prev?.zoho_shipment_id,
+        zoho_shipment_number: res.data.zoho_shipment_number || prev?.zoho_shipment_number,
+        delivery_method: res.data.delivery_method,
+        tracking_number: res.data.tracking_number
+      }));
+      setEditingZohoTracking(false);
+      toast.success(res.data.message || 'Zoho Shipment tracking updated!');
+      if (onCompleted) onCompleted();
+    } catch (err) {
+      handleApiError(err, 'Could not update Zoho shipment tracking.');
     } finally {
       setShipping(false);
     }
@@ -783,15 +816,69 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                   </div>
 
                   {shipResult ? (
-                    <div className="p-4 rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-900 text-xs flex items-center gap-2">
-                      <Truck className="w-4 h-4 shrink-0" />
-                      <div>
-                        <b>Zoho Package &amp; Shipment Created:</b>{' '}
-                        {shipResult.zoho_package_number || 'Package created'}
-                        {shipResult.zoho_shipment_number ? ` · Shipment #${shipResult.zoho_shipment_number}` : ''}
-                        {' · '}Mode of Delivery: <b>{shipResult.delivery_method}</b>
-                        {shipResult.tracking_number ? ` · Tracking: ${shipResult.tracking_number}` : ''}
+                    <div className="p-4 rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-900 text-xs space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Truck className="w-4 h-4 shrink-0" />
+                          <div>
+                            <b>Zoho Package &amp; Shipment Created:</b>{' '}
+                            {shipResult.zoho_package_number || 'Package created'}
+                            {shipResult.zoho_shipment_number ? ` · Shipment #${shipResult.zoho_shipment_number}` : ''}
+                            {' · '}Mode of Delivery: <b>{shipResult.delivery_method || '—'}</b>
+                            {shipResult.tracking_number ? ` · Tracking: ${shipResult.tracking_number}` : ' · No tracking yet'}
+                          </div>
+                        </div>
+                        {shipResult.zoho_shipment_id && (
+                          <button
+                            type="button"
+                            onClick={() => setEditingZohoTracking((v) => !v)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-emerald-400 bg-white text-emerald-900 font-semibold hover:bg-emerald-100"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            {editingZohoTracking ? 'Cancel' : (shipResult.tracking_number ? 'Edit Zoho Tracking' : 'Add Tracking to Zoho')}
+                          </button>
+                        )}
                       </div>
+                      {editingZohoTracking && (
+                        <div className="pt-2 border-t border-emerald-200 grid grid-cols-1 sm:grid-cols-2 gap-3 text-ink-primary">
+                          <div>
+                            <label className="block font-semibold text-ink-secondary mb-1">Mode of Delivery *</label>
+                            <input
+                              type="text"
+                              list="dr-delivery-methods"
+                              placeholder="e.g. Lalamove, LBC Express, Own Rider..."
+                              value={deliveryMethod}
+                              onChange={(e) => setDeliveryMethod(e.target.value)}
+                              className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                            />
+                            <datalist id="dr-delivery-methods">
+                              {DELIVERY_METHOD_OPTIONS.map((opt) => (
+                                <option key={opt} value={opt} />
+                              ))}
+                            </datalist>
+                          </div>
+                          <div>
+                            <label className="block font-semibold text-ink-secondary mb-1">Tracking Number *</label>
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                placeholder="Waybill or courier tracking link"
+                                value={trackingNumber}
+                                onChange={(e) => setTrackingNumber(e.target.value)}
+                                className="flex-1 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                              />
+                              <button
+                                type="button"
+                                disabled={shipping || !deliveryMethod.trim() || !trackingNumber.trim()}
+                                onClick={handleUpdateZohoTracking}
+                                className="px-3 py-1.5 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-50"
+                              >
+                                {shipping ? 'Saving…' : 'Sync to Zoho'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="p-4 rounded-lg border border-blue-200 bg-blue-50/50 space-y-3 text-xs">

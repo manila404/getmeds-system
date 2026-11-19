@@ -1469,6 +1469,27 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: result.message || 'Shipment created', shipmentorder: result.shipmentorder || result.shipment_order };
   }
 
+  async updateShipmentTracking(shipmentId, { deliveryMethod, trackingNumber, shipmentNumber, date } = {}) {
+    if (!shipmentId) throw new Error('updateShipmentTracking requires a Zoho shipment id');
+    let existing = null;
+    if (!shipmentNumber || !date || !deliveryMethod) {
+      const res = await this._request('GET', `/shipmentorders/${shipmentId}`);
+      existing = res.shipmentorder || res.shipment_order || null;
+    }
+    const cleanMethod = String(deliveryMethod || existing?.delivery_method || existing?.carrier || '').trim();
+    const cleanTracking = String(trackingNumber ?? existing?.tracking_number ?? '').trim();
+    const resolvedDate = date || existing?.date;
+    const resolvedNumber = String(shipmentNumber || existing?.shipment_number || '').trim();
+    const body = {
+      ...(resolvedNumber ? { shipment_number: resolvedNumber } : {}),
+      ...(resolvedDate ? { date: resolvedDate } : {}),
+      ...(cleanMethod ? { delivery_method: cleanMethod } : {}),
+      tracking_number: cleanTracking
+    };
+    const result = await this._request('PUT', `/shipmentorders/${shipmentId}`, { body });
+    return { code: 0, message: result.message || 'Shipment updated', shipmentorder: result.shipmentorder || result.shipment_order };
+  }
+
   async markShipmentDelivered(shipmentId) {
     const result = await this._request('POST', `/shipmentorders/${shipmentId}/status/delivered`);
     return { code: 0, message: result.message || 'Shipment marked as delivered' };

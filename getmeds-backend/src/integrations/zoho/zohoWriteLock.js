@@ -43,6 +43,7 @@ const APPROVED_WRITES = [
   write('POST', '/invoices/:id/status/sent', 'Dispatch marks the invoice sent'),
   write('POST', '/packages', 'Dispatch creates the package'),
   write('POST', '/shipmentorders', 'Dispatch creates the shipment'),
+  write('PUT', '/shipmentorders/:id', "Dispatch adds or updates a shipment's tracking number in Zoho"),
   write('POST', '/shipmentorders/:id/status/delivered', 'Dispatch marks the shipment delivered'),
 ];
 

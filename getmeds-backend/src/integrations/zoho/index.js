@@ -365,6 +365,7 @@ const facadeMethods = [
   'markInvoiceSent',
   'createPackageForSalesOrder',
   'createShipmentForPackage',
+  'updateShipmentTracking',
   'markShipmentDelivered',
   'setSimulatedOutage',
   'isSimulatedOutage'

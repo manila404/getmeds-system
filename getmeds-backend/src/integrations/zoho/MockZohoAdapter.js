@@ -870,6 +870,41 @@ class MockZohoAdapter extends ZohoAdapter {
     };
   }
 
+  async updateShipmentTracking(shipmentId, { deliveryMethod, trackingNumber, shipmentNumber, date } = {}) {
+    this._workflowOutage('updateShipmentTracking');
+    for (const so of this._salesOrders.values()) {
+      const pkg = (so.packages || []).find((p) => p.shipment_id === shipmentId);
+      if (pkg) {
+        if (String(deliveryMethod || '').trim()) {
+          pkg.delivery_method = String(deliveryMethod).trim();
+          pkg.carrier = String(deliveryMethod).trim();
+        }
+        if (trackingNumber !== undefined && trackingNumber !== null) {
+          pkg.tracking_number = String(trackingNumber).trim();
+        }
+        if (String(shipmentNumber || '').trim()) pkg.shipment_number = String(shipmentNumber).trim();
+        if (date) pkg.shipment_date = date;
+        this._log(`[ZOHO_MOCK] Would PUT /shipmentorders/${shipmentId}`);
+        return {
+          code: 0,
+          message: 'Shipment updated successfully. [MOCK MODE]',
+          shipmentorder: {
+            shipment_id: pkg.shipment_id,
+            shipment_number: pkg.shipment_number,
+            status: pkg.shipment_status || 'shipped',
+            salesorder_id: so.salesorder_id,
+            carrier: pkg.carrier,
+            delivery_method: pkg.delivery_method,
+            tracking_number: pkg.tracking_number
+          }
+        };
+      }
+    }
+    const err = new Error('The shipment ID given seems to be incorrect. [MOCK MODE]');
+    err.httpStatus = 404;
+    throw err;
+  }
+
   async markShipmentDelivered(shipmentId) {
     this._workflowOutage('markShipmentDelivered');
     for (const so of this._salesOrders.values()) {

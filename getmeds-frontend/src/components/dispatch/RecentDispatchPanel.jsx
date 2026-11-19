@@ -584,8 +584,8 @@ const RecentDispatchPanel = ({
             </h2>
             <p className="text-xs text-ink-secondary mt-0.5">
               {today
-                ? 'Confirmed for delivery today, across the whole Dispatch team — newest first.'
-                : 'Confirmed for delivery, across the whole Dispatch team — newest first.'}
+                ? 'Confirmed for delivery or fulfilled & shipped today, across the whole Dispatch team — newest first.'
+                : 'Confirmed for delivery or fulfilled & shipped, across the whole Dispatch team — newest first.'}
             </p>
           </div>
           <div className="relative shrink-0 mt-0.5">
@@ -619,52 +619,91 @@ const RecentDispatchPanel = ({
               <tr>
                 <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Order</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Customer</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Confirmed by</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Confirmed / Fulfilled by</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-ink-secondary uppercase">Tracking</th>
                 <th className="px-4 py-2 text-right text-xs font-medium text-ink-secondary uppercase">Total</th>
                 <th className="px-2 py-2" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {confirmedOrders.map((o) => (
+              {confirmedOrders.map((o) => {
+                const activityBy = o.delivery_confirmed_by || o.dispatched_by_name || o.catered?.by || 'Fulfilled';
+                const activityAt = o.delivery_confirmed_at || o.dispatched_at || o.updated_at;
+                const carrierLabel = o.dispatch_courier || o.entered_tracking?.courier;
+                const statusPill =
+                  o.status === 'completed'
+                    ? 'Completed'
+                    : o.status === 'tracking_shared'
+                      ? 'Tracking shared'
+                      : o.status === 'dispatched'
+                        ? 'Dispatched'
+                        : null;
+                return (
                 <tr key={o.id} className="hover:bg-surface">
                   <td className="px-4 py-2.5 align-top">
                     <Opener order={o} onOpen={onOpen}>
                       <p className="text-sm font-mono font-semibold text-getmeds-blue group-hover:underline">{o.getmeds_order_id}<WarehouseTag order={o} /></p>
                     </Opener>
+                    {statusPill && (
+                      <span className="inline-block mt-0.5 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                        {statusPill}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5 align-top text-sm text-ink-primary font-medium">{o.customer_name}</td>
                   <td className="px-4 py-2.5 align-top text-xs text-ink-secondary">
-                    <p className="text-sm text-ink-primary font-medium">{o.delivery_confirmed_by || '—'}</p>
-                    {o.delivery_confirmed_at && <p>{timeAgo(o.delivery_confirmed_at)}</p>}
+                    <p className="text-sm text-ink-primary font-medium">{activityBy}</p>
+                    {activityAt && <p>{timeAgo(activityAt)}</p>}
                   </td>
                   <td className="px-4 py-2.5 align-top text-xs text-ink-secondary">
-                    {/* Sep 28, 2026: whichever tracking number the order actually
-                        has — Zoho's own once it ships, or the one Dispatch typed
-                        in ahead of that (entered_tracking) — same precedence the
-                        card badge uses (DeliveryActions.jsx). Card and table used
-                        to disagree because this only checked Zoho's. */}
-                    {o.tracking_number
-                      ? <span className="font-mono text-ink-primary">{o.entered_tracking?.courier ? `${o.entered_tracking.courier} · ` : ''}{o.tracking_number}</span>
-                      : o.entered_tracking
-                        ? <span className="font-mono text-ink-primary">{o.entered_tracking.courier} · {o.entered_tracking.tracking_number}</span>
-                        : o.tracking_hold
-                          ? <span className="text-amber-800 font-semibold">On hold — {o.tracking_hold.reason || 'no reason given'}</span>
-                          : <span>Awaiting tracking</span>}
+                    {o.tracking_number ? (
+                      <span className="font-mono text-ink-primary">{carrierLabel ? `${carrierLabel} · ` : ''}{o.tracking_number}</span>
+                    ) : o.entered_tracking ? (
+                      <span className="font-mono text-ink-primary">{o.entered_tracking.courier} · {o.entered_tracking.tracking_number}</span>
+                    ) : o.tracking_hold ? (
+                      <span className="text-amber-800 font-semibold">On hold — {o.tracking_hold.reason || 'no reason given'}</span>
+                    ) : (
+                      <div className="space-y-0.5">
+                        <span className="block">Awaiting tracking</span>
+                        {onAddTracking && (
+                          <button
+                            type="button"
+                            onClick={() => onAddTracking(o)}
+                            className="text-[11px] font-semibold text-getmeds-blue hover:underline"
+                          >
+                            + Enter tracking
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-2.5 align-top text-right text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</td>
                   <td className="px-2 py-2.5 align-top text-right">
-                    <MoreInfoMenu
-                      title={o.getmeds_order_id}
-                      items={[
-                        { label: 'Receiver', value: o.intake_receiver },
-                        { label: 'Address', value: o.delivery_address },
-                        { label: 'Prescription', value: o.rx_badge?.label }
-                      ]}
-                    />
+                    <div className="inline-flex items-center gap-1">
+                      {DR_WORKFLOW_UI && (
+                        <IconButton
+                          icon={Layers}
+                          title={o.zoho_shipment_id ? 'Fulfill / Update Zoho tracking' : 'Fulfill: Pick Zoho Batches, Issue DR & Oojeema SI'}
+                          onClick={() => setFulfillOrder(o)}
+                          disabled={confirmingId === o.id}
+                          tone="primary"
+                        />
+                      )}
+                      <MoreInfoMenu
+                        title={o.getmeds_order_id}
+                        items={[
+                          { label: 'SO / Invoice', value: [o.zoho_so_number, o.zoho_invoice_number].filter(Boolean).join(' · ') || null },
+                          { label: 'Shipment #', value: o.zoho_shipment_number },
+                          { label: 'Receiver', value: o.intake_receiver },
+                          { label: 'Address', value: o.delivery_address },
+                          { label: 'Prescription', value: o.rx_badge?.label }
+                        ]}
+                      />
+                    </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
