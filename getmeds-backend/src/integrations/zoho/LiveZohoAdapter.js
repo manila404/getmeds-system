@@ -1364,11 +1364,58 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: result.message || 'Invoice marked as sent' };
   }
 
+  // Active dropdown values on Package custom field `cf_carrier` (customfield_id 2254168000007192994).
+  _mapPackageCarrier(deliveryMethod) {
+    const raw = String(deliveryMethod || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!raw) return null;
+    const map = {
+      lalamove: 'Lalamove',
+      'own rider / company vehicle': 'Inhouse',
+      'own rider': 'Inhouse',
+      inhouse: 'Inhouse',
+      'in-house': 'Inhouse',
+      'lbc express': 'LBC',
+      lbc: 'LBC',
+      'grab express': 'Grab',
+      grabexpress: 'Grab',
+      grab: 'Grab',
+      'j&t express': 'J & T',
+      'j&t': 'J & T',
+      'j & t': 'J & T',
+      jrs: 'JRS',
+      'jrs express': 'JRS',
+      ninjavan: 'NinjaVAN',
+      'ninja van': 'NinjaVAN',
+      'ninjavan same day': 'NinjaVAN Same Day',
+      'payo shippemnt': 'Payo Shippemnt',
+      'ai express': 'AI Express',
+      borzo: 'Borzo',
+      'tik tok': 'Tik tok',
+      'air asia': 'Aircargo\u00a0(AirAsia)',
+      airasia: 'Aircargo\u00a0(AirAsia)',
+      'aircargo (airasia)': 'Aircargo\u00a0(AirAsia)',
+      'victory liner': 'Victory Liner',
+      'idona cargo': 'Idona Cargo',
+      partas: 'Partas',
+      'pal cargo': 'PAL Cargo',
+      'ap cargo': 'AP Cargo',
+      'daily overland': 'Daily Overland',
+      'bicol isarog': 'Bicol Isarog',
+      krmc: 'KRMC',
+      'ao freight': 'AO freight'
+    };
+    return map[raw] || null;
+  }
+
   async createPackageForSalesOrder(salesorder, opts = {}) {
     const batchMap = opts.batchesBySoLineItemId || {};
+    const skipBatchesWhenInvoiced = Boolean(opts.skipBatchesForInvoicedLines);
     const lineItems = (salesorder.line_items || [])
       .map((li) => {
-        const linePicks = Array.isArray(batchMap[String(li.line_item_id)])
+        const alreadyInvoiced = Boolean(li.is_invoiced) || (
+          Number(li.quantity || 0) > 0 && Number(li.quantity_invoiced || 0) >= Number(li.quantity || 0)
+        );
+        const linePicks = (!skipBatchesWhenInvoiced || !alreadyInvoiced) && Array.isArray(batchMap[String(li.line_item_id)])
           ? batchMap[String(li.line_item_id)]
           : [];
         const warehouseId = linePicks[0]?.warehouse_id || li.warehouse_id || opts.warehouseId || null;
@@ -1395,6 +1442,10 @@ class LiveZohoAdapter extends ZohoAdapter {
 
     const body = { line_items: lineItems };
     if (opts.date) body.date = opts.date;
+    const mappedCarrier = opts.carrier ? this._mapPackageCarrier(opts.carrier) : null;
+    if (mappedCarrier) {
+      body.custom_fields = [{ customfield_id: '2254168000007192994', value: mappedCarrier }];
+    }
     const result = await this._request('POST', '/packages', {
       query: { salesorder_id: salesorder.salesorder_id },
       body
@@ -1403,14 +1454,17 @@ class LiveZohoAdapter extends ZohoAdapter {
   }
 
   async createShipmentForPackage({ salesorderId, packageId, shipmentNumber, date, deliveryMethod, trackingNumber }) {
+    const body = {
+      date,
+      delivery_method: String(deliveryMethod || '').trim(),
+      tracking_number: String(trackingNumber || '').trim()
+    };
+    if (String(shipmentNumber || '').trim()) {
+      body.shipment_number = String(shipmentNumber).trim();
+    }
     const result = await this._request('POST', '/shipmentorders', {
       query: { package_ids: packageId, salesorder_id: salesorderId },
-      body: {
-        shipment_number: shipmentNumber,
-        date,
-        delivery_method: deliveryMethod,
-        tracking_number: trackingNumber
-      }
+      body
     });
     return { code: 0, message: result.message || 'Shipment created', shipmentorder: result.shipmentorder || result.shipment_order };
   }

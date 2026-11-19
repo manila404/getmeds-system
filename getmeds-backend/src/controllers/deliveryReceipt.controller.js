@@ -108,3 +108,14 @@ exports.recordPrint = drAction((req) =>
     drId: req.params.drId,
     user: req.user
   }));
+
+exports.shipOrderZoho = drAction((req) =>
+  drService.shipInvoicedOrderInZoho({
+    orderId: req.params.id,
+    entityKey: req.body?.entity_key || null,
+    deliveryMethod: req.body?.delivery_method,
+    trackingNumber: req.body?.tracking_number,
+    user: req.user,
+    expectedUpdatedAt: req.body?.expected_updated_at || null,
+    expectedCateredBy: req.body?.expected_catered_by ?? null
+  }));

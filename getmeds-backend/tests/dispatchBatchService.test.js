@@ -259,8 +259,50 @@ describe('MockZohoAdapter & LiveZohoAdapter batch + invoice forwarding', () => {
         warehouse_id: 'WH-1',
         batches: [{ batch_id: 'BID-1', batch_in_id: 'BIN-1', batch_number: 'BT26244A', out_quantity: 5, warehouse_id: 'WH-1' }]
       });
+
+      const invoicedSo = {
+        ...salesorder,
+        line_items: [{ ...salesorder.line_items[0], is_invoiced: true, quantity_invoiced: 5 }]
+      };
+      await adapter.createPackageForSalesOrder(invoicedSo, {
+        skipBatchesForInvoicedLines: true,
+        carrier: 'Grab Express',
+        batchesBySoLineItemId: {
+          'SOL-1': [{ zoho_batch_id: 'BID-1', batch_number: 'BT26244A', warehouse_id: 'WH-1', quantity: 5 }]
+        }
+      });
+      const pkgInvoicedCall = calls[3];
+      expect(pkgInvoicedCall.body.line_items[0].batches).toBeUndefined();
+      expect(pkgInvoicedCall.body.custom_fields).toEqual([
+        { customfield_id: '2254168000007192994', value: 'Grab' }
+      ]);
+
+      await adapter.createShipmentForPackage({
+        salesorderId: 'SO-ID-1',
+        packageId: 'PKG-1',
+        date: '2026-11-19',
+        deliveryMethod: 'Lalamove',
+        trackingNumber: ''
+      });
+      const shpCall = calls[4];
+      expect(shpCall.url).toContain('/shipmentorders');
+      expect(shpCall.body.shipment_number).toBeUndefined();
+      expect(shpCall.body.delivery_method).toBe('Lalamove');
+      expect(shpCall.body.tracking_number).toBe('');
     } finally {
       global.fetch = origFetch;
     }
+  });
+
+  it('extractZohoContactCompliance reads cf_tin and cf_lto_license_number from flat, hash, or custom_fields array', () => {
+    const { extractZohoContactCompliance } = require('../src/services/customerTinService');
+    expect(extractZohoContactCompliance({
+      cf_tin: '009-341-772-000',
+      custom_fields: [{ api_name: 'cf_lto_license_number', value: 'LTO-300001884' }]
+    })).toEqual({ tin: '009-341-772-000', lto_license_number: 'LTO-300001884' });
+
+    expect(extractZohoContactCompliance({
+      custom_field_hash: { cf_tin: '121-786-330', cf_lto_license_number: 'LTO-99' }
+    })).toEqual({ tin: '121-786-330', lto_license_number: 'LTO-99' });
   });
 });

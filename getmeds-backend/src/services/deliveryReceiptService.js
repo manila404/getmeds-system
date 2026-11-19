@@ -10,6 +10,7 @@ const {
 } = require('./orderClassificationService');
 const { assertCanActOnOrder, DispatchBatchError } = require('./dispatchBatchService');
 const { claimOrder, releaseClaim } = require('./orderClaimService');
+const { evaluateCompletion } = require('./orderCompletionService');
 const { logEvent, resolveActor } = require('./auditService');
 const { hasColumn } = require('./schemaColumns');
 const stateMachine = require('../workflow/stateMachine');
@@ -158,7 +159,8 @@ async function issueSalesOrderDr({
   await assertCanActOnOrder({ orderId, user, expectedUpdatedAt, expectedCateredBy });
 
   const order = await db.prepare(`
-    SELECT o.*, c.name AS customer_name, c.tin AS customer_tin,
+    SELECT o.*, c.name AS customer_name,
+           COALESCE(NULLIF(TRIM(c.tin), ''), NULLIF(TRIM(o.intake_tin), '')) AS customer_tin,
            c.lto_license_number AS customer_lto, c.category AS customer_category
       FROM orders o
       LEFT JOIN customers c ON c.id = o.customer_id
@@ -311,7 +313,7 @@ async function issueSalesOrderDr({
         metadata: { drId, entityKey: resolvedEntity, drNumber: nextDrNo }
       });
 
-      return drId;
+      return { drId, now };
     })();
   } catch (err) {
     if (err?.code === '23505') {
@@ -320,7 +322,8 @@ async function issueSalesOrderDr({
     throw err;
   }
 
-  return getPrintableDr({ drId: createdDr });
+  const printable = await getPrintableDr({ drId: createdDr.drId });
+  return { ...printable, order_updated_at: createdDr.now };
 }
 
 async function issueTransferOrderDr({
@@ -448,7 +451,8 @@ async function voidDeliveryReceipt({ drId, user, reason, switchToNoSi = false, e
     }
   })();
 
-  return getPrintableDr({ drId: dr.id });
+  const printable = await getPrintableDr({ drId: dr.id });
+  return { ...printable, order_updated_at: now };
 }
 
 async function recordDrPrint({ drId, user }) {
@@ -477,7 +481,41 @@ async function recordDrPrint({ drId, user }) {
     });
   }
 
-  return getPrintableDr({ drId: dr.id });
+  const printable = await getPrintableDr({ drId: dr.id });
+  return { ...printable, order_updated_at: now };
+}
+
+async function loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget = null) {
+  let { salesorder: so } = await adapter.getSalesOrder(targetSoId);
+  const rawAdapter = typeof adapter?.getZohoAdapter === 'function' ? adapter.getZohoAdapter() : adapter;
+  if (!so && adapter.mode === 'mock' && rawAdapter?._salesOrders) {
+    // Re-hydrate in-memory mock Sales Order from DB across server restarts or local simulation seeds.
+    const mockSo = {
+      salesorder_id: targetSoId,
+      salesorder_number: splitTarget?.zoho_so_number || order.zoho_so_number || `SO-${order.id}`,
+      reference_number: order.getmeds_order_id,
+      status: 'confirmed',
+      customer_id: `MOCK-CONTACT-${order.customer_id}`,
+      total: order.total_amount,
+      invoices: [],
+      packages: [],
+      line_items: entityItems.map((it, idx) => ({
+        line_item_id: `${targetSoId}-L${idx + 1}`,
+        item_id: it.zoho_item_id || undefined,
+        name: it.product_name,
+        rate: it.unit_price,
+        quantity: it.quantity,
+        quantity_invoiced: 0,
+        quantity_packed: 0
+      }))
+    };
+    rawAdapter._salesOrders.set(targetSoId, mockSo);
+    so = mockSo;
+  }
+  if (!so) {
+    throw new DispatchBatchError(404, 'ZOHO_SO_NOT_FOUND', `Zoho Sales Order ${targetSoId} could not be loaded.`);
+  }
+  return so;
 }
 
 /**
@@ -559,47 +597,17 @@ async function finalizeZohoInvoiceForOrder({
     throw new DispatchBatchError(
       409,
       'CLAIM_CONFLICT',
-      `Order ${order.getmeds_order_id} cannot be invoiced right now (another user may be acting or stage changed).`
+      `Order ${order.getmeds_order_id} cannot be invoiced right now — another user or tab may have just updated it. Click Refresh and try again.`
     );
   }
 
   try {
-    let { salesorder: so } = await adapter.getSalesOrder(targetSoId);
-    const rawAdapter = typeof adapter?.getZohoAdapter === 'function' ? adapter.getZohoAdapter() : adapter;
-    if (!so && adapter.mode === 'mock' && rawAdapter?._salesOrders) {
-      // Re-hydrate in-memory mock Sales Order from DB across server restarts or local simulation seeds.
-      const mockSo = {
-        salesorder_id: targetSoId,
-        salesorder_number: splitTarget?.zoho_so_number || order.zoho_so_number || `SO-${order.id}`,
-        reference_number: order.getmeds_order_id,
-        status: 'confirmed',
-        customer_id: `MOCK-CONTACT-${order.customer_id}`,
-        total: order.total_amount,
-        invoices: [],
-        packages: [],
-        line_items: orderItems
-          .filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity)
-          .map((it, idx) => ({
-            line_item_id: `${targetSoId}-L${idx + 1}`,
-            item_id: it.zoho_item_id || undefined,
-            name: it.product_name,
-            rate: it.unit_price,
-            quantity: it.quantity,
-            quantity_invoiced: 0,
-            quantity_packed: 0
-          }))
-      };
-      rawAdapter._salesOrders.set(targetSoId, mockSo);
-      so = mockSo;
-    }
-    if (!so) {
-      throw new DispatchBatchError(404, 'ZOHO_SO_NOT_FOUND', `Zoho Sales Order ${targetSoId} could not be loaded.`);
-    }
+    const entityItems = orderItems.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity);
+    const so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
     const savedBatches = (await hasColumn('order_item_batches', 'order_item_id'))
       ? await db.prepare('SELECT * FROM order_item_batches WHERE order_id = ? ORDER BY id').all(order.id)
       : [];
 
-    const entityItems = orderItems.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity);
     const batchesBySoLineItemId = buildBatchesBySoLineItemId(entityItems, savedBatches, so.line_items || []);
     const finalDoctor = String(doctorName || order.dispatch_doctor_name || order.intake_doctor || 'NNH').trim() || 'NNH';
     const invoicingFrom = DR_ENTITY_PROFILES[resolvedEntity].invoicing_from;
@@ -681,7 +689,231 @@ async function finalizeZohoInvoiceForOrder({
       entity_key: resolvedEntity,
       zoho_invoice_id: invoice.invoice_id,
       zoho_invoice_number: invoice.invoice_number || customInvoiceNumber,
-      dr_number: activeDr?.dr_number || null
+      dr_number: activeDr?.dr_number || null,
+      order_updated_at: now
+    };
+  } finally {
+    await releaseClaim(order.id, token);
+  }
+}
+
+/**
+ * Create (or adopt) Zoho Package + Shipment after invoicing so the Sales Order
+ * carries its Mode of Delivery in Zoho Inventory without re-allocating batches
+ * already deducted on the Invoice.
+ */
+async function shipInvoicedOrderInZoho({
+  orderId,
+  entityKey = null,
+  deliveryMethod = null,
+  trackingNumber = '',
+  user,
+  expectedUpdatedAt = null,
+  expectedCateredBy = null,
+  adapter = zoho
+}) {
+  const actor = resolveActor(user);
+  await assertCanActOnOrder({ orderId, user, expectedUpdatedAt, expectedCateredBy });
+
+  const order = await db.prepare(`
+    SELECT o.*, d.id AS dispatch_id, d.courier AS dispatch_courier,
+           d.tracking_number AS dispatch_tracking_number
+      FROM orders o
+      LEFT JOIN dispatch_records d ON d.order_id = o.id
+     WHERE o.id = ?
+  `).get(orderId);
+  if (!order) throw new DispatchBatchError(404, 'NOT_FOUND', 'Order not found.');
+
+  const resolvedMethod = String(
+    deliveryMethod || order.intake_delivery_method || order.dispatch_courier || ''
+  ).trim();
+  if (!resolvedMethod) {
+    throw new DispatchBatchError(422, 'DELIVERY_METHOD_REQUIRED', 'Choose a Mode of Delivery before creating the Zoho package and shipment.');
+  }
+  const cleanTracking = String(trackingNumber ?? order.dispatch_tracking_number ?? '').trim();
+
+  const resolvedEntity = normalizeEntityKey(entityKey || order.oojeema_entity || order.invoicing_from || 'GPI');
+  const orderItems = await db.prepare(`
+    SELECT oi.*, p.name AS product_name, p.zoho_item_id, p.is_csp
+      FROM order_items oi
+      LEFT JOIN products p ON p.id = oi.product_id
+     WHERE oi.order_id = ?
+     ORDER BY oi.id
+  `).all(order.id);
+  const splits = await db.prepare('SELECT * FROM order_split_sales_orders WHERE order_id = ?').all(order.id);
+  const primaryEntity = normalizeEntityKey(order.invoicing_from || 'GPI');
+  const splitTarget = resolvedEntity !== primaryEntity
+    ? splits.find((s) => normalizeEntityKey(s.invoicing_from) === resolvedEntity)
+    : null;
+  const targetSoId = splitTarget ? splitTarget.zoho_so_id : order.zoho_so_id;
+  if (!targetSoId) {
+    throw new DispatchBatchError(422, 'MISSING_ZOHO_SO', `No Zoho Sales Order found for entity ${resolvedEntity}.`);
+  }
+
+  const claimableStatuses = [
+    'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch',
+    'picking_packing', 'dispatched', 'tracking_shared', 'completed'
+  ];
+  const token = await claimOrder(order.id, claimableStatuses, `Package & ship in Zoho by ${actor.name}`);
+  if (!token) {
+    throw new DispatchBatchError(
+      409,
+      'CLAIM_CONFLICT',
+      `Order ${order.getmeds_order_id} cannot be shipped right now — another user or tab may have just updated it. Click Refresh and try again.`
+    );
+  }
+
+  try {
+    const entityItems = orderItems.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity);
+    const so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
+
+    let pkg = (so.packages || [])[0] || null;
+    let adoptedPackage = Boolean(pkg);
+    if (!pkg) {
+      const savedBatches = (await hasColumn('order_item_batches', 'order_item_id'))
+        ? await db.prepare('SELECT * FROM order_item_batches WHERE order_id = ? ORDER BY id').all(order.id)
+        : [];
+      const batchesBySoLineItemId = buildBatchesBySoLineItemId(entityItems, savedBatches, so.line_items || []);
+      const createdPkg = await adapter.createPackageForSalesOrder(so, {
+        date: zohoTodayDate(),
+        skipBatchesForInvoicedLines: true,
+        carrier: resolvedMethod,
+        batchesBySoLineItemId
+      });
+      pkg = createdPkg.package;
+      adoptedPackage = false;
+    }
+
+    const existingShipped = (so.packages || []).find((p) => p.shipment_id);
+    let shipment = existingShipped
+      ? { shipment_id: existingShipped.shipment_id, shipment_number: existingShipped.shipment_number || null }
+      : null;
+    let adoptedShipment = Boolean(shipment);
+    if (!shipment) {
+      const createdShp = await adapter.createShipmentForPackage({
+        salesorderId: targetSoId,
+        packageId: pkg.package_id,
+        date: zohoTodayDate(),
+        deliveryMethod: resolvedMethod,
+        trackingNumber: cleanTracking
+      });
+      shipment = createdShp.shipmentorder;
+      adoptedShipment = false;
+    }
+
+    const now = new Date().toISOString();
+    let finalOrderStatus = order.status;
+    await db.transaction(async () => {
+      if (!splitTarget) {
+        if (order.dispatch_id) {
+          await db.prepare(`
+            UPDATE dispatch_records
+               SET status = 'dispatched',
+                   courier = ?,
+                   tracking_number = COALESCE(NULLIF(?, ''), tracking_number),
+                   zoho_package_id = COALESCE(?, zoho_package_id),
+                   zoho_package_number = COALESCE(?, zoho_package_number),
+                   zoho_shipment_id = COALESCE(?, zoho_shipment_id),
+                   zoho_shipment_number = COALESCE(?, zoho_shipment_number),
+                   dispatched_by = COALESCE(dispatched_by, ?),
+                   dispatched_at = COALESCE(dispatched_at, ?)
+             WHERE order_id = ?
+          `).run(
+            resolvedMethod,
+            cleanTracking,
+            pkg.package_id || null,
+            pkg.package_number || null,
+            shipment?.shipment_id || null,
+            shipment?.shipment_number || null,
+            actor.id,
+            now,
+            order.id
+          );
+        } else {
+          await db.prepare(`
+            INSERT INTO dispatch_records (
+              order_id, status, courier, tracking_number,
+              zoho_package_id, zoho_package_number, zoho_shipment_id, zoho_shipment_number,
+              dispatched_by, dispatched_at, created_at
+            ) VALUES (?, 'dispatched', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            order.id,
+            resolvedMethod,
+            cleanTracking || null,
+            pkg.package_id || null,
+            pkg.package_number || null,
+            shipment?.shipment_id || null,
+            shipment?.shipment_number || null,
+            actor.id,
+            now,
+            now
+          );
+        }
+
+        if (stateMachine.canTransition(finalOrderStatus, 'dispatched')) {
+          finalOrderStatus = 'dispatched';
+        }
+        if (cleanTracking && stateMachine.canTransition(finalOrderStatus, 'tracking_shared')) {
+          finalOrderStatus = 'tracking_shared';
+        }
+        await db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?')
+          .run(finalOrderStatus, now, order.id);
+      } else {
+        await db.prepare('UPDATE orders SET updated_at = ? WHERE id = ?').run(now, order.id);
+      }
+
+      if (!adoptedPackage) {
+        await logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_PACKAGE_CREATED',
+          oldStatus: order.status,
+          newStatus: finalOrderStatus,
+          actorId: actor.id,
+          actorName: actor.name,
+          notes: `Package ${pkg.package_number || ''} created in Zoho (${resolvedMethod}).`,
+          metadata: { zohoPackageId: pkg.package_id, zohoPackageNumber: pkg.package_number, entityKey: resolvedEntity, source: 'getmeds' }
+        });
+      }
+      if (!adoptedShipment) {
+        await logEvent({
+          orderId: order.id,
+          eventType: 'ZOHO_DISPATCHED',
+          oldStatus: order.status,
+          newStatus: finalOrderStatus,
+          actorId: actor.id,
+          actorName: actor.name,
+          notes: `Shipped in Zoho — ${resolvedMethod}${cleanTracking ? ` (Tracking: ${cleanTracking})` : ''}.`,
+          metadata: {
+            zohoShipmentId: shipment?.shipment_id || null,
+            zohoShipmentNumber: shipment?.shipment_number || null,
+            courier: resolvedMethod,
+            trackingNumber: cleanTracking || null,
+            entityKey: resolvedEntity,
+            adoptedShipment,
+            source: 'getmeds'
+          }
+        });
+      }
+    })();
+
+    try {
+      await evaluateCompletion(order.id);
+    } catch (err) {
+      console.warn(`[DR_SHIP] evaluateCompletion failed for order ${order.id}:`, err.message);
+    }
+
+    return {
+      entity_key: resolvedEntity,
+      zoho_package_id: pkg.package_id || null,
+      zoho_package_number: pkg.package_number || null,
+      zoho_shipment_id: shipment?.shipment_id || null,
+      zoho_shipment_number: shipment?.shipment_number || null,
+      delivery_method: resolvedMethod,
+      tracking_number: cleanTracking || null,
+      status: finalOrderStatus,
+      adopted_package: adoptedPackage,
+      adopted_shipment: adoptedShipment,
+      order_updated_at: now
     };
   } finally {
     await releaseClaim(order.id, token);
@@ -872,6 +1104,7 @@ module.exports = {
   voidDeliveryReceipt,
   recordDrPrint,
   finalizeZohoInvoiceForOrder,
+  shipInvoicedOrderInZoho,
   getPrintableDr,
   listLedger,
   exportLedgerXlsx
