@@ -269,7 +269,7 @@ exports.getQueue = async (req, res, next) => {
 
     const select = `
       SELECT o.*, c.name as customer_name, c.contact_number,
-             c.tin, c.lto_license_number, c.category as customer_category,
+             COALESCE(NULLIF(TRIM(c.tin), ''), NULLIF(TRIM(o.intake_tin), '')) as tin, c.lto_license_number, c.category as customer_category,
              u.name as medrep_name,
              d.status as dispatch_status, d.courier, d.tracking_number, d.created_at as dispatch_created_at,
              d.zoho_package_number, d.zoho_shipment_number, d.delivered_at,
@@ -454,7 +454,7 @@ exports.getRecent = async (req, res, next) => {
         o.total_amount, o.delivery_address, o.delivery_notes,
         o.intake_receiver, o.intake_contact_no, o.intake_delivery_method,
         o.zoho_so_number, o.zoho_so_status, o.created_at, o.updated_at,
-        c.name AS customer_name, c.contact_number, c.tin, c.lto_license_number, c.category AS customer_category,
+        c.name AS customer_name, c.contact_number, COALESCE(NULLIF(TRIM(c.tin), ''), NULLIF(TRIM(o.intake_tin), '')) AS tin, c.lto_license_number, c.category AS customer_category,
         u.name AS medrep_name,
         dc.delivery_confirmed_by, dc.delivery_confirmed_at, dc.delivery_confirmed_meta,
         (SELECT dr.tracking_number FROM dispatch_records dr WHERE dr.order_id = o.id) AS tracking_number,
@@ -1160,7 +1160,7 @@ exports.getSlip = async (req, res, next) => {
              o.zoho_so_number, o.delivery_address, o.delivery_notes,
              o.intake_receiver, o.intake_contact_no, o.intake_delivery_method, o.sales_order_date,
              o.created_at, o.total_amount,
-             c.name AS customer_name, c.contact_number, c.tin, c.lto_license_number, c.category AS customer_category,
+             c.name AS customer_name, c.contact_number, COALESCE(NULLIF(TRIM(c.tin), ''), NULLIF(TRIM(o.intake_tin), '')) AS tin, c.lto_license_number, c.category AS customer_category,
              u.name AS medrep_name,
              dc.delivery_confirmed_by, dc.delivery_confirmed_at, dc.delivery_confirmed_meta
         FROM orders o
@@ -1270,3 +1270,13 @@ exports.recordSlipPrint = drWorkflowAction(async (req) => {
   });
   return { printed_by_name: actor.name, printed_at: now };
 });
+
+exports.saveOrderCompliance = drWorkflowAction((req) =>
+  dispatchBatchService.saveOrderCustomerCompliance({
+    orderId: req.params.id,
+    user: req.user,
+    tin: req.body?.tin,
+    ltoLicenseNumber: req.body?.lto_license_number,
+    expectedUpdatedAt: req.body?.expected_updated_at || null,
+    expectedCateredBy: req.body?.expected_catered_by ?? null
+  }));

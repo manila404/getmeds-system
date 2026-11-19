@@ -833,22 +833,24 @@ class MockZohoAdapter extends ZohoAdapter {
 
   async createShipmentForPackage({ salesorderId, packageId, shipmentNumber, date, deliveryMethod, trackingNumber } = {}) {
     this._workflowOutage('createShipmentForPackage');
-    if (!shipmentNumber || !date || !deliveryMethod || !trackingNumber) {
-      throw new Error('Mock Zoho: shipment_number, date, delivery_method and tracking_number are all required.');
+    const n = this._nextDocNumber();
+    const resolvedShipmentNo = String(shipmentNumber || '').trim() || `SH-${n}`;
+    if (!date || !deliveryMethod) {
+      throw new Error('Mock Zoho: date and delivery_method are required.');
     }
     const so = this._workflowSalesOrder(salesorderId);
     const pkg = so.packages.find((p) => p.package_id === packageId);
     if (!pkg) throw new Error(`Mock Zoho: package ${packageId} is not on Sales Order ${so.salesorder_number}.`);
     if (pkg.shipment_id) throw new Error(`Mock Zoho: package ${pkg.package_number} has already been shipped.`);
 
-    const n = this._nextDocNumber();
     Object.assign(pkg, {
       shipment_id: `MOCK-SHP-${n}`,
-      shipment_number: shipmentNumber,
+      shipment_number: resolvedShipmentNo,
       shipment_status: 'shipped',
       status: 'shipped',
       carrier: deliveryMethod,
-      tracking_number: trackingNumber,
+      delivery_method: deliveryMethod,
+      tracking_number: String(trackingNumber || '').trim(),
       shipment_date: date
     });
     so.line_items.forEach((li) => { li.quantity_shipped = li.quantity_packed; });
@@ -858,11 +860,12 @@ class MockZohoAdapter extends ZohoAdapter {
       message: 'Shipment created successfully. [MOCK MODE]',
       shipmentorder: {
         shipment_id: pkg.shipment_id,
-        shipment_number: shipmentNumber,
+        shipment_number: resolvedShipmentNo,
         status: 'shipped',
         salesorder_id: so.salesorder_id,
         carrier: deliveryMethod,
-        tracking_number: trackingNumber
+        delivery_method: deliveryMethod,
+        tracking_number: pkg.tracking_number
       }
     };
   }

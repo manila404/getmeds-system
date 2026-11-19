@@ -343,5 +343,91 @@ describe('deliveryReceiptService end-to-end flows (mocked DB + MockZohoAdapter)'
       dr_number: null
     });
     expect(res.zoho_invoice_number).toBeTruthy();
+    expect(res.order_updated_at).toBeTruthy();
+  });
+
+  it('shipInvoicedOrderInZoho creates Zoho package + shipment with Mode of Delivery and updates dispatch_records', async () => {
+    jest.resetModules();
+    const adapter = new MockZohoAdapter();
+    const createdSo = await adapter.createSalesOrder({
+      getmeds_order_id: 'GM-20261119-0020',
+      customer_name: 'South City Hospital',
+      customer_type: 'credit',
+      customer_master_type: 'credit',
+      salesperson_name: 'TEST | MEDREP',
+      items: [{ sku: 'SUGA-200', name: 'SugamaGet 200mg', quantity: 10, unit_price: 5152, subtotal: 51520 }]
+    });
+    await adapter.confirmSalesOrder(createdSo.salesorder.salesorder_id);
+    const { salesorder } = await adapter.getSalesOrder(createdSo.salesorder.salesorder_id);
+    await adapter.createInvoiceFromSalesOrder(salesorder, { invoiceNumber: 'GPI-SI000003094' });
+
+    const writes = [];
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m) { super(m); this.status = s; this.code = c; } },
+      assertCanActOnOrder: jest.fn().mockResolvedValue({ order: { id: 30 }, currentCaterer: null })
+    }));
+    jest.doMock('../src/services/orderClaimService', () => ({
+      claimOrder: jest.fn().mockResolvedValue('claim-tok'),
+      releaseClaim: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/services/orderCompletionService', () => ({
+      evaluateCompletion: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: () => ({ id: 1, name: 'Aaron Dispatch' }),
+      logEvent: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => ({
+        get: jest.fn(async () => {
+          if (/FROM orders o/i.test(sql)) {
+            return {
+              id: 30,
+              getmeds_order_id: 'GM-20261119-0020',
+              status: 'ready_for_dispatch',
+              invoicing_from: 'Getmeds Philippines Inc.',
+              oojeema_entity: 'GPI',
+              intake_delivery_method: 'Lalamove',
+              zoho_so_id: createdSo.salesorder.salesorder_id,
+              zoho_so_number: createdSo.salesorder.salesorder_number,
+              dispatch_id: null
+            };
+          }
+          return null;
+        }),
+        all: jest.fn(async () => {
+          if (/FROM order_items oi/i.test(sql)) {
+            return [{ id: 1, product_name: 'SugamaGet 200mg', zoho_item_id: null, quantity: 10, invoicing_from: null }];
+          }
+          return [];
+        }),
+        run: jest.fn(async (...args) => {
+          writes.push({ sql, args });
+          return { changes: 1 };
+        })
+      }))
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+    const shipped = await svc.shipInvoicedOrderInZoho({
+      orderId: 30,
+      user: { id: 1, name: 'Aaron Dispatch' },
+      adapter
+    });
+
+    expect(shipped).toMatchObject({
+      entity_key: 'GPI',
+      delivery_method: 'Lalamove',
+      status: 'dispatched',
+      adopted_package: false,
+      adopted_shipment: false
+    });
+    expect(shipped.zoho_package_number).toBeTruthy();
+    expect(shipped.zoho_shipment_number).toBeTruthy();
+    expect(shipped.order_updated_at).toBeTruthy();
+    expect(writes.some((w) => /INSERT INTO dispatch_records/i.test(w.sql))).toBe(true);
+    expect(writes.some((w) => /UPDATE orders SET status = \?, updated_at = \?/i.test(w.sql) && w.args[0] === 'dispatched')).toBe(true);
   });
 });

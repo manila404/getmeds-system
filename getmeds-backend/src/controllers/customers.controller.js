@@ -3,7 +3,7 @@ const zoho = require('../integrations/zoho');
 const { isDryRunMode, getTestCustomerZohoIds } = require('../services/zohoTestFlags');
 const syncJobs = require('../services/syncJobs');
 const { getSyncState, setSyncState } = require('../services/syncState');
-const { setCustomerTin } = require('../services/customerTinService');
+const { setCustomerTin, extractZohoContactCompliance } = require('../services/customerTinService');
 const customerCreate = require('../services/customerCreateService');
 const customerZohoUpdate = require('../services/customerZohoUpdateService');
 const { teamScopeSql } = require('../services/teamScopeService');
@@ -390,6 +390,7 @@ async function reconcileContacts(contacts, opts = {}) {
     // Only an explicit 'inactive' deactivates. A missing/unknown status
     // is treated as active, so a Zoho response that omits the field can
     // never mass-hide the directory.
+    const compliance = extractZohoContactCompliance(contact);
     rows.push({
       zohoId: contact.contact_id,
       name: contact.contact_name || contact.company_name || 'Unnamed Zoho Contact',
@@ -402,15 +403,8 @@ async function reconcileContacts(contacts, opts = {}) {
         ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ')
         : null,
       isActive: String(contact.status || '').toLowerCase() === 'inactive' ? 0 : 1,
-      // Sep 18, 2026: Zoho's own TIN (cf_tin), a flat property on the
-      // contact object same as every other custom field Zoho returns —
-      // MockZohoAdapter.updateContactTin sets it the same way. Never synced
-      // here before, so a TIN entered directly in Zoho (rather than through
-      // this app's own TIN field, see customerTinService.js) never showed up
-      // locally no matter how many times Sync from Zoho ran. Blank/missing
-      // stays null rather than '' so the DO UPDATE below can tell "Zoho has
-      // nothing" from "Zoho says empty" and leave a local value alone.
-      tin: contact.cf_tin ? String(contact.cf_tin).trim() || null : null,
+      tin: compliance.tin,
+      ltoLicenseNumber: compliance.lto_license_number,
       outstanding_receivable: contact.outstanding_receivable_amount || 0,
     });
   }
@@ -457,31 +451,16 @@ async function reconcileContacts(contacts, opts = {}) {
 
       const params = [];
       const tuples = batch.map((r) => {
-        params.push(r.name, r.type, r.zohoId, r.contactPerson, r.phone, r.address, r.isActive, r.tin, r.outstanding_receivable);
-        return "(?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?, ?, ?)";
+        params.push(r.name, r.type, r.zohoId, r.contactPerson, r.phone, r.address, r.isActive, r.tin, r.ltoLicenseNumber, r.outstanding_receivable);
+        return "(?, ?, ?, 'zoho', ?, ?, ?, datetime('now'), ?, ?, ?, ?)";
       });
 
-      // ON CONFLICT names the index predicate as well as the column because
-      // idx_customers_zoho_contact_id is PARTIAL (... WHERE zoho_contact_id IS
-      // NOT NULL). Postgres will not infer a partial index without it.
-      //
-      // `type` and `source` are deliberately absent from the DO UPDATE list.
-      // Zoho has no equivalent of the credit-vs-direct distinction, so `type`
-      // is only ever a guess on first insert that an admin then corrects
-      // locally — re-deriving it on every sync would silently undo that
-      // correction. This matches the old UPDATE statement, which set neither.
-      //
-      // `tin` DOES get re-derived on every sync, unlike those two — Zoho is
-      // the compliance record for it (this app's own TIN field pushes TO
-      // Zoho, see customerTinService.js's header comment). COALESCE(EXCLUDED,
-      // existing) rather than a flat overwrite: when Zoho's cf_tin is blank
-      // this leaves whatever is already stored alone, so a value saved here
-      // but not yet reflected in Zoho (a failed push, or a local correction
-      // — see setCustomerTin's "clearing locally is not pushed to Zoho" note)
-      // is never wiped out by its own absence on the Zoho side.
+      // ON CONFLICT names the partial index predicate; `type` and `source` stay
+      // untouched on update, while `tin` and `lto_license_number` use COALESCE so
+      // blank Zoho values never overwrite local entries.
       await db
         .prepare(
-          `INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active, tin, outstanding_receivable)
+          `INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active, tin, lto_license_number, outstanding_receivable)
            VALUES ${tuples.join(', ')}
            ON CONFLICT (zoho_contact_id) WHERE zoho_contact_id IS NOT NULL
            DO UPDATE SET
@@ -492,6 +471,7 @@ async function reconcileContacts(contacts, opts = {}) {
              is_active = EXCLUDED.is_active,
              last_synced_at = EXCLUDED.last_synced_at,
              tin = COALESCE(EXCLUDED.tin, customers.tin),
+             lto_license_number = COALESCE(EXCLUDED.lto_license_number, customers.lto_license_number),
              outstanding_receivable = EXCLUDED.outstanding_receivable`
         )
         .run(...params);
@@ -715,31 +695,24 @@ async function getZohoAddress(req, res, next) {
     // is the moment their TIN actually matters (see OrderForm.jsx), so this
     // is also the moment this app is most likely to notice one was only ever
     // set directly in Zoho and never reached here via a bulk sync.
-    const tin = contact.cf_tin ? String(contact.cf_tin).trim() || null : null;
-    // Sep 18, 2026: same again for the customer's NAME and email — a
-    // correction made straight in Zoho ("Mercury Drug Taft" spelled out
-    // properly, a typo fixed) used to only reach here on the next bulk Sync
-    // from Zoho / Quick or Full Resync (an admin/management action), which
-    // could be a long wait. Every order for this customer — past AND future
-    // — reads `customers.name` live via a JOIN (orders never store their own
-    // copy of it), so fixing it here, the moment a MedRep actually picks the
-    // customer to raise an order, is what makes the fix show up on THIS
-    // order without anyone having to remember to sync first.
+    const { tin, lto_license_number: ltoLicenseNumber } = extractZohoContactCompliance(contact);
     const name = (contact.contact_name || contact.company_name || '').trim() || null;
     const email = (contact.email || '').trim() || null;
 
     await db.prepare(`
       UPDATE customers
          SET address = ?, contact_person = ?, contact_number = ?, tin = COALESCE(?, tin),
+             lto_license_number = COALESCE(?, lto_license_number),
              name = COALESCE(?, name), email = COALESCE(?, email), last_synced_at = datetime('now')
        WHERE id = ?
-    `).run(address || null, contactPerson, contactNumber, tin, name, email, customer.id);
+    `).run(address || null, contactPerson, contactNumber, tin, ltoLicenseNumber, name, email, customer.id);
 
     res.json({
       success: true,
       data: {
         address, contact_person: contactPerson, contact_number: contactNumber,
         tin: tin || customer.tin || null,
+        lto_license_number: ltoLicenseNumber || customer.lto_license_number || null,
         name: name || customer.name,
         email: email || customer.email || null,
         synced_from_zoho: true

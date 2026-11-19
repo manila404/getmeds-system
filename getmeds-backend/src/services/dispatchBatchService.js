@@ -6,6 +6,7 @@ const { isKnownCspProductName } = require('../constants/cspCatalog');
 const { classifyOrder } = require('./orderClassificationService');
 const { hasColumn } = require('./schemaColumns');
 const { logEvent, resolveActor } = require('./auditService');
+const { setCustomerTin, refreshCustomerComplianceFromZoho } = require('./customerTinService');
 
 class DispatchBatchError extends Error {
   constructor(status, code, message, details = null) {
@@ -250,7 +251,7 @@ async function assertCanActOnOrder({ orderId, user, expectedUpdatedAt = null, ex
     throw new DispatchBatchError(
       409,
       'CATERED_BY_ANOTHER',
-      `Order ${order.getmeds_order_id} is currently catered by ${currentCaterer.actor_name}. Take over the order first to avoid duplicate fulfillment.`,
+      `Order ${order.getmeds_order_id} is currently handled by ${currentCaterer.actor_name}. Click "Take Over" on the order before making changes.`,
       { current_caterer: currentCaterer }
     );
   }
@@ -261,7 +262,7 @@ async function assertCanActOnOrder({ orderId, user, expectedUpdatedAt = null, ex
       throw new DispatchBatchError(
         409,
         'STALE_STATE',
-        `Order ${order.getmeds_order_id} catering ownership changed while your screen was open. Refresh and try again.`
+        `Someone else took over order ${order.getmeds_order_id}. Click Refresh to check who is handling it.`
       );
     }
   }
@@ -270,7 +271,7 @@ async function assertCanActOnOrder({ orderId, user, expectedUpdatedAt = null, ex
     throw new DispatchBatchError(
       409,
       'STALE_STATE',
-      `Order ${order.getmeds_order_id} was updated by someone else while your screen was open. Refreshing latest state.`
+      `Order ${order.getmeds_order_id} was just updated. Click Refresh to load the latest details before saving.`
     );
   }
 
@@ -284,13 +285,19 @@ async function loadOrderWithItemsForBatches(orderId) {
     ? ', o.requires_si, o.requires_dr, o.is_csp, o.si_override_reason, o.dispatch_doctor_name, o.oojeema_si_number, o.oojeema_entity, o.slip_printed_by_name, o.slip_printed_at, o.slip_print_count'
     : '';
   const order = await db.prepare(`
-    SELECT o.id, o.getmeds_order_id, o.status, o.division, o.intake_source, o.invoicing_from,
+    SELECT o.id, o.getmeds_order_id, o.customer_id, o.status, o.division, o.intake_source, o.invoicing_from,
            o.intake_gl_number, o.intake_payment_terms, o.intake_is_doctor, o.intake_doctor,
+           o.intake_tin, o.intake_delivery_method,
            o.delivery_address, o.zoho_so_id, o.zoho_so_number, o.zoho_invoice_id, o.zoho_invoice_number,
            o.fulfil_warehouse_id, o.fulfil_warehouse_name, o.updated_at,
-           c.name AS customer_name, c.tin, c.lto_license_number, c.category AS customer_category${drOrderCols}
+           c.name AS customer_name, c.zoho_contact_id,
+           COALESCE(NULLIF(TRIM(c.tin), ''), NULLIF(TRIM(o.intake_tin), '')) AS tin,
+           c.lto_license_number, c.category AS customer_category,
+           d.zoho_package_id, d.zoho_package_number, d.zoho_shipment_id, d.zoho_shipment_number,
+           d.courier, d.tracking_number${drOrderCols}
       FROM orders o
       LEFT JOIN customers c ON c.id = o.customer_id
+      LEFT JOIN dispatch_records d ON d.order_id = o.id
      WHERE o.id = ?
   `).get(orderId);
   if (!order) throw new DispatchBatchError(404, 'NOT_FOUND', 'Order not found.');
@@ -348,6 +355,11 @@ async function fetchWarehouseBatchesForItems(items, { adapter = zoho, today = ma
 
 async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTodayDate() } = {}) {
   const { order, items, classification } = await loadOrderWithItemsForBatches(orderId);
+  if ((!order.tin || !order.lto_license_number) && order.customer_id && order.zoho_contact_id) {
+    const refreshed = await refreshCustomerComplianceFromZoho(order.customer_id, order.zoho_contact_id, adapter);
+    if (!order.tin && refreshed.tin) order.tin = refreshed.tin;
+    if (!order.lto_license_number && refreshed.lto_license_number) order.lto_license_number = refreshed.lto_license_number;
+  }
   const availableBatchesByItemId = await fetchWarehouseBatchesForItems(items, { adapter, today });
 
   const hasBatchTable = await hasColumn('order_item_batches', 'order_item_id');
@@ -467,6 +479,75 @@ async function saveOrderBatchPicks({
   return getOrderBatchOptions({ orderId: order.id, adapter, today });
 }
 
+async function saveOrderCustomerCompliance({
+  orderId,
+  user,
+  tin = null,
+  ltoLicenseNumber = null,
+  expectedUpdatedAt = null,
+  expectedCateredBy = null
+}) {
+  const actor = resolveActor(user);
+  await assertCanActOnOrder({ orderId, user, expectedUpdatedAt, expectedCateredBy });
+
+  const order = await db.prepare('SELECT id, getmeds_order_id, customer_id, status FROM orders WHERE id = ?').get(orderId);
+  if (!order) throw new DispatchBatchError(404, 'NOT_FOUND', 'Order not found.');
+  if (!order.customer_id) throw new DispatchBatchError(422, 'MISSING_CUSTOMER', 'Order is not linked to a customer record.');
+
+  const cleanTin = tin === null || tin === undefined ? null : (String(tin).trim() || null);
+  const cleanLto = ltoLicenseNumber === null || ltoLicenseNumber === undefined ? null : (String(ltoLicenseNumber).trim() || null);
+
+  let zohoPushed = false;
+  let zohoError = null;
+  if (tin !== undefined) {
+    const tinRes = await setCustomerTin(order.customer_id, cleanTin);
+    zohoPushed = Boolean(tinRes.zohoPushed);
+    zohoError = tinRes.zohoError || null;
+  }
+
+  const now = new Date().toISOString();
+  await db.transaction(async () => {
+    if (ltoLicenseNumber !== undefined) {
+      await db.prepare('UPDATE customers SET lto_license_number = ? WHERE id = ?').run(cleanLto, order.customer_id);
+    }
+    if (tin !== undefined && cleanTin) {
+      await db.prepare('UPDATE orders SET intake_tin = ?, updated_at = ? WHERE id = ?').run(cleanTin, now, order.id);
+    } else {
+      await db.prepare('UPDATE orders SET updated_at = ? WHERE id = ?').run(now, order.id);
+    }
+
+    // Keep any active (non-void) DR for this order in sync so printing Step 2 reflects updated TIN/LTO immediately.
+    await db.prepare(`
+      UPDATE delivery_receipts
+         SET tin = COALESCE(?, tin),
+             lto_license_number = COALESCE(?, lto_license_number),
+             updated_at = ?
+       WHERE order_id = ? AND status IN ('draft', 'issued')
+    `).run(cleanTin, cleanLto, now, order.id);
+
+    await logEvent({
+      orderId: order.id,
+      eventType: 'CUSTOMER_COMPLIANCE_UPDATED',
+      oldStatus: order.status,
+      newStatus: order.status,
+      actorId: actor.id,
+      actorName: actor.name,
+      notes: `Updated customer compliance in Dispatch modal (TIN: ${cleanTin || '—'}, LTO: ${cleanLto || '—'}).`,
+      metadata: { tin: cleanTin, ltoLicenseNumber: cleanLto, zohoPushed, zohoError }
+    });
+  })();
+
+  const refreshed = await db.prepare('SELECT tin, lto_license_number FROM customers WHERE id = ?').get(order.customer_id);
+  return {
+    customer_id: order.customer_id,
+    tin: refreshed?.tin || cleanTin || null,
+    lto_license_number: refreshed?.lto_license_number || cleanLto || null,
+    zoho_pushed: zohoPushed,
+    zoho_error: zohoError,
+    order_updated_at: now
+  };
+}
+
 module.exports = {
   DispatchBatchError,
   warehouseBalanceForBatch,
@@ -475,5 +556,6 @@ module.exports = {
   validatePickedBatches,
   assertCanActOnOrder,
   getOrderBatchOptions,
-  saveOrderBatchPicks
+  saveOrderBatchPicks,
+  saveOrderCustomerCompliance
 };

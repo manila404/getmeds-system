@@ -62,4 +62,61 @@ async function setCustomerTin(customerId, tin) {
   return { ok: true, changed: true, customer: updated, zohoPushed, zohoError };
 }
 
-module.exports = { setCustomerTin };
+function readContactCustomField(contact, apiName) {
+  if (!contact) return null;
+  if (contact[apiName]) {
+    const v = String(contact[apiName]).trim();
+    if (v) return v;
+  }
+  if (contact.custom_field_hash && contact.custom_field_hash[apiName]) {
+    const v = String(contact.custom_field_hash[apiName]).trim();
+    if (v) return v;
+  }
+  if (Array.isArray(contact.custom_fields)) {
+    const hit = contact.custom_fields.find((f) => f && f.api_name === apiName && f.value != null && String(f.value).trim() !== '');
+    if (hit) return String(hit.value).trim();
+  }
+  return null;
+}
+
+function extractZohoContactCompliance(contact) {
+  return {
+    tin: readContactCustomField(contact, 'cf_tin'),
+    lto_license_number: readContactCustomField(contact, 'cf_lto_license_number')
+  };
+}
+
+/**
+ * Best-effort read of a customer's cf_tin and cf_lto_license_number from Zoho
+ * when either field is blank locally. Never throws to callers.
+ */
+async function refreshCustomerComplianceFromZoho(customerId, zohoContactId, adapter = zoho) {
+  if (!customerId || !zohoContactId || typeof adapter?.getContact !== 'function') {
+    return { tin: null, lto_license_number: null, synced: false };
+  }
+  try {
+    const res = await adapter.getContact(zohoContactId);
+    const contact = res && res.contact;
+    if (!contact) return { tin: null, lto_license_number: null, synced: false };
+    const { tin, lto_license_number } = extractZohoContactCompliance(contact);
+    if (tin || lto_license_number) {
+      await db.prepare(`
+        UPDATE customers
+           SET tin = COALESCE(?, tin),
+               lto_license_number = COALESCE(?, lto_license_number),
+               last_synced_at = datetime('now')
+         WHERE id = ?
+      `).run(tin, lto_license_number, customerId);
+    }
+    return { tin, lto_license_number, synced: true };
+  } catch (err) {
+    console.warn(`[COMPLIANCE] getContact failed for customer ${customerId} (${zohoContactId}):`, err.message);
+    return { tin: null, lto_license_number: null, synced: false };
+  }
+}
+
+module.exports = {
+  setCustomerTin,
+  extractZohoContactCompliance,
+  refreshCustomerComplianceFromZoho
+};
