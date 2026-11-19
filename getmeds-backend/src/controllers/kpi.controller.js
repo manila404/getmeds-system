@@ -13,7 +13,7 @@
  */
 
 const db = require('../db/database');
-const { buildExport, monthRange, currentMonth, prevMonth, allowedFor, restrictToChannels, invoicedOrders } = require('../services/kpiService');
+const { buildExport, monthRange, currentMonth, prevMonth, allowedFor, restrictToChannels, invoicedOrders, territoryOwners, creditToTerritory } = require('../services/kpiService');
 const { viewerChannels } = require('../services/splitPeopleService');
 const { buildSalesPerformance } = require('../services/salesPerformanceService');
 const { buildSalesPerformanceWorkbook } = require('../services/salesPerformanceXlsx');
@@ -75,7 +75,9 @@ async function dayInvoiced(day) {
   const rows = await db.transaction(async () => {
     await q('SET TRANSACTION READ ONLY');
     await q('SET LOCAL statement_timeout = 10000');
-    return invoicedOrders({ query: async (sql, params) => ({ rows: await q(sql, params) }) }, day, day);
+    const client = { query: async (sql, params) => ({ rows: await q(sql, params) }) };
+    // Nov 19, 2026: credited to the territory's MedRep, the same as the month figures
+    return creditToTerritory(await invoicedOrders(client, day, day), await territoryOwners(client));
   })();
   dayCache.set(day, { at: Date.now(), rows });
   return rows;

@@ -123,6 +123,51 @@ const invoicedOrdersSql = (notImported) => `
    WHERE inv.invoice_date >= $1 AND inv.invoice_date <= $2
      AND o.status NOT IN ('cancelled', 'deleted') AND ${notImported}`;
 
+/**
+ * WHOSE SALE (Nov 19, 2026, Aaron): an order counts for the field MedRep (CHC) who holds its Zoho
+ * Salesperson, whoever placed it. E.g. Khalygen (Team Lead, MD Telesales) places orders under
+ * "RX | NCL"; they count for Gienel, who holds RX | NCL. Only active MedReps are owners (Team Leads
+ * hold tags only to place orders). A name held as main tag by exactly one MedRep goes to them; else,
+ * a name held by exactly one MedRep at all; otherwise (nobody, or two with equal claim) the order
+ * stays with whoever owns it in the app.
+ * Returns Map(lower-cased Zoho name -> user id).
+ */
+async function territoryOwners(client) {
+  const rows = (await client.query(
+    `SELECT us.salesperson, us.user_id, us.is_primary, u.is_active FROM user_salespersons us JOIN users u ON u.id = us.user_id
+      WHERE u.role = 'medrep'`
+  )).rows.filter((r) => Number(r.is_active) === 1 || r.is_active === true);
+  const by = new Map();
+  for (const r of rows) {
+    const k = String(r.salesperson || '').toLowerCase().trim();
+    if (!k) continue;
+    if (!by.has(k)) by.set(k, { all: new Set(), main: new Set() });
+    by.get(k).all.add(r.user_id);
+    if (Number(r.is_primary) === 1 || r.is_primary === true) by.get(k).main.add(r.user_id);
+  }
+  const out = new Map();
+  for (const [k, h] of by) {
+    if (h.main.size === 1) out.set(k, [...h.main][0]);
+    else if (h.all.size === 1) out.set(k, [...h.all][0]);
+  }
+  return out;
+}
+
+/**
+ * The rows with medrep_id moved to the territory's MedRep (see territoryOwners). When it moves, the
+ * person who had it becomes raised_by_id (unless someone else already is), so the owner's card shows
+ * it as "entered for me by others" and the placer's as "entered for others". Rows without a
+ * salesperson field are left alone.
+ */
+function creditToTerritory(rows, owners) {
+  return rows.map((o) => {
+    const owner = owners.get(String(o.salesperson || '').toLowerCase().trim());
+    if (!owner || owner === o.medrep_id) return o;
+    const raiser = o.raised_by_id && o.raised_by_id !== o.medrep_id ? o.raised_by_id : o.medrep_id;
+    return { ...o, medrep_id: owner, raised_by_id: raiser };
+  });
+}
+
 async function invoicedOrders(client, from, to) {
   const { importedSql } = require('./orderOrigin');
   return (await client.query(invoicedOrdersSql(`NOT (${importedSql('o')})`), [from, to])).rows;
@@ -137,7 +182,7 @@ async function waitingForInvoice(client, sinceUtc) {
   // The invoiced Sales Order numbers are collected once and matched by hash, not looked up per order.
   return (await client.query(
     `WITH cand AS (
-       SELECT o.id, o.medrep_id, o.zoho_so_number, o.total_amount
+       SELECT o.id, o.medrep_id, o.salesperson, o.zoho_so_number, o.total_amount
          FROM orders o
         WHERE o.id IN (SELECT DISTINCT e.order_id FROM order_events e WHERE e.event_type = 'FINANCE_VERIFIED' AND e.created_at >= $1)
           AND o.status NOT IN ('cancelled', 'deleted') AND NOT (${importedSql('o')})
@@ -156,11 +201,11 @@ async function waitingForInvoice(client, sinceUtc) {
           AND EXISTS (SELECT 1 FROM order_events e WHERE e.order_id = c.id AND e.event_type IN ('INVOICE_SENT', 'ZOHO_INVOICE_SENT')
                         AND e.created_at::timestamptz >= now() - interval '1 day')
      )
-     SELECT c.medrep_id, COUNT(*)::int AS n,
+     SELECT c.medrep_id, c.salesperson, COUNT(*)::int AS n,
             SUM(COALESCE((SELECT SUM(oi.line_total / (1 + COALESCE(oi.tax_percent, 0) / 100.0)) FROM order_items oi WHERE oi.order_id = c.id), c.total_amount)) AS net
        FROM cand c
       WHERE c.id NOT IN (SELECT id FROM invoiced)
-      GROUP BY c.medrep_id`,
+      GROUP BY c.medrep_id, c.salesperson`,
     [sinceUtc]
   )).rows;
 }
@@ -190,7 +235,9 @@ async function buildExport(client, month, targetRows, opts = {}) {
   // BOOKED — one row per order, by its latest FINANCE_VERIFIED event in the month.
   // Nov 9, 2026: opts.basis === 'invoiced' (My KPI, Team performance): by the order's first invoice date instead.
   const lastDay = `${month}-${String(new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate()).padStart(2, '0')}`;
-  const booked = opts.basis === 'invoiced' ? await invoicedOrders(client, `${month}-01`, lastDay) : await q(
+  // Nov 19, 2026: every order below counts for its territory's MedRep (creditToTerritory).
+  const owners = await territoryOwners(client);
+  const bookedRaw = opts.basis === 'invoiced' ? await invoicedOrders(client, `${month}-01`, lastDay) : await q(
     `SELECT id, medrep_id, raised_by_id, total_amount, status, division, salesperson,
             -- Oct 29, 2026 (Aaron): the same order without VAT, line by line (a 12% line ÷ 1.12; "No Tax"
             -- lines unchanged; discounts are already out of line_total). Shown on My KPI only.
@@ -204,11 +251,12 @@ async function buildExport(client, month, targetRows, opts = {}) {
          ORDER BY o.id, fe.created_at DESC) b`,
     [fromUtc, toUtc]
   );
+  const booked = creditToTerritory(bookedRaw, owners);
   // NEW CUSTOMERS (Oct 8, 2026, Aaron): a booked order that is its customer's FIRST-EVER order.
   // Any earlier order for the customer (Zoho history included; drafts, cancelled and deleted
   // not) means it is not new. Credited to that order's owner, in the month Finance confirmed it.
   // One index lookup per booked order (orders.customer_id is indexed).
-  const firstOrders = booked.length ? await q(
+  const firstOrders = creditToTerritory(booked.length ? await q(
     `SELECT o.id, o.medrep_id, o.salesperson FROM orders o
       WHERE o.id = ANY($1) AND o.customer_id IS NOT NULL
         AND NOT EXISTS (
@@ -217,19 +265,19 @@ async function buildExport(client, month, targetRows, opts = {}) {
              AND e.status NOT IN ('draft', 'cancelled', 'deleted')
              AND (e.created_at < o.created_at OR (e.created_at = o.created_at AND e.id < o.id)))`,
     [booked.map((b) => b.id)]
-  ) : [];
-  const raised = await q(
+  ) : [], owners);
+  const raised = creditToTerritory(await q(
     `SELECT o.id, o.medrep_id, o.division, o.salesperson FROM orders o
       WHERE o.created_at >= $1 AND o.created_at < $2 AND ${notImported}
         AND o.status NOT IN ('draft', 'cancelled', 'deleted')`,
     [fromUtc, toUtc]
-  );
-  const held = await q(
+  ), owners);
+  const held = creditToTerritory(await q(
     `SELECT DISTINCT o.id, o.medrep_id, o.salesperson FROM order_events e JOIN orders o ON o.id = e.order_id
       WHERE e.new_status = 'on_hold' AND e.old_status IS DISTINCT FROM 'on_hold'
         AND e.created_at >= $1 AND e.created_at < $2 AND ${notImported} AND o.status <> 'deleted'`,
     [fromUtc, toUtc]
-  );
+  ), owners);
 
   // ── who sits where ──
   // Oct 9, 2026: a territory also matches by its alias, the person's real Zoho name when Zoho
@@ -352,9 +400,16 @@ async function buildExport(client, month, targetRows, opts = {}) {
   const ownerOnly = [...T.keys()].filter((id) => id && !personIds.has(id)).map((id) => byId.get(id)).filter(Boolean);
   const peopleList = [...salespeople, ...ownerOnly];
 
-  const waitOf = new Map(opts.basis === 'invoiced'
-    ? (await waitingForInvoice(client, new Date(new Date(fromUtc).getTime() - 90 * 86400000).toISOString())).map((w) => [w.medrep_id, w])
-    : []);
+  // rows come per owner and Zoho name; credited to the territory's MedRep, then added up per person
+  const waitOf = new Map();
+  if (opts.basis === 'invoiced') {
+    const w = creditToTerritory(await waitingForInvoice(client, new Date(new Date(fromUtc).getTime() - 90 * 86400000).toISOString()), owners);
+    for (const r of w) {
+      const a = waitOf.get(r.medrep_id) || { medrep_id: r.medrep_id, n: 0, net: 0 };
+      a.n += Number(r.n) || 0; a.net += Number(r.net) || 0;
+      waitOf.set(r.medrep_id, a);
+    }
+  }
   const people = peopleList.map((u) => {
     const t = T.get(u.id) || tally(u.id);
     const lead = u.team_lead_id ? byId.get(u.team_lead_id) : null;
@@ -535,4 +590,4 @@ function currentMonth(now = new Date()) {
   return new Date(now.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 7);
 }
 
-module.exports = { MANILA, NOT_TRACKED, monthRange, prevMonth, toCsv, parseCsv, readTargets, targetsFor, copyTargets, buildExport, currentMonth, COLS, allowedFor, restrictToChannels, invoicedOrders };
+module.exports = { MANILA, NOT_TRACKED, monthRange, prevMonth, toCsv, parseCsv, readTargets, targetsFor, copyTargets, buildExport, currentMonth, COLS, allowedFor, restrictToChannels, invoicedOrders, territoryOwners, creditToTerritory };
