@@ -54,6 +54,7 @@ router.post('/orders/:id/tracking-hold', c.holdTracking);
 // The tracking number, typed by Dispatch — saved and sent to the MedRep only;
 // Zoho's shipment is still made in Zoho. Ends a hold.
 router.post('/orders/:id/tracking', requireRxCleared, c.addTracking);
+router.post('/orders/:id/zoho-tracking', requireRxCleared, c.updateZohoTracking);
 // Sep 15, 2026: which Dispatch person caters (handles) an order — a label
 // others see, not a lock. See services/dispatchCater.js.
 router.post('/orders/:id/cater', c.cater);

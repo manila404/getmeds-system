@@ -318,10 +318,34 @@ async function loadOrderWithItemsForBatches(orderId) {
     effective_warehouse_name: it.fulfil_warehouse_name || order.fulfil_warehouse_name || null
   }));
 
-  const [glProofs, splits] = await Promise.all([
+  const [glProofs, splits, latestTrackingEvent] = await Promise.all([
     db.prepare("SELECT file_type FROM payment_proofs WHERE order_id = ? AND lower(file_type) = 'gl' LIMIT 1").all(order.id),
-    db.prepare('SELECT invoicing_from FROM order_split_sales_orders WHERE order_id = ?').all(order.id)
+    db.prepare('SELECT invoicing_from FROM order_split_sales_orders WHERE order_id = ?').all(order.id),
+    db.prepare(`
+      SELECT actor_name, created_at, metadata
+        FROM order_events
+       WHERE order_id = ? AND event_type = 'DISPATCH_TRACKING_ADDED'
+       ORDER BY id DESC LIMIT 1
+    `).get(order.id)
   ]);
+
+  let enteredTracking = null;
+  if (latestTrackingEvent?.metadata) {
+    try {
+      const meta = JSON.parse(latestTrackingEvent.metadata);
+      if (meta?.tracking_number || meta?.courier) {
+        enteredTracking = {
+          courier: meta.courier || null,
+          tracking_number: meta.tracking_number || null,
+          by: latestTrackingEvent.actor_name || null,
+          at: latestTrackingEvent.created_at || null
+        };
+      }
+    } catch {
+      enteredTracking = null;
+    }
+  }
+  order.entered_tracking = enteredTracking;
 
   const classification = classifyOrder({
     order,
