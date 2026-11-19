@@ -46,3 +46,7 @@ Claude outputs/
 
 # Claude Code's local data (plugin databases): machine-specific, not source
 .claude/data/
+
+# Coolify env copy (secrets)
+.env.coolify
+**/.env.coolify

@@ -1,0 +1,19 @@
+# Never bake secrets into the image — Coolify injects env vars at runtime.
+.env
+.env.*
+!.env.example
+
+node_modules
+npm-debug.log*
+*.log
+*.db
+*.db-*
+*.sqlite*
+coverage
+tests
+mock-server
+on_hold
+backups
+.git
+Dockerfile
+.dockerignore
