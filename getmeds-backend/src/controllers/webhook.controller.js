@@ -468,7 +468,8 @@ exports.handleZohoWebhook = async (req, res, next) => {
         if (await recorded(['ZOHO_DISPATCHED'], 'zohoShipmentId', shipment?.shipment_id)) {
           const d = await db.prepare('SELECT tracking_number FROM dispatch_records WHERE order_id = ?').get(order.id);
           const incoming = shipment?.tracking_number || null;
-          if (!incoming || (d && d.tracking_number === incoming)) echo = 'already_recorded';
+          const preservedFullUrl = Boolean(d && /^https?:\/\//i.test(d.tracking_number || '') && !/^https?:\/\//i.test(incoming || ''));
+          if (!incoming || (d && (d.tracking_number === incoming || preservedFullUrl))) echo = 'already_recorded';
         }
       } else if (isPackageEvent) {
         if (await recorded(['ZOHO_PACKAGE_CREATED'], 'zohoPackageId', zohoPackage?.package_id)) echo = 'already_recorded';
@@ -787,13 +788,17 @@ exports.handleZohoWebhook = async (req, res, next) => {
       const courier = shipment?.carrier || shipment?.delivery_method || shipment?.service_provider || null;
 
       await db.transaction(async () => {
-        const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
+        const existingDispatch = await db.prepare('SELECT id, tracking_number FROM dispatch_records WHERE order_id = ?').get(order.id);
+        const trackingToStore =
+          existingDispatch && /^https?:\/\//i.test(existingDispatch.tracking_number || '') && !/^https?:\/\//i.test(trackingNumber || '')
+            ? existingDispatch.tracking_number
+            : trackingNumber;
         if (existingDispatch) {
           await db.prepare(`
             UPDATE dispatch_records
             SET status = 'dispatched', courier = COALESCE(?, courier), tracking_number = COALESCE(?, tracking_number), dispatched_at = COALESCE(dispatched_at, ?)
             WHERE order_id = ?
-          `).run(courier, trackingNumber, now, order.id);
+          `).run(courier, trackingToStore, now, order.id);
         } else {
           await db.prepare(`
             INSERT INTO dispatch_records (order_id, status, tracking_number, courier, dispatched_at, created_at)

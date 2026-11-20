@@ -6,6 +6,7 @@ import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle,
 import client from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPHT } from '../utils/dateUtils';
+import { openPrintableSalesOrder } from '../utils/printSalesOrder';
 // Sep 10, 2026 (2d): the flat event list became a ten-stage pipeline. See
 // components/orders/OrderPipeline.jsx and, on the backend,
 // services/orderTimelineService.js.
@@ -1059,6 +1060,14 @@ const OrderDetailPage = () => {
                 className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-getmeds-blue/40 bg-white text-xs font-semibold text-getmeds-blue hover:bg-getmeds-blue/5"
               >
                 📋 Order overview
+              </button>
+              <button
+                type="button"
+                onClick={() => openPrintableSalesOrder({ order, items })}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface"
+                title="Print formatted Sales Order in Hub without opening Zoho"
+              >
+                🖨️ Print SO
               </button>
             </div>
           </div>

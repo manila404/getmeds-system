@@ -435,7 +435,7 @@ async function saveOrderBatchPicks({
   adapter = zoho,
   today = manilaTodayDate()
 }) {
-  const actor = resolveActor(user);
+  const actor = await resolveActor(user);
   if (!(await hasColumn('order_item_batches', 'order_item_id'))) {
     throw new DispatchBatchError(503, 'MIGRATION_REQUIRED', 'Batch & DR database schema is not migrated yet (run migrate:pg).');
   }
@@ -511,7 +511,7 @@ async function saveOrderCustomerCompliance({
   expectedUpdatedAt = null,
   expectedCateredBy = null
 }) {
-  const actor = resolveActor(user);
+  const actor = await resolveActor(user);
   await assertCanActOnOrder({ orderId, user, expectedUpdatedAt, expectedCateredBy });
 
   const order = await db.prepare('SELECT id, getmeds_order_id, customer_id, status FROM orders WHERE id = ?').get(orderId);

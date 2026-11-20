@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown, RotateCcw, Pill } from 'lucide-react';
+import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown, RotateCcw, Pill, Printer } from 'lucide-react';
 import client from '../../api/client';
+import { openPrintableSalesOrder } from '../../utils/printSalesOrder';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
 import { attachmentLabel, HOSPITAL_REQUIRED_TYPES } from '../../constants/attachmentTypes';
@@ -564,6 +565,16 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = n
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {order && (
+              <button
+                type="button"
+                onClick={() => openPrintableSalesOrder({ order, items })}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface"
+                title="Print Zoho-style Sales Order in Hub"
+              >
+                <Printer className="w-3.5 h-3.5" /> Print SO
+              </button>
+            )}
             <button onClick={onClose} className="text-ink-secondary hover:text-ink-primary" title="Close">
               <X className="w-5 h-5" />
             </button>

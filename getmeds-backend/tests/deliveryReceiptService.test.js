@@ -430,4 +430,149 @@ describe('deliveryReceiptService end-to-end flows (mocked DB + MockZohoAdapter)'
     expect(writes.some((w) => /INSERT INTO dispatch_records/i.test(w.sql))).toBe(true);
     expect(writes.some((w) => /UPDATE orders SET status = \?, updated_at = \?/i.test(w.sql) && w.args[0] === 'dispatched')).toBe(true);
   });
+
+  it('shipInvoicedOrderInZoho enforces tracking for couriers when requireTracking=true and exempts Customer Pick-up / Inhouse', async () => {
+    jest.resetModules();
+    const MockZohoAdapter = require('../src/integrations/zoho/MockZohoAdapter');
+    const adapter = new MockZohoAdapter();
+    adapter._nextSeq = 55;
+    const createdSo = await adapter.createSalesOrder({
+      getmeds_order_id: 'GM-20261120-0030',
+      customer_name: 'South City Hospital',
+      customer_type: 'credit',
+      customer_master_type: 'credit',
+      salesperson_name: 'TEST | MEDREP',
+      items: [{ sku: 'SUGA-200', name: 'SugamaGet 200mg', quantity: 5, unit_price: 100 }]
+    });
+    await adapter.confirmSalesOrder(createdSo.salesorder.salesorder_id);
+
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m) { super(m); this.status = s; this.code = c; } },
+      assertCanActOnOrder: jest.fn().mockResolvedValue({ order: { id: 31 }, currentCaterer: null })
+    }));
+    jest.doMock('../src/services/orderClaimService', () => ({
+      claimOrder: jest.fn().mockResolvedValue('claim-tok'),
+      releaseClaim: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/services/orderCompletionService', () => ({
+      evaluateCompletion: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: () => ({ id: 1, name: 'Aaron Dispatch' }),
+      logEvent: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => ({
+        get: jest.fn(async () => (/FROM orders o/i.test(sql) ? {
+          id: 31,
+          getmeds_order_id: 'GM-20261120-0030',
+          status: 'ready_for_dispatch',
+          invoicing_from: 'Getmeds Philippines Inc.',
+          oojeema_entity: 'GPI',
+          intake_delivery_method: 'LBC Express',
+          zoho_so_id: createdSo.salesorder.salesorder_id,
+          zoho_so_number: createdSo.salesorder.salesorder_number,
+          dispatch_id: null
+        } : null)),
+        all: jest.fn(async () => (/FROM order_items oi/i.test(sql)
+          ? [{ id: 1, product_name: 'SugamaGet 200mg', zoho_item_id: null, quantity: 5, invoicing_from: null }]
+          : [])),
+        run: jest.fn(async () => ({ changes: 1 }))
+      }))
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+    expect(svc.normalizeZohoDeliveryMethod('Own Rider / Company Vehicle')).toBe('Inhouse');
+    expect(svc.normalizeZohoDeliveryMethod('Office Pickup')).toBe('Customer Pick-up');
+    expect(svc.isTrackingExemptDeliveryMethod('Customer Pick-up')).toBe(true);
+    expect(svc.isTrackingExemptDeliveryMethod('Inhouse')).toBe(true);
+    expect(svc.isTrackingExemptDeliveryMethod('Lalamove')).toBe(false);
+
+    await expect(
+      svc.shipInvoicedOrderInZoho({
+        orderId: 31,
+        deliveryMethod: 'LBC Express',
+        trackingNumber: '',
+        requireTracking: true,
+        user: { id: 1, name: 'Aaron Dispatch' },
+        adapter
+      })
+    ).rejects.toMatchObject({ code: 'TRACKING_REQUIRED', status: 422 });
+
+    const pickupShipped = await svc.shipInvoicedOrderInZoho({
+      orderId: 31,
+      deliveryMethod: 'Office Pickup',
+      trackingNumber: '',
+      requireTracking: true,
+      user: { id: 1, name: 'Aaron Dispatch' },
+      adapter
+    });
+    expect(pickupShipped.delivery_method).toBe('Customer Pick-up');
+    expect(pickupShipped.tracking_number).toBeNull();
+
+    const LiveZohoAdapter = require('../src/integrations/zoho/LiveZohoAdapter');
+    expect(LiveZohoAdapter.prototype._mapPackageCarrier('Customer Pick-up')).toBe('Inhouse');
+    expect(LiveZohoAdapter.prototype._mapPackageCarrier('Own Rider / Company Vehicle')).toBe('Inhouse');
+
+    // Lalamove >= 100 char share URL stays < 100 in tracking_number while full link moves to notes
+    const longLalamove = `https://share.lalamove.com/?PH100250915114525123456789&lang=en_PH&sign=${'x'.repeat(120)}`;
+    const fmt = LiveZohoAdapter.prototype._formatTrackingForZoho(longLalamove);
+    expect(fmt.trackingNumber).toBe('PH100250915114525123456789');
+    expect(fmt.trackingNumber.length).toBeLessThan(100);
+    expect(fmt.notes).toBe(`Tracking link: ${longLalamove}`);
+  });
+
+  it('listZohoTransferOrders filters excluded warehouses and expands Zoho TO lines & batches cleanly', async () => {
+    jest.resetModules();
+    const MockZohoAdapter = require('../src/integrations/zoho/MockZohoAdapter');
+    const adapter = new MockZohoAdapter();
+
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m) { super(m); this.status = s; this.code = c; } },
+      assertCanActOnOrder: jest.fn()
+    }));
+    jest.doMock('../src/services/orderClaimService', () => ({ claimOrder: jest.fn(), releaseClaim: jest.fn() }));
+    jest.doMock('../src/services/orderCompletionService', () => ({ evaluateCompletion: jest.fn() }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: async (u) => ({ id: u?.id || 1, name: u?.name || 'Aaron Dispatch' }),
+      logEvent: jest.fn()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => ({
+        get: jest.fn(async () => null),
+        all: jest.fn(async () => {
+          if (/FROM products/i.test(sql)) {
+            return [{ id: 77, name: 'Palonosetron 50mcg (Paloget)', sku: 'GM-4497', unit: 'Vials', zoho_item_id: 'MOCK-ITEM-P1' }];
+          }
+          return [];
+        }),
+        run: jest.fn(async () => ({ changes: 1 }))
+      }))
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+    const listRes = await svc.listZohoTransferOrders({ adapter });
+    expect(listRes.transfer_orders.map((t) => t.transfer_order_number)).toEqual(['TO-00379']);
+    expect(listRes.transfer_orders[0].default_address).toBe('DAVAO CITY');
+
+    const detailRes = await svc.getZohoTransferOrderForDr({ transferOrderId: 'MOCK-TO-379', adapter });
+    expect(detailRes.items).toEqual([
+      expect.objectContaining({
+        product_id: 77,
+        item_name: 'Palonosetron 50mcg (Paloget)',
+        batch_number: 'M2507479',
+        expiry_date: '2028-07-31',
+        quantity: 144
+      })
+    ]);
+
+    await expect(svc.getZohoTransferOrderForDr({ transferOrderId: 'MOCK-TO-EXP', adapter })).rejects.toMatchObject({
+      code: 'EXCLUDED_WAREHOUSE',
+      status: 422
+    });
+  });
 });

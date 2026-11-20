@@ -1,9 +1,19 @@
 import React, { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { FileSpreadsheet, PlusCircle, Printer, Ban, Search } from 'lucide-react';
+import { FileSpreadsheet, PlusCircle, Printer, Ban, Search, Trash2, RefreshCw } from 'lucide-react';
 import client from '../../api/client';
 import DrPrintVoucherModal from '../../components/dispatch/DrPrintVoucherModal';
+
+const emptyToItem = () => ({
+  include: true,
+  product_id: null,
+  item_name: '',
+  batch_number: '',
+  expiry_date: '',
+  quantity: 1,
+  unit: 'Vials'
+});
 
 const DrLedgerPage = () => {
   const qc = useQueryClient();
@@ -15,15 +25,29 @@ const DrLedgerPage = () => {
 
   const [printDrData, setPrintDrData] = useState(null);
   const [toOpen, setToOpen] = useState(false);
+  const [toSearch, setToSearch] = useState('');
+  const [selectedToId, setSelectedToId] = useState('');
+  const [loadingToDetail, setLoadingToDetail] = useState(false);
+  const [submittingTo, setSubmittingTo] = useState(false);
+  const [existingToDr, setExistingToDr] = useState(null);
   const [toForm, setToForm] = useState({
     entity_key: 'GPI',
-    external_ref: 'TO # ',
-    transfer_name: 'GPI WH -> 2MG WH',
-    item_name: '',
-    batch_number: '',
-    expiry_date: '',
-    quantity: 1,
-    unit: 'BOX'
+    external_ref: '',
+    transfer_name: '',
+    delivery_address: '',
+    date_issued: ''
+  });
+  const [toItems, setToItems] = useState([emptyToItem()]);
+
+  const zohoTosQuery = useQuery({
+    queryKey: ['zoho-transfer-orders', toSearch],
+    queryFn: () =>
+      client
+        .get('/api/dispatch/dr-ledger/transfer-orders', {
+          params: { search: toSearch.trim() || undefined, per_page: 50 }
+        })
+        .then((r) => r.data?.data?.transfer_orders || []),
+    enabled: toOpen
   });
 
   const { data, isLoading, isError, error } = useQuery({
@@ -90,28 +114,82 @@ const DrLedgerPage = () => {
     }
   };
 
+  const handleSelectZohoTo = async (toId) => {
+    setSelectedToId(toId);
+    if (!toId) return;
+    setLoadingToDetail(true);
+    try {
+      const { data: res } = await client.get(`/api/dispatch/dr-ledger/transfer-orders/${toId}`);
+      const d = res.data;
+      const to = d.transfer_order || {};
+      setToForm((prev) => ({
+        ...prev,
+        external_ref: to.transfer_order_number || '',
+        transfer_name: to.to_warehouse_name || to.description || '',
+        delivery_address: to.default_address || '',
+        date_issued: to.date || ''
+      }));
+      setExistingToDr(d.existing_dr || null);
+      const loadedItems = (d.items || []).map((it) => ({
+        include: true,
+        product_id: it.product_id || null,
+        item_name: it.item_name || '',
+        batch_number: it.batch_number || '',
+        expiry_date: it.expiry_date || '',
+        quantity: Number(it.quantity || 1),
+        unit: it.unit || 'pc'
+      }));
+      setToItems(loadedItems.length ? loadedItems : [emptyToItem()]);
+    } catch (err) {
+      toast.error(err?.response?.data?.error?.message || 'Could not load Transfer Order from Zoho.');
+    } finally {
+      setLoadingToDetail(false);
+    }
+  };
+
+  const updateToItem = (idx, patch) => {
+    setToItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  };
+
+  const removeToItem = (idx) => {
+    setToItems((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
+  };
+
   const submitTransferOrder = async (e) => {
     e.preventDefault();
+    const chosen = toItems
+      .filter((it) => it.include !== false)
+      .filter((it) => String(it.item_name || '').trim() && Number(it.quantity) > 0)
+      .map((it) => ({
+        product_id: it.product_id || null,
+        item_name: String(it.item_name).trim(),
+        batch_number: String(it.batch_number || '').trim() || null,
+        expiry_date: String(it.expiry_date || '').trim() || null,
+        quantity: Number(it.quantity),
+        unit: String(it.unit || 'pc').trim() || 'pc'
+      }));
+    if (!chosen.length) {
+      toast.error('Add or select at least one Transfer Order item with quantity > 0.');
+      return;
+    }
+    setSubmittingTo(true);
     try {
-      await client.post('/api/dispatch/dr-ledger/transfer-order', {
+      const { data: res } = await client.post('/api/dispatch/dr-ledger/transfer-order', {
         entity_key: toForm.entity_key,
-        external_ref: toForm.external_ref,
-        transfer_name: toForm.transfer_name,
-        items: [
-          {
-            item_name: toForm.item_name,
-            batch_number: toForm.batch_number || null,
-            expiry_date: toForm.expiry_date || null,
-            quantity: Number(toForm.quantity),
-            unit: toForm.unit
-          }
-        ]
+        external_ref: toForm.external_ref.trim(),
+        transfer_name: toForm.transfer_name.trim(),
+        delivery_address: toForm.delivery_address.trim(),
+        date_issued: toForm.date_issued || undefined,
+        items: chosen
       });
-      toast.success('Transfer Order DR issued.');
+      toast.success(`${res.data.receipt.entity_key} DR #${res.data.receipt.dr_number} issued for ${toForm.external_ref.trim()}!`);
       setToOpen(false);
       qc.invalidateQueries({ queryKey: ['dr-ledger'] });
+      setPrintDrData(res.data);
     } catch (err) {
       toast.error(err?.response?.data?.error?.message || 'Could not create Transfer Order DR.');
+    } finally {
+      setSubmittingTo(false);
     }
   };
 
@@ -250,40 +328,229 @@ const DrLedgerPage = () => {
 
       {toOpen && (
         <div className="fixed inset-0 z-40 bg-slate-900/50 flex items-center justify-center p-4">
-          <form onSubmit={submitTransferOrder} className="bg-white rounded-xl shadow-xl max-w-lg w-full p-5 space-y-3 border border-slate-200">
-            <h3 className="text-base font-bold text-ink-primary">Issue Transfer Order DR (TO #)</h3>
-            <div className="grid grid-cols-2 gap-3 text-xs">
+          <form onSubmit={submitTransferOrder} className="bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden border border-slate-200">
+            <div className="px-5 py-3.5 bg-surface border-b border-slate-200 flex items-center justify-between gap-2">
               <div>
-                <label className="block font-semibold mb-1">Entity Sequence</label>
-                <select value={toForm.entity_key} onChange={(e) => setToForm({ ...toForm, entity_key: e.target.value })} className="w-full px-2.5 py-1.5 border rounded">
-                  <option value="GPI">GPI</option>
-                  <option value="2MG">2MG</option>
-                </select>
+                <h3 className="text-base font-bold text-ink-primary">Issue Transfer Order DR (TO #)</h3>
+                <p className="text-xs text-ink-secondary">
+                  Load a Zoho Transfer Order (Cebu, Davao, Consignment &amp; active Homestocks) or add rows manually.
+                </p>
               </div>
+              <button
+                type="button"
+                onClick={() => zohoTosQuery.refetch()}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white text-xs font-semibold hover:bg-surface"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${zohoTosQuery.isFetching ? 'animate-spin' : ''}`} /> Refresh Zoho TOs
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              <div className="p-3 rounded-lg border border-blue-200 bg-blue-50/50 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex-1 min-w-[200px]">
+                    <label className="block font-semibold text-ink-secondary mb-1">Load from Zoho Transfer Orders</label>
+                    <select
+                      value={selectedToId}
+                      onChange={(e) => handleSelectZohoTo(e.target.value)}
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                    >
+                      <option value="">
+                        {zohoTosQuery.isLoading ? 'Loading Zoho Transfer Orders…' : '— Select Zoho Transfer Order (or enter manually below) —'}
+                      </option>
+                      {(zohoTosQuery.data || []).map((to) => (
+                        <option key={to.transfer_order_id} value={to.transfer_order_id}>
+                          {to.transfer_order_number} · {to.to_warehouse_name} ({to.date})
+                          {to.existing_dr ? ` [Issued ${to.existing_dr.entity_key} DR #${to.existing_dr.dr_number}]` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="w-48">
+                    <label className="block font-semibold text-ink-secondary mb-1">Filter TO# / Warehouse</label>
+                    <input
+                      type="text"
+                      placeholder="Search TO-00379, Cebu..."
+                      value={toSearch}
+                      onChange={(e) => setToSearch(e.target.value)}
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                    />
+                  </div>
+                </div>
+                {loadingToDetail && <p className="text-[11px] text-getmeds-blue font-semibold">Loading Zoho Transfer Order lines &amp; batch numbers…</p>}
+                {existingToDr && (
+                  <p className="text-[11px] text-amber-800 font-semibold">
+                    Note: {existingToDr.entity_key} DR #{existingToDr.dr_number} is already issued for {existingToDr.external_ref}. Confirm before issuing a duplicate.
+                  </p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block font-semibold mb-1">Entity Sequence *</label>
+                  <select
+                    value={toForm.entity_key}
+                    onChange={(e) => setToForm({ ...toForm, entity_key: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border rounded bg-white"
+                  >
+                    <option value="GPI">GPI</option>
+                    <option value="2MG">2MG</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold mb-1">TO Reference *</label>
+                  <input
+                    required
+                    type="text"
+                    value={toForm.external_ref}
+                    onChange={(e) => setToForm({ ...toForm, external_ref: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border rounded font-mono"
+                    placeholder="TO-00379"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold mb-1">Destination Warehouse *</label>
+                  <input
+                    required
+                    type="text"
+                    value={toForm.transfer_name}
+                    onChange={(e) => setToForm({ ...toForm, transfer_name: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border rounded"
+                    placeholder="CEBU WAREHOUSE / DAVAO WAREHOUSE..."
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold mb-1">Date Issued</label>
+                  <input
+                    type="date"
+                    value={toForm.date_issued}
+                    onChange={(e) => setToForm({ ...toForm, date_issued: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border rounded"
+                  />
+                </div>
+              </div>
+
               <div>
-                <label className="block font-semibold mb-1">TO Reference</label>
-                <input required type="text" value={toForm.external_ref} onChange={(e) => setToForm({ ...toForm, external_ref: e.target.value })} className="w-full px-2.5 py-1.5 border rounded" placeholder="TO # 0014" />
+                <label className="block font-semibold mb-1">Delivery Address (editable for Consignment / Homestocks)</label>
+                <input
+                  type="text"
+                  value={toForm.delivery_address}
+                  onChange={(e) => setToForm({ ...toForm, delivery_address: e.target.value })}
+                  className="w-full px-2.5 py-1.5 border rounded"
+                  placeholder="Unit1023, City Soho Mall, Cebu / Davao City / Consignment address..."
+                />
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-ink-primary">
+                    Transfer Items ({toItems.filter((it) => it.include !== false).length} selected)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setToItems((prev) => [...prev, emptyToItem()])}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white text-xs font-semibold hover:bg-surface"
+                  >
+                    <PlusCircle className="w-3.5 h-3.5" /> Add Item Row
+                  </button>
+                </div>
+                <div className="border border-slate-200 rounded-lg overflow-x-auto">
+                  <table className="min-w-full text-xs">
+                    <thead className="bg-surface border-b border-slate-200 text-[11px] uppercase text-ink-secondary">
+                      <tr>
+                        <th className="px-2 py-1.5 text-center w-8">Use</th>
+                        <th className="px-2 py-1.5 text-left">Item Name *</th>
+                        <th className="px-2 py-1.5 text-left w-32">Batch #</th>
+                        <th className="px-2 py-1.5 text-left w-32">Expiry Date</th>
+                        <th className="px-2 py-1.5 text-left w-20">Qty *</th>
+                        <th className="px-2 py-1.5 text-left w-24">Unit</th>
+                        <th className="px-2 py-1.5 w-8" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {toItems.map((it, idx) => (
+                        <tr key={idx} className={it.include === false ? 'opacity-45 bg-slate-50' : ''}>
+                          <td className="px-2 py-1.5 text-center">
+                            <input
+                              type="checkbox"
+                              checked={it.include !== false}
+                              onChange={(e) => updateToItem(idx, { include: e.target.checked })}
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              type="text"
+                              value={it.item_name}
+                              onChange={(e) => updateToItem(idx, { item_name: e.target.value })}
+                              placeholder="Medicine name"
+                              className="w-full px-2 py-1 border border-slate-300 rounded"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              type="text"
+                              value={it.batch_number}
+                              onChange={(e) => updateToItem(idx, { batch_number: e.target.value })}
+                              placeholder="Batch #"
+                              className="w-full px-2 py-1 border border-slate-300 rounded font-mono"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              type="date"
+                              value={it.expiry_date}
+                              onChange={(e) => updateToItem(idx, { expiry_date: e.target.value })}
+                              className="w-full px-2 py-1 border border-slate-300 rounded"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              type="number"
+                              min="1"
+                              value={it.quantity}
+                              onChange={(e) => updateToItem(idx, { quantity: e.target.value })}
+                              className="w-full px-2 py-1 border border-slate-300 rounded"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              type="text"
+                              value={it.unit}
+                              onChange={(e) => updateToItem(idx, { unit: e.target.value })}
+                              placeholder="Vials"
+                              className="w-full px-2 py-1 border border-slate-300 rounded"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 text-center">
+                            <button
+                              type="button"
+                              onClick={() => removeToItem(idx)}
+                              disabled={toItems.length <= 1}
+                              className="text-red-600 disabled:opacity-30"
+                              title="Remove row"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
-            <div className="text-xs">
-              <label className="block font-semibold mb-1">Transfer Route / Name</label>
-              <input required type="text" value={toForm.transfer_name} onChange={(e) => setToForm({ ...toForm, transfer_name: e.target.value })} className="w-full px-2.5 py-1.5 border rounded" />
-            </div>
-            <div className="text-xs">
-              <label className="block font-semibold mb-1">Item Name</label>
-              <input required type="text" value={toForm.item_name} onChange={(e) => setToForm({ ...toForm, item_name: e.target.value })} className="w-full px-2.5 py-1.5 border rounded" />
-            </div>
-            <div className="grid grid-cols-3 gap-2 text-xs">
-              <input type="text" placeholder="Batch #" value={toForm.batch_number} onChange={(e) => setToForm({ ...toForm, batch_number: e.target.value })} className="px-2.5 py-1.5 border rounded" />
-              <input type="date" value={toForm.expiry_date} onChange={(e) => setToForm({ ...toForm, expiry_date: e.target.value })} className="px-2.5 py-1.5 border rounded" />
-              <div className="flex gap-1">
-                <input required type="number" min="1" value={toForm.quantity} onChange={(e) => setToForm({ ...toForm, quantity: e.target.value })} className="w-16 px-2 py-1.5 border rounded" />
-                <input required type="text" value={toForm.unit} onChange={(e) => setToForm({ ...toForm, unit: e.target.value })} className="w-16 px-2 py-1.5 border rounded" />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setToOpen(false)} className="px-3 py-1.5 rounded border text-xs font-semibold">Cancel</button>
-              <button type="submit" className="px-3.5 py-1.5 rounded bg-getmeds-blue text-white text-xs font-semibold">Issue Transfer DR</button>
+
+            <div className="px-5 py-3 bg-surface border-t border-slate-200 flex justify-end gap-2">
+              <button type="button" onClick={() => setToOpen(false)} className="px-3 py-1.5 rounded border bg-white text-xs font-semibold">
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submittingTo}
+                className="px-4 py-1.5 rounded bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
+              >
+                {submittingTo ? 'Issuing DR…' : 'Issue & Print Transfer DR'}
+              </button>
             </div>
           </form>
         </div>

@@ -843,6 +843,15 @@ class MockZohoAdapter extends ZohoAdapter {
     if (!pkg) throw new Error(`Mock Zoho: package ${packageId} is not on Sales Order ${so.salesorder_number}.`);
     if (pkg.shipment_id) throw new Error(`Mock Zoho: package ${pkg.package_number} has already been shipped.`);
 
+    const cleanTracking = String(trackingNumber || '').trim();
+    let shortTracking = cleanTracking;
+    let notes = '';
+    if (cleanTracking.length >= 100) {
+      const m = cleanTracking.match(/[?&](PH[A-Za-z0-9_-]{6,})/i);
+      shortTracking = m ? m[1].slice(0, 99) : (/^https?:\/\//i.test(cleanTracking) ? 'Tracking link (see notes)' : cleanTracking.slice(0, 99));
+      notes = `Tracking link: ${cleanTracking}`;
+    }
+
     Object.assign(pkg, {
       shipment_id: `MOCK-SHP-${n}`,
       shipment_number: resolvedShipmentNo,
@@ -850,7 +859,8 @@ class MockZohoAdapter extends ZohoAdapter {
       status: 'shipped',
       carrier: deliveryMethod,
       delivery_method: deliveryMethod,
-      tracking_number: String(trackingNumber || '').trim(),
+      tracking_number: shortTracking,
+      notes,
       shipment_date: date
     });
     so.line_items.forEach((li) => { li.quantity_shipped = li.quantity_packed; });
@@ -865,7 +875,8 @@ class MockZohoAdapter extends ZohoAdapter {
         salesorder_id: so.salesorder_id,
         carrier: deliveryMethod,
         delivery_method: deliveryMethod,
-        tracking_number: pkg.tracking_number
+        tracking_number: pkg.tracking_number,
+        ...(notes ? { notes } : {})
       }
     };
   }
@@ -880,7 +891,14 @@ class MockZohoAdapter extends ZohoAdapter {
           pkg.carrier = String(deliveryMethod).trim();
         }
         if (trackingNumber !== undefined && trackingNumber !== null) {
-          pkg.tracking_number = String(trackingNumber).trim();
+          const clean = String(trackingNumber).trim();
+          if (clean.length >= 100) {
+            const m = clean.match(/[?&](PH[A-Za-z0-9_-]{6,})/i);
+            pkg.tracking_number = m ? m[1].slice(0, 99) : (/^https?:\/\//i.test(clean) ? 'Tracking link (see notes)' : clean.slice(0, 99));
+            pkg.notes = `Tracking link: ${clean}`;
+          } else {
+            pkg.tracking_number = clean;
+          }
         }
         if (String(shipmentNumber || '').trim()) pkg.shipment_number = String(shipmentNumber).trim();
         if (date) pkg.shipment_date = date;
@@ -895,7 +913,8 @@ class MockZohoAdapter extends ZohoAdapter {
             salesorder_id: so.salesorder_id,
             carrier: pkg.carrier,
             delivery_method: pkg.delivery_method,
-            tracking_number: pkg.tracking_number
+            tracking_number: pkg.tracking_number,
+            ...(pkg.notes ? { notes: pkg.notes } : {})
           }
         };
       }
@@ -903,6 +922,68 @@ class MockZohoAdapter extends ZohoAdapter {
     const err = new Error('The shipment ID given seems to be incorrect. [MOCK MODE]');
     err.httpStatus = 404;
     throw err;
+  }
+
+  async listTransferOrders() {
+    const sample = [
+      {
+        transfer_order_id: 'MOCK-TO-379',
+        transfer_order_number: 'TO-00379',
+        date: '2026-11-19',
+        from_warehouse_id: 'W-MAIN',
+        from_warehouse_name: 'Getmeds Philippines Inc.',
+        to_warehouse_id: 'W-DAVAO',
+        to_warehouse_name: 'DAVAO WAREHOUSE',
+        description: 'GETMEDS TRANSFER TO DAVAO WAREHOUSE',
+        status: 'transferred',
+        quantity_transfer: 144,
+        line_items: [
+          {
+            line_item_id: 'MOCK-TOI-1',
+            item_id: 'MOCK-ITEM-P1',
+            name: 'PaloGet',
+            sku: 'GM-4497',
+            unit: 'Vials',
+            quantity_transfer: 144,
+            batches: [{ batch_number: 'M2507479', expiry_date: '2028-07-31', out_quantity: 144 }]
+          }
+        ]
+      },
+      {
+        transfer_order_id: 'MOCK-TO-EXP',
+        transfer_order_number: 'TO-00999',
+        date: '2026-11-19',
+        from_warehouse_id: 'W-MAIN',
+        from_warehouse_name: 'Getmeds Philippines Inc.',
+        to_warehouse_id: 'W-EXPIRED',
+        to_warehouse_name: 'EXPIRED STOCKS',
+        status: 'transferred',
+        line_items: []
+      }
+    ];
+    this._transferOrders = this._transferOrders || new Map(sample.map((t) => [t.transfer_order_id, t]));
+    return { code: 0, message: 'success', transfer_orders: [...this._transferOrders.values()] };
+  }
+
+  async getTransferOrder(transferOrderId) {
+    if (!this._transferOrders) await this.listTransferOrders();
+    const to = this._transferOrders.get(transferOrderId);
+    if (!to) throw new Error('Transfer order not found. [MOCK MODE]');
+    return { code: 0, message: 'success', transfer_order: to };
+  }
+
+  async listWarehouses() {
+    return {
+      code: 0,
+      message: 'success',
+      warehouses: [
+        { warehouse_id: 'W-MAIN', warehouse_name: 'Getmeds Philippines Inc.', address: 'No. 17 Unit 305 Vatican Bldg Vatican Drive', city: 'Las Pinas', state: 'NCR', status: 'active' },
+        { warehouse_id: 'W-CEBU', warehouse_name: 'CEBU WAREHOUSE', address: '', city: '', status: 'active' },
+        { warehouse_id: 'W-DAVAO', warehouse_name: 'DAVAO WAREHOUSE', address: '', city: '', status: 'active' },
+        { warehouse_id: 'W-CONSIGN', warehouse_name: 'CONSIGNMENT WAREHOUSE', address: '', city: '', status: 'active' },
+        { warehouse_id: 'W-EXPIRED', warehouse_name: 'EXPIRED STOCKS', address: '', city: '', status: 'active' }
+      ]
+    };
   }
 
   async markShipmentDelivered(shipmentId) {

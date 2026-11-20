@@ -693,13 +693,17 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
           soCreated
         );
         await db.transaction(async () => {
-          const existingDispatch = await db.prepare('SELECT id FROM dispatch_records WHERE order_id = ?').get(order.id);
+          const existingDispatch = await db.prepare('SELECT id, tracking_number FROM dispatch_records WHERE order_id = ?').get(order.id);
+          const trackingToStore =
+            existingDispatch && /^https?:\/\//i.test(existingDispatch.tracking_number || '') && !/^https?:\/\//i.test(trackingNumber || '')
+              ? existingDispatch.tracking_number
+              : trackingNumber;
           if (existingDispatch) {
             await db.prepare(`
               UPDATE dispatch_records
               SET status = 'dispatched', courier = COALESCE(?, courier), tracking_number = COALESCE(?, tracking_number), dispatched_at = COALESCE(dispatched_at, ?)
               WHERE order_id = ?
-            `).run(courier, trackingNumber, now, order.id);
+            `).run(courier, trackingToStore, now, order.id);
           } else {
             await db.prepare(`
               INSERT INTO dispatch_records (order_id, status, tracking_number, courier, dispatched_at, created_at)
