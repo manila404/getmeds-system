@@ -1346,10 +1346,27 @@ class LiveZohoAdapter extends ZohoAdapter {
       query.ignore_auto_number_generation = 'true';
     }
     // Invoice module custom field IDs confirmed live on org 714292728 (distinct from SO field IDs).
+    const INVOICE_TEMPLATE_ID_BY_INVOICING_FROM = {
+      '2mg Incorporated': '2254168000013830593', // 2MG  Invoice
+      'Getmeds Philippines Inc.': '2254168000000017001' // Standard Getmeds Template
+    };
+    const soCustomFieldVal = (apiName) => salesorder?.custom_field_hash?.[apiName]
+      || (Array.isArray(salesorder?.custom_fields)
+        ? salesorder.custom_fields.find((c) => c.api_name === apiName)?.value
+        : null)
+      || null;
+    const effectiveDoctorName = opts.doctorName || soCustomFieldVal('cf_doctor_name');
+    const effectiveInvoicingFrom = opts.invoicingFrom || soCustomFieldVal('cf_invoicing_from');
+    const effectiveOrderSource = opts.orderSource || soCustomFieldVal('cf_source');
+
+    if (effectiveInvoicingFrom && INVOICE_TEMPLATE_ID_BY_INVOICING_FROM[effectiveInvoicingFrom]) {
+      body.template_id = INVOICE_TEMPLATE_ID_BY_INVOICING_FROM[effectiveInvoicingFrom];
+    }
+
     const customFields = [];
-    if (opts.doctorName) customFields.push({ customfield_id: '2254168001890600049', value: opts.doctorName });
-    if (opts.invoicingFrom) customFields.push({ customfield_id: '2254168001900812588', value: opts.invoicingFrom });
-    if (opts.orderSource) customFields.push({ customfield_id: '2254168001929089197', value: opts.orderSource });
+    if (effectiveDoctorName) customFields.push({ customfield_id: '2254168001890600049', value: effectiveDoctorName });
+    if (effectiveInvoicingFrom) customFields.push({ customfield_id: '2254168001900812588', value: effectiveInvoicingFrom });
+    if (effectiveOrderSource) customFields.push({ customfield_id: '2254168001929089197', value: effectiveOrderSource });
     if (customFields.length) body.custom_fields = customFields;
 
     if (salesorder.salesperson_id) body.salesperson_id = salesorder.salesperson_id;

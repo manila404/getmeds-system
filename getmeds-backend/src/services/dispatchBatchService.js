@@ -140,6 +140,9 @@ function suggestFefoPicks(sortedBatches = [], requiredQty = 0) {
  */
 function validatePickedBatches({ items = [], picksByItemId = new Map(), availableBatchesByItemId = new Map(), today = manilaTodayDate() } = {}) {
   const normalized = [];
+  // Track batch consumption across ALL lines of the order (e.g. Buy-1-Take-1 duplicate items)
+  // so two lines cannot both allocate the same remaining stock in the same warehouse.
+  const seenBatchUsage = new Map();
 
   for (const it of items) {
     const isCsp = Number(it.is_csp) === 1 || it.is_csp === true || isKnownCspProductName(it.product_name || it.name);
@@ -166,7 +169,6 @@ function validatePickedBatches({ items = [], picksByItemId = new Map(), availabl
     }
 
     let pickedSum = 0;
-    const seenBatchUsage = new Map();
     for (const p of itemPicks) {
       const qty = Number(p.quantity);
       if (!Number.isFinite(qty) || qty <= 0) {
@@ -192,7 +194,8 @@ function validatePickedBatches({ items = [], picksByItemId = new Map(), availabl
         );
       }
 
-      const prevUsed = seenBatchUsage.get(match.batch_number) || 0;
+      const poolKey = `${it.effective_warehouse_id || match.warehouse_id || 'DEFAULT'}::${it.zoho_item_id || it.product_id || ''}::${match.batch_number}`;
+      const prevUsed = seenBatchUsage.get(poolKey) || 0;
       const nextUsed = prevUsed + qty;
       if (nextUsed > Number(match.available_quantity)) {
         throw new DispatchBatchError(
@@ -201,7 +204,7 @@ function validatePickedBatches({ items = [], picksByItemId = new Map(), availabl
           `Batch "${match.batch_number}" only has ${match.available_quantity} available in warehouse, cannot take ${nextUsed}.`
         );
       }
-      seenBatchUsage.set(match.batch_number, nextUsed);
+      seenBatchUsage.set(poolKey, nextUsed);
       pickedSum += qty;
 
       normalized.push({
@@ -396,10 +399,32 @@ async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTod
     savedByItem.get(r.order_item_id).push(r);
   }
 
+  const consumedByBatchKey = new Map();
+  const batchPoolKey = (it, batchNumber) =>
+    `${it.effective_warehouse_id || 'DEFAULT'}::${it.zoho_item_id || it.product_id || ''}::${batchNumber || ''}`;
+
+  for (const it of items) {
+    for (const s of savedByItem.get(it.id) || []) {
+      const k = batchPoolKey(it, s.batch_number);
+      consumedByBatchKey.set(k, (consumedByBatchKey.get(k) || 0) + Number(s.quantity || 0));
+    }
+  }
+
   const lines = items.map((it) => {
     const avail = availableBatchesByItemId.get(Number(it.id)) || [];
     const saved = savedByItem.get(it.id) || [];
-    const fefo = suggestFefoPicks(avail, it.quantity);
+    let fefo = { picks: [], unallocated_quantity: 0, no_single_batch: false };
+    if (!saved.length) {
+      const remainingAvail = avail.map((b) => {
+        const used = consumedByBatchKey.get(batchPoolKey(it, b.batch_number)) || 0;
+        return { ...b, available_quantity: Math.max(0, Number(b.available_quantity || 0) - used) };
+      });
+      fefo = suggestFefoPicks(remainingAvail, it.quantity);
+      for (const p of fefo.picks) {
+        const k = batchPoolKey(it, p.batch_number);
+        consumedByBatchKey.set(k, (consumedByBatchKey.get(k) || 0) + Number(p.quantity || 0));
+      }
+    }
     return {
       order_item_id: it.id,
       product_id: it.product_id,

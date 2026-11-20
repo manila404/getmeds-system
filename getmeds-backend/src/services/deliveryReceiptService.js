@@ -773,7 +773,7 @@ async function finalizeZohoInvoiceForOrder({
 
   try {
     const entityItems = orderItems.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity);
-    const so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
+    let so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
     const savedBatches = (await hasColumn('order_item_batches', 'order_item_id'))
       ? await db.prepare('SELECT * FROM order_item_batches WHERE order_id = ? ORDER BY id').all(order.id)
       : [];
@@ -783,6 +783,20 @@ async function finalizeZohoInvoiceForOrder({
     const invoicingFrom = DR_ENTITY_PROFILES[resolvedEntity].invoicing_from;
 
     const existingInv = (so.invoices || []).find((i) => !['void', 'deleted'].includes(String(i.status || '').toLowerCase()));
+    if (!existingInv && String(so.status || '').toLowerCase() === 'draft') {
+      const finRow = splitTarget
+        ? (splitTarget.payment_status === 'verified' ? { ok: 1 } : null)
+        : await db.prepare("SELECT 1 AS ok FROM order_events WHERE order_id = ? AND event_type = 'FINANCE_VERIFIED' LIMIT 1").get(order.id);
+      if (!finRow) {
+        throw new DispatchBatchError(
+          409,
+          'NOT_CONFIRMED_IN_ZOHO',
+          `Sales Order ${so.salesorder_number || targetSoId} is still a draft in Zoho and Finance has not verified it yet. Confirm it in Zoho Books first.`
+        );
+      }
+      await adapter.confirmSalesOrder(so.salesorder_id || targetSoId);
+      so = { ...so, status: 'confirmed' };
+    }
     let invoice;
     if (existingInv) {
       invoice = existingInv;
@@ -961,7 +975,7 @@ async function shipInvoicedOrderInZoho({
 
   try {
     const entityItems = orderItems.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity);
-    const so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
+    let so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
 
     let pkg = (so.packages || [])[0] || null;
     let adoptedPackage = Boolean(pkg);

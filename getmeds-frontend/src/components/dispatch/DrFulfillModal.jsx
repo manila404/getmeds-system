@@ -84,7 +84,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
       setBatchData(d);
       setDoctorName(d.order.dispatch_doctor_name || d.order.intake_doctor || 'NNH');
       setRequiresSi(Boolean(d.classification?.requires_si));
-      setEntityKey(d.classification?.primary_entity || 'GPI');
+      setEntityKey(d.classification?.primary_entity || d.classification?.entity_keys?.[0] || 'GPI');
       setSiSuffix(d.order.oojeema_si_number || '');
       setTinInput(d.order.tin || '');
       setLtoInput(d.order.lto_license_number || '');
@@ -648,12 +648,16 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                   <label className="block font-semibold text-ink-secondary mb-1">Entity (Strict Separation)</label>
                   <select
                     value={entityKey}
+                    disabled={Boolean(cls?.primary_entity && !cls?.is_split)}
                     onChange={(e) => setEntityKey(e.target.value)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                    className={`w-full px-2.5 py-1.5 border border-slate-300 rounded ${cls?.primary_entity && !cls?.is_split ? 'bg-slate-100 text-ink-secondary cursor-not-allowed' : 'bg-white'}`}
                   >
                     <option value="GPI">Getmeds Philippines Inc. (GPI)</option>
                     <option value="2MG">2mg Incorporated (2MG)</option>
                   </select>
+                  {cls?.primary_entity && !cls?.is_split && (
+                    <div className="mt-0.5 text-[10px] text-ink-secondary">Locked to Sales Order entity ({cls.primary_entity})</div>
+                  )}
                 </div>
                 <div>
                   <label className="block font-semibold text-ink-secondary mb-1">Requires Oojeema SI &amp; DR?</label>
@@ -1208,7 +1212,11 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-xs font-semibold disabled:opacity-50"
               >
                 <Truck className="w-3.5 h-3.5" />
-                {saving ? 'Posting to Zoho…' : requiresSi ? 'Convert to Zoho Invoice & Mark Sent' : 'Create Zoho Auto-Invoice & Mark Sent'}
+                {saving
+                  ? 'Posting to Zoho…'
+                  : requiresSi
+                    ? `Convert to Zoho Invoice (${entityKey}) & Mark Sent`
+                    : `Create Zoho Auto-Invoice (${entityKey}) & Mark Sent`}
               </button>
             )}
             {step === 3 && finalInvoice && !shipResult && (

@@ -745,13 +745,29 @@ class MockZohoAdapter extends ZohoAdapter {
 
     const n = this._nextDocNumber();
     const batchMap = opts.batchesBySoLineItemId || {};
+    const INVOICE_TEMPLATE_ID_BY_INVOICING_FROM = {
+      '2mg Incorporated': '2254168000013830593',
+      'Getmeds Philippines Inc.': '2254168000000017001'
+    };
+    const soCfVal = (apiName) => so?.custom_field_hash?.[apiName]
+      || (Array.isArray(so?.custom_fields) ? so.custom_fields.find((c) => c.api_name === apiName)?.value : null)
+      || null;
+    const effectiveDoctorName = opts.doctorName || soCfVal('cf_doctor_name');
+    const effectiveInvoicingFrom = opts.invoicingFrom || soCfVal('cf_invoicing_from');
+    const effectiveOrderSource = opts.orderSource || soCfVal('cf_source');
+    const templateId = (effectiveInvoicingFrom && INVOICE_TEMPLATE_ID_BY_INVOICING_FROM[effectiveInvoicingFrom]) || null;
+
     const customFields = [];
-    if (opts.doctorName) customFields.push({ customfield_id: '2254168001890600049', api_name: 'cf_doctor_name', value: opts.doctorName });
-    if (opts.invoicingFrom) customFields.push({ customfield_id: '2254168001900812588', api_name: 'cf_invoicing_from', value: opts.invoicingFrom });
-    if (opts.orderSource) customFields.push({ customfield_id: '2254168001929089197', api_name: 'cf_source', value: opts.orderSource });
+    if (effectiveDoctorName) customFields.push({ customfield_id: '2254168001890600049', api_name: 'cf_doctor_name', value: effectiveDoctorName });
+    if (effectiveInvoicingFrom) customFields.push({ customfield_id: '2254168001900812588', api_name: 'cf_invoicing_from', value: effectiveInvoicingFrom });
+    if (effectiveOrderSource) customFields.push({ customfield_id: '2254168001929089197', api_name: 'cf_source', value: effectiveOrderSource });
     const invoice = {
       invoice_id: `MOCK-INV-${n}`,
       invoice_number: opts.invoiceNumber ? String(opts.invoiceNumber).trim() : `INV-${n}`,
+      ...(templateId ? {
+        template_id: templateId,
+        template_name: effectiveInvoicingFrom === '2mg Incorporated' ? '2MG  Invoice' : 'Standard Getmeds Template'
+      } : {}),
       status: 'draft',
       date: opts.date || new Date().toISOString().slice(0, 10),
       customer_id: so.customer_id,

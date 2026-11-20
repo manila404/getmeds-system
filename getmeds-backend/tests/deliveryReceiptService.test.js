@@ -575,4 +575,71 @@ describe('deliveryReceiptService end-to-end flows (mocked DB + MockZohoAdapter)'
       status: 422
     });
   });
+
+  it('auto-confirms a Finance-verified draft Zoho SO during finalizeZohoInvoiceForOrder and stamps 2MG invoice template', async () => {
+    jest.resetModules();
+    const adapter = new MockZohoAdapter();
+    const createdSo = await adapter.createSalesOrder({
+      getmeds_order_id: 'GM-20261121-0001',
+      customer_name: 'Patient Two',
+      customer_type: 'patient',
+      customer_master_type: 'patient',
+      invoicing_from: '2mg Incorporated',
+      salesperson_name: 'TEST | MEDREP',
+      items: [{ sku: 'SKU-1', name: 'Med 1', quantity: 5, unit_price: 100, subtotal: 500 }]
+    });
+    const draftSoId = createdSo.salesorder.salesorder_id; // remains draft until confirmed!
+
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/orderClaimService', () => ({
+      claimOrder: jest.fn().mockResolvedValue('tok-1'),
+      releaseClaim: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m) { super(m); this.status = s; this.code = c; } },
+      assertCanActOnOrder: jest.fn().mockResolvedValue({ order: { id: 88 }, currentCaterer: { actor_id: 1 } })
+    }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: jest.fn().mockResolvedValue({ id: 1, name: 'Aaron Dispatch' }),
+      logEvent: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => ({
+        get: jest.fn(async () => {
+          if (/FROM orders o/i.test(sql)) {
+            return {
+              id: 88, getmeds_order_id: 'GM-20261121-0001', status: 'ready_for_draft_invoice',
+              invoicing_from: '2mg Incorporated', zoho_so_id: draftSoId, zoho_so_number: createdSo.salesorder.salesorder_number,
+              customer_name: 'Patient Two', customer_type: 'patient', intake_doctor: 'NNH'
+            };
+          }
+          if (/FROM order_events/i.test(sql)) return { ok: 1 };
+          return null;
+        }),
+        all: jest.fn(async (/* sql */) => {
+          if (/FROM order_items/i.test(sql)) {
+            return [{ id: 1, product_id: 10, product_name: 'Med 1', quantity: 5, invoicing_from: null }];
+          }
+          return [];
+        }),
+        run: jest.fn(async () => ({ changes: 1 }))
+      }))
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+    const out = await svc.finalizeZohoInvoiceForOrder({
+      orderId: 88,
+      user: { id: 1, name: 'Aaron Dispatch' },
+      entityKey: '2MG',
+      requiresSi: false,
+      doctorName: 'NNH',
+      adapter
+    });
+
+    expect(out.entity_key).toBe('2MG');
+    const invRes = await adapter.getSalesOrder(draftSoId);
+    expect(invRes.salesorder.status).toBe('confirmed');
+    expect(invRes.salesorder.invoices[0].invoice_number).toBe(out.zoho_invoice_number);
+  });
 });
