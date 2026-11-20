@@ -211,7 +211,14 @@ async function removeQuietly(storagePath) {
   const asset = await sanityAssetFor(storagePath);
   if (asset) {
     try {
-      if (sanity.isEnabled()) await sanity.deleteAsset(asset.sanity_asset_id);
+      // Nov 20, 2026: Sanity stores an identical file once, so the same picture attached twice
+      // (a "double attach") gives two rows with ONE Sanity asset. Deleting the duplicate used to
+      // delete that asset and break the copy that was kept (GM-20261120-0061 / -0064). The asset
+      // is only deleted when no other attachment still uses it.
+      const shared = await db
+        .prepare('SELECT COUNT(*) AS n FROM attachment_assets WHERE sanity_asset_id = ? AND storage_path <> ?')
+        .get(asset.sanity_asset_id, storagePath);
+      if (sanity.isEnabled() && !(Number(shared && shared.n) > 0)) await sanity.deleteAsset(asset.sanity_asset_id);
       await db.prepare('DELETE FROM attachment_assets WHERE storage_path = ?').run(storagePath);
     } catch (err) {
       console.warn(`[ATTACHMENTS] Could not remove Sanity asset for ${storagePath}: ${err.message}`);
