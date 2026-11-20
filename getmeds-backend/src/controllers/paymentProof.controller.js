@@ -12,6 +12,7 @@ const heicImage = require('../services/heicImage');
 const { isPharmacyReviewable, RX_FILE_TYPE, supersededIds } = require('../services/prescriptionService');
 const { zohoFileName } = require('../services/zohoAttachmentSync');
 const teamScopeService = require('../services/teamScopeService');
+const { publicOrigin } = require('../services/publicOrigin');
 
 /**
  * Order attachments: proof of payment, and everything else.
@@ -536,8 +537,8 @@ async function isLatestPushedOnOrder(row) {
 }
 
 function urlsFor(req, row) {
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const origin = `${proto}://${req.get('host')}`;
+  // Nov 20, 2026: https behind Cloudflare / Coolify too (see publicOrigin.js).
+  const origin = publicOrigin(req);
   // Deterministic within its window (see attachmentLinkService.js) — the
   // SAME row requested again inside that window gets the SAME token, and
   // therefore the SAME URL, which is the entire point: that's what lets

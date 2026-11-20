@@ -16,6 +16,7 @@
 const db = require('../db/database');
 const { rxSummaries } = require('../services/prescriptionService');
 const attachmentLink = require('../services/attachmentLinkService');
+const { publicOrigin } = require('../services/publicOrigin');
 
 const LIMIT = 200;
 
@@ -62,7 +63,7 @@ exports.getCustomerOrders = async (req, res, next) => {
 
     // The prescription files themselves (view links, signed like every other attachment link),
     // so the pharmacist can read the prescribed quantity next to what was bought.
-    const origin = `${req.headers['x-forwarded-proto'] || req.protocol || 'http'}://${req.get('host')}`;
+    const origin = publicOrigin(req); // Nov 20, 2026: https behind Cloudflare / Coolify (publicOrigin.js)
     const files = ids.length ? await db.prepare(
       `SELECT id, order_id, file_name, content_type, status, uploaded_at
          FROM payment_proofs
