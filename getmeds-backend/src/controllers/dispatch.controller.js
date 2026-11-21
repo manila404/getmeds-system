@@ -13,14 +13,15 @@ const { CATERED_SUBQUERY } = require('../services/dispatchCater');
 const { warehouseOf, warehouseSql } = require('../services/dispatchWarehouses');
 const { rxSummaries, rxBadge, rxBlocks } = require('../services/prescriptionService');
 const { hasColumn } = require('../services/schemaColumns');
-const { classifyOrder } = require('../services/orderClassificationService');
+const { classifyOrder, normalizeEntityKey } = require('../services/orderClassificationService');
 
 /**
- * Load line items + gl proof flags for a batch of order IDs in two flat queries
- * (zero N+1 queries) so Dispatch views carry SI/DR/CSP & entity classifications.
+ * Load line items, gl proof flags, and split Sales Orders in flat queries
+ * (zero N+1 queries) so Dispatch views carry SI/DR/CSP, entity classifications,
+ * and every split SO number right from initial queue / Finance-Confirmed load.
  */
 async function attachClassifications(orderRows) {
-  if (!orderRows || !orderRows.length) return new Map();
+  if (!orderRows || !orderRows.length) return { classifications: new Map(), splitsByOrder: new Map() };
   const ids = Array.from(new Set(orderRows.map((o) => o.id).filter(Boolean)));
   const prodHasCsp = await hasColumn('products', 'is_csp');
   const itemRows = ids.length
@@ -40,7 +41,13 @@ async function attachClassifications(orderRows) {
     : [];
   const splitRows = ids.length
     ? await db.prepare(`
-        SELECT order_id, invoicing_from FROM order_split_sales_orders WHERE order_id = ANY(?)
+        SELECT id, order_id, invoicing_from, zoho_so_id, zoho_so_number, zoho_so_status,
+               zoho_sync_status, zoho_sync_error, zoho_invoice_id, zoho_invoice_number,
+               zoho_invoiced_status, zoho_package_id, zoho_package_number,
+               zoho_shipment_id, zoho_shipment_number, zoho_shipped_status, payment_status
+          FROM order_split_sales_orders
+         WHERE order_id = ANY(?)
+         ORDER BY id
       `).all([ids])
     : [];
 
@@ -56,9 +63,9 @@ async function attachClassifications(orderRows) {
     splitsByOrder.get(s.order_id).push(s);
   }
 
-  const out = new Map();
+  const classifications = new Map();
   for (const o of orderRows) {
-    out.set(o.id, classifyOrder({
+    classifications.set(o.id, classifyOrder({
       order: o,
       customer: { category: o.customer_category },
       items: itemsByOrder.get(o.id) || [],
@@ -66,7 +73,7 @@ async function attachClassifications(orderRows) {
       splits: splitsByOrder.get(o.id) || []
     }));
   }
-  return out;
+  return { classifications, splitsByOrder };
 }
 
 // ─── Confirmed for delivery (Sep 15, 2026) ─────────────────────────────────
@@ -395,13 +402,14 @@ exports.getQueue = async (req, res, next) => {
        LIMIT ? OFFSET ?
     `).all([...pageParams, limit, (page - 1) * limit]);
 
-    const classifications = await attachClassifications(orders);
+    const { classifications, splitsByOrder } = await attachClassifications(orders);
 
     res.json({
       success: true,
       data: {
         orders: orders.map((o) => ({
           ...withConfirmation(o),
+          splits: splitsByOrder.get(o.id) || [],
           classification: classifications.get(o.id) || null
         })),
         workflow_v2: v2,
@@ -546,7 +554,7 @@ exports.getRecent = async (req, res, next) => {
     );
 
     const allRecentRows = [...drafts, ...confirmed, ...confirmedOrdersRows];
-    const [rx, classifications] = await Promise.all([
+    const [rx, { classifications, splitsByOrder }] = await Promise.all([
       rxSummaries(allRecentRows.map((o) => o.id)),
       attachClassifications(allRecentRows)
     ]);
@@ -559,6 +567,7 @@ exports.getRecent = async (req, res, next) => {
         rx_requested: s.requested || null,
         rx_badge: rxBadge(s.state, financeCleared, s.requested),
         rx_blocking: rxBlocks(s),
+        splits: splitsByOrder.get(o.id) || [],
         classification: classifications.get(o.id) || null
       };
     };
@@ -936,7 +945,16 @@ exports.updateZohoTracking = async (req, res, next) => {
     const loaded = await loadForTracking(req.params.id);
     if (!loaded) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
     const order = loaded.raw;
-    if (!order.zoho_shipment_id) {
+    const requestedEntity = req.body?.entity_key ? normalizeEntityKey(req.body.entity_key) : null;
+    const primaryEntity = normalizeEntityKey(order.invoicing_from) || 'GPI';
+    const splitRow = requestedEntity && requestedEntity !== primaryEntity
+      ? await db.prepare('SELECT * FROM order_split_sales_orders WHERE order_id = ?').all(order.id)
+          .then((rows) => rows.find((r) => normalizeEntityKey(r.invoicing_from) === requestedEntity) || null)
+      : null;
+
+    const targetShipmentId = splitRow ? splitRow.zoho_shipment_id : order.zoho_shipment_id;
+    const targetShipmentNumber = splitRow ? splitRow.zoho_shipment_number : order.zoho_shipment_number;
+    if (!targetShipmentId) {
       return res.status(409).json({
         success: false,
         error: { code: 'NO_ZOHO_SHIPMENT', message: 'This order does not have a Zoho Shipment yet. Create the Package & Shipment first.' }
@@ -944,17 +962,26 @@ exports.updateZohoTracking = async (req, res, next) => {
     }
 
     const actor = await resolveActor(req.user, 'dispatch');
-    const updated = await zoho.updateShipmentTracking(order.zoho_shipment_id, {
+    const updated = await zoho.updateShipmentTracking(targetShipmentId, {
       deliveryMethod: courier,
       trackingNumber,
-      shipmentNumber: order.zoho_shipment_number || undefined
+      shipmentNumber: targetShipmentNumber || undefined
     });
+    const resolvedShipmentNo = updated?.shipmentorder?.shipment_number || targetShipmentNumber || null;
     const nextStatus = order.status === 'dispatched' ? 'tracking_shared' : order.status;
-    await db.prepare(`
-      UPDATE dispatch_records
-         SET courier = ?, tracking_number = ?
-       WHERE order_id = ?
-    `).run(courier, trackingNumber, order.id);
+    if (splitRow) {
+      await db.prepare(`
+        UPDATE order_split_sales_orders
+           SET zoho_shipment_number = COALESCE(?, zoho_shipment_number), updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?
+      `).run(resolvedShipmentNo, splitRow.id);
+    } else {
+      await db.prepare(`
+        UPDATE dispatch_records
+           SET courier = ?, tracking_number = ?
+         WHERE order_id = ?
+      `).run(courier, trackingNumber, order.id);
+    }
     await db.prepare(`
       UPDATE orders
          SET status = ?, updated_at = CURRENT_TIMESTAMP
@@ -968,13 +995,14 @@ exports.updateZohoTracking = async (req, res, next) => {
       newStatus: nextStatus,
       actorId: actor.id,
       actorName: actor.name,
-      notes: `Zoho shipment tracking updated by Dispatch: ${courier} ${trackingNumber} (Shipment ${order.zoho_shipment_number || order.zoho_shipment_id}).`,
+      notes: `Zoho shipment tracking updated by Dispatch${requestedEntity ? ` (${requestedEntity})` : ''}: ${courier} ${trackingNumber} (Shipment ${resolvedShipmentNo || targetShipmentId}).`,
       metadata: {
         courier,
         tracking_number: trackingNumber,
+        entity_key: requestedEntity || primaryEntity,
         zoho_synced: true,
-        zoho_shipment_id: order.zoho_shipment_id,
-        zoho_shipment_number: updated?.shipmentorder?.shipment_number || order.zoho_shipment_number || null
+        zoho_shipment_id: targetShipmentId,
+        zoho_shipment_number: resolvedShipmentNo
       }
     });
     await tellMedrep(order, `Order ${order.getmeds_order_id}: tracking number ${trackingNumber} (${courier}) updated in Zoho.`, 'DISPATCH_TRACKING_ADDED');
@@ -983,11 +1011,12 @@ exports.updateZohoTracking = async (req, res, next) => {
       success: true,
       data: {
         id: order.id,
+        entity_key: requestedEntity || primaryEntity,
         status: nextStatus,
         delivery_method: courier,
         tracking_number: trackingNumber,
-        zoho_shipment_id: order.zoho_shipment_id,
-        zoho_shipment_number: updated?.shipmentorder?.shipment_number || order.zoho_shipment_number || null,
+        zoho_shipment_id: targetShipmentId,
+        zoho_shipment_number: resolvedShipmentNo,
         message: `${order.getmeds_order_id}: Zoho Shipment updated (${trackingNumber}).`
       }
     });
@@ -1312,11 +1341,15 @@ exports.getSlip = async (req, res, next) => {
        WHERE oi.order_id = ?
        ORDER BY oi.id
     `).all(order.id);
-    const classifications = await attachClassifications([order]);
+    const { classifications, splitsByOrder } = await attachClassifications([order]);
     res.json({
       success: true,
       data: {
-        order: { ...withConfirmation(order), classification: classifications.get(order.id) || null },
+        order: {
+          ...withConfirmation(order),
+          splits: splitsByOrder.get(order.id) || [],
+          classification: classifications.get(order.id) || null
+        },
         items
       }
     });
@@ -1369,6 +1402,7 @@ exports.getOrderBatches = drWorkflowAction((req) =>
 exports.saveOrderBatches = drWorkflowAction((req) =>
   dispatchBatchService.saveOrderBatchPicks({
     orderId: req.params.id,
+    entityKey: req.body?.entity_key || null,
     user: req.user,
     doctorName: req.body?.doctor_name,
     requiresSi: req.body?.requires_si ?? null,

@@ -68,6 +68,7 @@ router.get('/', c.getAll);
 // resolveOrderMedrep's team_lead branch) instead of picking anyone.
 router.post('/', requireRole('medrep', 'management', 'admin', 'team_lead'), c.create);
 router.get('/:id', c.getById);
+router.get('/:id/printable-so', c.getPrintableSalesOrders);
 router.get('/:id/events', c.getEvents);
 // Sep 5, 2026: Both medreps and management can submit orders.
 // Sep 9, 2026: 'admin' added alongside create above. Creating an order you

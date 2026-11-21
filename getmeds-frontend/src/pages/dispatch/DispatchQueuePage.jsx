@@ -13,6 +13,7 @@ import DeliveryActions, { CONFIRMABLE_STATUSES, DISPATCH_PROOF_STATUSES } from '
 import HoldTrackingModal from '../../components/dispatch/HoldTrackingModal';
 import HoldOrderModal from '../../components/dispatch/HoldOrderModal';
 import { DISPATCH_WAREHOUSES } from '../../constants/dispatchWarehouses';
+import { normalizeEntityKey } from '../../utils/printSalesOrder';
 import StockAnnouncementsManager from '../../components/stock/StockAnnouncementsManager';
 import DispatchLowStockChecker from '../../components/dispatch/DispatchLowStockChecker';
 
@@ -479,11 +480,22 @@ const DispatchQueuePage = () => {
             pushDispatchActionToSplits), so nothing changes about what Dispatch
             does. This just explains why the receipt then shows two Zoho
             package/shipment confirmations instead of one. */}
-        {Number(order.split_count) > 0 && (
-          <p className="text-xs font-semibold text-indigo-700 mt-1">
-            Split order — also billed to {order.split_entities}. One tracking number covers both.
-          </p>
-        )}
+        {(Number(order.split_count) > 0 || (order.splits && order.splits.length > 0)) && (() => {
+          const primaryKey = normalizeEntityKey(order.invoicing_from) || 'GPI';
+          const entries = [
+            { entityKey: primaryKey, so: order.zoho_so_number || '—', inv: order.zoho_invoice_number || null },
+            ...(order.splits || []).map((s) => ({
+              entityKey: normalizeEntityKey(s.invoicing_from) || s.invoicing_from,
+              so: s.zoho_so_number || '—',
+              inv: s.zoho_invoice_number || null
+            }))
+          ];
+          return (
+            <p className="text-xs font-semibold text-indigo-700 mt-1">
+              Split SOs ({entries.map((e) => `${e.entityKey}: ${e.so}`).join(' · ')}) — fulfill each entity under its respective company.
+            </p>
+          );
+        })()}
       </div>
       <div className="flex items-start gap-1 shrink-0">
         <div className="text-right">
@@ -493,8 +505,18 @@ const DispatchQueuePage = () => {
         <MoreInfoMenu
           items={[
             { label: 'MedRep', value: order.medrep_name },
-            { label: 'SO number', value: order.zoho_so_number },
-            { label: 'Invoice', value: order.zoho_invoice_number },
+            {
+              label: 'SO number',
+              value: (order.splits || []).length > 0
+                ? [`${normalizeEntityKey(order.invoicing_from) || 'GPI'}: ${order.zoho_so_number || '—'}`, ...(order.splits || []).map((s) => `${normalizeEntityKey(s.invoicing_from)}: ${s.zoho_so_number || '—'}`)].join(' · ')
+                : order.zoho_so_number
+            },
+            {
+              label: 'Invoice',
+              value: (order.splits || []).length > 0
+                ? [order.zoho_invoice_number ? `${normalizeEntityKey(order.invoicing_from) || 'GPI'}: ${order.zoho_invoice_number}` : null, ...(order.splits || []).map((s) => (s.zoho_invoice_number ? `${normalizeEntityKey(s.invoicing_from)}: ${s.zoho_invoice_number}` : null))].filter(Boolean).join(' · ') || null
+                : order.zoho_invoice_number
+            },
             { label: 'Package', value: order.zoho_package_number }
           ]}
         />
