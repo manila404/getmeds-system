@@ -367,6 +367,9 @@ const facadeMethods = [
   'createShipmentForPackage',
   'updateShipmentTracking',
   'markShipmentDelivered',
+  'listTransferOrders',
+  'getTransferOrder',
+  'listWarehouses',
   'setSimulatedOutage',
   'isSimulatedOutage'
 ];

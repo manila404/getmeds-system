@@ -6,15 +6,28 @@ import {
   Paperclip, ExternalLink, RefreshCw, Pencil
 } from 'lucide-react';
 import client from '../../api/client';
+import { fetchAndPrintSalesOrder } from '../../utils/printSalesOrder';
 import { attachmentLabel } from '../../constants/attachmentTypes';
 import AttachmentLightbox from '../orders/AttachmentLightbox';
 import DrPrintVoucherModal from './DrPrintVoucherModal';
 
 const DELIVERY_METHOD_OPTIONS = [
   'Lalamove', 'Grab Express', 'LBC Express', 'J&T Express',
-  'Own Rider / Company Vehicle', 'Air Asia', 'Victory Liner', 'Partas',
-  'AO Freight', 'Daily Overland', 'AP Cargo', 'Customer Pick-up', 'Distributor Delivery'
+  'Inhouse', 'Own Rider / Company Vehicle', 'Customer Pick-up',
+  'Air Asia', 'Victory Liner', 'Partas',
+  'AO Freight', 'Daily Overland', 'AP Cargo', 'Distributor Delivery'
 ];
+
+function getTrackingExemptionInfo(method) {
+  const low = String(method || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (/customer pick-?up|office pick-?up|^pick-?up$|^pickup$|^walk-?in$|^will call$/.test(low)) {
+    return { exempt: true, zohoLabel: 'Customer Pick-up' };
+  }
+  if (/^(in-?\s?house|own rider(\s*\/\s*company vehicle)?|company vehicle|internal delivery)$/.test(low)) {
+    return { exempt: true, zohoLabel: 'Inhouse' };
+  }
+  return { exempt: false, zohoLabel: String(method || '').trim() };
+}
 
 const DrFulfillModal = ({ order, onClose, onCompleted }) => {
   const [loading, setLoading] = useState(true);
@@ -71,7 +84,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
       setBatchData(d);
       setDoctorName(d.order.dispatch_doctor_name || d.order.intake_doctor || 'NNH');
       setRequiresSi(Boolean(d.classification?.requires_si));
-      setEntityKey(d.classification?.primary_entity || 'GPI');
+      setEntityKey(d.classification?.primary_entity || d.classification?.entity_keys?.[0] || 'GPI');
       setSiSuffix(d.order.oojeema_si_number || '');
       setTinInput(d.order.tin || '');
       setLtoInput(d.order.lto_license_number || '');
@@ -402,6 +415,11 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
       toast.error('Please enter or select the Mode of Delivery.');
       return;
     }
+    const { exempt } = getTrackingExemptionInfo(deliveryMethod);
+    if (!exempt && !trackingNumber.trim()) {
+      toast.error('Please enter the Tracking Number (or choose Customer Pick-up / Inhouse).');
+      return;
+    }
     setShipping(true);
     try {
       const { data: res } = await client.post(`/api/dispatch/orders/${order.id}/ship-zoho`, {
@@ -483,6 +501,14 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => fetchAndPrintSalesOrder(order.id)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-ink-primary text-xs font-semibold hover:bg-surface"
+              title="Print Zoho-style Sales Order in Hub"
+            >
+              <Printer className="w-3.5 h-3.5" /> Print SO
+            </button>
             {finalInvoice && step !== 3 && (
               <button
                 type="button"
@@ -622,12 +648,16 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                   <label className="block font-semibold text-ink-secondary mb-1">Entity (Strict Separation)</label>
                   <select
                     value={entityKey}
+                    disabled={Boolean(cls?.primary_entity && !cls?.is_split)}
                     onChange={(e) => setEntityKey(e.target.value)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                    className={`w-full px-2.5 py-1.5 border border-slate-300 rounded ${cls?.primary_entity && !cls?.is_split ? 'bg-slate-100 text-ink-secondary cursor-not-allowed' : 'bg-white'}`}
                   >
                     <option value="GPI">Getmeds Philippines Inc. (GPI)</option>
                     <option value="2MG">2mg Incorporated (2MG)</option>
                   </select>
+                  {cls?.primary_entity && !cls?.is_split && (
+                    <div className="mt-0.5 text-[10px] text-ink-secondary">Locked to Sales Order entity ({cls.primary_entity})</div>
+                  )}
                 </div>
                 <div>
                   <label className="block font-semibold text-ink-secondary mb-1">Requires Oojeema SI &amp; DR?</label>
@@ -880,14 +910,42 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                         </div>
                       )}
                     </div>
-                  ) : (
+                  ) : (() => {
+                    const trackingMeta = getTrackingExemptionInfo(deliveryMethod);
+                    return (
                     <div className="p-4 rounded-lg border border-blue-200 bg-blue-50/50 space-y-3 text-xs">
-                      <div className="font-semibold text-ink-primary flex items-center gap-1.5">
-                        <Truck className="w-4 h-4 text-getmeds-blue" />
-                        4. Create Zoho Package &amp; Mark Shipped
+                      <div className="font-semibold text-ink-primary flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5">
+                          <Truck className="w-4 h-4 text-getmeds-blue" />
+                          4. Zoho Packaging, Mode of Delivery &amp; Tracking
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setDeliveryMethod('Inhouse')}
+                            className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${
+                              trackingMeta.zohoLabel === 'Inhouse'
+                                ? 'border-emerald-500 bg-emerald-100 text-emerald-900'
+                                : 'border-slate-300 bg-white text-ink-secondary hover:bg-surface'
+                            }`}
+                          >
+                            Inhouse
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeliveryMethod('Customer Pick-up')}
+                            className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${
+                              trackingMeta.zohoLabel === 'Customer Pick-up'
+                                ? 'border-emerald-500 bg-emerald-100 text-emerald-900'
+                                : 'border-slate-300 bg-white text-ink-secondary hover:bg-surface'
+                            }`}
+                          >
+                            Customer Pick-up
+                          </button>
+                        </div>
                       </div>
                       <p className="text-ink-secondary">
-                        Applies the order&apos;s Mode of Delivery to Packaging &amp; Shipment in Zoho Inventory (so you don&apos;t need to open Zoho manually).
+                        Required step: records Packaging &amp; Shipment directly in Zoho Inventory. For couriers, a tracking number or link is required just like Oojeema SI; Inhouse and Customer Pick-up are auto-detected.
                       </p>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
@@ -895,7 +953,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                           <input
                             type="text"
                             list="dr-delivery-methods"
-                            placeholder="e.g. Lalamove, LBC Express, Own Rider..."
+                            placeholder="e.g. Lalamove, LBC Express, Inhouse, Customer Pick-up..."
                             value={deliveryMethod}
                             onChange={(e) => setDeliveryMethod(e.target.value)}
                             className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
@@ -907,18 +965,28 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                           </datalist>
                         </div>
                         <div>
-                          <label className="block font-semibold text-ink-secondary mb-1">Tracking Number (optional)</label>
+                          <label className="block font-semibold text-ink-secondary mb-1">
+                            {trackingMeta.exempt ? 'Tracking Number (optional for Inhouse / Pick-up)' : 'Tracking Number *'}
+                          </label>
                           <input
                             type="text"
-                            placeholder="Optional — leave blank for Lalamove / Rider"
+                            placeholder={trackingMeta.exempt ? `Optional — recorded in Zoho as ${trackingMeta.zohoLabel}` : 'Required — waybill or Lalamove share link'}
                             value={trackingNumber}
                             onChange={(e) => setTrackingNumber(e.target.value)}
-                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                            className={`w-full px-2.5 py-1.5 border rounded bg-white text-xs ${
+                              !trackingMeta.exempt && !trackingNumber.trim() ? 'border-amber-400' : 'border-slate-300'
+                            }`}
                           />
                         </div>
                       </div>
+                      {trackingMeta.exempt && (
+                        <div className="p-2.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-900 text-[11px]">
+                          <b>No Tracking Number Required ({trackingMeta.zohoLabel}):</b> Zoho Package &amp; Shipment will be recorded as <b>{trackingMeta.zohoLabel}</b> without needing a tracking number.
+                        </div>
+                      )}
                     </div>
-                  )}
+                    );
+                  })()}
                 </div>
               ) : requiresSi ? (
                 <>
@@ -1144,13 +1212,17 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-pharmacy-green text-white text-xs font-semibold disabled:opacity-50"
               >
                 <Truck className="w-3.5 h-3.5" />
-                {saving ? 'Posting to Zoho…' : requiresSi ? 'Convert to Zoho Invoice & Mark Sent' : 'Create Zoho Auto-Invoice & Mark Sent'}
+                {saving
+                  ? 'Posting to Zoho…'
+                  : requiresSi
+                    ? `Convert to Zoho Invoice (${entityKey}) & Mark Sent`
+                    : `Create Zoho Auto-Invoice (${entityKey}) & Mark Sent`}
               </button>
             )}
             {step === 3 && finalInvoice && !shipResult && (
               <button
                 type="button"
-                disabled={shipping || !deliveryMethod.trim()}
+                disabled={shipping || !deliveryMethod.trim() || (!getTrackingExemptionInfo(deliveryMethod).exempt && !trackingNumber.trim())}
                 onClick={handleShipZoho}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
               >

@@ -257,7 +257,12 @@ async function createInvoice({ orderId, user }) {
           so = { ...so, status: 'confirmed' };
           confirmedHere = true;
         }
-        const created = await inZoho('create the invoice', () => zoho.createInvoiceFromSalesOrder(so, { date: zohoToday() }));
+        const created = await inZoho('create the invoice', () => zoho.createInvoiceFromSalesOrder(so, {
+          date: zohoToday(),
+          invoicingFrom: order.invoicing_from || so.custom_field_hash?.cf_invoicing_from || null,
+          doctorName: order.dispatch_doctor_name || order.intake_doctor || 'NNH',
+          orderSource: order.intake_source || null
+        }));
         invoice = created.invoice;
       }
       if (!INVOICE_ISSUED.includes(String(invoice.status || '').toLowerCase())) {

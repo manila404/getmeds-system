@@ -102,6 +102,8 @@ services:
         value: https://www.zohoapis.com/inventory/v1
       - key: ZOHO_ACCOUNTS_URL
         value: https://accounts.zoho.com
+      - key: GETMEDS_DR_WORKFLOW
+        value: "true"
 
       # Exact-match allowlist. Set this to your frontend's production URL
       # (Vercel, wherever it ends up living) with no trailing slash. Preview

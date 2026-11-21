@@ -175,6 +175,13 @@ describe('Dispatch: Today', () => {
       }));
       const dr = await db.prepare('SELECT tracking_number, courier FROM dispatch_records WHERE order_id = ?').get(orderId);
       expect(dr).toEqual({ tracking_number: 'TRK-PT-999', courier: 'LBC Express' });
+
+      // Verify order detail carries customer compliance + salesperson fields for in-Hub Sales Order printing
+      const orderDetailRes = await request(app).get(`/api/orders/${orderId}`).set({ Authorization: `Bearer ${token}` });
+      expect(orderDetailRes.status).toBe(200);
+      expect(orderDetailRes.body.data.order).toHaveProperty('tin');
+      expect(orderDetailRes.body.data.order).toHaveProperty('lto_license_number');
+      expect(orderDetailRes.body.data.order).toHaveProperty('salesperson_name');
     } finally {
       if (prevDrFlag === undefined) delete process.env.GETMEDS_DR_WORKFLOW;
       else process.env.GETMEDS_DR_WORKFLOW = prevDrFlag;

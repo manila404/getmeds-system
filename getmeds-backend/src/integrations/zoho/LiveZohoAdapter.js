@@ -1346,10 +1346,27 @@ class LiveZohoAdapter extends ZohoAdapter {
       query.ignore_auto_number_generation = 'true';
     }
     // Invoice module custom field IDs confirmed live on org 714292728 (distinct from SO field IDs).
+    const INVOICE_TEMPLATE_ID_BY_INVOICING_FROM = {
+      '2mg Incorporated': '2254168000013830593', // 2MG  Invoice
+      'Getmeds Philippines Inc.': '2254168000000017001' // Standard Getmeds Template
+    };
+    const soCustomFieldVal = (apiName) => salesorder?.custom_field_hash?.[apiName]
+      || (Array.isArray(salesorder?.custom_fields)
+        ? salesorder.custom_fields.find((c) => c.api_name === apiName)?.value
+        : null)
+      || null;
+    const effectiveDoctorName = opts.doctorName || soCustomFieldVal('cf_doctor_name');
+    const effectiveInvoicingFrom = opts.invoicingFrom || soCustomFieldVal('cf_invoicing_from');
+    const effectiveOrderSource = opts.orderSource || soCustomFieldVal('cf_source');
+
+    if (effectiveInvoicingFrom && INVOICE_TEMPLATE_ID_BY_INVOICING_FROM[effectiveInvoicingFrom]) {
+      body.template_id = INVOICE_TEMPLATE_ID_BY_INVOICING_FROM[effectiveInvoicingFrom];
+    }
+
     const customFields = [];
-    if (opts.doctorName) customFields.push({ customfield_id: '2254168001890600049', value: opts.doctorName });
-    if (opts.invoicingFrom) customFields.push({ customfield_id: '2254168001900812588', value: opts.invoicingFrom });
-    if (opts.orderSource) customFields.push({ customfield_id: '2254168001929089197', value: opts.orderSource });
+    if (effectiveDoctorName) customFields.push({ customfield_id: '2254168001890600049', value: effectiveDoctorName });
+    if (effectiveInvoicingFrom) customFields.push({ customfield_id: '2254168001900812588', value: effectiveInvoicingFrom });
+    if (effectiveOrderSource) customFields.push({ customfield_id: '2254168001929089197', value: effectiveOrderSource });
     if (customFields.length) body.custom_fields = customFields;
 
     if (salesorder.salesperson_id) body.salesperson_id = salesorder.salesperson_id;
@@ -1372,8 +1389,17 @@ class LiveZohoAdapter extends ZohoAdapter {
       lalamove: 'Lalamove',
       'own rider / company vehicle': 'Inhouse',
       'own rider': 'Inhouse',
+      'company vehicle': 'Inhouse',
       inhouse: 'Inhouse',
       'in-house': 'Inhouse',
+      'in house': 'Inhouse',
+      'customer pick-up': 'Inhouse',
+      'customer pickup': 'Inhouse',
+      'office pick-up': 'Inhouse',
+      'office pickup': 'Inhouse',
+      'pick-up': 'Inhouse',
+      pickup: 'Inhouse',
+      'walk-in': 'Inhouse',
       'lbc express': 'LBC',
       lbc: 'LBC',
       'grab express': 'Grab',
@@ -1453,12 +1479,31 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: result.message || 'Package created', package: result.package };
   }
 
+  _formatTrackingForZoho(trackingNumber) {
+    const clean = String(trackingNumber || '').trim();
+    if (!clean) return { trackingNumber: '', notes: null };
+    if (clean.length < 100) return { trackingNumber: clean, notes: null };
+
+    let shortRef = '';
+    const tokenMatch = clean.match(/[?&](PH[A-Za-z0-9_-]{6,})/i);
+    if (tokenMatch) {
+      shortRef = tokenMatch[1].slice(0, 99);
+    } else {
+      shortRef = /^https?:\/\//i.test(clean)
+        ? 'Tracking link (see notes)'
+        : clean.slice(0, 99);
+    }
+    return { trackingNumber: shortRef, notes: `Tracking link: ${clean}` };
+  }
+
   async createShipmentForPackage({ salesorderId, packageId, shipmentNumber, date, deliveryMethod, trackingNumber }) {
+    const formatted = this._formatTrackingForZoho(trackingNumber);
     const body = {
       date,
       delivery_method: String(deliveryMethod || '').trim(),
-      tracking_number: String(trackingNumber || '').trim()
+      tracking_number: formatted.trackingNumber
     };
+    if (formatted.notes) body.notes = formatted.notes;
     if (String(shipmentNumber || '').trim()) {
       body.shipment_number = String(shipmentNumber).trim();
     }
@@ -1477,17 +1522,53 @@ class LiveZohoAdapter extends ZohoAdapter {
       existing = res.shipmentorder || res.shipment_order || null;
     }
     const cleanMethod = String(deliveryMethod || existing?.delivery_method || existing?.carrier || '').trim();
-    const cleanTracking = String(trackingNumber ?? existing?.tracking_number ?? '').trim();
+    const rawTracking = String(trackingNumber ?? existing?.tracking_number ?? '').trim();
+    const formatted = this._formatTrackingForZoho(rawTracking);
     const resolvedDate = date || existing?.date;
     const resolvedNumber = String(shipmentNumber || existing?.shipment_number || '').trim();
     const body = {
       ...(resolvedNumber ? { shipment_number: resolvedNumber } : {}),
       ...(resolvedDate ? { date: resolvedDate } : {}),
       ...(cleanMethod ? { delivery_method: cleanMethod } : {}),
-      tracking_number: cleanTracking
+      tracking_number: formatted.trackingNumber,
+      ...(formatted.notes ? { notes: formatted.notes } : {})
     };
     const result = await this._request('PUT', `/shipmentorders/${shipmentId}`, { body });
     return { code: 0, message: result.message || 'Shipment updated', shipmentorder: result.shipmentorder || result.shipment_order };
+  }
+
+  async listTransferOrders(params = {}) {
+    const query = {
+      per_page: String(Math.min(Math.max(Number(params.per_page) || 50, 1), 200)),
+      page: String(Math.max(Number(params.page) || 1, 1)),
+      sort_column: params.sort_column || 'date',
+      sort_order: params.sort_order || 'D'
+    };
+    const result = await this._request('GET', '/transferorders', { query });
+    return {
+      code: 0,
+      message: 'success',
+      transfer_orders: result.transfer_orders || result.transferorders || []
+    };
+  }
+
+  async getTransferOrder(transferOrderId) {
+    if (!transferOrderId) throw new Error('getTransferOrder requires a Zoho transfer order id');
+    const result = await this._request('GET', `/transferorders/${transferOrderId}`);
+    return {
+      code: 0,
+      message: 'success',
+      transfer_order: result.transfer_order || result.transferorder || null
+    };
+  }
+
+  async listWarehouses() {
+    const result = await this._request('GET', '/settings/warehouses');
+    return {
+      code: 0,
+      message: 'success',
+      warehouses: result.warehouses || []
+    };
   }
 
   async markShipmentDelivered(shipmentId) {

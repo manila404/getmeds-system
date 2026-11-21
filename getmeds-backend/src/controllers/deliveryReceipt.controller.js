@@ -94,6 +94,18 @@ exports.issueTransferDr = drAction((req) =>
     user: req.user
   }));
 
+exports.listTransferOrders = drAction((req) =>
+  drService.listZohoTransferOrders({
+    search: req.query.search || '',
+    page: req.query.page || 1,
+    perPage: req.query.per_page || 50
+  }));
+
+exports.getTransferOrder = drAction((req) =>
+  drService.getZohoTransferOrderForDr({
+    transferOrderId: req.params.toId
+  }));
+
 exports.voidDr = drAction((req) =>
   drService.voidDeliveryReceipt({
     drId: req.params.drId,
@@ -115,6 +127,7 @@ exports.shipOrderZoho = drAction((req) =>
     entityKey: req.body?.entity_key || null,
     deliveryMethod: req.body?.delivery_method,
     trackingNumber: req.body?.tracking_number,
+    requireTracking: true,
     user: req.user,
     expectedUpdatedAt: req.body?.expected_updated_at || null,
     expectedCateredBy: req.body?.expected_catered_by ?? null

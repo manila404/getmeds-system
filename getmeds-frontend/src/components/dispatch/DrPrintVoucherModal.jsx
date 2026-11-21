@@ -37,7 +37,7 @@ export function buildDrPrintableHtml(drData) {
             <div><b>DATE:</b> ${esc(receipt.date_issued)}</div>
             <div><b>TERMS:</b> ${esc(receipt.terms || '—')}</div>
             <div><b>SI / REF NO.:</b> ${esc(receipt.si_number || receipt.external_ref || '—')}</div>
-            <div><b>DOCTOR:</b> ${esc(receipt.doctor_name || 'NNH')}</div>
+            <div><b>${receipt.reference_type === 'transfer_order' ? 'TYPE:' : 'DOCTOR:'}</b> ${esc(receipt.reference_type === 'transfer_order' ? 'Warehouse Transfer' : (receipt.doctor_name || 'NNH'))}</div>
           </div>
         </div>
         <table>

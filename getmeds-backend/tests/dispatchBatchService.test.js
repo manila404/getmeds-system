@@ -141,6 +141,22 @@ describe('FEFO warehouse batch filtering & validation', () => {
     expect(res).toHaveLength(2);
     expect(res[0]).toMatchObject({ order_item_id: 101, batch_number: 'LOT-SOONER', quantity: 20 });
     expect(res[1]).toMatchObject({ order_item_id: 102, batch_number: 'LOT-LATER', quantity: 20 });
+
+    // Cumulative cross-line check: LOT-SOONER only has 40 in W-MAIN, so taking 30 + 20 = 50 must fail!
+    expect(() =>
+      validatePickedBatches({
+        items: [
+          { id: 101, product_id: 7, product_name: 'Meropenem 1g', quantity: 30, effective_warehouse_id: 'W-MAIN', is_csp: 0 },
+          { id: 102, product_id: 7, product_name: 'Meropenem 1g', quantity: 20, effective_warehouse_id: 'W-MAIN', is_csp: 0 }
+        ],
+        availableBatchesByItemId: availMap,
+        picksByItemId: new Map([
+          [101, [{ order_item_id: 101, batch_number: 'LOT-SOONER', quantity: 30 }]],
+          [102, [{ order_item_id: 102, batch_number: 'LOT-SOONER', quantity: 20 }]]
+        ]),
+        today: '2026-11-16'
+      })
+    ).toThrow(/only has 40 available/i);
   });
 });
 
@@ -236,6 +252,7 @@ describe('MockZohoAdapter & LiveZohoAdapter batch + invoice forwarding', () => {
       const invCall = calls[1];
       expect(invCall.url).toContain('ignore_auto_number_generation=true');
       expect(invCall.body.invoice_number).toBe('2MG-SI000004987');
+      expect(invCall.body.template_id).toBe('2254168000013830593');
       expect(invCall.body.reference_number).toBe('SO-70070'); // Critical KPI fix!
       expect(invCall.body.custom_fields).toEqual(
         expect.arrayContaining([

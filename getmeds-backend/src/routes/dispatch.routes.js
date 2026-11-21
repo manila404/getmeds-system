@@ -81,6 +81,8 @@ router.post('/orders/:id/finalize-invoice', requireRxCleared, drCtrl.finalizeZoh
 router.post('/orders/:id/ship-zoho', requireRxCleared, drCtrl.shipOrderZoho);
 router.get('/dr-ledger', drCtrl.listLedger);
 router.get('/dr-ledger/export', drCtrl.exportLedger);
+router.get('/dr-ledger/transfer-orders', drCtrl.listTransferOrders);
+router.get('/dr-ledger/transfer-orders/:toId', drCtrl.getTransferOrder);
 router.post('/dr-ledger/transfer-order', drCtrl.issueTransferDr);
 router.get('/dr/:drId', drCtrl.getDr);
 router.post('/dr/:drId/print', drCtrl.recordPrint);

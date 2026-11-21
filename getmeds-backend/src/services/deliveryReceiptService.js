@@ -95,6 +95,171 @@ function summarizeLineBatches(picks = []) {
   };
 }
 
+const EXCLUDED_TRANSFER_WAREHOUSES = new Set([
+  'EXPIRED STOCKS',
+  'GLORIA DIAZ WAREHOUSE',
+  'HOMESTOCKS- CHAD',
+  'HOMESTOCKS- NASHRINA'
+]);
+
+const TRANSFER_WAREHOUSE_ADDRESSES = Object.freeze({
+  'CEBU WAREHOUSE': 'Unit1023, City Soho Mall, 59 Mirasol St, Cebu City',
+  'DAVAO WAREHOUSE': 'DAVAO CITY',
+  'GETMEDS PHILIPPINES INC.': 'No. 17 Unit 305 Vatican Bldg Vatican Drive, Las Pinas, NCR'
+});
+
+function isExcludedTransferWarehouse(name) {
+  return EXCLUDED_TRANSFER_WAREHOUSES.has(String(name || '').trim().toUpperCase());
+}
+
+function defaultTransferAddress(warehouseName, zohoWarehousesByName = new Map()) {
+  const key = String(warehouseName || '').trim().toUpperCase();
+  if (TRANSFER_WAREHOUSE_ADDRESSES[key]) return TRANSFER_WAREHOUSE_ADDRESSES[key];
+  const zw = zohoWarehousesByName.get(key);
+  if (zw) {
+    const parts = [zw.address, zw.city, zw.state].map((s) => String(s || '').trim()).filter(Boolean);
+    if (parts.length) return parts.join(', ');
+  }
+  return '';
+}
+
+async function listZohoTransferOrders({ search = '', page = 1, perPage = 50, adapter = zoho } = {}) {
+  await assertDrTablesReady();
+  const [toRes, existingRows] = await Promise.all([
+    adapter.listTransferOrders({ page, per_page: perPage }),
+    db.prepare(`
+      SELECT id, entity_key, dr_number, external_ref, status
+        FROM delivery_receipts
+       WHERE reference_type = 'transfer_order' AND status IN ('draft', 'issued')
+       ORDER BY id DESC
+    `).all()
+  ]);
+
+  const drByRef = new Map();
+  for (const r of existingRows || []) {
+    const refKey = String(r.external_ref || '').trim().toUpperCase();
+    if (refKey && !drByRef.has(refKey)) drByRef.set(refKey, r);
+  }
+
+  const q = String(search || '').trim().toLowerCase();
+  const filtered = (toRes.transfer_orders || [])
+    .filter((to) => !isExcludedTransferWarehouse(to.to_warehouse_name) && !isExcludedTransferWarehouse(to.from_warehouse_name))
+    .filter((to) => {
+      if (!q) return true;
+      return (
+        String(to.transfer_order_number || '').toLowerCase().includes(q) ||
+        String(to.to_warehouse_name || '').toLowerCase().includes(q) ||
+        String(to.description || '').toLowerCase().includes(q)
+      );
+    })
+    .map((to) => {
+      const refKey = String(to.transfer_order_number || '').trim().toUpperCase();
+      return {
+        transfer_order_id: to.transfer_order_id,
+        transfer_order_number: to.transfer_order_number,
+        date: to.date,
+        status: to.status,
+        description: to.description || '',
+        from_warehouse_name: to.from_warehouse_name || '',
+        to_warehouse_name: to.to_warehouse_name || '',
+        default_address: defaultTransferAddress(to.to_warehouse_name),
+        quantity_transfer: to.quantity_transfer ?? null,
+        existing_dr: drByRef.get(refKey) || null
+      };
+    });
+
+  return { transfer_orders: filtered };
+}
+
+async function getZohoTransferOrderForDr({ transferOrderId, adapter = zoho } = {}) {
+  await assertDrTablesReady();
+  const [{ transfer_order: to }, whRes] = await Promise.all([
+    adapter.getTransferOrder(transferOrderId),
+    adapter.listWarehouses().catch(() => ({ warehouses: [] }))
+  ]);
+  if (!to) throw new DispatchBatchError(404, 'NOT_FOUND', 'Zoho Transfer Order not found.');
+  if (isExcludedTransferWarehouse(to.to_warehouse_name)) {
+    throw new DispatchBatchError(422, 'EXCLUDED_WAREHOUSE', `Transfer Orders to "${to.to_warehouse_name}" are excluded from DR issuance.`);
+  }
+
+  const zohoWarehousesByName = new Map();
+  for (const w of whRes?.warehouses || []) {
+    zohoWarehousesByName.set(String(w.warehouse_name || '').trim().toUpperCase(), w);
+  }
+
+  const lineItems = to.line_items || [];
+  const zohoItemIds = Array.from(new Set(lineItems.map((li) => String(li.item_id || '').trim()).filter(Boolean)));
+  const productByZohoId = new Map();
+  if (zohoItemIds.length) {
+    const prodRows = await db.prepare(`
+      SELECT id, name, sku, unit, zoho_item_id
+        FROM products
+       WHERE zoho_item_id = ANY(?)
+    `).all([zohoItemIds]);
+    for (const p of prodRows || []) {
+      productByZohoId.set(String(p.zoho_item_id), p);
+    }
+  }
+
+  const expandedItems = [];
+  for (const li of lineItems) {
+    const mappedProd = li.item_id ? productByZohoId.get(String(li.item_id)) : null;
+    const itemName = mappedProd?.name || li.name || 'Unnamed Item';
+    const unit = mappedProd?.unit || li.unit || 'pc';
+    const batches = Array.isArray(li.batches) ? li.batches : [];
+    if (batches.length) {
+      for (const b of batches) {
+        const qty = Number(b.out_quantity ?? b.in_quantity ?? li.quantity_transfer ?? 0);
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+        expandedItems.push({
+          product_id: mappedProd?.id || null,
+          item_name: itemName,
+          batch_number: b.batch_number || b.batch_in_number || '',
+          expiry_date: b.expiry_date || '',
+          quantity: qty,
+          unit
+        });
+      }
+    } else {
+      const qty = Number(li.quantity_transfer ?? li.quantity ?? 0);
+      if (Number.isFinite(qty) && qty > 0) {
+        expandedItems.push({
+          product_id: mappedProd?.id || null,
+          item_name: itemName,
+          batch_number: '',
+          expiry_date: '',
+          quantity: qty,
+          unit
+        });
+      }
+    }
+  }
+
+  const existingDr = to.transfer_order_number
+    ? await db.prepare(`
+        SELECT id, entity_key, dr_number, external_ref, status, date_issued
+          FROM delivery_receipts
+         WHERE reference_type = 'transfer_order' AND external_ref = ? AND status IN ('draft', 'issued')
+         ORDER BY id DESC LIMIT 1
+      `).get(to.transfer_order_number)
+    : null;
+
+  return {
+    transfer_order: {
+      transfer_order_id: to.transfer_order_id,
+      transfer_order_number: to.transfer_order_number,
+      date: to.date,
+      status: to.status,
+      description: to.description || '',
+      from_warehouse_name: to.from_warehouse_name || '',
+      to_warehouse_name: to.to_warehouse_name || '',
+      default_address: defaultTransferAddress(to.to_warehouse_name, zohoWarehousesByName)
+    },
+    items: expandedItems,
+    existing_dr: existingDr || null
+  };
+}
+
 /**
  * Match saved Hub `order_item_batches` (keyed by order_item_id) to Zoho's
  * `salesorder.line_items` (keyed by salesorder_item_id), handling B1T1 duplicate SKUs
@@ -155,7 +320,7 @@ async function issueSalesOrderDr({
   expectedCateredBy = null
 }) {
   await assertDrTablesReady();
-  const actor = resolveActor(user);
+  const actor = await resolveActor(user);
   await assertCanActOnOrder({ orderId, user, expectedUpdatedAt, expectedCateredBy });
 
   const order = await db.prepare(`
@@ -337,7 +502,7 @@ async function issueTransferOrderDr({
   user
 }) {
   await assertDrTablesReady();
-  const actor = resolveActor(user);
+  const actor = await resolveActor(user);
   const resolvedEntity = normalizeEntityKey(entityKey);
   if (!resolvedEntity) throw new DispatchBatchError(422, 'INVALID_ENTITY', 'Entity must be GPI or 2MG.');
   const cleanRef = String(externalRef || '').trim();
@@ -379,6 +544,11 @@ async function issueTransferOrderDr({
         throw new DispatchBatchError(422, 'INVALID_TRANSFER_ITEM', 'Each transfer item requires item_name and quantity > 0.');
       }
       nextItemSeq += 1;
+      const cleanItemName = String(it.item_name).trim();
+      const batchNo = it.batch_number ? String(it.batch_number).trim() : null;
+      const expDate = it.expiry_date ? String(it.expiry_date).slice(0, 10) : null;
+      const batchDesc = [batchNo ? `Batch: ${batchNo}` : null, expDate ? `Exp: ${expDate}` : null].filter(Boolean).join(' · ');
+      const displayItemName = batchDesc && !cleanItemName.includes('Batch:') ? `${cleanItemName} — ${batchDesc}` : cleanItemName;
       await db.prepare(`
         INSERT INTO delivery_receipt_items (
           delivery_receipt_id, entity_key, order_item_id, item_seq_no, si_or_to_no,
@@ -390,10 +560,10 @@ async function issueTransferOrderDr({
         nextItemSeq,
         cleanRef,
         it.product_id || null,
-        String(it.item_name).trim(),
-        it.batch_number ? String(it.batch_number).trim() : null,
-        it.expiry_date ? String(it.expiry_date).slice(0, 10) : null,
-        it.warehouse_name || null,
+        displayItemName,
+        batchNo,
+        expDate,
+        it.warehouse_name || cleanName || null,
         qty,
         it.unit || 'pc',
         now
@@ -408,7 +578,7 @@ async function issueTransferOrderDr({
 
 async function voidDeliveryReceipt({ drId, user, reason, switchToNoSi = false, expectedUpdatedAt = null }) {
   await assertDrTablesReady();
-  const actor = resolveActor(user);
+  const actor = await resolveActor(user);
   const cleanReason = String(reason || '').trim();
   if (!cleanReason) throw new DispatchBatchError(422, 'REASON_REQUIRED', 'A reason is required to void a Delivery Receipt.');
 
@@ -457,7 +627,7 @@ async function voidDeliveryReceipt({ drId, user, reason, switchToNoSi = false, e
 
 async function recordDrPrint({ drId, user }) {
   await assertDrTablesReady();
-  const actor = resolveActor(user);
+  const actor = await resolveActor(user);
   const dr = await db.prepare('SELECT * FROM delivery_receipts WHERE id = ?').get(drId);
   if (!dr) throw new DispatchBatchError(404, 'NOT_FOUND', 'Delivery Receipt not found.');
   if (dr.order_id) await assertCanActOnOrder({ orderId: dr.order_id, user });
@@ -522,6 +692,26 @@ async function loadTargetSalesOrder(adapter, targetSoId, order, entityItems, spl
  * Bridge DR + Oojeema SI (or auto-invoice for Patient/Doctor) + Zoho Warehouse Batches
  * into Zoho Inventory, then mark the invoice Sent. Respects orderClaimService lock.
  */
+function resolveTargetSalesOrderForEntity({ order, splits = [], resolvedEntity }) {
+  const explicitPrimaryEntity = normalizeEntityKey(order.invoicing_from);
+  const primaryEntity = explicitPrimaryEntity || 'GPI';
+  const splitTarget = resolvedEntity !== primaryEntity
+    ? splits.find((s) => normalizeEntityKey(s.invoicing_from) === resolvedEntity)
+    : null;
+  if (explicitPrimaryEntity && resolvedEntity !== explicitPrimaryEntity && !splitTarget) {
+    throw new DispatchBatchError(
+      422,
+      'ENTITY_MISMATCH',
+      `Sales Order ${order.zoho_so_number || order.getmeds_order_id} is under ${order.invoicing_from} (${explicitPrimaryEntity}) and cannot be fulfilled under ${DR_ENTITY_PROFILES[resolvedEntity].invoicing_from} (${resolvedEntity}).`
+    );
+  }
+  const targetSoId = splitTarget ? splitTarget.zoho_so_id : order.zoho_so_id;
+  if (!targetSoId) {
+    throw new DispatchBatchError(422, 'MISSING_ZOHO_SO', `No Zoho Sales Order found for entity ${resolvedEntity}.`);
+  }
+  return { primaryEntity, splitTarget, targetSoId };
+}
+
 async function finalizeZohoInvoiceForOrder({
   orderId,
   entityKey = null,
@@ -532,7 +722,7 @@ async function finalizeZohoInvoiceForOrder({
   expectedCateredBy = null,
   adapter = zoho
 }) {
-  const actor = resolveActor(user);
+  const actor = await resolveActor(user);
   await assertCanActOnOrder({ orderId, user, expectedUpdatedAt, expectedCateredBy });
 
   const order = await db.prepare(`
@@ -562,14 +752,7 @@ async function finalizeZohoInvoiceForOrder({
     splits
   });
 
-  const primaryEntity = normalizeEntityKey(order.invoicing_from || 'GPI');
-  const splitTarget = resolvedEntity !== primaryEntity
-    ? splits.find((s) => normalizeEntityKey(s.invoicing_from) === resolvedEntity)
-    : null;
-  const targetSoId = splitTarget ? splitTarget.zoho_so_id : order.zoho_so_id;
-  if (!targetSoId) {
-    throw new DispatchBatchError(422, 'MISSING_ZOHO_SO', `No Zoho Sales Order found for entity ${resolvedEntity}.`);
-  }
+  const { primaryEntity, splitTarget, targetSoId } = resolveTargetSalesOrderForEntity({ order, splits, resolvedEntity });
 
   let customInvoiceNumber = null;
   let activeDr = null;
@@ -603,7 +786,7 @@ async function finalizeZohoInvoiceForOrder({
 
   try {
     const entityItems = orderItems.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity);
-    const so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
+    let so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
     const savedBatches = (await hasColumn('order_item_batches', 'order_item_id'))
       ? await db.prepare('SELECT * FROM order_item_batches WHERE order_id = ? ORDER BY id').all(order.id)
       : [];
@@ -613,6 +796,20 @@ async function finalizeZohoInvoiceForOrder({
     const invoicingFrom = DR_ENTITY_PROFILES[resolvedEntity].invoicing_from;
 
     const existingInv = (so.invoices || []).find((i) => !['void', 'deleted'].includes(String(i.status || '').toLowerCase()));
+    if (!existingInv && String(so.status || '').toLowerCase() === 'draft') {
+      const finRow = splitTarget
+        ? (splitTarget.payment_status === 'verified' ? { ok: 1 } : null)
+        : await db.prepare("SELECT 1 AS ok FROM order_events WHERE order_id = ? AND event_type = 'FINANCE_VERIFIED' LIMIT 1").get(order.id);
+      if (!finRow) {
+        throw new DispatchBatchError(
+          409,
+          'NOT_CONFIRMED_IN_ZOHO',
+          `Sales Order ${so.salesorder_number || targetSoId} is still a draft in Zoho and Finance has not verified it yet. Confirm it in Zoho Books first.`
+        );
+      }
+      await adapter.confirmSalesOrder(so.salesorder_id || targetSoId);
+      so = { ...so, status: 'confirmed' };
+    }
     let invoice;
     if (existingInv) {
       invoice = existingInv;
@@ -702,17 +899,36 @@ async function finalizeZohoInvoiceForOrder({
  * carries its Mode of Delivery in Zoho Inventory without re-allocating batches
  * already deducted on the Invoice.
  */
+function normalizeZohoDeliveryMethod(method) {
+  const raw = String(method || '').trim();
+  if (!raw) return '';
+  const low = raw.toLowerCase().replace(/\s+/g, ' ');
+  if (/customer pick-?up|office pick-?up|^pick-?up$|^pickup$|^walk-?in$|^will call$/.test(low)) {
+    return 'Customer Pick-up';
+  }
+  if (/^(in-?\s?house|own rider(\s*\/\s*company vehicle)?|company vehicle|internal delivery)$/.test(low)) {
+    return 'Inhouse';
+  }
+  return raw;
+}
+
+function isTrackingExemptDeliveryMethod(method) {
+  const normalized = normalizeZohoDeliveryMethod(method);
+  return normalized === 'Customer Pick-up' || normalized === 'Inhouse';
+}
+
 async function shipInvoicedOrderInZoho({
   orderId,
   entityKey = null,
   deliveryMethod = null,
   trackingNumber = '',
+  requireTracking = false,
   user,
   expectedUpdatedAt = null,
   expectedCateredBy = null,
   adapter = zoho
 }) {
-  const actor = resolveActor(user);
+  const actor = await resolveActor(user);
   await assertCanActOnOrder({ orderId, user, expectedUpdatedAt, expectedCateredBy });
 
   const order = await db.prepare(`
@@ -724,13 +940,20 @@ async function shipInvoicedOrderInZoho({
   `).get(orderId);
   if (!order) throw new DispatchBatchError(404, 'NOT_FOUND', 'Order not found.');
 
-  const resolvedMethod = String(
+  const resolvedMethod = normalizeZohoDeliveryMethod(
     deliveryMethod || order.intake_delivery_method || order.dispatch_courier || ''
-  ).trim();
+  );
   if (!resolvedMethod) {
     throw new DispatchBatchError(422, 'DELIVERY_METHOD_REQUIRED', 'Choose a Mode of Delivery before creating the Zoho package and shipment.');
   }
   const cleanTracking = String(trackingNumber ?? order.dispatch_tracking_number ?? '').trim();
+  if (requireTracking && !isTrackingExemptDeliveryMethod(resolvedMethod) && !cleanTracking) {
+    throw new DispatchBatchError(
+      422,
+      'TRACKING_REQUIRED',
+      `Enter a Tracking Number for ${resolvedMethod} before marking shipped (or choose Customer Pick-up / Inhouse).`
+    );
+  }
 
   const resolvedEntity = normalizeEntityKey(entityKey || order.oojeema_entity || order.invoicing_from || 'GPI');
   const orderItems = await db.prepare(`
@@ -741,14 +964,7 @@ async function shipInvoicedOrderInZoho({
      ORDER BY oi.id
   `).all(order.id);
   const splits = await db.prepare('SELECT * FROM order_split_sales_orders WHERE order_id = ?').all(order.id);
-  const primaryEntity = normalizeEntityKey(order.invoicing_from || 'GPI');
-  const splitTarget = resolvedEntity !== primaryEntity
-    ? splits.find((s) => normalizeEntityKey(s.invoicing_from) === resolvedEntity)
-    : null;
-  const targetSoId = splitTarget ? splitTarget.zoho_so_id : order.zoho_so_id;
-  if (!targetSoId) {
-    throw new DispatchBatchError(422, 'MISSING_ZOHO_SO', `No Zoho Sales Order found for entity ${resolvedEntity}.`);
-  }
+  const { primaryEntity, splitTarget, targetSoId } = resolveTargetSalesOrderForEntity({ order, splits, resolvedEntity });
 
   const claimableStatuses = [
     'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch',
@@ -765,7 +981,7 @@ async function shipInvoicedOrderInZoho({
 
   try {
     const entityItems = orderItems.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity);
-    const so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
+    let so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
 
     let pkg = (so.packages || [])[0] || null;
     let adoptedPackage = Boolean(pkg);
@@ -1101,10 +1317,15 @@ module.exports = {
   buildBatchesBySoLineItemId,
   issueSalesOrderDr,
   issueTransferOrderDr,
+  listZohoTransferOrders,
+  getZohoTransferOrderForDr,
+  isExcludedTransferWarehouse,
   voidDeliveryReceipt,
   recordDrPrint,
   finalizeZohoInvoiceForOrder,
   shipInvoicedOrderInZoho,
+  normalizeZohoDeliveryMethod,
+  isTrackingExemptDeliveryMethod,
   getPrintableDr,
   listLedger,
   exportLedgerXlsx

@@ -806,7 +806,10 @@ exports.getById = async (req, res, next) => {
   try {
     const loadOrder = async () => await db.prepare(`
       SELECT o.*, c.name as customer_name, c.contact_person, c.contact_number,
-             u.name as medrep_name, u.email as medrep_email,
+             c.address as customer_address,
+             COALESCE(NULLIF(TRIM(c.tin), ''), NULLIF(TRIM(o.intake_tin), '')) as tin,
+             c.lto_license_number,
+             u.name as medrep_name, u.email as medrep_email, u.salesperson as salesperson_name,
              r.name as raised_by_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -902,6 +905,20 @@ exports.getById = async (req, res, next) => {
       LEFT JOIN products p ON oi.product_id = p.id
       WHERE oi.order_id = ?
     `).all(order.id);
+
+    if (items.length && (await hasColumn('order_item_batches', 'order_item_id'))) {
+      const batchRows = await db.prepare(
+        'SELECT order_item_id, batch_number, expiry_date, quantity FROM order_item_batches WHERE order_id = ? ORDER BY id'
+      ).all(order.id);
+      const byItem = new Map();
+      for (const b of batchRows || []) {
+        if (!byItem.has(b.order_item_id)) byItem.set(b.order_item_id, []);
+        byItem.get(b.order_item_id).push(b);
+      }
+      for (const it of items) {
+        it.batches = byItem.get(it.id) || [];
+      }
+    }
 
     const payment = await db.prepare(`
       SELECT p.*, u.name as verified_by_name

@@ -331,6 +331,22 @@ class ZohoAdapter {
   }
 
   /**
+   * Read-only: Transfer Orders (`GET /transferorders`) and detail (`GET /transferorders/{id}`),
+   * plus warehouses (`GET /settings/warehouses`) for Dispatch Transfer Order DR generation.
+   */
+  async listTransferOrders(params = {}) {
+    throw new Error('Not implemented');
+  }
+
+  async getTransferOrder(transferOrderId) {
+    throw new Error('Not implemented');
+  }
+
+  async listWarehouses() {
+    throw new Error('Not implemented');
+  }
+
+  /**
    * Write EXACTLY ONE thing to an existing Zoho contact: its TIN (`cf_tin`
    * custom field). See the Sep 8, 2026 note above for why this narrow
    * exception exists. Never creates a contact — `contactId` must already
