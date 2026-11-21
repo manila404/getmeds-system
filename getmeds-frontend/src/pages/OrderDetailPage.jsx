@@ -6,7 +6,7 @@ import { ArrowLeft, Package, CreditCard, Truck, Clock, CheckCircle, AlertCircle,
 import client from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { formatPHT } from '../utils/dateUtils';
-import { openPrintableSalesOrder } from '../utils/printSalesOrder';
+import { fetchAndPrintSalesOrder } from '../utils/printSalesOrder';
 // Sep 10, 2026 (2d): the flat event list became a ten-stage pipeline. See
 // components/orders/OrderPipeline.jsx and, on the backend,
 // services/orderTimelineService.js.
@@ -1063,11 +1063,11 @@ const OrderDetailPage = () => {
               </button>
               <button
                 type="button"
-                onClick={() => openPrintableSalesOrder({ order, items })}
+                onClick={() => fetchAndPrintSalesOrder(order.id)}
                 className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface"
-                title="Print formatted Sales Order in Hub without opening Zoho"
+                title={splits.length > 0 ? 'Print Zoho-formatted Sales Orders for every split entity' : 'Print formatted Sales Order in Hub without opening Zoho'}
               >
-                🖨️ Print SO
+                🖨️ {splits.length > 0 ? `Print SOs (${splits.length + 1})` : 'Print SO'}
               </button>
             </div>
           </div>

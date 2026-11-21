@@ -654,4 +654,144 @@ describe('deliveryReceiptService end-to-end flows (mocked DB + MockZohoAdapter)'
       })
     ).rejects.toMatchObject({ code: 'ENTITY_MISMATCH', status: 422 });
   });
+
+  it('split-order DR, invoice, and shipment stay isolated per entity SO (2MG primary + GPI split)', async () => {
+    jest.resetModules();
+    const adapter = new MockZohoAdapter();
+    const soPrimary = await adapter.createSalesOrder({
+      getmeds_order_id: 'GM-20261120-0035',
+      customer_name: 'Ronaldo Biscocho',
+      customer_type: 'patient',
+      customer_master_type: 'patient',
+      invoicing_from: '2mg Incorporated',
+      salesperson_name: 'TEST | MEDREP',
+      items: [{ sku: 'GM-4622', name: 'Beltro 25mg', quantity: 14, unit_price: 454.68, subtotal: 6365.52 }]
+    });
+    const soSplit = await adapter.createSalesOrder({
+      getmeds_order_id: 'GM-20261120-0035',
+      customer_name: 'Ronaldo Biscocho',
+      customer_type: 'patient',
+      customer_master_type: 'patient',
+      invoicing_from: 'Getmeds Philippines Inc.',
+      salesperson_name: 'TEST | MEDREP',
+      items: [{ sku: 'GM-4442', name: 'Getfil 300', quantity: 2, unit_price: 3000, subtotal: 6000 }]
+    });
+    await adapter.confirmSalesOrder(soPrimary.salesorder.salesorder_id);
+    await adapter.confirmSalesOrder(soSplit.salesorder.salesorder_id);
+
+    const dbWrites = [];
+    const drs = [];
+    const seqState = { '2MG': { last_dr_no: 4924, last_item_no: 1482 }, GPI: { last_dr_no: 4568, last_item_no: 711 } };
+
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/orderClaimService', () => ({
+      claimOrder: jest.fn().mockResolvedValue('tok-split'),
+      releaseClaim: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/services/orderCompletionService', () => ({
+      evaluateCompletion: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m, d) { super(m); this.status = s; this.code = c; if (d) this.details = d; } },
+      assertCanActOnOrder: jest.fn().mockResolvedValue({ order: { id: 63853 } })
+    }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: () => ({ id: 1, name: 'Aaron Dispatch' }),
+      logEvent: jest.fn().mockResolvedValue()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => ({
+        get: jest.fn(async (...args) => {
+          if (/FROM orders o/i.test(sql)) {
+            return {
+              id: 63853, getmeds_order_id: 'GM-20261120-0035', status: 'dispatched',
+              invoicing_from: '2mg Incorporated', zoho_so_id: soPrimary.salesorder.salesorder_id,
+              zoho_so_number: soPrimary.salesorder.salesorder_number,
+              oojeema_entity: '2MG', oojeema_si_number: 'SI-2MG-999',
+              customer_name: 'Ronaldo Biscocho', customer_category: 'patient', intake_doctor: 'Melissa Erika Tuy',
+              intake_delivery_method: 'Lalamove'
+            };
+          }
+          if (/SELECT last_dr_no, last_item_no FROM dr_sequences/i.test(sql)) return seqState[args[0]];
+          if (/FROM delivery_receipts WHERE id = \?/i.test(sql)) return drs.find((d) => d.id === args[0]) || null;
+          if (/FROM delivery_receipts/i.test(sql)) {
+            return drs.find((d) => d.order_id === args[0] && d.entity_key === args[1] && ['draft', 'issued'].includes(d.status)) || null;
+          }
+          if (/FROM order_events/i.test(sql)) return { ok: 1 };
+          return null;
+        }),
+        all: jest.fn(async () => {
+          if (/FROM order_items oi/i.test(sql)) {
+            return [
+              { id: 18600, order_id: 63853, product_name: 'Beltro 25mg', quantity: 14, unit: 'pcs', invoicing_from: null },
+              { id: 18602, order_id: 63853, product_name: 'Getfil 300', quantity: 2, unit: 'pcs', invoicing_from: 'Getmeds Philippines Inc.' }
+            ];
+          }
+          if (/FROM order_split_sales_orders/i.test(sql)) {
+            return [{
+              id: 65,
+              order_id: 63853,
+              invoicing_from: 'Getmeds Philippines Inc.',
+              zoho_so_id: soSplit.salesorder.salesorder_id,
+              zoho_so_number: soSplit.salesorder.salesorder_number,
+              payment_status: 'verified'
+            }];
+          }
+          return [];
+        }),
+        run: jest.fn(async (...args) => {
+          dbWrites.push({ sql, args });
+          if (/UPDATE dr_sequences/i.test(sql)) {
+            seqState[args[3]].last_dr_no = args[0];
+            seqState[args[3]].last_item_no = args[1];
+          }
+          if (/INSERT INTO delivery_receipts /i.test(sql)) {
+            const id = drs.length + 1;
+            drs.push({
+              id, entity_key: args[0], dr_number: args[1], order_id: args[2],
+              external_ref: args[3], si_number: args[4], status: 'issued'
+            });
+            return { lastInsertRowid: id };
+          }
+          return { changes: 1 };
+        })
+      }))
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+    // 1. Issuing DR for GPI split SO uses split SO# as external_ref and doesn't leak primary's SI or overwrite primary's oojeema_entity.
+    const gpiDr = await svc.issueSalesOrderDr({
+      orderId: 63853,
+      entityKey: 'GPI',
+      user: { id: 1, name: 'Aaron Dispatch' }
+    });
+    expect(gpiDr.receipt.external_ref).toBe(soSplit.salesorder.salesorder_number);
+    expect(gpiDr.receipt.si_number).toBeNull();
+    expect(dbWrites.some((w) => /UPDATE orders/i.test(w.sql) && /oojeema_entity/i.test(w.sql))).toBe(false);
+
+    // 2. Auto-invoicing & shipping the split GPI entity works even after primary is already 'dispatched',
+    //    and writes invoice + shipment IDs strictly to order_split_sales_orders.
+    const invOut = await svc.finalizeZohoInvoiceForOrder({
+      orderId: 63853,
+      entityKey: 'GPI',
+      user: { id: 1, name: 'Aaron Dispatch' },
+      adapter
+    });
+    expect(invOut.entity_key).toBe('GPI');
+    expect(dbWrites.some((w) => /UPDATE order_split_sales_orders/i.test(w.sql) && w.args.includes(invOut.zoho_invoice_id))).toBe(true);
+    expect(dbWrites.some((w) => /UPDATE orders\s+SET zoho_invoice_id/i.test(w.sql))).toBe(false);
+
+    const shipOut = await svc.shipInvoicedOrderInZoho({
+      orderId: 63853,
+      entityKey: 'GPI',
+      deliveryMethod: 'Lalamove',
+      trackingNumber: 'https://share.lalamove.com/split-gpi',
+      user: { id: 1, name: 'Aaron Dispatch' },
+      adapter
+    });
+    expect(shipOut.entity_key).toBe('GPI');
+    expect(shipOut.zoho_shipment_id).toBeTruthy();
+    expect(dbWrites.some((w) => /UPDATE order_split_sales_orders/i.test(w.sql) && w.args.includes(shipOut.zoho_shipment_id))).toBe(true);
+  });
 });

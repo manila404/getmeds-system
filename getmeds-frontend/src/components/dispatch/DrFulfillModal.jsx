@@ -6,7 +6,7 @@ import {
   Paperclip, ExternalLink, RefreshCw, Pencil
 } from 'lucide-react';
 import client from '../../api/client';
-import { fetchAndPrintSalesOrder } from '../../utils/printSalesOrder';
+import { fetchAndPrintSalesOrder, normalizeEntityKey } from '../../utils/printSalesOrder';
 import { attachmentLabel } from '../../constants/attachmentTypes';
 import AttachmentLightbox from '../orders/AttachmentLightbox';
 import DrPrintVoucherModal from './DrPrintVoucherModal';
@@ -29,24 +29,29 @@ function getTrackingExemptionInfo(method) {
   return { exempt: false, zohoLabel: String(method || '').trim() };
 }
 
+const ENTITY_FULL_NAME = {
+  GPI: 'Getmeds Philippines Inc.',
+  '2MG': '2mg Incorporated'
+};
+
 const DrFulfillModal = ({ order, onClose, onCompleted }) => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [conflictMsg, setConflictMsg] = useState('');
   const [batchData, setBatchData] = useState(null);
-  const [step, setStep] = useState(1);
+  const [stepByEntity, setStepByEntity] = useState({ GPI: 1, '2MG': 1 });
 
   const [doctorName, setDoctorName] = useState('NNH');
   const [requiresSi, setRequiresSi] = useState(false);
   const [entityKey, setEntityKey] = useState('GPI');
   const [picksByItem, setPicksByItem] = useState({});
-  const [drData, setDrData] = useState(null);
+  const [drByEntity, setDrByEntity] = useState({});
   const [printOpen, setPrintOpen] = useState(false);
-  const [siSuffix, setSiSuffix] = useState('');
-  const [finalInvoice, setFinalInvoice] = useState(null);
+  const [siSuffixByEntity, setSiSuffixByEntity] = useState({});
+  const [finalInvoiceByEntity, setFinalInvoiceByEntity] = useState({});
   const [deliveryMethod, setDeliveryMethod] = useState('');
   const [trackingNumber, setTrackingNumber] = useState('');
-  const [shipResult, setShipResult] = useState(null);
+  const [shipResultByEntity, setShipResultByEntity] = useState({});
   const [shipping, setShipping] = useState(false);
   const [editingZohoTracking, setEditingZohoTracking] = useState(false);
   const [editingCompliance, setEditingCompliance] = useState(false);
@@ -55,6 +60,23 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
   const [savingCompliance, setSavingCompliance] = useState(false);
   const [lightboxAttachment, setLightboxAttachment] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
+
+  const step = stepByEntity[entityKey] || 1;
+  const drData = drByEntity[entityKey] || null;
+  const siSuffix = siSuffixByEntity[entityKey] ?? '';
+  const finalInvoice = finalInvoiceByEntity[entityKey] || null;
+  const shipResult = shipResultByEntity[entityKey] || null;
+
+  const setStep = (val, targetKey = entityKey) =>
+    setStepByEntity((prev) => ({ ...prev, [targetKey]: typeof val === 'function' ? val(prev[targetKey] || 1) : val }));
+  const setDrData = (val, targetKey = entityKey) =>
+    setDrByEntity((prev) => ({ ...prev, [targetKey]: typeof val === 'function' ? val(prev[targetKey] || null) : val }));
+  const setSiSuffix = (val, targetKey = entityKey) =>
+    setSiSuffixByEntity((prev) => ({ ...prev, [targetKey]: val }));
+  const setFinalInvoice = (val, targetKey = entityKey) =>
+    setFinalInvoiceByEntity((prev) => ({ ...prev, [targetKey]: typeof val === 'function' ? val(prev[targetKey] || null) : val }));
+  const setShipResult = (val, targetKey = entityKey) =>
+    setShipResultByEntity((prev) => ({ ...prev, [targetKey]: typeof val === 'function' ? val(prev[targetKey] || null) : val }));
 
   const attachmentsQuery = useQuery({
     queryKey: ['finance-order-attachments', order.id],
@@ -83,32 +105,96 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
       const d = res.data;
       setBatchData(d);
       setDoctorName(d.order.dispatch_doctor_name || d.order.intake_doctor || 'NNH');
-      setRequiresSi(Boolean(d.classification?.requires_si));
-      setEntityKey(d.classification?.primary_entity || d.classification?.entity_keys?.[0] || 'GPI');
-      setSiSuffix(d.order.oojeema_si_number || '');
+      const reqSi = Boolean(d.classification?.requires_si);
+      setRequiresSi(reqSi);
+
+      const primaryKey = normalizeEntityKey(d.classification?.primary_entity || d.order.invoicing_from) || d.classification?.entity_keys?.[0] || 'GPI';
+      const splitKeys = (d.splits || []).map((s) => normalizeEntityKey(s.invoicing_from)).filter(Boolean);
+      const validEntityKeys = Array.from(new Set([primaryKey, ...splitKeys]));
+      setEntityKey((prev) => (validEntityKeys.includes(prev) ? prev : primaryKey));
+
       setTinInput(d.order.tin || '');
       setLtoInput(d.order.lto_license_number || '');
-      setDeliveryMethod(d.order.courier || d.order.entered_tracking?.courier || d.order.intake_delivery_method || '');
-      setTrackingNumber(d.order.tracking_number || d.order.entered_tracking?.tracking_number || '');
+      const baseMethod = d.order.courier || d.order.entered_tracking?.courier || d.order.intake_delivery_method || '';
+      const baseTracking = d.order.tracking_number || d.order.entered_tracking?.tracking_number || '';
+      setDeliveryMethod(baseMethod);
+      setTrackingNumber(baseTracking);
+
+      const activeDrs = Array.isArray(d.active_drs) ? d.active_drs : [];
+      const activeDrByKey = {};
+      for (const dr of activeDrs) {
+        const k = normalizeEntityKey(dr.entity_key);
+        if (k) activeDrByKey[k] = dr;
+      }
+
+      // Hydrate printable DR payloads in parallel if any active DR already exists.
+      const drPayloads = {};
+      if (activeDrs.length) {
+        const drDetails = await Promise.all(
+          activeDrs.map((r) => client.get(`/api/dispatch/dr/${r.id}`).then((x) => x.data?.data).catch(() => null))
+        );
+        for (const payload of drDetails) {
+          const k = normalizeEntityKey(payload?.receipt?.entity_key);
+          if (k) drPayloads[k] = payload;
+        }
+      }
+      setDrByEntity((prev) => ({ ...prev, ...drPayloads }));
+
+      const nextFinal = {};
+      const nextShip = {};
+      const nextSi = {};
+      const nextStep = {};
+
       if (d.order.zoho_invoice_number) {
-        setFinalInvoice((prev) => prev || {
-          entity_key: d.order.oojeema_entity || d.classification?.primary_entity || 'GPI',
+        nextFinal[primaryKey] = {
+          entity_key: primaryKey,
           zoho_invoice_id: d.order.zoho_invoice_id,
-          zoho_invoice_number: d.order.zoho_invoice_number
-        });
+          zoho_invoice_number: d.order.zoho_invoice_number,
+          dr_number: activeDrByKey[primaryKey]?.dr_number || null
+        };
       }
       if (d.order.zoho_shipment_id || d.order.zoho_shipment_number) {
-        setShipResult((prev) => prev || {
+        nextShip[primaryKey] = {
+          entity_key: primaryKey,
           zoho_package_number: d.order.zoho_package_number,
           zoho_shipment_id: d.order.zoho_shipment_id,
           zoho_shipment_number: d.order.zoho_shipment_number,
-          delivery_method: d.order.courier || d.order.entered_tracking?.courier || d.order.intake_delivery_method || '',
-          tracking_number: d.order.tracking_number || d.order.entered_tracking?.tracking_number || ''
-        });
+          delivery_method: baseMethod,
+          tracking_number: baseTracking
+        };
       }
-      if (d.order.zoho_invoice_number || d.order.zoho_shipment_id || d.order.zoho_shipment_number) {
-        setStep(3);
+      nextSi[primaryKey] = activeDrByKey[primaryKey]?.si_number || d.order.oojeema_si_number || '';
+      nextStep[primaryKey] = (nextFinal[primaryKey] || nextShip[primaryKey]) ? 3 : (activeDrByKey[primaryKey] && reqSi ? 2 : 1);
+
+      for (const s of d.splits || []) {
+        const sKey = normalizeEntityKey(s.invoicing_from);
+        if (!sKey) continue;
+        if (s.zoho_invoice_number) {
+          nextFinal[sKey] = {
+            entity_key: sKey,
+            zoho_invoice_id: s.zoho_invoice_id,
+            zoho_invoice_number: s.zoho_invoice_number,
+            dr_number: activeDrByKey[sKey]?.dr_number || null
+          };
+        }
+        if (s.zoho_shipment_id || s.zoho_shipment_number) {
+          nextShip[sKey] = {
+            entity_key: sKey,
+            zoho_package_number: s.zoho_package_number,
+            zoho_shipment_id: s.zoho_shipment_id,
+            zoho_shipment_number: s.zoho_shipment_number,
+            delivery_method: baseMethod,
+            tracking_number: baseTracking
+          };
+        }
+        nextSi[sKey] = activeDrByKey[sKey]?.si_number || '';
+        nextStep[sKey] = (nextFinal[sKey] || nextShip[sKey]) ? 3 : (activeDrByKey[sKey] && reqSi ? 2 : 1);
       }
+
+      setFinalInvoiceByEntity((prev) => ({ ...prev, ...nextFinal }));
+      setShipResultByEntity((prev) => ({ ...prev, ...nextShip }));
+      setSiSuffixByEntity((prev) => ({ ...nextSi, ...prev }));
+      setStepByEntity((prev) => ({ ...prev, ...nextStep }));
 
       const initPicks = {};
       for (const ln of d.lines || []) {
@@ -257,8 +343,15 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
   const handleSaveBatchesAndAdvance = async () => {
     setSaving(true);
     try {
-      const flatPicks = Object.values(picksByItem).flat().filter((p) => Number(p.quantity) > 0);
+      const targetLines = (batchData?.lines || []).filter(
+        (ln) => (batchData?.splits?.length ? ln.entity_key === entityKey : true)
+      );
+      const targetItemIds = new Set(targetLines.map((ln) => Number(ln.order_item_id)));
+      const flatPicks = Object.values(picksByItem)
+        .flat()
+        .filter((p) => Number(p.quantity) > 0 && targetItemIds.has(Number(p.order_item_id)));
       const { data: res } = await client.post(`/api/dispatch/orders/${order.id}/batches`, {
+        entity_key: batchData?.splits?.length ? entityKey : null,
         doctor_name: doctorName,
         requires_si: requiresSi,
         picks: flatPicks,
@@ -268,7 +361,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
 
       if (!requiresSi) {
         setStep(3);
-        toast.success('Batches saved — skipped DR (No SI required).');
+        toast.success(`Batches saved (${entityKey}) — skipped DR (No SI required).`);
         return;
       }
 
@@ -290,7 +383,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
         setDrData(existingDr.data);
         setConflictMsg('');
         setStep(2);
-        toast('Loaded existing active DR for this order.');
+        toast(`Loaded existing active ${entityKey} DR for this order.`);
       } else {
         handleApiError(err, 'Could not save batches / generate DR.');
       }
@@ -371,11 +464,13 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
 
   const handleCopyOojeema = () => {
     const o = batchData?.order || {};
-    const lines = (batchData?.lines || []).map((ln) => {
+    const lines = activeLines.map((ln) => {
       const picks = (picksByItem[ln.order_item_id] || []).map((p) => `${p.batch_number} (Exp ${p.expiry_date || 'N/A'})`).join(', ');
       return `${ln.quantity} ${ln.unit || 'pc'} x ${ln.product_name}${picks ? ` [${picks}]` : ''}`;
     });
     const text = [
+      `ENTITY: ${ENTITY_FULL_NAME[entityKey] || entityKey} (${entityKey})`,
+      `ZOHO SO: ${activeTab?.soNumber || o.zoho_so_number || '—'}`,
       `CUSTOMER: ${o.customer_name || ''}`,
       `TIN: ${o.tin || 'N/A'} | LTO: ${o.lto_license_number || 'N/A'}`,
       `ADDRESS: ${o.delivery_address || ''}`,
@@ -385,7 +480,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
     ].join('\n');
     navigator.clipboard?.writeText(text);
     setCopiedKey('__all__');
-    toast.success('Copied full Oojeema summary to clipboard!');
+    toast.success(`Copied ${entityKey} Oojeema summary to clipboard!`);
     setTimeout(() => setCopiedKey((prev) => (prev === '__all__' ? null : prev)), 1500);
   };
 
@@ -448,6 +543,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
     setShipping(true);
     try {
       const { data: res } = await client.post(`/api/dispatch/orders/${order.id}/zoho-tracking`, {
+        entity_key: isSplit ? entityKey : null,
         delivery_method: deliveryMethod.trim(),
         tracking_number: trackingNumber.trim()
       });
@@ -470,6 +566,37 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
 
   const cls = batchData?.classification;
   const o = batchData?.order || order;
+  const splits = batchData?.splits || [];
+  const primaryEntityKey = normalizeEntityKey(cls?.primary_entity || o.invoicing_from) || cls?.entity_keys?.[0] || 'GPI';
+  const allLines = batchData?.lines || [];
+  const entityTabs = (() => {
+    const buildTab = (eKey, soNum, isPrimary) => {
+      const eLines = allLines.filter((ln) => (ln.entity_key || primaryEntityKey) === eKey);
+      const eTotal = eLines.reduce((sum, ln) => sum + Number(ln.subtotal || 0), 0);
+      return {
+        entityKey: eKey,
+        label: ENTITY_FULL_NAME[eKey] || eKey,
+        soNumber: soNum || '—',
+        isPrimary,
+        itemCount: eLines.length,
+        entityTotal: eTotal,
+        dr: drByEntity[eKey]?.receipt || (batchData?.active_drs || []).find((r) => normalizeEntityKey(r.entity_key) === eKey) || null,
+        invoice: finalInvoiceByEntity[eKey] || null,
+        ship: shipResultByEntity[eKey] || null
+      };
+    };
+    const tabs = [buildTab(primaryEntityKey, o.zoho_so_number, true)];
+    for (const s of splits) {
+      const sKey = normalizeEntityKey(s.invoicing_from);
+      if (sKey && !tabs.some((t) => t.entityKey === sKey)) {
+        tabs.push(buildTab(sKey, s.zoho_so_number, false));
+      }
+    }
+    return tabs;
+  })();
+  const isSplit = entityTabs.length > 1;
+  const activeTab = entityTabs.find((t) => t.entityKey === entityKey) || entityTabs[0];
+  const activeLines = isSplit ? allLines.filter((ln) => (ln.entity_key || primaryEntityKey) === entityKey) : allLines;
 
   return (
     <div className="fixed inset-0 z-40 bg-slate-900/50 flex items-center justify-center p-4">
@@ -481,7 +608,12 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
               <span className="truncate">{o.getmeds_order_id} — {o.customer_name}</span>
             </h3>
             <div className="text-xs text-ink-secondary flex flex-wrap items-center gap-x-2 gap-y-1 mt-0.5">
-              <span>SO: {o.zoho_so_number || '—'}</span>
+              <span>
+                SO:{' '}
+                {isSplit
+                  ? entityTabs.map((t) => `${t.entityKey} ${t.soNumber}`).join(' · ')
+                  : (o.zoho_so_number || '—')}
+              </span>
               <span>· Warehouse: {o.fulfil_warehouse_name || 'Main (Zoho default)'}</span>
               <span>· TIN: <b className="text-ink-primary">{o.tin || '—'}</b></span>
               <span>· LTO: <b className="text-ink-primary">{o.lto_license_number || '—'}</b></span>
@@ -501,14 +633,35 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => fetchAndPrintSalesOrder(order.id)}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-ink-primary text-xs font-semibold hover:bg-surface"
-              title="Print Zoho-style Sales Order in Hub"
-            >
-              <Printer className="w-3.5 h-3.5" /> Print SO
-            </button>
+            {isSplit ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => fetchAndPrintSalesOrder(order.id, { entityKey })}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-ink-primary text-xs font-semibold hover:bg-surface"
+                  title={`Print ${entityKey} Sales Order (${activeTab?.soNumber || ''})`}
+                >
+                  <Printer className="w-3.5 h-3.5" /> Print {entityKey} SO
+                </button>
+                <button
+                  type="button"
+                  onClick={() => fetchAndPrintSalesOrder(order.id)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-indigo-300 bg-indigo-50 text-indigo-900 text-xs font-semibold hover:bg-indigo-100"
+                  title="Print both company Sales Orders back-to-back"
+                >
+                  <Printer className="w-3.5 h-3.5" /> All SOs ({entityTabs.length})
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => fetchAndPrintSalesOrder(order.id)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-ink-primary text-xs font-semibold hover:bg-surface"
+                title="Print Zoho-style Sales Order in Hub"
+              >
+                <Printer className="w-3.5 h-3.5" /> Print SO
+              </button>
+            )}
             {finalInvoice && step !== 3 && (
               <button
                 type="button"
@@ -627,6 +780,58 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
             </div>
           )}
 
+          {!loading && isSplit && (
+            <div className="p-3 rounded-lg border border-indigo-200 bg-indigo-50/70 space-y-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-indigo-950">
+                <span>
+                  <b>Split Order Across {entityTabs.length} Companies:</b> Fulfill, issue DR/SI or auto-invoice, and ship each entity Sales Order under its own company below.
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {entityTabs.map((tab) => {
+                  const active = tab.entityKey === entityKey;
+                  const statusLabel = tab.ship
+                    ? 'Shipped'
+                    : tab.invoice
+                      ? `Invoiced · ${tab.invoice.zoho_invoice_number}`
+                      : tab.dr
+                        ? `DR #${tab.dr.dr_number}`
+                        : 'Pending';
+                  const statusCls = tab.ship || tab.invoice
+                    ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                    : tab.dr
+                      ? 'bg-amber-100 text-amber-900 border-amber-300'
+                      : 'bg-slate-100 text-slate-700 border-slate-300';
+                  return (
+                    <button
+                      key={tab.entityKey}
+                      type="button"
+                      onClick={() => { setEntityKey(tab.entityKey); setEditingZohoTracking(false); }}
+                      className={`text-left px-3 py-2 rounded-lg border transition-colors ${
+                        active
+                          ? 'border-getmeds-blue bg-white shadow-sm ring-2 ring-getmeds-blue/20'
+                          : 'border-indigo-200 bg-white/70 hover:bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-ink-primary">
+                          {tab.entityKey} · <span className="font-mono">{tab.soNumber}</span>
+                        </span>
+                        <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold uppercase ${statusCls}`}>
+                          {statusLabel}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-ink-secondary mt-0.5 flex items-center justify-between gap-2">
+                        <span>{tab.label}{tab.isPrimary ? ' (Primary)' : ' (Split)'}</span>
+                        <span className="font-medium">{tab.itemCount} item(s) · ₱{Number(tab.entityTotal || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-3 gap-2 text-xs">
             <div className={`px-3 py-2 rounded-lg border ${step === 1 ? 'border-getmeds-blue bg-blue-50 font-semibold text-getmeds-blue' : 'border-slate-200 bg-surface text-ink-secondary'}`}>
               1. Doctor &amp; Zoho Batches
@@ -648,16 +853,18 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                   <label className="block font-semibold text-ink-secondary mb-1">Entity (Strict Separation)</label>
                   <select
                     value={entityKey}
-                    disabled={Boolean(cls?.primary_entity && !cls?.is_split)}
+                    disabled={Boolean(cls?.primary_entity)}
                     onChange={(e) => setEntityKey(e.target.value)}
-                    className={`w-full px-2.5 py-1.5 border border-slate-300 rounded ${cls?.primary_entity && !cls?.is_split ? 'bg-slate-100 text-ink-secondary cursor-not-allowed' : 'bg-white'}`}
+                    className={`w-full px-2.5 py-1.5 border border-slate-300 rounded ${cls?.primary_entity ? 'bg-slate-100 text-ink-secondary cursor-not-allowed' : 'bg-white'}`}
                   >
                     <option value="GPI">Getmeds Philippines Inc. (GPI)</option>
                     <option value="2MG">2mg Incorporated (2MG)</option>
                   </select>
-                  {cls?.primary_entity && !cls?.is_split && (
+                  {isSplit ? (
+                    <div className="mt-0.5 text-[10px] text-indigo-700 font-medium">Controlled by company tab above ({activeTab?.soNumber})</div>
+                  ) : cls?.primary_entity ? (
                     <div className="mt-0.5 text-[10px] text-ink-secondary">Locked to Sales Order entity ({cls.primary_entity})</div>
-                  )}
+                  ) : null}
                 </div>
                 <div>
                   <label className="block font-semibold text-ink-secondary mb-1">Requires Oojeema SI &amp; DR?</label>
@@ -700,7 +907,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {(batchData?.lines || []).map((ln) => {
+                    {activeLines.map((ln) => {
                       const linePicks = picksByItem[ln.order_item_id] || [];
                       const validBatches = (ln.available_batches || []).filter((b) => !b.is_expired && Number(b.available_quantity) > 0);
                       const pickedTotal = linePicks.reduce((s, p) => s + Number(p.quantity || 0), 0);
@@ -1004,11 +1211,12 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                     <div className="p-3.5 space-y-3 text-xs bg-white">
                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                         {[
+                          { key: 'ent', label: 'Company Entity', val: `${ENTITY_FULL_NAME[entityKey] || entityKey} (${entityKey})` },
                           { key: 'cust', label: 'Customer', val: o.customer_name },
                           { key: 'tin', label: 'TIN', val: o.tin },
                           { key: 'lto', label: 'LTO No.', val: o.lto_license_number },
                           { key: 'terms', label: 'Terms / MOP', val: o.intake_payment_terms || 'COD' },
-                          { key: 'so', label: 'Zoho SO No.', val: o.zoho_so_number },
+                          { key: 'so', label: 'Zoho SO No.', val: activeTab?.soNumber || o.zoho_so_number },
                           { key: 'dr', label: 'DR No.', val: drData?.receipt?.dr_number ? `${drData.receipt.dr_number}` : null },
                           { key: 'doc', label: 'Doctor', val: doctorName },
                           { key: 'gl', label: 'GL No.', val: o.intake_gl_number }
@@ -1058,7 +1266,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
-                            {(batchData?.lines || []).map((ln) => {
+                            {activeLines.map((ln) => {
                               const linePicks = picksByItem[ln.order_item_id] || [];
                               const itemKey = `item-${ln.order_item_id}`;
                               const qtyKey = `qty-${ln.order_item_id}`;
@@ -1230,15 +1438,29 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
                 {shipping ? 'Creating Package & Shipment…' : 'Create Zoho Package & Mark Shipped'}
               </button>
             )}
-            {step === 3 && finalInvoice && shipResult && (
-              <button
-                type="button"
-                onClick={onClose}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
-              >
-                <Check className="w-3.5 h-3.5" /> Done
-              </button>
-            )}
+            {step === 3 && finalInvoice && shipResult && (() => {
+              const nextPending = isSplit ? entityTabs.find((t) => t.entityKey !== entityKey && (!t.invoice || !t.ship)) : null;
+              return (
+                <>
+                  {nextPending && (
+                    <button
+                      type="button"
+                      onClick={() => { setEntityKey(nextPending.entityKey); setEditingZohoTracking(false); }}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700"
+                    >
+                      Fulfill {nextPending.entityKey} ({nextPending.soNumber}) →
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
+                  >
+                    <Check className="w-3.5 h-3.5" /> Done
+                  </button>
+                </>
+              );
+            })()}
           </div>
         </div>
       </div>

@@ -67,6 +67,7 @@ const { buildZohoSalesOrderPayload } = require('../services/zohoPayloadBuilder')
 const { isTestModeEnabled } = require('../middleware/testMode');
 const { computeLine, parseInclusiveTax } = require('../services/lineAmounts');
 const { hasColumn, tableExists } = require('../services/schemaColumns');
+const { normalizeEntityKey } = require('../services/orderClassificationService');
 const { CATERED_SUBQUERY } = require('../services/dispatchCater');
 
 // Sep 5, 2026 (3): mirrors auth.controller.js's SUB_DIVISIONS_BY_DIVISION
@@ -1014,6 +1015,126 @@ exports.getById = async (req, res, next) => {
         splits,
         events: events.map((e) => ({ ...e, tier: tierOf(e.event_type) })),
         timeline: buildTimeline(order, events, splits)
+      }
+    });
+  } catch (err) { next(err); }
+};
+
+// Best-effort printable SO payload: returns Hub order/items/splits and, when
+// Zoho is reachable, enriches each entity's Sales Order with live Zoho fields
+// (Strength, Medicine Form, Terms & Conditions, Status, exact line items).
+exports.getPrintableSalesOrders = async (req, res, next) => {
+  try {
+    const order = await db.prepare(`
+      SELECT o.*, c.name as customer_name, c.contact_person, c.contact_number,
+             c.address as customer_address,
+             COALESCE(NULLIF(TRIM(c.tin), ''), NULLIF(TRIM(o.intake_tin), '')) as tin,
+             c.lto_license_number,
+             u.name as medrep_name, u.email as medrep_email, u.salesperson as salesperson_name
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN users u ON o.medrep_id = u.id
+      WHERE o.id = ?
+    `).get(req.params.id);
+
+    if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } });
+    if (!canActOnOrder(req.user, order)) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    }
+    if (req.user.role === 'team_lead') {
+      if (!(await teamScopeService.canAccessOrder(req.user, order))) {
+        return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+      }
+    } else if (!(await canAccessOrder(req.user, order))) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    }
+
+    const items = await db.prepare(`
+      SELECT oi.*, p.name as product_name, p.sku, p.unit, p.zoho_item_id, p.tax_name, p.tax_percentage
+      FROM order_items oi
+      LEFT JOIN products p ON oi.product_id = p.id
+      WHERE oi.order_id = ?
+      ORDER BY oi.id ASC
+    `).all(order.id);
+    const { rows: splits } = await getSplitsForOrder(order.id);
+
+    const primaryKey = normalizeEntityKey(order.invoicing_from) || 'GPI';
+    const soTargets = [];
+    if (order.zoho_so_id && !String(order.zoho_so_id).startsWith('DRYRUN-')) {
+      soTargets.push({ entityKey: primaryKey, zohoSoId: order.zoho_so_id });
+    }
+    for (const s of splits || []) {
+      const k = normalizeEntityKey(s.invoicing_from);
+      if (k && s.zoho_so_id && !String(s.zoho_so_id).startsWith('DRYRUN-')) {
+        soTargets.push({ entityKey: k, zohoSoId: s.zoho_so_id });
+      }
+    }
+
+    const zohoSalesOrdersByEntity = {};
+    if (soTargets.length > 0 && typeof zoho?.getSalesOrder === 'function') {
+      const customFieldVal = (list, apiName) => {
+        if (!Array.isArray(list)) return '';
+        const found = list.find((f) => f && f.api_name === apiName);
+        return String(found?.value_formatted ?? found?.value ?? '').trim();
+      };
+      const fetchOne = async ({ entityKey, zohoSoId }) => {
+        try {
+          const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 4000));
+          const resSo = await Promise.race([zoho.getSalesOrder(zohoSoId), timeout]);
+          const so = resSo?.salesorder;
+          if (!so) return;
+          zohoSalesOrdersByEntity[entityKey] = {
+            salesorder_id: so.salesorder_id,
+            salesorder_number: so.salesorder_number,
+            template_name: so.template_name || null,
+            status: so.status || null,
+            date: so.date || null,
+            shipment_date: so.shipment_date || null,
+            reference_number: so.reference_number || null,
+            payment_terms_label: so.payment_terms_label || null,
+            delivery_method: so.delivery_method || null,
+            salesperson_name: so.salesperson_name || null,
+            customer_name: so.customer_name || null,
+            doctor_name: customFieldVal(so.custom_fields, 'cf_doctor_name') || null,
+            notes: so.notes || null,
+            terms: so.terms || null,
+            is_inclusive_tax: so.is_inclusive_tax,
+            sub_total: so.sub_total,
+            tax_total: so.tax_total,
+            taxes: Array.isArray(so.taxes) ? so.taxes : [],
+            total: so.total,
+            line_items: Array.isArray(so.line_items)
+              ? so.line_items.map((li) => ({
+                  line_item_id: li.line_item_id,
+                  item_id: li.item_id || null,
+                  sku: li.sku || null,
+                  name: li.name,
+                  description: li.description || '',
+                  strength: customFieldVal(li.item_custom_fields, 'cf_strength') || '',
+                  medicine_form: customFieldVal(li.item_custom_fields, 'cf_medicine_form_1') || '',
+                  quantity: Number(li.quantity || 0),
+                  unit: li.unit || 'pcs',
+                  rate: Number(li.rate || 0),
+                  item_total: Number(li.item_total || 0),
+                  tax_name: li.tax_name || '',
+                  tax_percentage: Number(li.tax_percentage || 0)
+                }))
+              : []
+          };
+        } catch {
+          // Best-effort only: print still succeeds from Hub DB data
+        }
+      };
+      await Promise.all(soTargets.map(fetchOne));
+    }
+
+    res.json({
+      success: true,
+      data: {
+        order,
+        items,
+        splits,
+        zoho_sales_orders_by_entity: zohoSalesOrdersByEntity
       }
     });
   } catch (err) { next(err); }

@@ -8,8 +8,74 @@ import DeliveryActions, { deliveryActionFlags, printDeliverySlip } from './Deliv
 import RxBadge from './RxBadge';
 import MoreInfoMenu from './MoreInfoMenu';
 import DrFulfillModal from './DrFulfillModal';
+import { normalizeEntityKey } from '../../utils/printSalesOrder';
 
 const DR_WORKFLOW_UI = import.meta.env.VITE_DR_WORKFLOW === 'true';
+
+function formatEntitySoEntries(order) {
+  const splits = Array.isArray(order?.splits) ? order.splits : [];
+  if (!splits.length && !order?.classification?.is_split) return [];
+  const primaryKey = normalizeEntityKey(order.invoicing_from) || 'GPI';
+  const entries = [
+    {
+      entityKey: primaryKey,
+      soNumber: order.zoho_so_number || '—',
+      invoiceNumber: order.zoho_invoice_number || null,
+      shipmentNumber: order.zoho_shipment_number || null
+    }
+  ];
+  for (const s of splits) {
+    const k = normalizeEntityKey(s.invoicing_from);
+    if (!k || k === primaryKey) continue;
+    entries.push({
+      entityKey: k,
+      soNumber: s.zoho_so_number || '—',
+      invoiceNumber: s.zoho_invoice_number || null,
+      shipmentNumber: s.zoho_shipment_number || null
+    });
+  }
+  return entries;
+}
+
+function formatSoSummary(order) {
+  const entries = formatEntitySoEntries(order);
+  if (entries.length > 1) {
+    return entries.map((e) => `${e.entityKey}: ${e.soNumber}`).join(' · ');
+  }
+  return order.zoho_so_number || null;
+}
+
+function formatInvoiceSummary(order) {
+  const entries = formatEntitySoEntries(order);
+  if (entries.length > 1) {
+    const invs = entries.map((e) => (e.invoiceNumber ? `${e.entityKey}: ${e.invoiceNumber}` : null)).filter(Boolean);
+    return invs.length ? invs.join(' · ') : null;
+  }
+  return order.zoho_invoice_number || null;
+}
+
+const SplitSoBadge = ({ order }) => {
+  const entries = formatEntitySoEntries(order);
+  if (entries.length < 2) return null;
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1 mt-1"
+      title="Split across 2 company Sales Orders — fulfill & invoice each entity under its respective company"
+    >
+      <span className="whitespace-nowrap text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-900 border border-indigo-200">
+        Split SOs ({entries.length})
+      </span>
+      {entries.map((e) => (
+        <span
+          key={e.entityKey}
+          className="whitespace-nowrap text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-ink-primary border border-slate-200"
+        >
+          {e.entityKey}: {e.soNumber}{e.invoiceNumber ? ` · Inv ${e.invoiceNumber}` : ''}
+        </span>
+      ))}
+    </div>
+  );
+};
 
 const ClassificationTags = ({ order }) => {
   const cls = order.classification;
@@ -326,6 +392,7 @@ const RecentDispatchPanel = ({
                   <Opener order={o} onOpen={onOpen}>
                     <p className="text-sm font-mono font-semibold text-getmeds-blue">{o.getmeds_order_id}<WarehouseTag order={o} /></p>
                     <p className="text-sm text-ink-primary font-medium truncate">{o.customer_name}</p>
+                    <SplitSoBadge order={o} />
                     {o.catered && (
                       <p className="text-[11px] text-ink-secondary mt-0.5" title={o.catered.at ? `Catering since ${formatPHT(o.catered.at, 'short-datetime')}` : undefined}>
                         Catered by <span className="font-semibold text-ink-primary">{cateredByMe ? 'You' : o.catered.by}</span>
@@ -342,7 +409,7 @@ const RecentDispatchPanel = ({
                     <MoreInfoMenu
                       title={o.getmeds_order_id}
                       items={[
-                        { label: 'SO number', value: o.zoho_so_number },
+                        { label: 'SO number', value: formatSoSummary(o) },
                         { label: 'MedRep', value: o.medrep_name },
                         { label: 'Prescription', value: o.rx_badge?.label },
                         { label: 'Catered by', value: o.catered?.by }
@@ -406,6 +473,10 @@ const RecentDispatchPanel = ({
                       <p className="text-xs text-ink-secondary truncate" title={o.delivery_address || ''}>
                         {o.delivery_address || <span className="text-red-700 font-semibold">No delivery address</span>}
                       </p>
+                      <SplitSoBadge order={o} />
+                      <div className="mt-1">
+                        <ClassificationTags order={o} />
+                      </div>
                     </Opener>
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
                       <p className="text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</p>
@@ -429,6 +500,7 @@ const RecentDispatchPanel = ({
                         <MoreInfoMenu
                           title={o.getmeds_order_id}
                           items={[
+                            { label: 'SO number', value: formatSoSummary(o) },
                             { label: 'Stage', value: STAGE_LABEL[o.status] || o.status },
                             { label: 'Finance confirmed', value: timeAgo(o.finance_confirmed_at || o.updated_at) },
                             { label: 'Prescription', value: o.rx_badge?.label },
@@ -486,6 +558,7 @@ const RecentDispatchPanel = ({
                     </Opener>
                     <p className="text-sm font-semibold text-ink-primary shrink-0">{peso(o.total_amount)}</p>
                   </div>
+                  <SplitSoBadge order={o} />
                   <ClassificationTags order={o} />
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-xs">
                     <div className="flex items-center gap-2">
@@ -543,6 +616,8 @@ const RecentDispatchPanel = ({
                       <MoreInfoMenu
                         title={o.getmeds_order_id}
                         items={[
+                          { label: 'SO number', value: formatSoSummary(o) },
+                          { label: 'Invoice', value: formatInvoiceSummary(o) },
                           { label: 'Receiver', value: o.intake_receiver },
                           { label: 'Catering since', value: o.catered?.at ? timeAgo(o.catered.at) : null },
                           { label: 'Prescription', value: o.rx_badge?.label }
@@ -644,6 +719,7 @@ const RecentDispatchPanel = ({
                     <Opener order={o} onOpen={onOpen}>
                       <p className="text-sm font-mono font-semibold text-getmeds-blue group-hover:underline">{o.getmeds_order_id}<WarehouseTag order={o} /></p>
                     </Opener>
+                    <SplitSoBadge order={o} />
                     {statusPill && (
                       <span className="inline-block mt-0.5 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
                         {statusPill}
@@ -692,7 +768,8 @@ const RecentDispatchPanel = ({
                       <MoreInfoMenu
                         title={o.getmeds_order_id}
                         items={[
-                          { label: 'SO / Invoice', value: [o.zoho_so_number, o.zoho_invoice_number].filter(Boolean).join(' · ') || null },
+                          { label: 'SO number', value: formatSoSummary(o) },
+                          { label: 'Invoice', value: formatInvoiceSummary(o) },
                           { label: 'Shipment #', value: o.zoho_shipment_number },
                           { label: 'Receiver', value: o.intake_receiver },
                           { label: 'Address', value: o.delivery_address },

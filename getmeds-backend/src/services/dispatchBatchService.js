@@ -3,7 +3,7 @@
 const db = require('../db/database');
 const zoho = require('../integrations/zoho');
 const { isKnownCspProductName } = require('../constants/cspCatalog');
-const { classifyOrder } = require('./orderClassificationService');
+const { classifyOrder, normalizeEntityKey } = require('./orderClassificationService');
 const { hasColumn } = require('./schemaColumns');
 const { logEvent, resolveActor } = require('./auditService');
 const { setCustomerTin, refreshCustomerComplianceFromZoho } = require('./customerTinService');
@@ -321,9 +321,26 @@ async function loadOrderWithItemsForBatches(orderId) {
     effective_warehouse_name: it.fulfil_warehouse_name || order.fulfil_warehouse_name || null
   }));
 
-  const [glProofs, splits, latestTrackingEvent] = await Promise.all([
+  const hasDrTable = await hasColumn('delivery_receipts', 'dr_number');
+  const [glProofs, splits, activeDrs, latestTrackingEvent] = await Promise.all([
     db.prepare("SELECT file_type FROM payment_proofs WHERE order_id = ? AND lower(file_type) = 'gl' LIMIT 1").all(order.id),
-    db.prepare('SELECT invoicing_from FROM order_split_sales_orders WHERE order_id = ?').all(order.id),
+    db.prepare(`
+      SELECT id, order_id, invoicing_from, zoho_so_id, zoho_so_number, zoho_so_status,
+             zoho_sync_status, zoho_sync_error, zoho_invoice_id, zoho_invoice_number,
+             zoho_invoiced_status, zoho_package_id, zoho_package_number,
+             zoho_shipment_id, zoho_shipment_number, zoho_shipped_status, payment_status
+        FROM order_split_sales_orders
+       WHERE order_id = ?
+       ORDER BY id
+    `).all(order.id),
+    hasDrTable
+      ? db.prepare(`
+          SELECT id, entity_key, dr_number, external_ref, si_number, status, date_issued, doctor_name, printed_at, print_count
+            FROM delivery_receipts
+           WHERE order_id = ? AND status IN ('draft', 'issued')
+           ORDER BY id
+        `).all(order.id)
+      : Promise.resolve([]),
     db.prepare(`
       SELECT actor_name, created_at, metadata
         FROM order_events
@@ -358,7 +375,7 @@ async function loadOrderWithItemsForBatches(orderId) {
     splits
   });
 
-  return { order, items: enrichedItems, classification };
+  return { order, items: enrichedItems, classification, splits, activeDrs };
 }
 
 async function fetchWarehouseBatchesForItems(items, { adapter = zoho, today = manilaTodayDate() } = {}) {
@@ -381,7 +398,7 @@ async function fetchWarehouseBatchesForItems(items, { adapter = zoho, today = ma
 }
 
 async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTodayDate() } = {}) {
-  const { order, items, classification } = await loadOrderWithItemsForBatches(orderId);
+  const { order, items, classification, splits, activeDrs } = await loadOrderWithItemsForBatches(orderId);
   if ((!order.tin || !order.lto_license_number) && order.customer_id && order.zoho_contact_id) {
     const refreshed = await refreshCustomerComplianceFromZoho(order.customer_id, order.zoho_contact_id, adapter);
     if (!order.tin && refreshed.tin) order.tin = refreshed.tin;
@@ -410,6 +427,7 @@ async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTod
     }
   }
 
+  const primaryEntity = classification?.primary_entity || normalizeEntityKey(order.invoicing_from) || 'GPI';
   const lines = items.map((it) => {
     const avail = availableBatchesByItemId.get(Number(it.id)) || [];
     const saved = savedByItem.get(it.id) || [];
@@ -434,6 +452,8 @@ async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTod
       quantity: it.quantity,
       unit_price: Number(it.unit_price || 0),
       subtotal: Number(it.subtotal != null ? it.subtotal : Number(it.quantity || 0) * Number(it.unit_price || 0)),
+      invoicing_from: it.invoicing_from || null,
+      entity_key: normalizeEntityKey(it.invoicing_from) || primaryEntity,
       is_csp: Number(it.is_csp) === 1 || isKnownCspProductName(it.product_name),
       warehouse_id: it.effective_warehouse_id,
       warehouse_name: it.effective_warehouse_name,
@@ -445,11 +465,12 @@ async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTod
     };
   });
 
-  return { order, classification, lines };
+  return { order, classification, splits, active_drs: activeDrs, lines };
 }
 
 async function saveOrderBatchPicks({
   orderId,
+  entityKey = null,
   user,
   doctorName,
   requiresSi = null,
@@ -466,18 +487,28 @@ async function saveOrderBatchPicks({
   }
   await assertCanActOnOrder({ orderId, user, expectedUpdatedAt, expectedCateredBy });
 
-  const { order, items } = await loadOrderWithItemsForBatches(orderId);
-  const availableBatchesByItemId = await fetchWarehouseBatchesForItems(items, { adapter, today });
+  const { order, items, classification } = await loadOrderWithItemsForBatches(orderId);
+  const resolvedEntity = entityKey ? normalizeEntityKey(entityKey) : null;
+  const primaryEntity = classification?.primary_entity || normalizeEntityKey(order.invoicing_from) || 'GPI';
+  const targetItems = resolvedEntity
+    ? items.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity)
+    : items;
+  if (resolvedEntity && !targetItems.length) {
+    throw new DispatchBatchError(422, 'NO_ENTITY_ITEMS', `Order ${order.getmeds_order_id} has no items under entity ${resolvedEntity}.`);
+  }
+  const availableBatchesByItemId = await fetchWarehouseBatchesForItems(targetItems, { adapter, today });
 
+  const targetItemIds = new Set(targetItems.map((it) => Number(it.id)));
   const picksByItemId = new Map();
   for (const p of picks || []) {
     const itemId = Number(p.order_item_id);
+    if (!targetItemIds.has(itemId)) continue;
     if (!picksByItemId.has(itemId)) picksByItemId.set(itemId, []);
     picksByItemId.get(itemId).push(p);
   }
 
   const normalizedPicks = validatePickedBatches({
-    items,
+    items: targetItems,
     picksByItemId,
     availableBatchesByItemId,
     today
@@ -488,7 +519,12 @@ async function saveOrderBatchPicks({
   const reqSiFlag = requiresSi === null || requiresSi === undefined ? null : (requiresSi ? 1 : 0);
 
   await db.transaction(async () => {
-    await db.prepare('DELETE FROM order_item_batches WHERE order_id = ?').run(order.id);
+    if (resolvedEntity) {
+      await db.prepare('DELETE FROM order_item_batches WHERE order_id = ? AND order_item_id = ANY(?)')
+        .run(order.id, Array.from(targetItemIds));
+    } else {
+      await db.prepare('DELETE FROM order_item_batches WHERE order_id = ?').run(order.id);
+    }
     for (const p of normalizedPicks) {
       await db.prepare(`
         INSERT INTO order_item_batches (

@@ -348,6 +348,17 @@ async function issueSalesOrderDr({
 
   // Strict Hard Entity Separation: only include lines belonging to `resolvedEntity`.
   const orderPrimaryEntity = normalizeEntityKey(order.invoicing_from || 'GPI');
+  const splits = await db.prepare('SELECT * FROM order_split_sales_orders WHERE order_id = ?').all(order.id);
+  const splitTarget = resolvedEntity !== orderPrimaryEntity
+    ? splits.find((s) => normalizeEntityKey(s.invoicing_from) === resolvedEntity) || null
+    : null;
+  if (order.invoicing_from && resolvedEntity !== orderPrimaryEntity && !splitTarget) {
+    throw new DispatchBatchError(
+      422,
+      'ENTITY_MISMATCH',
+      `Sales Order ${order.zoho_so_number || order.getmeds_order_id} is under ${order.invoicing_from} (${orderPrimaryEntity}) and has no split under ${resolvedEntity}.`
+    );
+  }
   const entityItems = allItems.filter((it) => {
     const lineEntity = normalizeEntityKey(it.invoicing_from) || orderPrimaryEntity;
     return lineEntity === resolvedEntity;
@@ -355,6 +366,8 @@ async function issueSalesOrderDr({
   if (!entityItems.length) {
     throw new DispatchBatchError(422, 'NO_ENTITY_ITEMS', `Order ${order.getmeds_order_id} has no items under entity ${resolvedEntity}.`);
   }
+  const entityExternalRef = splitTarget?.zoho_so_number || order.zoho_so_number || order.getmeds_order_id;
+  const entityInitialSi = splitTarget ? (splitTarget.zoho_invoice_number || null) : (order.oojeema_si_number || null);
 
   const batchRows = await db.prepare('SELECT * FROM order_item_batches WHERE order_id = ? ORDER BY id').all(order.id);
   const batchesByItem = new Map();
@@ -411,8 +424,8 @@ async function issueSalesOrderDr({
         resolvedEntity,
         nextDrNo,
         order.id,
-        order.zoho_so_number || order.getmeds_order_id,
-        order.oojeema_si_number || null,
+        entityExternalRef,
+        entityInitialSi,
         today,
         order.customer_name || 'Unknown Customer',
         order.delivery_address || '',
@@ -444,7 +457,7 @@ async function issueSalesOrderDr({
           resolvedEntity,
           it.id,
           nextItemSeq,
-          order.oojeema_si_number || 'PENDING SI',
+          entityInitialSi || 'PENDING SI',
           it.product_id || null,
           displayName,
           summary.batchNumber,
@@ -457,15 +470,26 @@ async function issueSalesOrderDr({
         );
       }
 
-      await db.prepare(`
-        UPDATE orders
-           SET requires_si = COALESCE(requires_si, 1),
-               requires_dr = COALESCE(requires_dr, 1),
-               dispatch_doctor_name = ?,
-               oojeema_entity = ?,
-               updated_at = ?
-         WHERE id = ?
-      `).run(finalDoctor, resolvedEntity, now, order.id);
+      if (splitTarget) {
+        await db.prepare(`
+          UPDATE orders
+             SET requires_si = COALESCE(requires_si, 1),
+                 requires_dr = COALESCE(requires_dr, 1),
+                 dispatch_doctor_name = ?,
+                 updated_at = ?
+           WHERE id = ?
+        `).run(finalDoctor, now, order.id);
+      } else {
+        await db.prepare(`
+          UPDATE orders
+             SET requires_si = COALESCE(requires_si, 1),
+                 requires_dr = COALESCE(requires_dr, 1),
+                 dispatch_doctor_name = ?,
+                 oojeema_entity = ?,
+                 updated_at = ?
+           WHERE id = ?
+        `).run(finalDoctor, resolvedEntity, now, order.id);
+      }
 
       await logEvent({
         orderId: order.id,
@@ -772,9 +796,9 @@ async function finalizeZohoInvoiceForOrder({
     customInvoiceNumber = formatEntitySiNumber(resolvedEntity, siSuffix);
   }
 
-  const claimableStatuses = [
-    'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'
-  ];
+  const claimableStatuses = splits.length > 0
+    ? ['ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing', 'dispatched', 'tracking_shared']
+    : ['ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch', 'picking_packing'];
   const token = await claimOrder(order.id, claimableStatuses, `Finalize Zoho invoice by ${actor.name}`);
   if (!token) {
     throw new DispatchBatchError(
@@ -838,6 +862,7 @@ async function finalizeZohoInvoiceForOrder({
              SET zoho_invoice_id = ?, zoho_invoice_number = ?, zoho_invoiced_status = 'sent', updated_at = ?
            WHERE id = ?
         `).run(invoice.invoice_id, invoice.invoice_number || customInvoiceNumber, now, splitTarget.id);
+        await db.prepare('UPDATE orders SET updated_at = ? WHERE id = ?').run(now, order.id);
       } else {
         const nextStatus = ['ready_for_draft_invoice', 'ready_for_invoice_sent'].includes(order.status) && stateMachine.canTransition(order.status, 'ready_for_dispatch')
           ? 'ready_for_dispatch'
@@ -1075,6 +1100,23 @@ async function shipInvoicedOrderInZoho({
         await db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?')
           .run(finalOrderStatus, now, order.id);
       } else {
+        await db.prepare(`
+          UPDATE order_split_sales_orders
+             SET zoho_package_id = COALESCE(?, zoho_package_id),
+                 zoho_package_number = COALESCE(?, zoho_package_number),
+                 zoho_shipment_id = COALESCE(?, zoho_shipment_id),
+                 zoho_shipment_number = COALESCE(?, zoho_shipment_number),
+                 zoho_shipped_status = 'shipped',
+                 updated_at = ?
+           WHERE id = ?
+        `).run(
+          pkg.package_id || null,
+          pkg.package_number || null,
+          shipment?.shipment_id || null,
+          shipment?.shipment_number || null,
+          now,
+          splitTarget.id
+        );
         await db.prepare('UPDATE orders SET updated_at = ? WHERE id = ?').run(now, order.id);
       }
 
