@@ -692,6 +692,26 @@ async function loadTargetSalesOrder(adapter, targetSoId, order, entityItems, spl
  * Bridge DR + Oojeema SI (or auto-invoice for Patient/Doctor) + Zoho Warehouse Batches
  * into Zoho Inventory, then mark the invoice Sent. Respects orderClaimService lock.
  */
+function resolveTargetSalesOrderForEntity({ order, splits = [], resolvedEntity }) {
+  const explicitPrimaryEntity = normalizeEntityKey(order.invoicing_from);
+  const primaryEntity = explicitPrimaryEntity || 'GPI';
+  const splitTarget = resolvedEntity !== primaryEntity
+    ? splits.find((s) => normalizeEntityKey(s.invoicing_from) === resolvedEntity)
+    : null;
+  if (explicitPrimaryEntity && resolvedEntity !== explicitPrimaryEntity && !splitTarget) {
+    throw new DispatchBatchError(
+      422,
+      'ENTITY_MISMATCH',
+      `Sales Order ${order.zoho_so_number || order.getmeds_order_id} is under ${order.invoicing_from} (${explicitPrimaryEntity}) and cannot be fulfilled under ${DR_ENTITY_PROFILES[resolvedEntity].invoicing_from} (${resolvedEntity}).`
+    );
+  }
+  const targetSoId = splitTarget ? splitTarget.zoho_so_id : order.zoho_so_id;
+  if (!targetSoId) {
+    throw new DispatchBatchError(422, 'MISSING_ZOHO_SO', `No Zoho Sales Order found for entity ${resolvedEntity}.`);
+  }
+  return { primaryEntity, splitTarget, targetSoId };
+}
+
 async function finalizeZohoInvoiceForOrder({
   orderId,
   entityKey = null,
@@ -732,14 +752,7 @@ async function finalizeZohoInvoiceForOrder({
     splits
   });
 
-  const primaryEntity = normalizeEntityKey(order.invoicing_from || 'GPI');
-  const splitTarget = resolvedEntity !== primaryEntity
-    ? splits.find((s) => normalizeEntityKey(s.invoicing_from) === resolvedEntity)
-    : null;
-  const targetSoId = splitTarget ? splitTarget.zoho_so_id : order.zoho_so_id;
-  if (!targetSoId) {
-    throw new DispatchBatchError(422, 'MISSING_ZOHO_SO', `No Zoho Sales Order found for entity ${resolvedEntity}.`);
-  }
+  const { primaryEntity, splitTarget, targetSoId } = resolveTargetSalesOrderForEntity({ order, splits, resolvedEntity });
 
   let customInvoiceNumber = null;
   let activeDr = null;
@@ -951,14 +964,7 @@ async function shipInvoicedOrderInZoho({
      ORDER BY oi.id
   `).all(order.id);
   const splits = await db.prepare('SELECT * FROM order_split_sales_orders WHERE order_id = ?').all(order.id);
-  const primaryEntity = normalizeEntityKey(order.invoicing_from || 'GPI');
-  const splitTarget = resolvedEntity !== primaryEntity
-    ? splits.find((s) => normalizeEntityKey(s.invoicing_from) === resolvedEntity)
-    : null;
-  const targetSoId = splitTarget ? splitTarget.zoho_so_id : order.zoho_so_id;
-  if (!targetSoId) {
-    throw new DispatchBatchError(422, 'MISSING_ZOHO_SO', `No Zoho Sales Order found for entity ${resolvedEntity}.`);
-  }
+  const { primaryEntity, splitTarget, targetSoId } = resolveTargetSalesOrderForEntity({ order, splits, resolvedEntity });
 
   const claimableStatuses = [
     'ready_for_draft_invoice', 'ready_for_invoice_sent', 'ready_for_dispatch',

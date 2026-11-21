@@ -641,5 +641,17 @@ describe('deliveryReceiptService end-to-end flows (mocked DB + MockZohoAdapter)'
     const invRes = await adapter.getSalesOrder(draftSoId);
     expect(invRes.salesorder.status).toBe('confirmed');
     expect(invRes.salesorder.invoices[0].invoice_number).toBe(out.zoho_invoice_number);
+
+    // Reject invoicing under a different company when no split SO exists for that entity.
+    await expect(
+      svc.finalizeZohoInvoiceForOrder({
+        orderId: 88,
+        user: { id: 1, name: 'Aaron Dispatch' },
+        entityKey: 'GPI',
+        requiresSi: false,
+        doctorName: 'NNH',
+        adapter
+      })
+    ).rejects.toMatchObject({ code: 'ENTITY_MISMATCH', status: 422 });
   });
 });
