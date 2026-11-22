@@ -81,6 +81,9 @@ function slipHtml({ order }) {
   const e = escapeHtml;
   const contact = order.intake_contact_no || order.contact_number;
   const date = formatPHT(order.sales_order_date || order.created_at, 'date');
+  const receiver = String(order.intake_receiver || '').trim();
+  const primaryRecipient = receiver || order.customer_name || 'Customer';
+  const showCustomerLine = Boolean(order.customer_name) && order.customer_name.trim().toLowerCase() !== primaryRecipient.trim().toLowerCase();
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Delivery slip ${e(order.getmeds_order_id)}</title>
 <style>
@@ -104,9 +107,9 @@ function slipHtml({ order }) {
 
   <div class="box">
     <div class="label">Deliver to</div>
-    <div class="customer">${e(order.customer_name)}</div>
+    <div class="customer">${e(primaryRecipient)}</div>
     <div class="address">${e(order.delivery_address || 'NO DELIVERY ADDRESS ON THIS ORDER')}</div>
-    ${order.intake_receiver ? `<div class="line"><b>Receiver:</b> ${e(order.intake_receiver)}</div>` : ''}
+    ${showCustomerLine ? `<div class="line"><b>Customer:</b> ${e(order.customer_name)}</div>` : ''}
     ${contact ? `<div class="line"><b>Contact no.:</b> ${e(contact)}</div>` : ''}
     ${order.intake_delivery_method ? `<div class="line"><b>Delivery method:</b> ${e(order.intake_delivery_method)}</div>` : ''}
     ${order.delivery_notes ? `<div class="line"><b>Notes:</b> ${e(order.delivery_notes)}</div>` : ''}

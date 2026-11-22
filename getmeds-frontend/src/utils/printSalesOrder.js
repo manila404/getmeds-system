@@ -421,50 +421,34 @@ function buildSingleSheetHtml({ order, docSpec, logoHref, pageBreakAfter }) {
 }
 
 function buildDeliveryAddressSlipHtml({ order = {}, docs = [] }) {
-  const soSummary = docs.map((d) => `${d.entityKey}: ${d.soNumber}`).join(' · ');
-  const singleSo = docs.length === 1 ? docs[0].soNumber : '';
+  const soList = docs.map((d) => d.soNumber).filter((s) => s && s !== '—');
+  const soText = docs.length > 1
+    ? docs.map((d) => `${d.entityKey}: ${d.soNumber}`).join(' · ')
+    : (soList[0] || '');
   const contact = order.intake_contact_no || order.contact_number || '';
-  const receiver = order.intake_receiver || order.contact_person || '';
+  const receiver = String(order.intake_receiver || '').trim() || String(order.contact_person || '').trim();
+  const primaryRecipient = receiver || order.customer_name || 'Customer';
+  const showCustomerLine = Boolean(order.customer_name) && order.customer_name.trim().toLowerCase() !== primaryRecipient.trim().toLowerCase();
   const deliveryMethod = order.intake_delivery_method || order.courier || '';
-  const doctorName = order.dispatch_doctor_name || order.intake_doctor || '';
   const date = fmtZohoDate(order.sales_order_date || order.created_at);
 
   return `
     <div class="sheet slip-sheet">
-      <div class="slip-header">
-        <div>
-          <div class="slip-kicker">DISPATCH TAGGING &amp; WAYBILL COPY</div>
-          <div class="slip-title">DELIVERY ADDRESS SLIP</div>
-        </div>
-        <div class="slip-order-meta">
-          <div><b>Order:</b> ${esc(order.getmeds_order_id || '—')}</div>
-          ${docs.length > 1
-            ? `<div><b>Split SOs:</b> ${esc(soSummary)}</div>`
-            : (singleSo ? `<div><b>SO:</b> ${esc(singleSo)}</div>` : '')}
-          <div><b>Date:</b> ${esc(date)}</div>
-        </div>
+      <div class="slip-meta">
+        <span><b>Order</b> ${esc(order.getmeds_order_id || '—')}</span>
+        ${soText ? `<span><b>SO</b> ${esc(soText)}</span>` : ''}
+        <span><b>Date</b> ${esc(date)}</span>
       </div>
 
       <div class="slip-box">
-        <div class="slip-label">DELIVER TO</div>
-        <div class="slip-customer">${esc(order.customer_name || 'Customer')}</div>
+        <div class="slip-label">Deliver to</div>
+        <div class="slip-recipient">${esc(primaryRecipient)}</div>
         <div class="slip-address">${esc(order.delivery_address || 'NO DELIVERY ADDRESS ON THIS ORDER')}</div>
-
-        <div class="slip-grid">
-          ${receiver ? `<div class="slip-field"><span class="slip-fk">Receiver / Attention:</span> <span class="slip-fv">${esc(receiver)}</span></div>` : ''}
-          ${contact ? `<div class="slip-field"><span class="slip-fk">Contact No.:</span> <span class="slip-fv">${esc(contact)}</span></div>` : ''}
-          ${deliveryMethod ? `<div class="slip-field"><span class="slip-fk">Delivery Method:</span> <span class="slip-fv">${esc(deliveryMethod)}</span></div>` : ''}
-          ${order.intake_payment_terms ? `<div class="slip-field"><span class="slip-fk">Payment Terms:</span> <span class="slip-fv">${esc(order.intake_payment_terms)}</span></div>` : ''}
-          ${doctorName ? `<div class="slip-field"><span class="slip-fk">Doctor Name:</span> <span class="slip-fv">${esc(doctorName)}</span></div>` : ''}
-          ${order.delivery_notes ? `<div class="slip-field slip-field-wide"><span class="slip-fk">Delivery Notes:</span> <span class="slip-fv">${esc(order.delivery_notes)}</span></div>` : ''}
-        </div>
+        ${showCustomerLine ? `<div class="slip-line"><b>Customer:</b> ${esc(order.customer_name)}</div>` : ''}
+        ${contact ? `<div class="slip-line"><b>Contact no.:</b> ${esc(contact)}</div>` : ''}
+        ${deliveryMethod ? `<div class="slip-line"><b>Delivery method:</b> ${esc(deliveryMethod)}</div>` : ''}
+        ${order.delivery_notes ? `<div class="slip-line"><b>Notes:</b> ${esc(order.delivery_notes)}</div>` : ''}
       </div>
-
-      ${docs.length > 1 ? `
-        <div class="slip-split-note">
-          <b>Split-Order Packing Reminder:</b> Pack items for both Sales Orders (${esc(soSummary)}) under one parcel tagging unless instructed otherwise.
-        </div>
-      ` : ''}
     </div>
   `;
 }
@@ -623,63 +607,28 @@ export function buildSalesOrderPrintableHtml({
     .footer-rule { border-top: 1px solid #9ca3af; }
     .footer-page { text-align: right; font-size: 7.8pt; color: #9ca3af; margin-top: 4px; }
 
-    /* Trailing Delivery Address / Tagging Slip page */
-    .slip-sheet { justify-content: flex-start; padding-top: 8mm; }
-    .slip-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 16px;
-      border-bottom: 2px solid #111827;
-      padding-bottom: 10px;
-      margin-bottom: 16px;
-    }
-    .slip-kicker { font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; color: #4b5563; }
-    .slip-title { font-size: 18pt; font-weight: 700; color: #111827; margin-top: 2px; }
-    .slip-order-meta { text-align: right; font-size: 9.5pt; line-height: 1.5; color: #1f2937; }
+    /* Trailing Delivery Address / Tagging Slip page (exact match to Delivery Slip layout, Receiver on top) */
+    .slip-sheet { font-family: Arial, Helvetica, sans-serif; color: #111; justify-content: flex-start; padding-top: 4mm; }
+    .slip-meta { font-size: 10.5pt; color: #333; margin-bottom: 6mm; }
+    .slip-meta span { margin-right: 6mm; }
     .slip-box {
-      border: 2px solid #111827;
-      border-radius: 6px;
-      padding: 18px 20px;
+      border: 1.5px solid #111;
+      border-radius: 3mm;
+      padding: 5mm 6mm;
+      margin-bottom: 6mm;
       background: #fff;
     }
     .slip-label {
       font-size: 9pt;
-      font-weight: 700;
+      font-weight: bold;
       text-transform: uppercase;
-      letter-spacing: 1.1px;
-      color: #4b5563;
-      margin-bottom: 6px;
+      letter-spacing: 1px;
+      color: #555;
+      margin-bottom: 2mm;
     }
-    .slip-customer { font-size: 16pt; font-weight: 700; color: #111827; margin-bottom: 6px; }
-    .slip-address {
-      font-size: 14pt;
-      line-height: 1.45;
-      color: #111827;
-      white-space: pre-wrap;
-      margin-bottom: 14px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid #d1d5db;
-    }
-    .slip-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px 18px;
-      font-size: 10pt;
-      line-height: 1.45;
-    }
-    .slip-field-wide { grid-column: 1 / -1; }
-    .slip-fk { font-weight: 700; color: #374151; }
-    .slip-fv { color: #111827; }
-    .slip-split-note {
-      margin-top: 12px;
-      padding: 10px 12px;
-      border: 1px solid #c7d2fe;
-      background: #eef2ff;
-      color: #1e1b4b;
-      border-radius: 4px;
-      font-size: 9.5pt;
-    }
+    .slip-recipient { font-size: 15pt; font-weight: bold; color: #111; }
+    .slip-address { font-size: 14pt; margin: 2mm 0 3mm; white-space: pre-wrap; color: #111; }
+    .slip-line { margin: 1mm 0; font-size: 12pt; color: #111; }
   </style>
 </head>
 <body>
