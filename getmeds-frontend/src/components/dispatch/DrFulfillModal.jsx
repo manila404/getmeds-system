@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
   X, Trash2, RotateCcw, Check, CheckCircle2, AlertTriangle, Printer, Copy, ShieldAlert, ArrowLeft, Layers, Truck,
-  Paperclip, ExternalLink, RefreshCw, Pencil
+  Paperclip, ExternalLink, RefreshCw, Pencil, PanelRight
 } from 'lucide-react';
 import client from '../../api/client';
 import { fetchAndPrintSalesOrder, normalizeEntityKey } from '../../utils/printSalesOrder';
@@ -34,7 +34,7 @@ const ENTITY_FULL_NAME = {
   '2MG': '2mg Incorporated'
 };
 
-const DrFulfillModal = ({ order, onClose, onCompleted }) => {
+const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onToggleDetails = null }) => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [conflictMsg, setConflictMsg] = useState('');
@@ -599,7 +599,9 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
   const activeLines = isSplit ? allLines.filter((ln) => (ln.entity_key || primaryEntityKey) === entityKey) : allLines;
 
   return (
-    <div className="fixed inset-0 z-40 bg-slate-900/50 flex items-center justify-center p-4">
+    <div className={`fixed inset-0 z-[60] bg-slate-900/50 flex items-center p-3 sm:p-4 ${
+      detailsOpen ? 'justify-center lg:justify-start lg:pr-[37rem]' : 'justify-center'
+    }`}>
       <div className="bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden border border-slate-200">
         <div className="px-5 py-3.5 bg-surface border-b border-slate-200 flex items-center justify-between gap-3">
           <div className="min-w-0">
@@ -632,34 +634,48 @@ const DrFulfillModal = ({ order, onClose, onCompleted }) => {
               )}
             </div>
           </div>
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+            {onToggleDetails && (
+              <button
+                type="button"
+                onClick={onToggleDetails}
+                className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs font-semibold transition-colors ${
+                  detailsOpen
+                    ? 'border-getmeds-blue bg-blue-50 text-getmeds-blue-dark'
+                    : 'border-slate-300 bg-white text-ink-primary hover:bg-surface'
+                }`}
+                title={detailsOpen ? 'Hide Order Details side panel' : 'Open Order Details side panel beside this workflow'}
+              >
+                <PanelRight className="w-3.5 h-3.5" /> {detailsOpen ? 'Hide Details' : 'Order Details'}
+              </button>
+            )}
             {isSplit ? (
               <>
                 <button
                   type="button"
-                  onClick={() => fetchAndPrintSalesOrder(order.id, { entityKey })}
+                  onClick={() => fetchAndPrintSalesOrder(order.id, { entityKey, onSlipPrinted: onCompleted })}
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-ink-primary text-xs font-semibold hover:bg-surface"
-                  title={`Print ${entityKey} Sales Order (${activeTab?.soNumber || ''})`}
+                  title={`Print ${entityKey} Sales Order (${activeTab?.soNumber || ''}) + Delivery Address Slip`}
                 >
-                  <Printer className="w-3.5 h-3.5" /> Print {entityKey} SO
+                  <Printer className="w-3.5 h-3.5" /> Print {entityKey} SO &amp; Address
                 </button>
                 <button
                   type="button"
-                  onClick={() => fetchAndPrintSalesOrder(order.id)}
+                  onClick={() => fetchAndPrintSalesOrder(order.id, { onSlipPrinted: onCompleted })}
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-indigo-300 bg-indigo-50 text-indigo-900 text-xs font-semibold hover:bg-indigo-100"
-                  title="Print both company Sales Orders back-to-back"
+                  title="Print all company Sales Orders + Delivery Address Slip back-to-back"
                 >
-                  <Printer className="w-3.5 h-3.5" /> All SOs ({entityTabs.length})
+                  <Printer className="w-3.5 h-3.5" /> All SOs &amp; Address ({entityTabs.length})
                 </button>
               </>
             ) : (
               <button
                 type="button"
-                onClick={() => fetchAndPrintSalesOrder(order.id)}
+                onClick={() => fetchAndPrintSalesOrder(order.id, { onSlipPrinted: onCompleted })}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-ink-primary text-xs font-semibold hover:bg-surface"
-                title="Print Zoho-style Sales Order in Hub"
+                title="Print Zoho-style Sales Order + Delivery Address & Tagging Slip in one job"
               >
-                <Printer className="w-3.5 h-3.5" /> Print SO
+                <Printer className="w-3.5 h-3.5" /> Print SO &amp; Address
               </button>
             )}
             {finalInvoice && step !== 3 && (

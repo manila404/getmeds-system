@@ -427,7 +427,7 @@ const Section = ({ title, children }) => (
 // Sep 15, 2026: `footer` — Dispatch opens this same panel as the order's
 // receipt (what to prepare), and puts its own actions there instead of
 // Finance's Confirm. Without `onConfirm` no Confirm button can appear anyway.
-const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = null, onOpenConfirm = null, confirming, workflowV2 = false, footer = null }) => {
+const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = null, onOpenConfirm = null, confirming, workflowV2 = false, footer = null, sideBySide = false }) => {
   const detail = useQuery({
     queryKey: ['finance-order-detail', orderId],
     queryFn: () => client.get(`/api/orders/${orderId}`).then((r) => r.data),
@@ -545,11 +545,13 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = n
   return (
     <>
       <div
-        className="fixed inset-0 z-50 bg-black/30"
+        className={`fixed inset-0 ${sideBySide ? 'z-[65] bg-black/30 lg:hidden' : 'z-50 bg-black/30'}`}
         onClick={onClose}
       />
       <div
-        className="fixed inset-y-0 right-0 z-50 w-full max-w-2xl bg-surface shadow-2xl flex flex-col overflow-hidden"
+        className={`fixed inset-y-0 right-0 w-full bg-surface shadow-2xl flex flex-col overflow-hidden ${
+          sideBySide ? 'z-[65] max-w-xl border-l border-slate-300' : 'z-50 max-w-2xl'
+        }`}
       >
         <div className="px-5 py-3.5 border-b border-slate-200 bg-white flex items-start justify-between gap-3 shrink-0">
           <div className="min-w-0">
@@ -570,9 +572,9 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = n
                 type="button"
                 onClick={() => fetchAndPrintSalesOrder(order.id)}
                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface"
-                title={splits.length > 0 ? 'Print Zoho-style Sales Orders for all split entities in Hub' : 'Print Zoho-style Sales Order in Hub'}
+                title={splits.length > 0 ? 'Print Zoho-style Sales Orders + Delivery Address Slip' : 'Print Zoho-style Sales Order + Delivery Address Slip'}
               >
-                <Printer className="w-3.5 h-3.5" /> {splits.length > 0 ? `Print SOs (${splits.length + 1})` : 'Print SO'}
+                <Printer className="w-3.5 h-3.5" /> {splits.length > 0 ? `Print SOs & Address (${splits.length + 1})` : 'Print SO & Address'}
               </button>
             )}
             <button onClick={onClose} className="text-ink-secondary hover:text-ink-primary" title="Close">

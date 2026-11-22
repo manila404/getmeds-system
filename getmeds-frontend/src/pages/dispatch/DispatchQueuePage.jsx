@@ -394,6 +394,7 @@ const DispatchQueuePage = () => {
         onReleaseCater={onReleaseCater}
         onHoldOrder={setHoldOrderFor}
         onLiftHold={(o) => liftHold.mutate({ id: o.id })}
+        onFulfill={DR_WORKFLOW_UI ? setFulfillOrder : undefined}
         confirmingId={confirmingId}
         onOpen={setViewing}
       />
@@ -402,6 +403,7 @@ const DispatchQueuePage = () => {
         <OrderDetailsModal
           orderId={viewing.id}
           onClose={() => setViewing(null)}
+          sideBySide={Boolean(fulfillOrder)}
           footer={<DeliveryActions {...actionProps(viewingNow)} />}
         />
       )}
@@ -443,6 +445,8 @@ const DispatchQueuePage = () => {
         <DrFulfillModal
           order={fulfillOrder}
           onClose={() => setFulfillOrder(null)}
+          detailsOpen={Boolean(viewing)}
+          onToggleDetails={() => setViewing((prev) => (prev?.id === fulfillOrder.id ? null : fulfillOrder))}
           onCompleted={() => {
             qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
             qc.invalidateQueries({ queryKey: ['dispatch-queue'] });

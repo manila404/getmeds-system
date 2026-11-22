@@ -420,12 +420,46 @@ function buildSingleSheetHtml({ order, docSpec, logoHref, pageBreakAfter }) {
   `;
 }
 
+function buildDeliveryAddressSlipHtml({ order = {}, docs = [] }) {
+  const soList = docs.map((d) => d.soNumber).filter((s) => s && s !== '—');
+  const soText = docs.length > 1
+    ? docs.map((d) => `${d.entityKey}: ${d.soNumber}`).join(' · ')
+    : (soList[0] || '');
+  const contact = order.intake_contact_no || order.contact_number || '';
+  const receiver = String(order.intake_receiver || '').trim() || String(order.contact_person || '').trim();
+  const primaryRecipient = receiver || order.customer_name || 'Customer';
+  const showCustomerLine = Boolean(order.customer_name) && order.customer_name.trim().toLowerCase() !== primaryRecipient.trim().toLowerCase();
+  const deliveryMethod = order.intake_delivery_method || order.courier || '';
+  const date = fmtZohoDate(order.sales_order_date || order.created_at);
+
+  return `
+    <div class="sheet slip-sheet">
+      <div class="slip-meta">
+        <span><b>Order</b> ${esc(order.getmeds_order_id || '—')}</span>
+        ${soText ? `<span><b>SO</b> ${esc(soText)}</span>` : ''}
+        <span><b>Date</b> ${esc(date)}</span>
+      </div>
+
+      <div class="slip-box">
+        <div class="slip-label">Deliver to</div>
+        <div class="slip-recipient">${esc(primaryRecipient)}</div>
+        <div class="slip-address">${esc(order.delivery_address || 'NO DELIVERY ADDRESS ON THIS ORDER')}</div>
+        ${showCustomerLine ? `<div class="slip-line"><b>Customer:</b> ${esc(order.customer_name)}</div>` : ''}
+        ${contact ? `<div class="slip-line"><b>Contact no.:</b> ${esc(contact)}</div>` : ''}
+        ${deliveryMethod ? `<div class="slip-line"><b>Delivery method:</b> ${esc(deliveryMethod)}</div>` : ''}
+        ${order.delivery_notes ? `<div class="slip-line"><b>Notes:</b> ${esc(order.delivery_notes)}</div>` : ''}
+      </div>
+    </div>
+  `;
+}
+
 export function buildSalesOrderPrintableHtml({
   order = {},
   items = [],
   splits = [],
   zoho_sales_orders_by_entity = {},
-  entityKey = null
+  entityKey = null,
+  includeAddressSlip = true
 } = {}) {
   const docs = resolveSalesOrderDocuments({
     order,
@@ -442,9 +476,10 @@ export function buildSalesOrderPrintableHtml({
       order,
       docSpec,
       logoHref,
-      pageBreakAfter: idx < docs.length - 1
+      pageBreakAfter: includeAddressSlip || idx < docs.length - 1
     }))
     .join('');
+  const slipHtml = includeAddressSlip ? buildDeliveryAddressSlipHtml({ order, docs }) : '';
 
   return `<!doctype html>
 <html>
@@ -571,10 +606,34 @@ export function buildSalesOrderPrintableHtml({
     .sheet-footer { margin-top: auto; padding-top: 18px; }
     .footer-rule { border-top: 1px solid #9ca3af; }
     .footer-page { text-align: right; font-size: 7.8pt; color: #9ca3af; margin-top: 4px; }
+
+    /* Trailing Delivery Address / Tagging Slip page (exact match to Delivery Slip layout, Receiver on top) */
+    .slip-sheet { font-family: Arial, Helvetica, sans-serif; color: #111; justify-content: flex-start; padding-top: 4mm; }
+    .slip-meta { font-size: 10.5pt; color: #333; margin-bottom: 6mm; }
+    .slip-meta span { margin-right: 6mm; }
+    .slip-box {
+      border: 1.5px solid #111;
+      border-radius: 3mm;
+      padding: 5mm 6mm;
+      margin-bottom: 6mm;
+      background: #fff;
+    }
+    .slip-label {
+      font-size: 9pt;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #555;
+      margin-bottom: 2mm;
+    }
+    .slip-recipient { font-size: 15pt; font-weight: bold; color: #111; }
+    .slip-address { font-size: 14pt; margin: 2mm 0 3mm; white-space: pre-wrap; color: #111; }
+    .slip-line { margin: 1mm 0; font-size: 12pt; color: #111; }
   </style>
 </head>
 <body>
   ${sheetsHtml}
+  ${slipHtml}
   <script>
     (function () {
       function triggerPrint() {
@@ -611,14 +670,16 @@ export function openPrintableSalesOrder({
   items,
   splits = [],
   zoho_sales_orders_by_entity = {},
-  entityKey = null
+  entityKey = null,
+  includeAddressSlip = true
 }) {
   const html = buildSalesOrderPrintableHtml({
     order,
     items,
     splits,
     zoho_sales_orders_by_entity,
-    entityKey
+    entityKey,
+    includeAddressSlip
   });
   const win = window.open('', '_blank', 'width=900,height=980');
   if (!win) return false;
@@ -626,13 +687,13 @@ export function openPrintableSalesOrder({
   return true;
 }
 
-export async function fetchAndPrintSalesOrder(orderId, { entityKey = null } = {}) {
+export async function fetchAndPrintSalesOrder(orderId, { entityKey = null, includeAddressSlip = true, onSlipPrinted = null } = {}) {
   // Open synchronously inside click gesture so popup blockers never trigger after await.
   const win = window.open('', '_blank', 'width=900,height=980');
   if (!win) return false;
   writeAndClosePrintWindow(
     win,
-    '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;color:#475569;font-size:13px;">Loading Zoho-formatted Sales Order…</body></html>'
+    '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;color:#475569;font-size:13px;">Loading Zoho-formatted Sales Order &amp; Address Slip…</body></html>'
   );
 
   try {
@@ -650,9 +711,15 @@ export async function fetchAndPrintSalesOrder(orderId, { entityKey = null } = {}
       items: d.items || [],
       splits: d.splits || [],
       zoho_sales_orders_by_entity: d.zoho_sales_orders_by_entity || {},
-      entityKey
+      entityKey,
+      includeAddressSlip
     });
     writeAndClosePrintWindow(win, html);
+    if (includeAddressSlip && import.meta?.env?.VITE_DR_WORKFLOW === 'true') {
+      client.post(`/api/dispatch/orders/${orderId}/slip-print`)
+        .then(() => { if (onSlipPrinted) onSlipPrinted(); })
+        .catch(() => {});
+    }
     return true;
   } catch (err) {
     win.document.open();

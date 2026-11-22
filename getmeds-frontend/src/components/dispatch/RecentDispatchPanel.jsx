@@ -258,11 +258,12 @@ const IconButton = ({ icon: Icon, title, onClick, disabled, tone = 'default' }) 
 };
 
 const RecentDispatchPanel = ({
-  onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, confirmingId, onOpen,
+  onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, onFulfill = null, confirmingId, onOpen,
   warehouse = '', period = ''
 }) => {
   const qc = useQueryClient();
   const [fulfillOrder, setFulfillOrder] = useState(null);
+  const openFulfill = onFulfill || setFulfillOrder;
   // Sep 15, 2026: filtered by the warehouse picked at the top of the page, and
   // by "Today" — every draft SO created today and every order Finance
   // confirmed today, not just the latest 20. "On hold" swaps both lists for
@@ -567,7 +568,7 @@ const RecentDispatchPanel = ({
                     <div className="pt-0.5">
                       <FulfillActionButton
                         order={o}
-                        onClick={setFulfillOrder}
+                        onClick={openFulfill}
                         disabled={busy}
                         fullWidth
                       />
@@ -763,7 +764,7 @@ const RecentDispatchPanel = ({
                       {DR_WORKFLOW_UI && (
                         <FulfillActionButton
                           order={o}
-                          onClick={setFulfillOrder}
+                          onClick={openFulfill}
                           disabled={confirmingId === o.id}
                           compact
                         />

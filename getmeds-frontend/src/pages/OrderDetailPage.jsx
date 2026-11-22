@@ -1065,9 +1065,9 @@ const OrderDetailPage = () => {
                 type="button"
                 onClick={() => fetchAndPrintSalesOrder(order.id)}
                 className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface"
-                title={splits.length > 0 ? 'Print Zoho-formatted Sales Orders for every split entity' : 'Print formatted Sales Order in Hub without opening Zoho'}
+                title={splits.length > 0 ? 'Print Zoho-formatted Sales Orders + Delivery Address Slip' : 'Print Zoho-formatted Sales Order + Delivery Address Slip'}
               >
-                🖨️ {splits.length > 0 ? `Print SOs (${splits.length + 1})` : 'Print SO'}
+                🖨️ {splits.length > 0 ? `Print SOs & Address (${splits.length + 1})` : 'Print SO & Address'}
               </button>
             </div>
           </div>
