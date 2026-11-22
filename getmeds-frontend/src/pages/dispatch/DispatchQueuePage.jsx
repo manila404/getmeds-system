@@ -16,6 +16,9 @@ import { DISPATCH_WAREHOUSES } from '../../constants/dispatchWarehouses';
 import { normalizeEntityKey } from '../../utils/printSalesOrder';
 import StockAnnouncementsManager from '../../components/stock/StockAnnouncementsManager';
 import DispatchLowStockChecker from '../../components/dispatch/DispatchLowStockChecker';
+import DrFulfillModal from '../../components/dispatch/DrFulfillModal';
+
+const DR_WORKFLOW_UI = import.meta.env.VITE_DR_WORKFLOW === 'true';
 
 /**
  * Sep 12, 2026: two versions of this page, chosen by the server.
@@ -310,9 +313,20 @@ const DispatchQueuePage = () => {
     queryFn: () => client.get(`/api/orders/${viewing.id}`).then((r) => r.data),
     enabled: Boolean(viewing?.id)
   });
-  const freshStatus = viewingDetail.data?.data?.order?.status;
-  const viewingNow = viewing && freshStatus ? { ...viewing, status: freshStatus } : viewing;
+  const freshOrder = viewingDetail.data?.data?.order;
+  const freshDispatch = viewingDetail.data?.data?.dispatch;
+  const freshSplits = viewingDetail.data?.data?.splits;
+  const viewingNow = viewing && freshOrder
+    ? {
+        ...viewing,
+        ...freshOrder,
+        zoho_shipment_id: freshDispatch?.zoho_shipment_id ?? viewing.zoho_shipment_id,
+        zoho_shipment_number: freshDispatch?.zoho_shipment_number ?? viewing.zoho_shipment_number,
+        splits: freshSplits ?? viewing.splits
+      }
+    : viewing;
 
+  const [fulfillOrder, setFulfillOrder] = useState(null);
   const pendingId = (m) => (m.isPending ? m.variables?.id : null);
   const confirmingId =
     pendingId(confirmDelivery) ?? pendingId(holdTracking) ?? pendingId(addTracking) ??
@@ -328,6 +342,7 @@ const DispatchQueuePage = () => {
     onReleaseCater,
     onHoldOrder: setHoldOrderFor,
     onLiftHold: (o) => liftHold.mutate({ id: o.id }),
+    ...(DR_WORKFLOW_UI ? { onFulfill: setFulfillOrder } : {}),
     busy: confirmingId === order.id
   });
   const deliveryActions = (order) =>
@@ -422,6 +437,17 @@ const DispatchQueuePage = () => {
           onClose={() => setHoldOrderFor(null)}
           onSave={(reason) => holdOrder.mutate({ id: holdOrderFor.id, reason })}
           saving={holdOrder.isPending}
+        />
+      )}
+      {fulfillOrder && (
+        <DrFulfillModal
+          order={fulfillOrder}
+          onClose={() => setFulfillOrder(null)}
+          onCompleted={() => {
+            qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
+            qc.invalidateQueries({ queryKey: ['dispatch-queue'] });
+            qc.invalidateQueries({ queryKey: ['finance-order-detail', fulfillOrder.id] });
+          }}
         />
       )}
     </>
