@@ -7,6 +7,9 @@ import { formatPHT } from '../../utils/dateUtils';
 import { useAuth } from '../../hooks/useAuth';
 import { onPasteImage } from '../../hooks/usePasteImage';
 import UploadConfirmModal from '../orders/UploadConfirmModal';
+import FulfillActionButton from './FulfillActionButton';
+
+const DR_WORKFLOW_UI = import.meta.env.VITE_DR_WORKFLOW === 'true';
 
 /**
  * Print the delivery slip, and confirm the order for delivery.
@@ -202,7 +205,7 @@ export function useDeliveryActionFlags(order, handlers) {
  * Print + Confirm for one order, or the confirmation already recorded — and,
  * once confirmed, putting the tracking number on hold (Sep 15, 2026).
  */
-const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, busy }) => {
+const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, onFulfill, busy }) => {
   const {
     catered, cateredByMe, canCater, canRelease, dispatchHold, canHoldOrder, canLiftHold,
     confirmed, stale, canConfirm, hold, entered, canAddTracking, canHold
@@ -275,6 +278,9 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {DR_WORKFLOW_UI && onFulfill && CONFIRMABLE_STATUSES.includes(order.status) && (
+        <FulfillActionButton order={order} onClick={onFulfill} disabled={busy} />
+      )}
       {dispatchHold && (
         <span
           className="inline-flex items-center gap-1 rounded-md border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-950"

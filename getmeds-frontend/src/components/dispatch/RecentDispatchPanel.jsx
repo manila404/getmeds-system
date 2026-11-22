@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
-import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle, Search, X, Layers } from 'lucide-react';
+import { FilePlus2, ShieldCheck, CalendarCheck2, PackageCheck, Printer, CheckCircle2, PauseCircle, PlayCircle, ChevronLeft, ChevronRight, AlertTriangle, Search, X } from 'lucide-react';
 import client from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { formatPHT } from '../../utils/dateUtils';
@@ -8,6 +8,7 @@ import DeliveryActions, { deliveryActionFlags, printDeliverySlip } from './Deliv
 import RxBadge from './RxBadge';
 import MoreInfoMenu from './MoreInfoMenu';
 import DrFulfillModal from './DrFulfillModal';
+import FulfillActionButton from './FulfillActionButton';
 import { normalizeEntityKey } from '../../utils/printSalesOrder';
 
 const DR_WORKFLOW_UI = import.meta.env.VITE_DR_WORKFLOW === 'true';
@@ -525,7 +526,9 @@ const RecentDispatchPanel = ({
       <Card
         icon={PackageCheck}
         title="Catered Orders"
-        hint="Claimed and being fulfilled. Print the address, check it, then confirm the delivery."
+        hint={DR_WORKFLOW_UI
+          ? 'Claimed and ready for automated processing. Click "DR · Invoice & Ship" on each order to pick batches, issue DR/SI, and ship in Zoho.'
+          : 'Claimed and being fulfilled. Print the address, check it, then confirm the delivery.'}
         count={catered.length}
       >
         {isLoading ? loading : catered.length === 0 ? <Empty text="Nobody is catering an order right now." /> : (
@@ -560,6 +563,16 @@ const RecentDispatchPanel = ({
                   </div>
                   <SplitSoBadge order={o} />
                   <ClassificationTags order={o} />
+                  {DR_WORKFLOW_UI && (
+                    <div className="pt-0.5">
+                      <FulfillActionButton
+                        order={o}
+                        onClick={setFulfillOrder}
+                        disabled={busy}
+                        fullWidth
+                      />
+                    </div>
+                  )}
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-xs">
                     <div className="flex items-center gap-2">
                       <span className="text-ink-secondary">Catered by <span className="font-semibold text-ink-primary">{cateredByMe ? 'You' : o.catered?.by}</span></span>
@@ -585,15 +598,6 @@ const RecentDispatchPanel = ({
                       )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
-                      {DR_WORKFLOW_UI && (
-                        <IconButton
-                          icon={Layers}
-                          title="Fulfill: Pick Zoho Batches, Issue DR & Oojeema SI"
-                          onClick={() => setFulfillOrder(o)}
-                          disabled={busy}
-                          tone="primary"
-                        />
-                      )}
                       <IconButton icon={Printer} title="Print address" onClick={() => printDeliverySlip(o.id, () => qc.invalidateQueries({ queryKey: ['dispatch-recent'] }))} />
                       {canConfirm && (
                         <IconButton
@@ -755,14 +759,13 @@ const RecentDispatchPanel = ({
                   </td>
                   <td className="px-4 py-2.5 align-top text-right text-sm font-semibold text-ink-primary">{peso(o.total_amount)}</td>
                   <td className="px-2 py-2.5 align-top text-right">
-                    <div className="inline-flex items-center gap-1">
+                    <div className="inline-flex items-center gap-1.5">
                       {DR_WORKFLOW_UI && (
-                        <IconButton
-                          icon={Layers}
-                          title={o.zoho_shipment_id ? 'Fulfill / Update Zoho tracking' : 'Fulfill: Pick Zoho Batches, Issue DR & Oojeema SI'}
-                          onClick={() => setFulfillOrder(o)}
+                        <FulfillActionButton
+                          order={o}
+                          onClick={setFulfillOrder}
                           disabled={confirmingId === o.id}
-                          tone="primary"
+                          compact
                         />
                       )}
                       <MoreInfoMenu
