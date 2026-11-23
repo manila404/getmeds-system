@@ -794,4 +794,165 @@ describe('deliveryReceiptService end-to-end flows (mocked DB + MockZohoAdapter)'
     expect(shipOut.zoho_shipment_id).toBeTruthy();
     expect(dbWrites.some((w) => /UPDATE order_split_sales_orders/i.test(w.sql) && w.args.includes(shipOut.zoho_shipment_id))).toBe(true);
   });
+
+  it('listLedger orders chronologically across entities when All Entities is selected and by dr_number DESC per entity', async () => {
+    jest.resetModules();
+    const ledgerSqls = [];
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m) { super(m); this.status = s; this.code = c; } },
+      assertCanActOnOrder: jest.fn()
+    }));
+    jest.doMock('../src/services/orderClaimService', () => ({ claimOrder: jest.fn(), releaseClaim: jest.fn() }));
+    jest.doMock('../src/services/orderCompletionService', () => ({ evaluateCompletion: jest.fn() }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: async () => ({ id: 1, name: 'Aaron Dispatch' }),
+      logEvent: jest.fn()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => {
+        if (/FROM delivery_receipts dr/i.test(sql) && /ORDER BY/i.test(sql)) {
+          ledgerSqls.push(sql);
+        }
+        return {
+          get: jest.fn(async () => ({ cnt: 0 })),
+          all: jest.fn(async () => [])
+        };
+      })
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+    await svc.listLedger({ entityKey: null });
+    await svc.listLedger({ entityKey: 'GPI' });
+
+    expect(ledgerSqls).toHaveLength(2);
+    expect(ledgerSqls[0]).toContain('ORDER BY dr.date_issued DESC, COALESCE(dr.issued_at, dr.created_at) DESC, dr.id DESC, dri.item_seq_no ASC');
+    expect(ledgerSqls[1]).toContain('ORDER BY dr.dr_number DESC, dri.item_seq_no ASC');
+  });
+
+  it('issueTransferOrderDr allows split-entity DRs for a TO#, blocks same-entity duplicates, and exposes existing_drs', async () => {
+    jest.resetModules();
+    const adapter = new MockZohoAdapter();
+    const seqState = {
+      '2MG': { last_dr_no: 4953, last_item_no: 1538 },
+      GPI: { last_dr_no: 4592, last_item_no: 749 }
+    };
+    const drs = [];
+    const drItems = [];
+
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m) { super(m); this.status = s; this.code = c; } },
+      assertCanActOnOrder: jest.fn()
+    }));
+    jest.doMock('../src/services/orderClaimService', () => ({ claimOrder: jest.fn(), releaseClaim: jest.fn() }));
+    jest.doMock('../src/services/orderCompletionService', () => ({ evaluateCompletion: jest.fn() }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: async () => ({ id: 2, name: 'Tiara Jem Evangelista' }),
+      logEvent: jest.fn()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => ({
+        get: jest.fn(async (...args) => {
+          if (/FROM delivery_receipts/i.test(sql) && /reference_type = 'transfer_order'/i.test(sql) && /entity_key = \?/i.test(sql)) {
+            const ref = String(args[0] || '').trim().toUpperCase();
+            const ent = args[1];
+            return drs.find(
+              (d) => d.reference_type === 'transfer_order' && d.external_ref.toUpperCase() === ref && d.entity_key === ent && ['draft', 'issued'].includes(d.status)
+            ) || null;
+          }
+          if (/FROM dr_sequences WHERE entity_key/i.test(sql)) {
+            return seqState[args[0]];
+          }
+          if (/FROM delivery_receipts WHERE id = \?/i.test(sql)) {
+            return drs.find((d) => d.id === Number(args[0])) || null;
+          }
+          return null;
+        }),
+        all: jest.fn(async (...args) => {
+          if (/FROM delivery_receipt_items/i.test(sql)) {
+            return drItems.filter((it) => it.delivery_receipt_id === Number(args[0]));
+          }
+          if (/FROM delivery_receipts/i.test(sql) && /reference_type = 'transfer_order'/i.test(sql)) {
+            const refFilter = args.length ? String(args[0] || '').trim().toUpperCase() : null;
+            return drs
+              .filter((d) => d.reference_type === 'transfer_order' && ['draft', 'issued'].includes(d.status))
+              .filter((d) => (!refFilter ? true : d.external_ref.toUpperCase() === refFilter))
+              .sort((a, b) => b.id - a.id);
+          }
+          return [];
+        }),
+        run: jest.fn(async (...args) => {
+          if (/UPDATE dr_sequences/i.test(sql)) {
+            seqState[args[3]] = { last_dr_no: args[0], last_item_no: args[1] };
+          }
+          if (/INSERT INTO delivery_receipts /i.test(sql)) {
+            const id = drs.length + 1;
+            drs.push({
+              id,
+              entity_key: args[0],
+              dr_number: args[1],
+              reference_type: 'transfer_order',
+              external_ref: args[2],
+              si_number: args[3],
+              date_issued: args[4],
+              customer_name: args[5],
+              delivery_address: args[6],
+              status: 'issued'
+            });
+            return { lastInsertRowid: id };
+          }
+          if (/INSERT INTO delivery_receipt_items/i.test(sql)) {
+            drItems.push({
+              id: drItems.length + 1,
+              delivery_receipt_id: args[0],
+              entity_key: args[1],
+              item_seq_no: args[3],
+              item_name: args[6],
+              quantity: args[10],
+              unit: args[11]
+            });
+          }
+          return { changes: 1 };
+        })
+      }))
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+    const dr2mg = await svc.issueTransferOrderDr({
+      entityKey: '2MG',
+      externalRef: 'TO-00379',
+      transferName: 'DAVAO WAREHOUSE',
+      items: [{ item_name: 'BELTRO 25MG', quantity: 560, unit: 'TABLETS' }],
+      user: { id: 2, name: 'Tiara Jem Evangelista' }
+    });
+    expect(dr2mg.receipt.dr_number).toBe(4954);
+
+    // Splitting remaining GPI items onto GPI DR succeeds
+    const drGpi = await svc.issueTransferOrderDr({
+      entityKey: 'GPI',
+      externalRef: 'TO-00379',
+      transferName: 'DAVAO WAREHOUSE',
+      items: [{ item_name: 'SUGAMAGET 200MG', quantity: 50, unit: 'Vials' }],
+      user: { id: 2, name: 'Tiara Jem Evangelista' }
+    });
+    expect(drGpi.receipt.dr_number).toBe(4593);
+
+    // Submitting a second active GPI DR for the same TO-00379 rejects with 409 DR_ALREADY_EXISTS
+    await expect(svc.issueTransferOrderDr({
+      entityKey: 'GPI',
+      externalRef: 'TO-00379',
+      transferName: 'DAVAO WAREHOUSE',
+      items: [{ item_name: 'SUGAMAGET 200MG', quantity: 50, unit: 'Vials' }],
+      user: { id: 2, name: 'Tiara Jem Evangelista' }
+    })).rejects.toMatchObject({ status: 409, code: 'DR_ALREADY_EXISTS' });
+
+    const listRes = await svc.listZohoTransferOrders({ adapter });
+    expect(listRes.transfer_orders[0].existing_drs.map((d) => `${d.entity_key}#${d.dr_number}`)).toEqual(['GPI#4593', '2MG#4954']);
+
+    const detRes = await svc.getZohoTransferOrderForDr({ transferOrderId: 'MOCK-TO-379', adapter });
+    expect(detRes.existing_drs.map((d) => `${d.entity_key}#${d.dr_number}`)).toEqual(['GPI#4593', '2MG#4954']);
+  });
 });

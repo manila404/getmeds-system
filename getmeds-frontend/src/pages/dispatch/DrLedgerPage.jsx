@@ -29,7 +29,7 @@ const DrLedgerPage = () => {
   const [selectedToId, setSelectedToId] = useState('');
   const [loadingToDetail, setLoadingToDetail] = useState(false);
   const [submittingTo, setSubmittingTo] = useState(false);
-  const [existingToDr, setExistingToDr] = useState(null);
+  const [existingToDrs, setExistingToDrs] = useState([]);
   const [toForm, setToForm] = useState({
     entity_key: 'GPI',
     external_ref: '',
@@ -38,6 +38,20 @@ const DrLedgerPage = () => {
     date_issued: ''
   });
   const [toItems, setToItems] = useState([emptyToItem()]);
+
+  const resetToModal = () => {
+    setToSearch('');
+    setSelectedToId('');
+    setExistingToDrs([]);
+    setToForm({
+      entity_key: 'GPI',
+      external_ref: '',
+      transfer_name: '',
+      delivery_address: '',
+      date_issued: ''
+    });
+    setToItems([emptyToItem()]);
+  };
 
   const zohoTosQuery = useQuery({
     queryKey: ['zoho-transfer-orders', toSearch],
@@ -71,6 +85,19 @@ const DrLedgerPage = () => {
   const sequences = data?.sequences || [];
   const pagination = data?.pagination;
 
+  const matchedZohoTo = (() => {
+    const cleanRef = String(toForm.external_ref || '').trim().toUpperCase();
+    if (!cleanRef) return null;
+    return (zohoTosQuery.data || []).find(
+      (to) => String(to.transfer_order_number || '').trim().toUpperCase() === cleanRef
+    ) || null;
+  })();
+  const activeToDrs = existingToDrs.length
+    ? existingToDrs
+    : matchedZohoTo?.existing_drs || (matchedZohoTo?.existing_dr ? [matchedZohoTo.existing_dr] : []);
+  const sameEntityToDr = activeToDrs.find((dr) => dr.entity_key === toForm.entity_key) || null;
+  const otherEntityToDrs = activeToDrs.filter((dr) => dr.entity_key !== toForm.entity_key);
+
   const openPrint = async (drId) => {
     try {
       const { data: res } = await client.get(`/api/dispatch/dr/${drId}`);
@@ -87,6 +114,7 @@ const DrLedgerPage = () => {
       await client.post(`/api/dispatch/dr/${drId}/void`, { reason: reason.trim() });
       toast.success(`DR #${drNo} marked VOID.`);
       qc.invalidateQueries({ queryKey: ['dr-ledger'] });
+      qc.invalidateQueries({ queryKey: ['zoho-transfer-orders'] });
     } catch (err) {
       toast.error(err?.response?.data?.error?.message || 'Could not void DR.');
     }
@@ -116,7 +144,10 @@ const DrLedgerPage = () => {
 
   const handleSelectZohoTo = async (toId) => {
     setSelectedToId(toId);
-    if (!toId) return;
+    if (!toId) {
+      setExistingToDrs([]);
+      return;
+    }
     setLoadingToDetail(true);
     try {
       const { data: res } = await client.get(`/api/dispatch/dr-ledger/transfer-orders/${toId}`);
@@ -129,7 +160,12 @@ const DrLedgerPage = () => {
         delivery_address: to.default_address || '',
         date_issued: to.date || ''
       }));
-      setExistingToDr(d.existing_dr || null);
+      const drs = Array.isArray(d.existing_drs)
+        ? d.existing_drs
+        : d.existing_dr
+          ? [d.existing_dr]
+          : [];
+      setExistingToDrs(drs);
       const loadedItems = (d.items || []).map((it) => ({
         include: true,
         product_id: it.product_id || null,
@@ -184,7 +220,9 @@ const DrLedgerPage = () => {
       });
       toast.success(`${res.data.receipt.entity_key} DR #${res.data.receipt.dr_number} issued for ${toForm.external_ref.trim()}!`);
       setToOpen(false);
+      resetToModal();
       qc.invalidateQueries({ queryKey: ['dr-ledger'] });
+      qc.invalidateQueries({ queryKey: ['zoho-transfer-orders'] });
       setPrintDrData(res.data);
     } catch (err) {
       toast.error(err?.response?.data?.error?.message || 'Could not create Transfer Order DR.');
@@ -210,7 +248,10 @@ const DrLedgerPage = () => {
           ))}
           <button
             type="button"
-            onClick={() => setToOpen(true)}
+            onClick={() => {
+              resetToModal();
+              setToOpen(true);
+            }}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark"
           >
             <PlusCircle className="w-4 h-4" /> Transfer Order DR (TO #)
@@ -358,12 +399,17 @@ const DrLedgerPage = () => {
                       <option value="">
                         {zohoTosQuery.isLoading ? 'Loading Zoho Transfer Orders…' : '— Select Zoho Transfer Order (or enter manually below) —'}
                       </option>
-                      {(zohoTosQuery.data || []).map((to) => (
-                        <option key={to.transfer_order_id} value={to.transfer_order_id}>
-                          {to.transfer_order_number} · {to.to_warehouse_name} ({to.date})
-                          {to.existing_dr ? ` [Issued ${to.existing_dr.entity_key} DR #${to.existing_dr.dr_number}]` : ''}
-                        </option>
-                      ))}
+                      {(zohoTosQuery.data || []).map((to) => {
+                        const toDrs = to.existing_drs?.length ? to.existing_drs : to.existing_dr ? [to.existing_dr] : [];
+                        const issuedLabel = toDrs.length
+                          ? ` [Issued ${toDrs.map((dr) => `${dr.entity_key} DR #${dr.dr_number}`).join(', ')}]`
+                          : '';
+                        return (
+                          <option key={to.transfer_order_id} value={to.transfer_order_id}>
+                            {to.transfer_order_number} · {to.to_warehouse_name} ({to.date}){issuedLabel}
+                          </option>
+                        );
+                      })}
                     </select>
                   </div>
                   <div className="w-48">
@@ -378,9 +424,15 @@ const DrLedgerPage = () => {
                   </div>
                 </div>
                 {loadingToDetail && <p className="text-[11px] text-getmeds-blue font-semibold">Loading Zoho Transfer Order lines &amp; batch numbers…</p>}
-                {existingToDr && (
+                {sameEntityToDr && (
+                  <p className="text-[11px] text-red-700 font-semibold">
+                    {sameEntityToDr.entity_key} DR #{sameEntityToDr.dr_number} is already issued for {sameEntityToDr.external_ref}. Void it first before re-issuing for {sameEntityToDr.entity_key}, or switch Entity Sequence to split items.
+                  </p>
+                )}
+                {!sameEntityToDr && otherEntityToDrs.length > 0 && (
                   <p className="text-[11px] text-amber-800 font-semibold">
-                    Note: {existingToDr.entity_key} DR #{existingToDr.dr_number} is already issued for {existingToDr.external_ref}. Confirm before issuing a duplicate.
+                    Already issued for {otherEntityToDrs[0].external_ref}:{' '}
+                    {otherEntityToDrs.map((dr) => `${dr.entity_key} DR #${dr.dr_number}`).join(', ')}. Keep only remaining {toForm.entity_key} items checked below.
                   </p>
                 )}
               </div>
@@ -546,7 +598,7 @@ const DrLedgerPage = () => {
               </button>
               <button
                 type="submit"
-                disabled={submittingTo}
+                disabled={submittingTo || Boolean(sameEntityToDr)}
                 className="px-4 py-1.5 rounded bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
               >
                 {submittingTo ? 'Issuing DR…' : 'Issue & Print Transfer DR'}

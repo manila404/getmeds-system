@@ -135,10 +135,12 @@ async function listZohoTransferOrders({ search = '', page = 1, perPage = 50, ada
     `).all()
   ]);
 
-  const drByRef = new Map();
+  const drsByRef = new Map();
   for (const r of existingRows || []) {
     const refKey = String(r.external_ref || '').trim().toUpperCase();
-    if (refKey && !drByRef.has(refKey)) drByRef.set(refKey, r);
+    if (!refKey) continue;
+    if (!drsByRef.has(refKey)) drsByRef.set(refKey, []);
+    drsByRef.get(refKey).push(r);
   }
 
   const q = String(search || '').trim().toLowerCase();
@@ -154,6 +156,7 @@ async function listZohoTransferOrders({ search = '', page = 1, perPage = 50, ada
     })
     .map((to) => {
       const refKey = String(to.transfer_order_number || '').trim().toUpperCase();
+      const existingDrs = drsByRef.get(refKey) || [];
       return {
         transfer_order_id: to.transfer_order_id,
         transfer_order_number: to.transfer_order_number,
@@ -164,7 +167,8 @@ async function listZohoTransferOrders({ search = '', page = 1, perPage = 50, ada
         to_warehouse_name: to.to_warehouse_name || '',
         default_address: defaultTransferAddress(to.to_warehouse_name),
         quantity_transfer: to.quantity_transfer ?? null,
-        existing_dr: drByRef.get(refKey) || null
+        existing_dr: existingDrs[0] || null,
+        existing_drs: existingDrs
       };
     });
 
@@ -235,14 +239,16 @@ async function getZohoTransferOrderForDr({ transferOrderId, adapter = zoho } = {
     }
   }
 
-  const existingDr = to.transfer_order_number
+  const existingDrs = to.transfer_order_number
     ? await db.prepare(`
         SELECT id, entity_key, dr_number, external_ref, status, date_issued
           FROM delivery_receipts
-         WHERE reference_type = 'transfer_order' AND external_ref = ? AND status IN ('draft', 'issued')
-         ORDER BY id DESC LIMIT 1
-      `).get(to.transfer_order_number)
-    : null;
+         WHERE reference_type = 'transfer_order'
+           AND UPPER(TRIM(external_ref)) = UPPER(?)
+           AND status IN ('draft', 'issued')
+         ORDER BY id DESC
+      `).all(String(to.transfer_order_number).trim())
+    : [];
 
   return {
     transfer_order: {
@@ -256,7 +262,8 @@ async function getZohoTransferOrderForDr({ transferOrderId, adapter = zoho } = {
       default_address: defaultTransferAddress(to.to_warehouse_name, zohoWarehousesByName)
     },
     items: expandedItems,
-    existing_dr: existingDr || null
+    existing_dr: existingDrs[0] || null,
+    existing_drs: existingDrs
   };
 }
 
@@ -547,6 +554,23 @@ async function issueTransferOrderDr({
   const issueDate = dateIssued ? String(dateIssued).slice(0, 10) : manilaTodayDate();
 
   const drId = await db.transaction(async () => {
+    const existingSameEntity = await db.prepare(`
+      SELECT id, entity_key, dr_number, external_ref
+        FROM delivery_receipts
+       WHERE reference_type = 'transfer_order'
+         AND UPPER(TRIM(external_ref)) = UPPER(?)
+         AND entity_key = ?
+         AND status IN ('draft', 'issued')
+       LIMIT 1
+    `).get(cleanRef, resolvedEntity);
+    if (existingSameEntity) {
+      throw new DispatchBatchError(
+        409,
+        'DR_ALREADY_EXISTS',
+        `${resolvedEntity} DR #${existingSameEntity.dr_number} is already issued for ${existingSameEntity.external_ref}. Void it first before re-issuing for ${resolvedEntity}.`
+      );
+    }
+
     const seqRow = await db.prepare('SELECT last_dr_no, last_item_no FROM dr_sequences WHERE entity_key = ? FOR UPDATE').get(resolvedEntity);
     if (!seqRow) throw new DispatchBatchError(500, 'MISSING_SEQUENCE', `DR sequence missing for ${resolvedEntity}.`);
 
@@ -1252,6 +1276,9 @@ async function listLedger({
   }
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const orderBySql = cleanEntity
+    ? 'ORDER BY dr.dr_number DESC, dri.item_seq_no ASC'
+    : 'ORDER BY dr.date_issued DESC, COALESCE(dr.issued_at, dr.created_at) DESC, dr.id DESC, dri.item_seq_no ASC';
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
   const offset = (safePage - 1) * safeLimit;
@@ -1267,7 +1294,7 @@ async function listLedger({
         FROM delivery_receipts dr
         LEFT JOIN delivery_receipt_items dri ON dri.delivery_receipt_id = dr.id
        ${whereSql}
-       ORDER BY dr.dr_number DESC, dri.item_seq_no ASC
+       ${orderBySql}
        LIMIT ? OFFSET ?
     `).all([...params, safeLimit, offset]),
     db.prepare(`
