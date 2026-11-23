@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Printer, CheckCircle2, AlertTriangle, PauseCircle, PlayCircle, Camera, Truck, Clipboard } from 'lucide-react';
+import { Printer, CheckCircle2, AlertTriangle, PauseCircle, PlayCircle, Camera, Truck, Clipboard, Pencil } from 'lucide-react';
 import client from '../../api/client';
 import { formatPHT } from '../../utils/dateUtils';
 import { useAuth } from '../../hooks/useAuth';
@@ -210,9 +210,43 @@ export function useDeliveryActionFlags(order, handlers) {
  */
 const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold, onFulfill, busy }) => {
   const {
-    catered, cateredByMe, canCater, canRelease, dispatchHold, canHoldOrder, canLiftHold,
+    role, catered, cateredByMe, canCater, canRelease, dispatchHold, canHoldOrder, canLiftHold,
     confirmed, stale, canConfirm, hold, entered, canAddTracking, canHold
   } = useDeliveryActionFlags(order, { onConfirm, onHold, onAddTracking, onCater, onReleaseCater, onHoldOrder, onLiftHold });
+
+  // Nov 23, 2026: once Zoho has shipped the order, its tracking number can
+  // still be corrected by Dispatch — updated on the Zoho Shipment itself
+  // (POST /zoho-tracking, as in the fulfil window) and the MedRep is told.
+  // Split orders keep using the fulfil window, which picks the entity.
+  const canEditZohoTracking = ['dispatch', 'admin'].includes(role) &&
+    Boolean(order.zoho_shipment_id) && !(order.splits?.length > 0) && !canAddTracking;
+  const [editTracking, setEditTracking] = useState(null); // { courier, tracking } | null
+  const [savingTracking, setSavingTracking] = useState(false);
+  const openEditTracking = () => setEditTracking({
+    courier: order.dispatch_courier || order.courier || entered?.courier || order.intake_delivery_method || '',
+    tracking: order.tracking_number || entered?.tracking_number || ''
+  });
+  const saveEditTracking = async () => {
+    const courier = editTracking.courier.trim();
+    const tracking = editTracking.tracking.trim();
+    if (!courier || !tracking) { toast.error('Enter both Mode of Delivery and Tracking Number.'); return; }
+    setSavingTracking(true);
+    try {
+      const { data: res } = await client.post(`/api/dispatch/orders/${order.id}/zoho-tracking`, {
+        delivery_method: courier,
+        tracking_number: tracking
+      });
+      toast.success(res?.data?.message || 'Tracking updated in Zoho.');
+      setEditTracking(null);
+      qc.invalidateQueries({ queryKey: ['dispatch-recent'] });
+      qc.invalidateQueries({ queryKey: ['dispatch-queue'] });
+      qc.invalidateQueries({ queryKey: ['my-orders'] });
+    } catch (err) {
+      toast.error(err?.response?.data?.error?.message || 'Could not update the tracking number.');
+    } finally {
+      setSavingTracking(false);
+    }
+  };
 
   // Sep 15, 2026: the proof photo. Several can be picked at once; they go up
   // one after another, and the toast says what reached Zoho.
@@ -400,6 +434,71 @@ const DeliveryActions = ({ order, onConfirm, onHold, onAddTracking, onCater, onR
           <PlayCircle className="w-3.5 h-3.5" />
           {entered ? 'Update tracking' : 'Add tracking number'}
         </button>
+      )}
+      {canEditZohoTracking && (
+        <button
+          type="button"
+          disabled={busy || savingTracking}
+          onClick={openEditTracking}
+          title="Change the courier or tracking number on the Zoho Shipment — the MedRep is told"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-ink-primary hover:bg-surface disabled:opacity-50"
+        >
+          <Pencil className="w-3.5 h-3.5" />
+          {order.tracking_number ? 'Edit tracking' : 'Add tracking to Zoho'}
+        </button>
+      )}
+      {editTracking && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4" onClick={() => !savingTracking && setEditTracking(null)}>
+          <div className="w-full max-w-md rounded-xl bg-white shadow-xl p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div>
+              <h3 className="text-sm font-bold text-ink-primary">Edit tracking — {order.getmeds_order_id}</h3>
+              <p className="text-xs text-ink-secondary mt-0.5">
+                Updates the Zoho Shipment{order.zoho_shipment_number ? ` ${order.zoho_shipment_number}` : ''}. The MedRep is notified.
+              </p>
+            </div>
+            <label className="block text-xs font-semibold text-ink-secondary">
+              Mode of Delivery
+              <input
+                type="text"
+                value={editTracking.courier}
+                onChange={(e) => setEditTracking((p) => ({ ...p, courier: e.target.value }))}
+                maxLength={100}
+                placeholder="e.g. Lalamove, J&T Express"
+                className="mt-1 w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm font-normal text-ink-primary"
+              />
+            </label>
+            <label className="block text-xs font-semibold text-ink-secondary">
+              Tracking Number
+              <input
+                type="text"
+                value={editTracking.tracking}
+                onChange={(e) => setEditTracking((p) => ({ ...p, tracking: e.target.value }))}
+                maxLength={500}
+                placeholder="Waybill or Lalamove share link"
+                autoFocus
+                className="mt-1 w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm font-normal text-ink-primary"
+              />
+            </label>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={savingTracking}
+                onClick={() => setEditTracking(null)}
+                className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={savingTracking || !editTracking.courier.trim() || !editTracking.tracking.trim()}
+                onClick={saveEditTracking}
+                className="px-3 py-1.5 rounded-md bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
+              >
+                {savingTracking ? 'Saving to Zoho…' : 'Save tracking'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {canHold && (
         <button
