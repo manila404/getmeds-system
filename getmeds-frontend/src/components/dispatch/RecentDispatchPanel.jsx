@@ -80,7 +80,7 @@ const SplitSoBadge = ({ order }) => {
 
 const ClassificationTags = ({ order }) => {
   const cls = order.classification;
-  if (!cls && !order.fulfil_warehouse_name && !order.slip_printed_by_name) return null;
+  if (!cls && !order.slip_printed_by_name) return null;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {cls?.is_csp && (
@@ -91,11 +91,6 @@ const ClassificationTags = ({ order }) => {
       {cls && (
         <span className={`whitespace-nowrap text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${cls.requires_si ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-800'}`}>
           {cls.requires_si ? 'SI + DR Required' : cls.transaction_kind === 'doctor' ? 'Doctor · No SI/DR' : 'Auto Zoho Inv'}
-        </span>
-      )}
-      {order.fulfil_warehouse_name && (
-        <span className="whitespace-nowrap text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-ink-secondary">
-          {order.fulfil_warehouse_name}
         </span>
       )}
       {order.slip_printed_by_name && (
@@ -503,6 +498,7 @@ const RecentDispatchPanel = ({
                           title={o.getmeds_order_id}
                           items={[
                             { label: 'SO number', value: formatSoSummary(o) },
+                            { label: 'Warehouse', value: o.fulfil_warehouse_name },
                             { label: 'Stage', value: STAGE_LABEL[o.status] || o.status },
                             { label: 'Finance confirmed', value: timeAgo(o.finance_confirmed_at || o.updated_at) },
                             { label: 'Prescription', value: o.rx_badge?.label },
@@ -623,6 +619,7 @@ const RecentDispatchPanel = ({
                         items={[
                           { label: 'SO number', value: formatSoSummary(o) },
                           { label: 'Invoice', value: formatInvoiceSummary(o) },
+                          { label: 'Warehouse', value: o.fulfil_warehouse_name },
                           { label: 'Receiver', value: o.intake_receiver },
                           { label: 'Catering since', value: o.catered?.at ? timeAgo(o.catered.at) : null },
                           { label: 'Prescription', value: o.rx_badge?.label }
