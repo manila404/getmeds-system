@@ -367,7 +367,12 @@ async function issueSalesOrderDr({
     throw new DispatchBatchError(422, 'NO_ENTITY_ITEMS', `Order ${order.getmeds_order_id} has no items under entity ${resolvedEntity}.`);
   }
   const entityExternalRef = splitTarget?.zoho_so_number || order.zoho_so_number || order.getmeds_order_id;
-  const entityInitialSi = splitTarget ? (splitTarget.zoho_invoice_number || null) : (order.oojeema_si_number || null);
+  // Nov 23, 2026: a DR can now be issued after the Zoho invoice is posted
+  // (e.g. a No-SI order the customer still wants a DR for). With no Oojeema SI
+  // the Zoho invoice number (GPI-SI…) is the SI reference on the DR.
+  const entityInitialSi = splitTarget
+    ? (splitTarget.zoho_invoice_number || null)
+    : (order.oojeema_si_number || order.zoho_invoice_number || null);
 
   const batchRows = await db.prepare('SELECT * FROM order_item_batches WHERE order_id = ? ORDER BY id').all(order.id);
   const batchesByItem = new Map();

@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
   X, Trash2, RotateCcw, Check, CheckCircle2, AlertTriangle, Printer, Copy, ShieldAlert, ArrowLeft, Layers, Truck,
-  Paperclip, ExternalLink, RefreshCw, Pencil, PanelRight
+  Paperclip, ExternalLink, RefreshCw, Pencil, PanelRight, FileText
 } from 'lucide-react';
 import client from '../../api/client';
 import { fetchAndPrintSalesOrder, normalizeEntityKey } from '../../utils/printSalesOrder';
@@ -386,6 +386,38 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
         toast(`Loaded existing active ${entityKey} DR for this order.`);
       } else {
         handleApiError(err, 'Could not save batches / generate DR.');
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Nov 23, 2026: Dispatch sometimes still makes a Delivery Receipt for an
+  // order that is already invoiced (No-SI auto-invoice, or the DR was skipped).
+  // Batches were saved in step 1, so this only issues the DR and opens it to print.
+  const handleIssueDrAfterInvoice = async () => {
+    setSaving(true);
+    try {
+      const { data: drRes } = await client.post(`/api/dispatch/orders/${order.id}/dr`, {
+        entity_key: entityKey,
+        doctor_name: doctorName,
+        expected_updated_at: batchData?.order?.updated_at || null
+      });
+      setDrData(drRes.data);
+      syncOrderUpdatedAt(drRes.data.order_updated_at);
+      setFinalInvoice((prev) => (prev ? { ...prev, dr_number: drRes.data.receipt.dr_number } : prev));
+      setConflictMsg('');
+      setPrintOpen(true);
+      toast.success(`${drRes.data.receipt.entity_key} DR #${drRes.data.receipt.dr_number} issued!`);
+      if (onCompleted) onCompleted();
+    } catch (err) {
+      if (err?.response?.data?.error?.code === 'DR_ALREADY_EXISTS' && err?.response?.data?.error?.details?.existing_dr?.id) {
+        const { data: existingDr } = await client.get(`/api/dispatch/dr/${err.response.data.error.details.existing_dr.id}`);
+        setDrData(existingDr.data);
+        setPrintOpen(true);
+        toast(`Loaded existing active ${entityKey} DR for this order.`);
+      } else {
+        handleApiError(err, 'Could not issue the Delivery Receipt.');
       }
     } finally {
       setSaving(false);
@@ -1066,6 +1098,34 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
                       <span className="font-mono font-bold">{finalInvoice.zoho_invoice_number}</span>
                       {finalInvoice.dr_number ? ` · Linked DR #${finalInvoice.dr_number}` : ''}
                     </div>
+                  </div>
+
+                  {/* Nov 23, 2026: a DR can still be made after the invoice. */}
+                  <div className="p-3 rounded-lg border border-slate-200 bg-white text-xs flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-ink-secondary">
+                      <FileText className="w-4 h-4 shrink-0" />
+                      {drData?.receipt
+                        ? <span><b className="text-ink">{drData.receipt.entity_key} DR #{drData.receipt.dr_number}</b> issued for this order.</span>
+                        : <span>No Delivery Receipt yet. Need one for this order? You can still issue it.</span>}
+                    </div>
+                    {drData?.receipt ? (
+                      <button
+                        type="button"
+                        onClick={() => setPrintOpen(true)}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 bg-white font-semibold hover:bg-slate-50"
+                      >
+                        <Printer className="w-3.5 h-3.5" /> Print DR
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={saving || loading}
+                        onClick={handleIssueDrAfterInvoice}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-getmeds-blue text-getmeds-blue bg-white font-semibold hover:bg-blue-50 disabled:opacity-50"
+                      >
+                        <FileText className="w-3.5 h-3.5" /> {saving ? 'Issuing…' : `Issue Delivery Receipt (${entityKey})`}
+                      </button>
+                    )}
                   </div>
 
                   {shipResult ? (
