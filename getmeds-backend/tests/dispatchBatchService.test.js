@@ -7,7 +7,8 @@ const {
   warehouseBalanceForBatch,
   filterAndSortBatchesForWarehouse,
   suggestFefoPicks,
-  validatePickedBatches
+  validatePickedBatches,
+  validateManualFallbackBatches
 } = require('../src/services/dispatchBatchService');
 
 describe('FEFO warehouse batch filtering & validation', () => {
@@ -321,5 +322,88 @@ describe('MockZohoAdapter & LiveZohoAdapter batch + invoice forwarding', () => {
     expect(extractZohoContactCompliance({
       custom_field_hash: { cf_tin: '121-786-330', cf_lto_license_number: 'LTO-99' }
     })).toEqual({ tin: '121-786-330', lto_license_number: 'LTO-99' });
+  });
+
+  it('validateManualFallbackBatches enforces non-placeholder batches, valid non-expired expiry, and exact qty while skipping Packaging/CSP', () => {
+    const items = [
+      { id: 10, product_name: 'AtraGet 10mg', quantity: 2000, is_csp: 0 },
+      { id: 11, product_name: 'Packaging : Split Box Styro', quantity: 1, is_csp: 0 }
+    ];
+
+    expect(() =>
+      validateManualFallbackBatches({
+        items,
+        picksByItemId: new Map([[10, [{ order_item_id: 10, batch_number: 'N/A', expiry_date: '2028-08-31', quantity: 2000 }]]]),
+        today: '2026-11-24'
+      })
+    ).toThrow(/valid Batch #/i);
+
+    expect(() =>
+      validateManualFallbackBatches({
+        items,
+        picksByItemId: new Map([[10, [{ order_item_id: 10, batch_number: '2226244C', expiry_date: '2026-11-01', quantity: 2000 }]]]),
+        today: '2026-11-24'
+      })
+    ).toThrow(/expired/i);
+
+    expect(() =>
+      validateManualFallbackBatches({
+        items,
+        picksByItemId: new Map([[10, [{ order_item_id: 10, batch_number: '2226244C', expiry_date: '2028-08-31', quantity: 1500 }]]]),
+        today: '2026-11-24'
+      })
+    ).toThrow(/must equal ordered qty/i);
+
+    const out = validateManualFallbackBatches({
+      items,
+      picksByItemId: new Map([[10, [{ order_item_id: 10, batch_number: '2226244C', expiry_date: '2028-08-31', quantity: 2000 }]]]),
+      today: '2026-11-24'
+    });
+    expect(out).toEqual([
+      expect.objectContaining({
+        order_item_id: 10,
+        batch_number: '2226244C',
+        expiry_date: '2028-08-31',
+        quantity: 2000
+      })
+    ]);
+  });
+
+  it('LiveZohoAdapter stops retrying GET immediately when Zoho reports 10,000 daily rate limit exhaustion', async () => {
+    const adapter = new LiveZohoAdapter({
+      clientId: 'cid',
+      clientSecret: 'csec',
+      refreshToken: 'rtok',
+      organizationId: '714292728',
+      allowedOrgIds: ['714292728'],
+      baseUrl: 'https://www.zohoapis.com/inventory/v1',
+      logger: () => {}
+    });
+    adapter.getAccessToken = jest.fn().mockResolvedValue('tok');
+
+    let calls = 0;
+    const origFetch = global.fetch;
+    global.fetch = jest.fn(async () => {
+      calls += 1;
+      return {
+        ok: false,
+        status: 429,
+        json: async () => ({
+          code: 44,
+          message: 'The API call for this organization has exceeded the maximum call rate limit of 10,000'
+        })
+      };
+    });
+
+    try {
+      await expect(adapter.getItemBatches('ITEM-1')).rejects.toMatchObject({
+        httpStatus: 429,
+        isRateLimit: true,
+        isDailyLimit: true
+      });
+      expect(calls).toBe(1);
+    } finally {
+      global.fetch = origFetch;
+    }
   });
 });

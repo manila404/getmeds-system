@@ -97,11 +97,13 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
     setBatchData((prev) => (prev ? { ...prev, order: { ...prev.order, updated_at: nextUpdatedAt } } : prev));
   };
 
-  const loadState = async () => {
+  const loadState = async ({ forceRefresh = false } = {}) => {
     setLoading(true);
     setConflictMsg('');
     try {
-      const { data: res } = await client.get(`/api/dispatch/orders/${order.id}/batches`);
+      const { data: res } = await client.get(`/api/dispatch/orders/${order.id}/batches`, {
+        params: forceRefresh ? { refresh: '1' } : undefined
+      });
       const d = res.data;
       setBatchData(d);
       setDoctorName(d.order.dispatch_doctor_name || d.order.intake_doctor || 'NNH');
@@ -199,14 +201,26 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
       const initPicks = {};
       for (const ln of d.lines || []) {
         const seedPicks = (ln.saved_picks && ln.saved_picks.length) ? ln.saved_picks : (ln.suggested_picks || []);
-        initPicks[ln.order_item_id] = seedPicks.map((p) => ({
-          order_item_id: ln.order_item_id,
-          zoho_batch_id: p.zoho_batch_id,
-          zoho_batch_in_id: p.zoho_batch_in_id,
-          batch_number: p.batch_number,
-          expiry_date: p.expiry_date,
-          quantity: Number(p.quantity || 0)
-        }));
+        const isSupply = ln.is_csp || /^packaging\b/i.test(ln.product_name || '');
+        if (!seedPicks.length && d.zoho_batches_unavailable && !isSupply) {
+          initPicks[ln.order_item_id] = [{
+            order_item_id: ln.order_item_id,
+            zoho_batch_id: null,
+            zoho_batch_in_id: null,
+            batch_number: '',
+            expiry_date: '',
+            quantity: Number(ln.quantity || 0)
+          }];
+        } else {
+          initPicks[ln.order_item_id] = seedPicks.map((p) => ({
+            order_item_id: ln.order_item_id,
+            zoho_batch_id: p.zoho_batch_id,
+            zoho_batch_in_id: p.zoho_batch_in_id,
+            batch_number: p.batch_number,
+            expiry_date: p.expiry_date,
+            quantity: Number(p.quantity || 0)
+          }));
+        }
       }
       setPicksByItem(initPicks);
     } catch (err) {
@@ -224,7 +238,9 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
     const checkFreshness = async () => {
       if (document.visibilityState !== 'visible' || saving || shipping || finalInvoice) return;
       try {
-        const { data: res } = await client.get(`/api/dispatch/orders/${order.id}/batches`);
+        const { data: res } = await client.get(`/api/dispatch/orders/${order.id}/batches`, {
+          params: { check_only: '1' }
+        });
         const latestUpdatedAt = res?.data?.order?.updated_at;
         if (batchData?.order?.updated_at && latestUpdatedAt && latestUpdatedAt !== batchData.order.updated_at) {
           setConflictMsg('This order changed in another tab or by another dispatcher. Click Refresh before saving.');
@@ -242,7 +258,11 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
   }, [order.id, batchData?.order?.updated_at, saving, shipping, finalInvoice]);
 
   const handleApiError = (err, fallback) => {
-    const msg = err?.response?.data?.error?.message || fallback;
+    const rawMsg = err?.response?.data?.error?.message || fallback;
+    const isRateLimit = /maximum call rate limit|10,000|rate limit/i.test(rawMsg);
+    const msg = isRateLimit
+      ? `${rawMsg} — DRs work normally in Hub; finish Zoho Invoice/Shipment directly at inventory.zoho.com.`
+      : rawMsg;
     if (err?.response?.status === 409) {
       setConflictMsg(msg);
       loadState();
@@ -272,6 +292,36 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
       const list = [...(prev[lineId] || [])];
       list[pickIdx] = { ...list[pickIdx], quantity: Math.max(0, Number(val) || 0) };
       return { ...prev, [lineId]: list };
+    });
+  };
+
+  const updateManualBatchField = (lineId, pickIdx, patch) => {
+    setPicksByItem((prev) => {
+      const list = [...(prev[lineId] || [])];
+      list[pickIdx] = { ...list[pickIdx], ...patch };
+      return { ...prev, [lineId]: list };
+    });
+  };
+
+  const addManualSplitRow = (line) => {
+    setPicksByItem((prev) => {
+      const current = prev[line.order_item_id] || [];
+      const currentSum = current.reduce((s, p) => s + Number(p.quantity || 0), 0);
+      const remaining = Math.max(0, Number(line.quantity || 0) - currentSum);
+      return {
+        ...prev,
+        [line.order_item_id]: [
+          ...current,
+          {
+            order_item_id: line.order_item_id,
+            zoho_batch_id: null,
+            zoho_batch_in_id: null,
+            batch_number: '',
+            expiry_date: '',
+            quantity: remaining
+          }
+        ]
+      };
     });
   };
 
@@ -355,6 +405,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
         doctor_name: doctorName,
         requires_si: requiresSi,
         picks: flatPicks,
+        manual_fallback: Boolean(batchData?.zoho_batches_unavailable),
         expected_updated_at: batchData?.order?.updated_at || null
       });
       setBatchData(res.data);
@@ -945,6 +996,24 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
                 </div>
               </div>
 
+              {batchData?.zoho_batches_unavailable && (
+                <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 text-amber-950 text-xs flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5 flex-1 min-w-[240px]">
+                    <div className="font-bold">Zoho Inventory Batches Temporarily Unavailable (API Limit / Offline)</div>
+                    <div>
+                      Enter exact <b>Batch #</b> and <b>Expiry Date</b> manually from physical stock / <code>inventory.zoho.com</code> to save batches and generate official DRs without fail.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => loadState({ forceRefresh: true })}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-amber-400 bg-white text-amber-900 font-semibold hover:bg-amber-100 shrink-0"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Retry Zoho Batches
+                  </button>
+                </div>
+              )}
+
               <div className="border border-slate-200 rounded-lg overflow-hidden">
                 <table className="min-w-full text-xs">
                   <thead className="bg-surface border-b border-slate-200">
@@ -969,8 +1038,62 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
                           </td>
                           <td className="px-3 py-2.5 font-semibold whitespace-nowrap">{ln.quantity} {ln.unit || 'pc'}</td>
                           <td className="px-3 py-2.5 space-y-1.5">
-                            {ln.is_csp && !(ln.available_batches || []).length ? (
-                              <span className="text-ink-secondary">CSP non-stocked item</span>
+                            {(ln.is_csp || /^packaging\b/i.test(ln.product_name || '')) && !(ln.available_batches || []).length ? (
+                              <span className="text-ink-secondary">
+                                {ln.is_csp ? 'CSP non-stocked item' : 'Packaging / supply (no batch required)'}
+                              </span>
+                            ) : !(ln.available_batches || []).length && batchData?.zoho_batches_unavailable ? (
+                              <>
+                                {linePicks.map((p, idx) => (
+                                  <div key={idx} className="flex flex-wrap items-center gap-2">
+                                    <input
+                                      type="text"
+                                      placeholder="Batch #"
+                                      value={p.batch_number || ''}
+                                      onChange={(e) => updateManualBatchField(ln.order_item_id, idx, { batch_number: e.target.value })}
+                                      className="w-32 px-2 py-1 border border-slate-300 rounded bg-white font-mono"
+                                    />
+                                    <input
+                                      type="date"
+                                      value={p.expiry_date ? String(p.expiry_date).slice(0, 10) : ''}
+                                      onChange={(e) => updateManualBatchField(ln.order_item_id, idx, { expiry_date: e.target.value })}
+                                      className="px-2 py-1 border border-slate-300 rounded bg-white"
+                                    />
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      max={ln.quantity}
+                                      value={p.quantity}
+                                      onChange={(e) => updateBatchQty(ln.order_item_id, idx, e.target.value)}
+                                      className="w-20 px-2 py-1 border border-slate-300 rounded bg-white"
+                                    />
+                                    {linePicks.length > 1 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => removeBatchRow(ln.order_item_id, idx)}
+                                        title="Remove this batch row"
+                                        aria-label="Remove batch row"
+                                        className="p-1 rounded border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                                <div className="flex flex-wrap items-center gap-3 pt-0.5 text-[11px]">
+                                  <span className={`font-semibold ${qtyDiff === 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                                    Picked: {pickedTotal} / {ln.quantity} {ln.unit || 'pc'}
+                                    {qtyDiff > 0 ? ` (need ${qtyDiff} more)` : qtyDiff < 0 ? ` (${Math.abs(qtyDiff)} over)` : ' ✓'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => addManualSplitRow(ln)}
+                                    className="font-semibold text-getmeds-blue hover:underline"
+                                  >
+                                    + Split across another batch
+                                  </button>
+                                </div>
+                              </>
                             ) : !(ln.available_batches || []).length ? (
                               <span className="text-ink-secondary">No batch-tracked stock returned from Zoho</span>
                             ) : (

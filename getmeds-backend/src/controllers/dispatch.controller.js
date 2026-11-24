@@ -1397,7 +1397,11 @@ function drWorkflowAction(run) {
 }
 
 exports.getOrderBatches = drWorkflowAction((req) =>
-  dispatchBatchService.getOrderBatchOptions({ orderId: req.params.id }));
+  dispatchBatchService.getOrderBatchOptions({
+    orderId: req.params.id,
+    skipZoho: req.query.check_only === '1' || req.query.skip_zoho === '1',
+    forceRefresh: req.query.refresh === '1'
+  }));
 
 exports.saveOrderBatches = drWorkflowAction((req) =>
   dispatchBatchService.saveOrderBatchPicks({
@@ -1408,6 +1412,7 @@ exports.saveOrderBatches = drWorkflowAction((req) =>
     requiresSi: req.body?.requires_si ?? null,
     siOverrideReason: req.body?.si_override_reason ?? null,
     picks: req.body?.picks || [],
+    manualFallback: Boolean(req.body?.manual_fallback),
     expectedUpdatedAt: req.body?.expected_updated_at || null,
     expectedCateredBy: req.body?.expected_catered_by ?? null
   }));

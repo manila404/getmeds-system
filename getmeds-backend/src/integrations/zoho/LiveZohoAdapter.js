@@ -254,13 +254,17 @@ class LiveZohoAdapter extends ZohoAdapter {
 
       const json = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        // 429 (rate limited) and 5xx are worth another go on a GET; a 4xx
-        // like a bad org id or a revoked token will fail identically every
-        // time, so retrying it just delays the real message.
-        const worthRetrying = retryable && (resp.status === 429 || resp.status >= 500);
+        // 429 (rate limited) and 5xx are worth another go on a GET — EXCEPT daily
+        // organization rate-limit exhaustion, which will fail identically all day
+        // and only burns more failing requests if retried.
+        const isRateLimit = resp.status === 429 || /maximum call rate limit|rate limit/i.test(json.message || '');
+        const isDailyLimit = /maximum call rate limit|10,000|daily/i.test(json.message || '');
+        const worthRetrying = retryable && !isDailyLimit && (resp.status === 429 || resp.status >= 500);
         const err = new Error(json.message || `Zoho API error (HTTP ${resp.status})`);
         err.zohoResponse = json;
         err.httpStatus = resp.status;
+        err.isRateLimit = isRateLimit;
+        err.isDailyLimit = isDailyLimit;
 
         if (worthRetrying && attempt < attempts) {
           const wait = RETRY_BASE_MS * attempt * (resp.status === 429 ? 4 : 1);

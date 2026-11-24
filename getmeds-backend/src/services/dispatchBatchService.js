@@ -22,6 +22,32 @@ function manilaTodayDate(now = new Date()) {
   return new Date(now.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
+const ITEM_BATCH_CACHE_TTL_MS = 60 * 1000;
+const itemBatchCacheByAdapter = new WeakMap();
+const dailyLimitCacheByAdapter = new WeakMap();
+
+function isNonBatchSupplyName(name = '') {
+  return /^packaging\b/i.test(String(name || '').trim());
+}
+
+function isZohoRateLimitOrUnavailable(err) {
+  if (!err) return false;
+  if (err.isRateLimit || err.isDailyLimit || err.zohoUnavailable) return true;
+  if (err.httpStatus === 429 || err.httpStatus >= 500) return true;
+  const msg = String(err.message || '');
+  return /maximum call rate limit|10,000|rate limit|timed out|timeout|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed/i.test(msg);
+}
+
+function getAdapterCache(map, adapter) {
+  const key = adapter && typeof adapter === 'object' ? adapter : zoho;
+  let inner = map.get(key);
+  if (!inner) {
+    inner = new Map();
+    map.set(key, inner);
+  }
+  return inner;
+}
+
 /**
  * Extract warehouse-specific remaining quantity from a Zoho Inventory batch object.
  * Confirmed live: Zoho's /items/batches?item_id= returns top-level `warehouse_id: ""`
@@ -235,6 +261,89 @@ function validatePickedBatches({ items = [], picksByItemId = new Map(), availabl
 }
 
 /**
+ * Strict validation when Zoho Inventory API is unreachable/rate-limited and Dispatch enters
+ * manual Batch # + Expiry Date from physical stock / Zoho web UI. Rejects empty batch numbers,
+ * placeholders ("N/A"), missing/expired expiry dates, non-positive quantities, and qty mismatches.
+ */
+function validateManualFallbackBatches({ items = [], picksByItemId = new Map(), today = manilaTodayDate() } = {}) {
+  const normalized = [];
+  for (const it of items) {
+    const label = it.product_name || it.name || `Item #${it.id}`;
+    const isCsp = Number(it.is_csp) === 1 || it.is_csp === true || isKnownCspProductName(label);
+    const isSupply = isNonBatchSupplyName(label);
+    const itemPicks = picksByItemId.get(Number(it.id)) || [];
+
+    if ((isCsp || isSupply) && itemPicks.length === 0) continue;
+
+    if (!itemPicks.length) {
+      throw new DispatchBatchError(
+        422,
+        'BATCH_SELECTION_REQUIRED',
+        `Please enter Batch # and Expiry Date for "${label}" (qty ${it.quantity}).`
+      );
+    }
+
+    let pickedSum = 0;
+    for (const p of itemPicks) {
+      const batchNo = String(p.batch_number || '').trim();
+      if (batchNo.length < 2 || /^(n\/a|na|none|tbd|-+)$/i.test(batchNo)) {
+        throw new DispatchBatchError(
+          422,
+          'INVALID_BATCH_NUMBER',
+          `Enter a valid Batch # for "${label}".`
+        );
+      }
+      const exp = p.expiry_date ? String(p.expiry_date).slice(0, 10) : '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(exp)) {
+        throw new DispatchBatchError(
+          422,
+          'INVALID_EXPIRY_DATE',
+          `Enter a valid Expiry Date (YYYY-MM-DD) for "${label}" batch "${batchNo}".`
+        );
+      }
+      if (exp < today) {
+        throw new DispatchBatchError(
+          422,
+          'EXPIRED_BATCH_FORBIDDEN',
+          `Batch "${batchNo}" expired on ${exp} and cannot be picked.`
+        );
+      }
+      const qty = Number(p.quantity);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new DispatchBatchError(
+          422,
+          'INVALID_BATCH_QTY',
+          `Batch quantity for "${label}" must be greater than 0.`
+        );
+      }
+      pickedSum += qty;
+      normalized.push({
+        order_item_id: Number(it.id),
+        zoho_item_id: it.zoho_item_id || null,
+        zoho_batch_id: p.zoho_batch_id || null,
+        zoho_batch_in_id: p.zoho_batch_in_id || null,
+        batch_number: batchNo,
+        manufacturer_batch_no: p.manufacturer_batch_no || null,
+        manufactured_date: p.manufactured_date || null,
+        expiry_date: exp,
+        warehouse_id: it.effective_warehouse_id || p.warehouse_id || null,
+        warehouse_name: it.effective_warehouse_name || null,
+        quantity: qty
+      });
+    }
+
+    if (Math.abs(pickedSum - Number(it.quantity)) > 1e-6) {
+      throw new DispatchBatchError(
+        422,
+        'BATCH_QTY_MISMATCH',
+        `Total picked batch qty (${pickedSum}) must equal ordered qty (${it.quantity}) for "${label}".`
+      );
+    }
+  }
+  return normalized;
+}
+
+/**
  * Stale-tab & multi-user safeguard: blocks writes if another dispatcher caters the
  * order or if the order updated since the user's modal opened.
  */
@@ -378,15 +487,65 @@ async function loadOrderWithItemsForBatches(orderId) {
   return { order, items: enrichedItems, classification, splits, activeDrs };
 }
 
-async function fetchWarehouseBatchesForItems(items, { adapter = zoho, today = manilaTodayDate() } = {}) {
+async function fetchWarehouseBatchesForItems(
+  items,
+  { adapter = zoho, today = manilaTodayDate(), failSoft = false, forceRefresh = false } = {}
+) {
   const uniqueZohoIds = Array.from(new Set(items.map((it) => it.zoho_item_id).filter(Boolean)));
+  const cache = getAdapterCache(itemBatchCacheByAdapter, adapter);
+  const limitCache = getAdapterCache(dailyLimitCacheByAdapter, adapter);
+  const recentDailyLimit = !forceRefresh ? limitCache.get('status') : null;
+
   const rawByZohoId = new Map();
-  await Promise.all(
-    uniqueZohoIds.map(async (zid) => {
-      const res = await adapter.getItemBatches(zid);
-      rawByZohoId.set(String(zid), res.batches || []);
-    })
-  );
+  let zohoUnavailable = false;
+  let zohoError = null;
+
+  if (recentDailyLimit && recentDailyLimit.expiresAt > Date.now() && uniqueZohoIds.some((zid) => {
+    const c = cache.get(String(zid));
+    return !c || c.expiresAt <= Date.now();
+  })) {
+    zohoUnavailable = true;
+    zohoError = recentDailyLimit.error;
+    if (!failSoft) {
+      const err = new Error(zohoError);
+      err.zohoUnavailable = true;
+      err.isRateLimit = true;
+      throw err;
+    }
+  }
+
+  if (!zohoUnavailable) {
+    await Promise.all(
+      uniqueZohoIds.map(async (zid) => {
+        const key = String(zid);
+        const cached = !forceRefresh ? cache.get(key) : null;
+        if (cached && cached.expiresAt > Date.now()) {
+          rawByZohoId.set(key, cached.batches);
+          return;
+        }
+        try {
+          const res = await adapter.getItemBatches(zid);
+          const batches = res?.batches || [];
+          cache.set(key, { batches, expiresAt: Date.now() + ITEM_BATCH_CACHE_TTL_MS });
+          rawByZohoId.set(key, batches);
+        } catch (err) {
+          if (err?.isDailyLimit || /maximum call rate limit|10,000/i.test(err?.message || '')) {
+            limitCache.set('status', { error: err.message, expiresAt: Date.now() + ITEM_BATCH_CACHE_TTL_MS });
+          }
+          if (!failSoft) throw err;
+          if (isZohoRateLimitOrUnavailable(err)) {
+            zohoUnavailable = true;
+            if (!zohoError) zohoError = err.message;
+          } else {
+            throw err;
+          }
+        }
+      })
+    );
+    if (!zohoUnavailable && forceRefresh) {
+      limitCache.delete('status');
+    }
+  }
 
   const availableBatchesByItemId = new Map();
   for (const it of items) {
@@ -394,17 +553,45 @@ async function fetchWarehouseBatchesForItems(items, { adapter = zoho, today = ma
     const sorted = filterAndSortBatchesForWarehouse(raw, it.effective_warehouse_id, { today });
     availableBatchesByItemId.set(Number(it.id), sorted);
   }
-  return availableBatchesByItemId;
+  return { availableBatchesByItemId, zohoUnavailable, zohoError };
 }
 
-async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTodayDate() } = {}) {
+async function getOrderBatchOptions({
+  orderId,
+  adapter = zoho,
+  today = manilaTodayDate(),
+  skipZoho = false,
+  forceRefresh = false
+} = {}) {
   const { order, items, classification, splits, activeDrs } = await loadOrderWithItemsForBatches(orderId);
-  if ((!order.tin || !order.lto_license_number) && order.customer_id && order.zoho_contact_id) {
-    const refreshed = await refreshCustomerComplianceFromZoho(order.customer_id, order.zoho_contact_id, adapter);
-    if (!order.tin && refreshed.tin) order.tin = refreshed.tin;
-    if (!order.lto_license_number && refreshed.lto_license_number) order.lto_license_number = refreshed.lto_license_number;
+  if (skipZoho) {
+    return {
+      order,
+      classification,
+      splits,
+      active_drs: activeDrs,
+      lines: [],
+      zoho_batches_unavailable: false,
+      zoho_batches_error: null
+    };
   }
-  const availableBatchesByItemId = await fetchWarehouseBatchesForItems(items, { adapter, today });
+  if ((!order.tin || !order.lto_license_number) && order.customer_id && order.zoho_contact_id) {
+    try {
+      const refreshed = await refreshCustomerComplianceFromZoho(order.customer_id, order.zoho_contact_id, adapter);
+      if (!order.tin && refreshed.tin) order.tin = refreshed.tin;
+      if (!order.lto_license_number && refreshed.lto_license_number) order.lto_license_number = refreshed.lto_license_number;
+    } catch (err) {
+      if (!isZohoRateLimitOrUnavailable(err)) {
+        console.warn(`[DISPATCH_BATCH] customer compliance lookup failed for order ${orderId}:`, err.message);
+      }
+    }
+  }
+  const { availableBatchesByItemId, zohoUnavailable, zohoError } = await fetchWarehouseBatchesForItems(items, {
+    adapter,
+    today,
+    failSoft: true,
+    forceRefresh
+  });
 
   const hasBatchTable = await hasColumn('order_item_batches', 'order_item_id');
   const savedRows = hasBatchTable
@@ -465,7 +652,15 @@ async function getOrderBatchOptions({ orderId, adapter = zoho, today = manilaTod
     };
   });
 
-  return { order, classification, splits, active_drs: activeDrs, lines };
+  return {
+    order,
+    classification,
+    splits,
+    active_drs: activeDrs,
+    lines,
+    zoho_batches_unavailable: Boolean(zohoUnavailable),
+    zoho_batches_error: zohoError || null
+  };
 }
 
 async function saveOrderBatchPicks({
@@ -476,6 +671,7 @@ async function saveOrderBatchPicks({
   requiresSi = null,
   siOverrideReason = null,
   picks = [],
+  manualFallback = false,
   expectedUpdatedAt = null,
   expectedCateredBy = null,
   adapter = zoho,
@@ -496,7 +692,27 @@ async function saveOrderBatchPicks({
   if (resolvedEntity && !targetItems.length) {
     throw new DispatchBatchError(422, 'NO_ENTITY_ITEMS', `Order ${order.getmeds_order_id} has no items under entity ${resolvedEntity}.`);
   }
-  const availableBatchesByItemId = await fetchWarehouseBatchesForItems(targetItems, { adapter, today });
+  let availableBatchesByItemId = new Map();
+  let usedManualFallback = false;
+  let zohoFallbackReason = null;
+  try {
+    const batchRes = await fetchWarehouseBatchesForItems(targetItems, { adapter, today, failSoft: false });
+    availableBatchesByItemId = batchRes.availableBatchesByItemId;
+  } catch (err) {
+    if (isZohoRateLimitOrUnavailable(err)) {
+      if (!manualFallback) {
+        throw new DispatchBatchError(
+          503,
+          'ZOHO_BATCHES_UNAVAILABLE',
+          `Zoho Inventory batches unavailable (${err.message}). Enter Batch # and Expiry Date manually to proceed.`
+        );
+      }
+      usedManualFallback = true;
+      zohoFallbackReason = err.message;
+    } else {
+      throw err;
+    }
+  }
 
   const targetItemIds = new Set(targetItems.map((it) => Number(it.id)));
   const picksByItemId = new Map();
@@ -507,12 +723,14 @@ async function saveOrderBatchPicks({
     picksByItemId.get(itemId).push(p);
   }
 
-  const normalizedPicks = validatePickedBatches({
-    items: targetItems,
-    picksByItemId,
-    availableBatchesByItemId,
-    today
-  });
+  const normalizedPicks = usedManualFallback
+    ? validateManualFallbackBatches({ items: targetItems, picksByItemId, today })
+    : validatePickedBatches({
+        items: targetItems,
+        picksByItemId,
+        availableBatchesByItemId,
+        today
+      });
 
   const now = new Date().toISOString();
   const cleanDoctor = String(doctorName || order.dispatch_doctor_name || order.intake_doctor || 'NNH').trim() || 'NNH';
@@ -556,8 +774,15 @@ async function saveOrderBatchPicks({
       newStatus: order.status,
       actorId: actor.id,
       actorName: actor.name,
-      notes: `Batch selection saved (Doctor: ${cleanDoctor}, ${normalizedPicks.length} batch row(s)).`,
-      metadata: { doctorName: cleanDoctor, pickCount: normalizedPicks.length }
+      notes: usedManualFallback
+        ? `Batch selection saved via manual Zoho-rate-limit fallback (Doctor: ${cleanDoctor}, ${normalizedPicks.length} batch row(s)).`
+        : `Batch selection saved (Doctor: ${cleanDoctor}, ${normalizedPicks.length} batch row(s)).`,
+      metadata: {
+        doctorName: cleanDoctor,
+        pickCount: normalizedPicks.length,
+        manualFallback: usedManualFallback,
+        zohoFallbackReason
+      }
     });
   })();
 
@@ -639,6 +864,8 @@ module.exports = {
   filterAndSortBatchesForWarehouse,
   suggestFefoPicks,
   validatePickedBatches,
+  validateManualFallbackBatches,
+  isZohoRateLimitOrUnavailable,
   assertCanActOnOrder,
   getOrderBatchOptions,
   saveOrderBatchPicks,

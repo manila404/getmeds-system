@@ -36,13 +36,20 @@ const zohoSalespersonSync = require('./zohoSalespersonSync');
  * otherwise accumulate forever and crowd real work out of every batch.
  */
 
-const INTERVAL_MS = parseInt(process.env.ZOHO_AUTO_SYNC_INTERVAL_MS, 10) || 5 * 60 * 1000; // 5 min
-const BATCH_SIZE = parseInt(process.env.ZOHO_AUTO_SYNC_BATCH, 10) || 20;
+const INTERVAL_MS = parseInt(process.env.ZOHO_AUTO_SYNC_INTERVAL_MS, 10) || 30 * 60 * 1000; // 30 min (conserves Zoho 10k/day quota)
+const BATCH_SIZE = parseInt(process.env.ZOHO_AUTO_SYNC_BATCH, 10) || 10;
 // A page open won't re-read an order Zoho was asked about this recently.
 const OPEN_COOLDOWN_MS = parseInt(process.env.ZOHO_AUTO_SYNC_OPEN_COOLDOWN_MS, 10) || 60 * 1000; // 1 min
 // Spacing between orders inside one tick, so a batch is a trickle rather than
-// twenty simultaneous requests at Zoho's rate limiter.
+// simultaneous requests at Zoho's rate limiter.
 const STAGGER_MS = parseInt(process.env.ZOHO_AUTO_SYNC_STAGGER_MS, 10) || 400;
+const RATE_LIMIT_PAUSE_MS = 30 * 60 * 1000;
+let rateLimitPausedUntil = 0;
+
+function isZohoDailyLimitHit(errOrRes) {
+  const msg = String(errOrRes?.message || '');
+  return Boolean(errOrRes?.isDailyLimit || /maximum call rate limit|10,000/i.test(msg));
+}
 
 const TERMINAL = ['completed', 'cancelled', 'deleted'];
 
@@ -170,6 +177,9 @@ async function reconcileOne(order, source) {
 
 /** One pass over a batch. Never throws — a bad order must not stop the rest. */
 async function runOnce({ limit = BATCH_SIZE, source = 'auto_sync' } = {}) {
+  if (Date.now() < rateLimitPausedUntil) {
+    return [];
+  }
   // Sep 11, 2026: Zoho's Salesperson list first — one read per tick. It goes
   // BEFORE the orders so a rename is carried to every stored copy of the old
   // name before any order is compared against Zoho; otherwise each order
@@ -184,16 +194,32 @@ async function runOnce({ limit = BATCH_SIZE, source = 'auto_sync' } = {}) {
     }
   } catch (err) {
     console.warn('[ZOHO_AUTO_SYNC] Salesperson list refresh failed:', err.message);
+    if (isZohoDailyLimitHit(err)) {
+      rateLimitPausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+      console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — pausing background sync for 30 minutes.');
+      return [];
+    }
   }
 
   const orders = await pickBatch(limit);
   const results = [];
   for (const order of orders) {
     try {
-      results.push({ order: order.getmeds_order_id, ...(await reconcileOne(order, source)) });
+      const res = await reconcileOne(order, source);
+      results.push({ order: order.getmeds_order_id, ...res });
+      if (!res?.ok && isZohoDailyLimitHit(res)) {
+        rateLimitPausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+        console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — pausing rest of batch for 30 minutes.');
+        break;
+      }
     } catch (err) {
       console.error(`[ZOHO_AUTO_SYNC] ${order.getmeds_order_id} threw:`, err.message);
       results.push({ order: order.getmeds_order_id, ok: false, message: err.message });
+      if (isZohoDailyLimitHit(err)) {
+        rateLimitPausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+        console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — pausing rest of batch for 30 minutes.');
+        break;
+      }
     }
     if (STAGGER_MS > 0) await sleep(STAGGER_MS);
   }
