@@ -14,6 +14,7 @@ const { warehouseOf, warehouseSql } = require('../services/dispatchWarehouses');
 const { rxSummaries, rxBadge, rxBlocks } = require('../services/prescriptionService');
 const { hasColumn } = require('../services/schemaColumns');
 const { classifyOrder, normalizeEntityKey } = require('../services/orderClassificationService');
+const zohoQuotaGuard = require('../services/zohoQuotaGuard');
 
 /**
  * Load line items, gl proof flags, and split Sales Orders in flat queries
@@ -1453,3 +1454,25 @@ exports.saveOrderCompliance = drWorkflowAction((req) =>
     expectedUpdatedAt: req.body?.expected_updated_at || null,
     expectedCateredBy: req.body?.expected_catered_by ?? null
   }));
+
+/**
+ * GET /api/dispatch/zoho-quota
+ * Read-only daily Zoho API call counter (from sync_state — 0 Zoho calls),
+ * restricted strictly to Admin and Aaron Dispatch (dispatch@getmeds.ph).
+ */
+exports.getZohoQuotaUsage = async (req, res, next) => {
+  try {
+    const role = String(req.user?.role || '').toLowerCase();
+    const email = String(req.user?.email || '').trim().toLowerCase();
+    if (role !== 'admin' && email !== 'dispatch@getmeds.ph') {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'API usage monitor is restricted to Admin and Aaron Dispatch.' }
+      });
+    }
+    const snapshot = await zohoQuotaGuard.getUsageSnapshot();
+    res.json({ success: true, data: snapshot });
+  } catch (err) {
+    next(err);
+  }
+};

@@ -282,4 +282,41 @@ describe('Zoho API Optimization & Quota Guard (Nov 24 hardening)', () => {
     expect(dr.si_number).toBe('GPI-SI00055');
     expect(dri.si_or_to_no).toBe('GPI-SI00055');
   });
+
+  test('dispatch.controller.getZohoQuotaUsage allows Admin and dispatch@getmeds.ph, blocks other dispatchers', async () => {
+    const dispatchController = require('../src/controllers/dispatch.controller');
+    const makeRes = () => {
+      const r = { statusCode: 200, body: null };
+      r.status = (c) => { r.statusCode = c; return r; };
+      r.json = (b) => { r.body = b; return r; };
+      return r;
+    };
+
+    const resAaron = makeRes();
+    await dispatchController.getZohoQuotaUsage(
+      { user: { id: 232, role: 'dispatch', email: 'dispatch@getmeds.ph' } },
+      resAaron,
+      jest.fn()
+    );
+    expect(resAaron.statusCode).toBe(200);
+    expect(resAaron.body.success).toBe(true);
+    expect(resAaron.body.data).toHaveProperty('callsToday');
+
+    const resAdmin = makeRes();
+    await dispatchController.getZohoQuotaUsage(
+      { user: { id: 1, role: 'admin', email: 'ai@getmeds.ph' } },
+      resAdmin,
+      jest.fn()
+    );
+    expect(resAdmin.statusCode).toBe(200);
+    expect(resAdmin.body.success).toBe(true);
+
+    const resOther = makeRes();
+    await dispatchController.getZohoQuotaUsage(
+      { user: { id: 186, role: 'dispatch', email: 'davao@getmeds.ph' } },
+      resOther,
+      jest.fn()
+    );
+    expect(resOther.statusCode).toBe(403);
+  });
 });

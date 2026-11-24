@@ -13,6 +13,7 @@ router.use(requireRole('dispatch', 'admin', 'management'));
 router.param('id', (req, res, next) => requireOrderScope(req, res, next));
 
 router.get('/queue', c.getQueue);
+router.get('/zoho-quota', c.getZohoQuotaUsage);
 
 // Sep 25, 2026: the pharmacy's prescription queue — orders with a prescription,
 // visible from the moment Management approves them (before Finance), with

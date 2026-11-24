@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { CheckCircle, RefreshCw, PackageCheck, Truck, ExternalLink, Receipt, MapPin, Search, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CheckCircle, RefreshCw, PackageCheck, Truck, ExternalLink, Receipt, MapPin, Search, ChevronLeft, ChevronRight, Activity } from 'lucide-react';
 import client from '../../api/client';
+import { useAuth } from '../../hooks/useAuth';
+import ZohoApiUsageModal from '../../components/dispatch/ZohoApiUsageModal';
 import DeliveryConfirmModal from '../../components/dispatch/DeliveryConfirmModal';
 import OrderDetailsModal from '../../components/finance/OrderDetailsModal';
 import RecentDispatchPanel from '../../components/dispatch/RecentDispatchPanel';
@@ -116,6 +118,9 @@ const Pager = ({ pagination, onPage, fetching }) => {
 
 const DispatchQueuePage = () => {
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const canViewApiUsage = user?.role === 'admin' || String(user?.email || '').trim().toLowerCase() === 'dispatch@getmeds.ph';
+  const [apiUsageOpen, setApiUsageOpen] = useState(false);
 
   // Sep 15, 2026: the queue is paged and searchable on the server. Before,
   // it came back whole — 10,108 orders, nearly all imported from Zoho, drawn
@@ -467,9 +472,21 @@ const DispatchQueuePage = () => {
             : 'Orders waiting on Pharmacy/Dispatch in Zoho. This list is read-only — create the Package and Shipment in Zoho Inventory itself; this page updates automatically once that happens.'}
         </p>
       </div>
-      <button onClick={() => refetch()} className="flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary shrink-0 w-full sm:w-auto">
-        <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
-      </button>
+      <div className="flex flex-wrap items-center gap-2 shrink-0 w-full sm:w-auto">
+        {canViewApiUsage && (
+          <button
+            type="button"
+            onClick={() => setApiUsageOpen(true)}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary flex-1 sm:flex-none"
+          >
+            <Activity className="w-4 h-4 text-getmeds-blue" /> API Usage
+          </button>
+        )}
+        <button onClick={() => refetch()} className="flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 rounded-md text-sm text-ink-secondary hover:bg-surface hover:text-ink-primary flex-1 sm:flex-none">
+          <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
+        </button>
+        <ZohoApiUsageModal open={apiUsageOpen} onClose={() => setApiUsageOpen(false)} />
+      </div>
     </div>
   );
 
