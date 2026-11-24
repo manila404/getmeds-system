@@ -685,18 +685,41 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorders, truncated, newWatermark, stoppedEarly };
   }
 
-  async findSalesOrdersByReference(referenceNumber) {
+  async findSalesOrdersByReference(referenceNumber, { salesorderNumber = null } = {}) {
     const cleanRef = String(referenceNumber || '').trim();
-    if (!cleanRef) return { code: 0, message: 'success', salesorders: [] };
-    const result = await this._request('GET', '/salesorders', {
-      query: { reference_number: cleanRef, per_page: '25' }
-    });
-    const exact = (result.salesorders || []).filter((so) => {
-      const ref = String(so.reference_number || '').trim().toUpperCase();
-      const status = String(so.status || '').trim().toLowerCase();
-      return ref === cleanRef.toUpperCase() && !['void', 'cancelled'].includes(status);
-    });
-    return { code: 0, message: 'success', salesorders: exact };
+    const cleanSoNum = String(salesorderNumber || '').trim();
+    const matches = [];
+    const seen = new Set();
+
+    if (cleanSoNum) {
+      const byNum = await this._request('GET', '/salesorders', {
+        query: { salesorder_number: cleanSoNum, per_page: '10' }
+      });
+      for (const so of byNum.salesorders || []) {
+        const num = String(so.salesorder_number || '').trim().toUpperCase();
+        const status = String(so.status || '').trim().toLowerCase();
+        if (num === cleanSoNum.toUpperCase() && !['void', 'cancelled'].includes(status) && !seen.has(so.salesorder_id)) {
+          seen.add(so.salesorder_id);
+          matches.push(so);
+        }
+      }
+    }
+
+    if (!matches.length && cleanRef) {
+      const result = await this._request('GET', '/salesorders', {
+        query: { reference_number: cleanRef, per_page: '25' }
+      });
+      for (const so of result.salesorders || []) {
+        const ref = String(so.reference_number || '').trim().toUpperCase();
+        const status = String(so.status || '').trim().toLowerCase();
+        if (ref === cleanRef.toUpperCase() && !['void', 'cancelled'].includes(status) && !seen.has(so.salesorder_id)) {
+          seen.add(so.salesorder_id);
+          matches.push(so);
+        }
+      }
+    }
+
+    return { code: 0, message: 'success', salesorders: matches };
   }
 
   /**

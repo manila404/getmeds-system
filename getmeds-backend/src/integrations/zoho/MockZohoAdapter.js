@@ -462,13 +462,16 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorders, truncated: false, newWatermark: null, stoppedEarly: false };
   }
 
-  async findSalesOrdersByReference(referenceNumber) {
+  async findSalesOrdersByReference(referenceNumber, { salesorderNumber = null } = {}) {
     const cleanRef = String(referenceNumber || '').trim().toUpperCase();
-    if (!cleanRef) return { code: 0, message: 'success [MOCK MODE]', salesorders: [] };
+    const cleanSoNum = String(salesorderNumber || '').trim().toUpperCase();
+    if (!cleanRef && !cleanSoNum) return { code: 0, message: 'success [MOCK MODE]', salesorders: [] };
     const salesorders = [...this._salesOrders.values()].filter((so) => {
       const ref = String(so.reference_number || '').trim().toUpperCase();
+      const num = String(so.salesorder_number || '').trim().toUpperCase();
       const status = String(so.status || '').trim().toLowerCase();
-      return ref === cleanRef && !['void', 'cancelled'].includes(status);
+      if (['void', 'cancelled'].includes(status)) return false;
+      return (cleanSoNum && num === cleanSoNum) || (cleanRef && ref === cleanRef);
     });
     return { code: 0, message: 'success [MOCK MODE]', salesorders };
   }

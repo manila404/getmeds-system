@@ -58,9 +58,9 @@ function extractSoInvoicingFrom(so) {
  * Prevent duplicate Sales Orders if staff already created the SO manually in Zoho
  * using `GM-YYYYMMDD-XXXX` in Zoho's Reference# field during an outage or rate limit.
  */
-async function findExistingManualSalesOrder(referenceNumber, { invoicingFrom = null, excludeSoIds = [] } = {}) {
-  if (!referenceNumber || typeof zoho.findSalesOrdersByReference !== 'function') return null;
-  const res = await zoho.findSalesOrdersByReference(referenceNumber);
+async function findExistingManualSalesOrder(referenceNumber, { invoicingFrom = null, excludeSoIds = [], salesorderNumber = null } = {}) {
+  if ((!referenceNumber && !salesorderNumber) || typeof zoho.findSalesOrdersByReference !== 'function') return null;
+  const res = await zoho.findSalesOrdersByReference(referenceNumber, { salesorderNumber });
   const exclude = new Set((excludeSoIds || []).filter(Boolean).map(String));
   const candidates = (res?.salesorders || []).filter((so) => so?.salesorder_id && !exclude.has(String(so.salesorder_id)));
   if (!candidates.length) return null;
@@ -176,7 +176,7 @@ async function processOne(row) {
     // order_items unfiltered is exactly what buildZohoSalesOrderPayload does
     // with no override). For an order with no split this is simply every
     // item, so the payload is identical to before this filtering existed.
-    const orderRow = await db.prepare('SELECT invoicing_from FROM orders WHERE id = ?').get(row.order_id);
+    const orderRow = await db.prepare('SELECT invoicing_from, zoho_so_number FROM orders WHERE id = ?').get(row.order_id);
     if (!orderRow) {
       throw new Error(`Order ${row.order_id} no longer exists — cannot retry Zoho sync.`);
     }
@@ -209,8 +209,12 @@ async function processOne(row) {
       .all(row.order_id);
     const adoptedSo = await findExistingManualSalesOrder(payload.getmeds_order_id, {
       invoicingFrom: existingSplits.length ? orderRow.invoicing_from : null,
-      excludeSoIds: existingSplits.map((s) => s.zoho_so_id)
+      excludeSoIds: existingSplits.map((s) => s.zoho_so_id),
+      salesorderNumber: orderRow.zoho_so_number || null
     });
+    if (!adoptedSo && orderRow.zoho_so_number) {
+      throw new Error(`Manual Zoho SO ${orderRow.zoho_so_number} is already recorded on this order but was not found in Zoho yet; refusing to create a duplicate SO.`);
+    }
     const zohoResult = adoptedSo ? { salesorder: adoptedSo } : await zoho.createSalesOrder(payload);
     const now = new Date().toISOString();
 

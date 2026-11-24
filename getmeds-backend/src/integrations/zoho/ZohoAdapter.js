@@ -170,7 +170,7 @@ class ZohoAdapter {
   }
 
   /** @returns {Promise<{code:number, message:string, salesorders:object[]}>} */
-  async findSalesOrdersByReference(referenceNumber) {
+  async findSalesOrdersByReference(referenceNumber, opts = {}) {
     throw new Error('Not implemented');
   }
 
