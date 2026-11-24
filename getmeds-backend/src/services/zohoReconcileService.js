@@ -15,6 +15,8 @@ const { alertFinancePaidEarly } = require('./paidTermsGuard');
 // 10 Sep — a log of when this app looked, not of what happened.
 const { firstIsoWithPrecision, notBeforeWithPrecision } = require('./zohoDates');
 const { syncLineItemsFromZoho } = require('./zohoLineSyncService');
+const { hasColumn } = require('./schemaColumns');
+const { normalizeEntityKey } = require('./orderClassificationService');
 
 /** The later of two {iso, exact} pairs, ignoring nulls — see zohoDates.js. */
 function latestOfWithPrecision(...values) {
@@ -532,6 +534,27 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
                   updated_at = ?
               WHERE id = ?
             `).run(zohoInvoiceId || null, zohoInvoiceNumber || null, now, order.id);
+
+            if (zohoInvoiceNumber && (await hasColumn('delivery_receipts', 'si_number'))) {
+              const primaryEnt = normalizeEntityKey(order.invoicing_from || 'GPI');
+              const pendingDrs = primaryEnt
+                ? await db.prepare(`
+                    SELECT id FROM delivery_receipts
+                     WHERE order_id = ? AND entity_key = ? AND status IN ('draft', 'issued')
+                       AND (si_number IS NULL OR TRIM(si_number) = '' OR UPPER(TRIM(si_number)) = 'PENDING SI')
+                  `).all(order.id, primaryEnt)
+                : [];
+              for (const drRow of pendingDrs || []) {
+                await db.prepare('UPDATE delivery_receipts SET si_number = ?, updated_at = ? WHERE id = ?')
+                  .run(zohoInvoiceNumber, now, drRow.id);
+                await db.prepare(`
+                  UPDATE delivery_receipt_items
+                     SET si_or_to_no = ?
+                   WHERE delivery_receipt_id = ?
+                     AND (si_or_to_no IS NULL OR TRIM(si_or_to_no) = '' OR UPPER(TRIM(si_or_to_no)) = 'PENDING SI')
+                `).run(zohoInvoiceNumber, drRow.id);
+              }
+            }
 
             await logEvent({
               orderId: order.id,

@@ -299,6 +299,7 @@ const facadeMethods = [
   // through the one module every controller actually imports.
   'updateSalesOrder',
   'getSalesOrder',
+  'findSalesOrdersByReference',
   'getInvoice', // Oct 22, 2026: read-only, for the refund flow
   'findCreditNotes', // Oct 23, 2026: read-only, for the refund flow
   // Oct 9, 2026: added HERE. getItemWarehouses and getItemBatches existed on LiveZohoAdapter

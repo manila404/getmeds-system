@@ -3524,8 +3524,17 @@ async function syncOrderToZohoAndFinalize({ order, items, getmedsOrderId, pipeli
     zohoSyncStatus = 'skipped';
   } else {
     try {
-      zohoResult = await zoho.createSalesOrder(zohoPayload);
-      zohoSyncStatus = 'synced';
+      const existingManual = (typeof zoho.findSalesOrdersByReference === 'function' && !splitItems)
+        ? await zoho.findSalesOrdersByReference(getmedsOrderId).then((r) => (r?.salesorders || [])[0] || null)
+        : null;
+      if (existingManual) {
+        zohoResult = { salesorder: existingManual };
+        zohoSyncStatus = 'synced';
+        console.log(`[ZOHO] Adopted existing Zoho Sales Order ${existingManual.salesorder_number} for ${getmedsOrderId} instead of creating a duplicate.`);
+      } else {
+        zohoResult = await zoho.createSalesOrder(zohoPayload);
+        zohoSyncStatus = 'synced';
+      }
     } catch (err) {
       zohoSyncStatus = 'failed';
       zohoError = err.message;

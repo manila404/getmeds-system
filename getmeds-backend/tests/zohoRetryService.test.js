@@ -256,6 +256,85 @@ describe('admin.controller — Zoho queue endpoints', () => {
     expect(res.body.data.results.some((r) => r.orderId === orderId && r.outcome === 'succeeded')).toBe(true);
   });
 
+  test('adopts an existing manual Zoho SO matching Reference# instead of creating a duplicate', async () => {
+    const now = new Date().toISOString();
+    const orderId = (await db.prepare(`
+      INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
+        delivery_address, zoho_sync_status, created_at, updated_at)
+      VALUES ('GM-MANUAL-ADOPT-1', ?, ?, 'so_pending', 'direct', 20, '1 Adopt St', 'failed', ?, ?)
+    `).run(customerId, medrepId, now, now)).lastInsertRowid;
+    createdOrderIds.push(orderId);
+
+    const zohoAdapter = zoho.getZohoAdapter();
+    const manualSo = await zohoAdapter.createSalesOrder({
+      getmeds_order_id: 'GM-MANUAL-ADOPT-1',
+      customer_name: 'Retry Test Clinic',
+      customer_type: 'direct',
+      customer_master_type: 'direct',
+      total_amount: 20,
+      delivery_address: '1 Adopt St',
+      salesperson_name: 'TEST | MEDREP',
+      items: []
+    });
+
+    await zohoRetryService.enqueue({
+      orderId,
+      payload: { getmeds_order_id: 'GM-MANUAL-ADOPT-1', customer_name: 'x', total_amount: 20, delivery_address: 'y', items: [] },
+      error: 'rate limit'
+    });
+    const row = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
+    const spyCreate = jest.spyOn(zohoAdapter, 'createSalesOrder');
+    try {
+      const result = await zohoRetryService.processOne(row);
+      expect(result.outcome).toBe('succeeded');
+      expect(spyCreate).not.toHaveBeenCalled();
+
+      const updatedOrder = await db.prepare('SELECT zoho_so_id, zoho_so_number, zoho_sync_status FROM orders WHERE id = ?').get(orderId);
+      expect(updatedOrder).toEqual({
+        zoho_so_id: manualSo.salesorder.salesorder_id,
+        zoho_so_number: manualSo.salesorder.salesorder_number,
+        zoho_sync_status: 'synced'
+      });
+    } finally {
+      spyCreate.mockRestore();
+    }
+  });
+
+  test('does not increment attempts or mark failed_permanent when Zoho hits 10,000 daily rate limit', async () => {
+    const now = new Date().toISOString();
+    const orderId = (await db.prepare(`
+      INSERT INTO orders (getmeds_order_id, customer_id, medrep_id, status, customer_type, total_amount,
+        delivery_address, zoho_sync_status, created_at, updated_at)
+      VALUES ('GM-RATELIMIT-STAY', ?, ?, 'so_pending', 'direct', 20, '1 Limit St', 'failed', ?, ?)
+    `).run(customerId, medrepId, now, now)).lastInsertRowid;
+    createdOrderIds.push(orderId);
+
+    await zohoRetryService.enqueue({
+      orderId,
+      payload: { getmeds_order_id: 'GM-RATELIMIT-STAY', customer_name: 'x', total_amount: 20, delivery_address: 'y', items: [] },
+      error: 'rate limit'
+    });
+    await db.prepare('UPDATE zoho_sync_queue SET attempts = 4 WHERE order_id = ?').run(orderId);
+    const row = await db.prepare('SELECT * FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
+
+    const zohoAdapter = zoho.getZohoAdapter();
+    const spyFind = jest.spyOn(zohoAdapter, 'findSalesOrdersByReference').mockRejectedValue(
+      Object.assign(new Error('The API call for this organization has exceeded the maximum call rate limit of 10,000'), {
+        httpStatus: 429,
+        isRateLimit: true,
+        isDailyLimit: true
+      })
+    );
+    try {
+      const result = await zohoRetryService.processOne(row);
+      expect(result.outcome).toBe('rate_limited');
+      const queueAfter = await db.prepare('SELECT status, attempts FROM zoho_sync_queue WHERE order_id = ?').get(orderId);
+      expect(queueAfter).toEqual({ status: 'pending', attempts: 4 });
+    } finally {
+      spyFind.mockRestore();
+    }
+  });
+
   afterAll(async () => {
     for (const id of createdOrderIds) {
       await db.prepare('DELETE FROM notifications WHERE order_id = ?').run(id);

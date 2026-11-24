@@ -169,6 +169,11 @@ class ZohoAdapter {
     throw new Error('Not implemented');
   }
 
+  /** @returns {Promise<{code:number, message:string, salesorders:object[]}>} */
+  async findSalesOrdersByReference(referenceNumber) {
+    throw new Error('Not implemented');
+  }
+
   /**
    * Read-only: credit notes matching { creditnote_number } and/or { reference_number } (the invoice number a credit note
    * was raised against). Oct 23, 2026: the refund flow checks that Finance's credit note exists and is the right size.

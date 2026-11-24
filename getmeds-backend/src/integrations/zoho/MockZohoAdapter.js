@@ -462,6 +462,17 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorders, truncated: false, newWatermark: null, stoppedEarly: false };
   }
 
+  async findSalesOrdersByReference(referenceNumber) {
+    const cleanRef = String(referenceNumber || '').trim().toUpperCase();
+    if (!cleanRef) return { code: 0, message: 'success [MOCK MODE]', salesorders: [] };
+    const salesorders = [...this._salesOrders.values()].filter((so) => {
+      const ref = String(so.reference_number || '').trim().toUpperCase();
+      const status = String(so.status || '').trim().toLowerCase();
+      return ref === cleanRef && !['void', 'cancelled'].includes(status);
+    });
+    return { code: 0, message: 'success [MOCK MODE]', salesorders };
+  }
+
   /**
    * Mirrors LiveZohoAdapter.listSalesOrderComments' shape. Read-only, like
    * there — this mock has no addComment either.

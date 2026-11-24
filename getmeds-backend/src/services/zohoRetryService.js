@@ -33,10 +33,52 @@ const { groupItemsByInvoicingFrom } = require('./orderSplitService');
 const MAX_ATTEMPTS = parseInt(process.env.ZOHO_RETRY_MAX_ATTEMPTS, 10) || 5;
 const BASE_DELAY_MS = parseInt(process.env.ZOHO_RETRY_BASE_DELAY_MS, 10) || 30000; // 30s
 const MAX_DELAY_MS = parseInt(process.env.ZOHO_RETRY_MAX_DELAY_MS, 10) || 30 * 60 * 1000; // 30min
+const DAILY_LIMIT_DELAY_MS = 30 * 60 * 1000; // 30min
 
 function backoffDelayMs(attempts) {
   const delay = BASE_DELAY_MS * Math.pow(2, attempts);
   return Math.min(delay, MAX_DELAY_MS);
+}
+
+function isZohoDailyLimitError(err) {
+  return Boolean(err?.isDailyLimit || /maximum call rate limit|10,000/i.test(String(err?.message || '')));
+}
+
+function extractSoInvoicingFrom(so) {
+  if (!so) return '';
+  if (so.cf_invoicing_from) return String(so.cf_invoicing_from).trim();
+  if (so.custom_field_hash?.cf_invoicing_from) return String(so.custom_field_hash.cf_invoicing_from).trim();
+  const field = Array.isArray(so.custom_fields)
+    ? so.custom_fields.find((f) => f.api_name === 'cf_invoicing_from' || f.label === 'Invoicing From')
+    : null;
+  return field?.value ? String(field.value).trim() : '';
+}
+
+/**
+ * Prevent duplicate Sales Orders if staff already created the SO manually in Zoho
+ * using `GM-YYYYMMDD-XXXX` in Zoho's Reference# field during an outage or rate limit.
+ */
+async function findExistingManualSalesOrder(referenceNumber, { invoicingFrom = null, excludeSoIds = [] } = {}) {
+  if (!referenceNumber || typeof zoho.findSalesOrdersByReference !== 'function') return null;
+  const res = await zoho.findSalesOrdersByReference(referenceNumber);
+  const exclude = new Set((excludeSoIds || []).filter(Boolean).map(String));
+  const candidates = (res?.salesorders || []).filter((so) => so?.salesorder_id && !exclude.has(String(so.salesorder_id)));
+  if (!candidates.length) return null;
+
+  if (invoicingFrom) {
+    const target = String(invoicingFrom).trim().toLowerCase();
+    for (const c of candidates) {
+      const listInvFrom = extractSoInvoicingFrom(c).toLowerCase();
+      if (listInvFrom === target) return c;
+      if (!listInvFrom && typeof zoho.getSalesOrder === 'function') {
+        const full = (await zoho.getSalesOrder(c.salesorder_id).catch(() => null))?.salesorder;
+        if (extractSoInvoicingFrom(full).toLowerCase() === target) return full || c;
+      }
+    }
+    return null;
+  }
+
+  return candidates[0];
 }
 
 /**
@@ -162,7 +204,14 @@ async function processOne(row) {
       }
     }
 
-    const zohoResult = await zoho.createSalesOrder(payload);
+    const existingSplits = await db
+      .prepare('SELECT zoho_so_id FROM order_split_sales_orders WHERE order_id = ? AND zoho_so_id IS NOT NULL')
+      .all(row.order_id);
+    const adoptedSo = await findExistingManualSalesOrder(payload.getmeds_order_id, {
+      invoicingFrom: existingSplits.length ? orderRow.invoicing_from : null,
+      excludeSoIds: existingSplits.map((s) => s.zoho_so_id)
+    });
+    const zohoResult = adoptedSo ? { salesorder: adoptedSo } : await zoho.createSalesOrder(payload);
     const now = new Date().toISOString();
 
     const txn = db.transaction(async () => {
@@ -177,7 +226,9 @@ async function processOne(row) {
         orderId: row.order_id,
         eventType: 'ZOHO_SYNC_RECOVERED',
         actorName: 'System (Zoho Retry Job)',
-        notes: `Zoho SO created on retry attempt #${row.attempts + 1}: ${zohoResult.salesorder.salesorder_number}`
+        notes: adoptedSo
+          ? `Adopted existing Zoho SO ${zohoResult.salesorder.salesorder_number} (matching Reference# ${payload.getmeds_order_id}).`
+          : `Zoho SO created on retry attempt #${row.attempts + 1}: ${zohoResult.salesorder.salesorder_number}`
       });
     });
     await txn();
@@ -205,8 +256,17 @@ async function processOne(row) {
 
     return { orderId: row.order_id, queueId: row.id, outcome: 'succeeded' };
   } catch (err) {
-    const attempts = row.attempts + 1;
     const now = new Date().toISOString();
+    if (isZohoDailyLimitError(err)) {
+      const nextAttemptAt = new Date(Date.now() + DAILY_LIMIT_DELAY_MS).toISOString();
+      await db.prepare(`
+        UPDATE zoho_sync_queue SET last_error = ?, next_attempt_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(err.message, nextAttemptAt, now, row.id);
+      return { orderId: row.order_id, queueId: row.id, outcome: 'rate_limited', error: err.message, nextAttemptAt };
+    }
+
+    const attempts = row.attempts + 1;
 
     if (attempts >= MAX_ATTEMPTS) {
       await db.prepare(`
@@ -303,7 +363,15 @@ async function processSplitRetry(row) {
       }
     }
 
-    const zohoResult = await zoho.createSalesOrder(payload);
+    const parentOrder = await db.prepare('SELECT zoho_so_id FROM orders WHERE id = ?').get(row.order_id);
+    const otherSplits = await db
+      .prepare('SELECT zoho_so_id FROM order_split_sales_orders WHERE order_id = ? AND invoicing_from <> ? AND zoho_so_id IS NOT NULL')
+      .all(row.order_id, row.invoicing_from);
+    const adoptedSplitSo = await findExistingManualSalesOrder(payload.getmeds_order_id, {
+      invoicingFrom: row.invoicing_from,
+      excludeSoIds: [parentOrder?.zoho_so_id, ...otherSplits.map((s) => s.zoho_so_id)]
+    });
+    const zohoResult = adoptedSplitSo ? { salesorder: adoptedSplitSo } : await zoho.createSalesOrder(payload);
     const now = new Date().toISOString();
 
     const txn = db.transaction(async () => {
@@ -319,7 +387,9 @@ async function processSplitRetry(row) {
         orderId: row.order_id,
         eventType: 'ZOHO_SYNC_RECOVERED',
         actorName: 'System (Zoho Retry Job)',
-        notes: `Zoho SO created on retry attempt #${row.attempts + 1} for ${row.invoicing_from}: ${zohoResult.salesorder.salesorder_number}`
+        notes: adoptedSplitSo
+          ? `Adopted existing Zoho SO ${zohoResult.salesorder.salesorder_number} for ${row.invoicing_from} (matching Reference# ${payload.getmeds_order_id}).`
+          : `Zoho SO created on retry attempt #${row.attempts + 1} for ${row.invoicing_from}: ${zohoResult.salesorder.salesorder_number}`
       });
     });
     await txn();
@@ -337,8 +407,17 @@ async function processSplitRetry(row) {
 
     return { orderId: row.order_id, queueId: row.id, outcome: 'succeeded' };
   } catch (err) {
-    const attempts = row.attempts + 1;
     const now = new Date().toISOString();
+    if (isZohoDailyLimitError(err)) {
+      const nextAttemptAt = new Date(Date.now() + DAILY_LIMIT_DELAY_MS).toISOString();
+      await db.prepare(`
+        UPDATE zoho_sync_queue SET last_error = ?, next_attempt_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(err.message, nextAttemptAt, now, row.id);
+      return { orderId: row.order_id, queueId: row.id, outcome: 'rate_limited', error: err.message, nextAttemptAt };
+    }
+
+    const attempts = row.attempts + 1;
 
     if (attempts >= MAX_ATTEMPTS) {
       await db.prepare(`
@@ -400,7 +479,12 @@ async function processQueue({ force = false } = {}) {
   const results = [];
   for (const row of rows) {
     // eslint-disable-next-line no-await-in-loop -- intentionally sequential, low volume, avoids hammering Zoho concurrently
-    results.push(await processOne(row));
+    const r = await processOne(row);
+    results.push(r);
+    if (r?.outcome === 'rate_limited') {
+      console.warn('[ZOHO_RETRY] Zoho daily API rate limit hit — stopping current queue sweep.');
+      break;
+    }
   }
   return results;
 }

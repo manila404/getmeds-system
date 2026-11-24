@@ -685,6 +685,20 @@ class LiveZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'success', salesorders, truncated, newWatermark, stoppedEarly };
   }
 
+  async findSalesOrdersByReference(referenceNumber) {
+    const cleanRef = String(referenceNumber || '').trim();
+    if (!cleanRef) return { code: 0, message: 'success', salesorders: [] };
+    const result = await this._request('GET', '/salesorders', {
+      query: { reference_number: cleanRef, per_page: '25' }
+    });
+    const exact = (result.salesorders || []).filter((so) => {
+      const ref = String(so.reference_number || '').trim().toUpperCase();
+      const status = String(so.status || '').trim().toLowerCase();
+      return ref === cleanRef.toUpperCase() && !['void', 'cancelled'].includes(status);
+    });
+    return { code: 0, message: 'success', salesorders: exact };
+  }
+
   /**
    * GET /salesorders/{id}/comments — Zoho's own "Comments & History" log for
    * one Sales Order. See ZohoAdapter.listSalesOrderComments for why this
