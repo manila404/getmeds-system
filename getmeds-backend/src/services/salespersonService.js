@@ -36,7 +36,7 @@ const zohoSalespersonSync = require('./zohoSalespersonSync');
 // burst of form-opens into effectively one Zoho read while keeping the
 // window short enough nobody notices it. Still overridable via
 // ZOHO_SALESPERSON_CACHE_MS for an environment that wants it longer/shorter.
-const CACHE_TTL_MS = Number(process.env.ZOHO_SALESPERSON_CACHE_MS) || 30 * 1000;
+const CACHE_TTL_MS = Number(process.env.ZOHO_SALESPERSON_CACHE_MS) || 5 * 60 * 1000;
 let cache = { names: null, fetchedAt: 0 };
 
 /** The Salesperson string for a user id, or null if they have no mapping. */

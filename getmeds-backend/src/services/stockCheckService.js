@@ -2,6 +2,7 @@
 
 const db = require('../db/database');
 const zoho = require('../integrations/zoho');
+const zohoQuotaGuard = require('./zohoQuotaGuard');
 
 /**
  * Management's stock check before approving an order. Oct 9, 2026.
@@ -22,9 +23,14 @@ const zoho = require('../integrations/zoho');
  * most 3 at a time (Zoho refuses more than about 4 in-process requests at once).
  */
 
-const CACHE_MS = 60 * 1000;
+const CACHE_MS = 3 * 60 * 1000;
 const PARALLEL = 3;
 const cache = new Map(); // zohoItemId -> { at, warehouses }
+
+function isUncached(zohoItemId) {
+  const hit = cache.get(zohoItemId);
+  return !hit || Date.now() - hit.at >= CACHE_MS;
+}
 
 async function warehousesOf(zohoItemId) {
   const hit = cache.get(zohoItemId);
@@ -69,6 +75,12 @@ async function checkOrderStock(orderId, requestedWarehouseId = null) {
   if (!lines.length) return { available: false, reason: 'This order has no items.' };
 
   const itemIds = [...new Set(lines.map((l) => l.zoho_item_id).filter(Boolean))];
+  if (itemIds.some(isUncached)) {
+    const limitState = await zohoQuotaGuard.getDailyLimitStatus();
+    if (limitState.limited) {
+      return { available: false, reason: limitState.reason || 'Zoho daily API limit active; stock check paused temporarily.' };
+    }
+  }
   const failures = new Map(); // zohoItemId -> message
   const stock = new Map(); // zohoItemId -> warehouses[]
   await inBatches(itemIds, PARALLEL, async (id) => {

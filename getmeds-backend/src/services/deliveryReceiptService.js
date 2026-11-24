@@ -8,7 +8,7 @@ const {
   formatEntitySiNumber,
   classifyOrder
 } = require('./orderClassificationService');
-const { assertCanActOnOrder, DispatchBatchError } = require('./dispatchBatchService');
+const { assertCanActOnOrder, DispatchBatchError, invalidateItemBatchesCache } = require('./dispatchBatchService');
 const { claimOrder, releaseClaim } = require('./orderClaimService');
 const { evaluateCompletion } = require('./orderCompletionService');
 const { logEvent, resolveActor } = require('./auditService');
@@ -1181,6 +1181,9 @@ async function finalizeZohoInvoiceForOrder({
         }
       });
     })();
+    if (typeof invalidateItemBatchesCache === 'function') {
+      invalidateItemBatchesCache(entityItems.map((it) => it.zoho_item_id), adapter);
+    }
 
     return {
       entity_key: resolvedEntity,

@@ -5,6 +5,7 @@ const { logEvent } = require('./auditService');
 const { notify, getUserIdsByRole } = require('./notificationService');
 const { buildZohoSalesOrderPayload } = require('./zohoPayloadBuilder');
 const { pushUnsyncedAttachments } = require('./zohoAttachmentSync');
+const zohoQuotaGuard = require('./zohoQuotaGuard');
 // Sep 22, 2026: split-invoicing orders — see this file's own processOne/
 // processSplitRetry notes below and services/orderSplitService.js.
 const { groupItemsByInvoicingFrom } = require('./orderSplitService');
@@ -40,9 +41,7 @@ function backoffDelayMs(attempts) {
   return Math.min(delay, MAX_DELAY_MS);
 }
 
-function isZohoDailyLimitError(err) {
-  return Boolean(err?.isDailyLimit || /maximum call rate limit|10,000/i.test(String(err?.message || '')));
-}
+const isZohoDailyLimitError = zohoQuotaGuard.isZohoDailyLimitError;
 
 function extractSoInvoicingFrom(so) {
   if (!so) return '';
@@ -237,6 +236,20 @@ async function processOne(row) {
     });
     await txn();
 
+    if (adoptedSo) {
+      try {
+        await require('./zohoReconcileService').reconcileOrderFully({
+          orderId: row.order_id,
+          actorId: null,
+          actorName: 'System (Zoho Retry Job)',
+          source: 'retry_adoption',
+          salesorder: adoptedSo
+        });
+      } catch (recErr) {
+        console.warn(`[ZOHO_RETRY] post-adoption reconcile failed for order ${row.order_id}:`, recErr.message);
+      }
+    }
+
     // Sep 21, 2026: same reasoning as syncOrderToZohoAndFinalize's own call —
     // this order may have gathered attachments (proof of payment, etc.)
     // during however long it sat in the retry queue with no zoho_so_id to
@@ -398,6 +411,18 @@ async function processSplitRetry(row) {
     });
     await txn();
 
+    if (adoptedSplitSo) {
+      try {
+        await require('./zohoSplitReconcileService').reconcileSplitOrders({
+          orderId: row.order_id,
+          actorName: 'System (Zoho Retry Job)',
+          source: 'retry_adoption'
+        });
+      } catch (recErr) {
+        console.warn(`[ZOHO_RETRY] post-adoption split reconcile failed for order ${row.order_id}:`, recErr.message);
+      }
+    }
+
     const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(row.order_id);
     if (order && order.medrep_id) {
       await notify({
@@ -475,6 +500,12 @@ async function processSplitRetry(row) {
  * row's backoff window (used by the on-demand admin/test endpoint).
  */
 async function processQueue({ force = false } = {}) {
+  if (!force) {
+    const limitState = await zohoQuotaGuard.getDailyLimitStatus();
+    if (limitState.limited) {
+      return [];
+    }
+  }
   const now = new Date().toISOString();
   const rows = force
     ? await db.prepare(`SELECT * FROM zoho_sync_queue WHERE status = 'pending' ORDER BY created_at ASC`).all()
@@ -486,8 +517,12 @@ async function processQueue({ force = false } = {}) {
     const r = await processOne(row);
     results.push(r);
     if (r?.outcome === 'rate_limited') {
+      await zohoQuotaGuard.tripDailyLimit(r.error);
       console.warn('[ZOHO_RETRY] Zoho daily API rate limit hit — stopping current queue sweep.');
       break;
+    }
+    if (r?.outcome === 'succeeded') {
+      await zohoQuotaGuard.clearDailyLimit();
     }
   }
   return results;

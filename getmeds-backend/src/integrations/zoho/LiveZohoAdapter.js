@@ -1,6 +1,7 @@
 const ZohoAdapter = require('./ZohoAdapter');
 const { findSalesperson, SalespersonNotFoundError } = require('./salespersonName');
 const { assertZohoCallAllowed } = require('./zohoWriteLock');
+const zohoQuotaGuard = require('../../services/zohoQuotaGuard');
 
 // Sep 2, 2026 — network resilience, added after a Full Resync died with the
 // famously unhelpful "fetch failed". See _request below for why retries are
@@ -151,6 +152,7 @@ class LiveZohoAdapter extends ZohoAdapter {
     });
     this._modeLabel = modeLabel;
     this._log = log;
+    this._inFlightGets = new Map();
   }
 
   get mode() {
@@ -202,6 +204,23 @@ class LiveZohoAdapter extends ZohoAdapter {
     this._assertCallAllowed(method, path);
     const params = new URLSearchParams({ organization_id: this.organizationId, ...query });
     const url = `${this.baseUrl}${path}?${params.toString()}`;
+
+    // Coalesce identical concurrent GET requests in flight so parallel UI/service
+    // calls against the same Zoho resource make one outbound HTTP call instead of N.
+    if (method === 'GET') {
+      const existing = this._inFlightGets.get(url);
+      if (existing) return existing;
+      const promise = this._executeRequest(method, path, url, body).finally(() => {
+        this._inFlightGets.delete(url);
+      });
+      this._inFlightGets.set(url, promise);
+      return promise;
+    }
+
+    return this._executeRequest(method, path, url, body);
+  }
+
+  async _executeRequest(method, path, url, body) {
     this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] ${method} ${path} (org=${this.organizationId})`);
 
     // Sep 2, 2026: retries, but ONLY for GET.
@@ -223,6 +242,7 @@ class LiveZohoAdapter extends ZohoAdapter {
     let lastError = null;
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      zohoQuotaGuard.recordCall();
       let resp;
       try {
         resp = await this._fetchAuthed((token) => fetch(url, {
@@ -266,6 +286,10 @@ class LiveZohoAdapter extends ZohoAdapter {
         err.isRateLimit = isRateLimit;
         err.isDailyLimit = isDailyLimit;
 
+        if (isDailyLimit) {
+          zohoQuotaGuard.tripDailyLimit(err.message).catch(() => {});
+        }
+
         if (worthRetrying && attempt < attempts) {
           const wait = RETRY_BASE_MS * attempt * (resp.status === 429 ? 4 : 1);
           this._log(`[ZOHO_${this._modeLabel.toUpperCase()}] ${method} ${path} HTTP ${resp.status} — retry ${attempt}/${attempts - 1} in ${wait}ms`);
@@ -275,6 +299,7 @@ class LiveZohoAdapter extends ZohoAdapter {
         }
         throw err;
       }
+      zohoQuotaGuard.clearDailyLimit().catch(() => {});
       return json;
     }
 

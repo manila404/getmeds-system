@@ -7,6 +7,7 @@ const { classifyOrder, normalizeEntityKey } = require('./orderClassificationServ
 const { hasColumn } = require('./schemaColumns');
 const { logEvent, resolveActor } = require('./auditService');
 const { setCustomerTin, refreshCustomerComplianceFromZoho } = require('./customerTinService');
+const zohoQuotaGuard = require('./zohoQuotaGuard');
 
 class DispatchBatchError extends Error {
   constructor(status, code, message, details = null) {
@@ -22,9 +23,8 @@ function manilaTodayDate(now = new Date()) {
   return new Date(now.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
-const ITEM_BATCH_CACHE_TTL_MS = 60 * 1000;
+const ITEM_BATCH_CACHE_TTL_MS = 3 * 60 * 1000;
 const itemBatchCacheByAdapter = new WeakMap();
-const dailyLimitCacheByAdapter = new WeakMap();
 
 function isNonBatchSupplyName(name = '') {
   return /^packaging\b/i.test(String(name || '').trim());
@@ -32,10 +32,22 @@ function isNonBatchSupplyName(name = '') {
 
 function isZohoRateLimitOrUnavailable(err) {
   if (!err) return false;
-  if (err.isRateLimit || err.isDailyLimit || err.zohoUnavailable) return true;
+  if (zohoQuotaGuard.isZohoDailyLimitError(err)) return true;
+  if (err.isRateLimit || err.zohoUnavailable) return true;
   if (err.httpStatus === 429 || err.httpStatus >= 500) return true;
   const msg = String(err.message || '');
-  return /maximum call rate limit|10,000|rate limit|timed out|timeout|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed/i.test(msg);
+  return /rate limit|timed out|timeout|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed/i.test(msg);
+}
+
+function invalidateItemBatchesCache(zohoItemIds = [], adapter = zoho) {
+  const cache = getAdapterCache(itemBatchCacheByAdapter, adapter);
+  if (!Array.isArray(zohoItemIds) || !zohoItemIds.length) {
+    cache.clear();
+    return;
+  }
+  for (const zid of zohoItemIds) {
+    if (zid) cache.delete(String(zid));
+  }
 }
 
 function getAdapterCache(map, adapter) {
@@ -493,19 +505,18 @@ async function fetchWarehouseBatchesForItems(
 ) {
   const uniqueZohoIds = Array.from(new Set(items.map((it) => it.zoho_item_id).filter(Boolean)));
   const cache = getAdapterCache(itemBatchCacheByAdapter, adapter);
-  const limitCache = getAdapterCache(dailyLimitCacheByAdapter, adapter);
-  const recentDailyLimit = !forceRefresh ? limitCache.get('status') : null;
+  const recentDailyLimit = !forceRefresh ? await zohoQuotaGuard.getDailyLimitStatus() : { limited: false };
 
   const rawByZohoId = new Map();
   let zohoUnavailable = false;
   let zohoError = null;
 
-  if (recentDailyLimit && recentDailyLimit.expiresAt > Date.now() && uniqueZohoIds.some((zid) => {
+  if (recentDailyLimit.limited && uniqueZohoIds.some((zid) => {
     const c = cache.get(String(zid));
     return !c || c.expiresAt <= Date.now();
   })) {
     zohoUnavailable = true;
-    zohoError = recentDailyLimit.error;
+    zohoError = recentDailyLimit.reason;
     if (!failSoft) {
       const err = new Error(zohoError);
       err.zohoUnavailable = true;
@@ -529,8 +540,8 @@ async function fetchWarehouseBatchesForItems(
           cache.set(key, { batches, expiresAt: Date.now() + ITEM_BATCH_CACHE_TTL_MS });
           rawByZohoId.set(key, batches);
         } catch (err) {
-          if (err?.isDailyLimit || /maximum call rate limit|10,000/i.test(err?.message || '')) {
-            limitCache.set('status', { error: err.message, expiresAt: Date.now() + ITEM_BATCH_CACHE_TTL_MS });
+          if (zohoQuotaGuard.isZohoDailyLimitError(err)) {
+            await zohoQuotaGuard.tripDailyLimit(err.message);
           }
           if (!failSoft) throw err;
           if (isZohoRateLimitOrUnavailable(err)) {
@@ -543,7 +554,7 @@ async function fetchWarehouseBatchesForItems(
       })
     );
     if (!zohoUnavailable && forceRefresh) {
-      limitCache.delete('status');
+      await zohoQuotaGuard.clearDailyLimit();
     }
   }
 
@@ -869,5 +880,6 @@ module.exports = {
   assertCanActOnOrder,
   getOrderBatchOptions,
   saveOrderBatchPicks,
-  saveOrderCustomerCompliance
+  saveOrderCustomerCompliance,
+  invalidateItemBatchesCache
 };

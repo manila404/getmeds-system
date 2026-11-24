@@ -309,6 +309,9 @@ describe('MockZohoAdapter & LiveZohoAdapter batch + invoice forwarding', () => {
       expect(shpCall.body.tracking_number).toBe('');
     } finally {
       global.fetch = origFetch;
+      const zohoQuotaGuard = require('../src/services/zohoQuotaGuard');
+      await zohoQuotaGuard.clearDailyLimit();
+      zohoQuotaGuard._resetForTest();
     }
   });
 
@@ -404,6 +407,9 @@ describe('MockZohoAdapter & LiveZohoAdapter batch + invoice forwarding', () => {
       expect(calls).toBe(1);
     } finally {
       global.fetch = origFetch;
+      const zohoQuotaGuard = require('../src/services/zohoQuotaGuard');
+      await zohoQuotaGuard.clearDailyLimit();
+      zohoQuotaGuard._resetForTest();
     }
   });
 });

@@ -2,6 +2,7 @@ const db = require('../db/database');
 const { reconcileOrderFully } = require('./zohoReconcileService');
 // Sep 11, 2026: the live copy of Zoho's Salesperson list.
 const zohoSalespersonSync = require('./zohoSalespersonSync');
+const zohoQuotaGuard = require('./zohoQuotaGuard');
 
 /**
  * Keeps the audit trail current without anyone pressing a button.
@@ -36,20 +37,16 @@ const zohoSalespersonSync = require('./zohoSalespersonSync');
  * otherwise accumulate forever and crowd real work out of every batch.
  */
 
-const INTERVAL_MS = parseInt(process.env.ZOHO_AUTO_SYNC_INTERVAL_MS, 10) || 30 * 60 * 1000; // 30 min (conserves Zoho 10k/day quota)
+const INTERVAL_MS = parseInt(process.env.ZOHO_AUTO_SYNC_INTERVAL_MS, 10) || 15 * 60 * 1000; // 15 min on active pipeline (tracking_shared tiered to 6h)
 const BATCH_SIZE = parseInt(process.env.ZOHO_AUTO_SYNC_BATCH, 10) || 10;
 // A page open won't re-read an order Zoho was asked about this recently.
-const OPEN_COOLDOWN_MS = parseInt(process.env.ZOHO_AUTO_SYNC_OPEN_COOLDOWN_MS, 10) || 60 * 1000; // 1 min
+const OPEN_COOLDOWN_MS = parseInt(process.env.ZOHO_AUTO_SYNC_OPEN_COOLDOWN_MS, 10) || 3 * 60 * 1000; // 3 min
 // Spacing between orders inside one tick, so a batch is a trickle rather than
 // simultaneous requests at Zoho's rate limiter.
 const STAGGER_MS = parseInt(process.env.ZOHO_AUTO_SYNC_STAGGER_MS, 10) || 400;
-const RATE_LIMIT_PAUSE_MS = 30 * 60 * 1000;
-let rateLimitPausedUntil = 0;
-
-function isZohoDailyLimitHit(errOrRes) {
-  const msg = String(errOrRes?.message || '');
-  return Boolean(errOrRes?.isDailyLimit || /maximum call rate limit|10,000/i.test(msg));
-}
+const TRACKING_SHARED_POLL_MS = parseInt(process.env.ZOHO_TRACKING_SHARED_POLL_MS, 10) || 6 * 60 * 60 * 1000; // 6h safety poll
+const SALESPERSON_REFRESH_MS = parseInt(process.env.ZOHO_SALESPERSON_REFRESH_MS, 10) || 4 * 60 * 60 * 1000; // 4h
+const SALESPERSON_SYNC_KEY = 'zoho_salesperson_sync:last_run';
 
 const TERMINAL = ['completed', 'cancelled', 'deleted'];
 
@@ -100,19 +97,33 @@ function isEnabled() {
   return (process.env.ZOHO_AUTO_SYNC_ENABLED || 'true').trim().toLowerCase() !== 'false';
 }
 
-/** Orders worth asking Zoho about: live, synced, and least-recently checked. */
+/**
+ * Orders worth asking Zoho about: live, synced, and least-recently checked.
+ * Active pipeline orders always run before old `tracking_shared` orders, which
+ * only re-poll after TRACKING_SHARED_POLL_MS (6h) since invoice copy + webhooks
+ * deliver credit payment settlements without polling 1,600+ shipped orders every tick.
+ */
 async function pickBatch(limit = BATCH_SIZE) {
   if (!(await hasReconcileColumn())) return [];
+  const trackingCutoff = new Date(Date.now() - TRACKING_SHARED_POLL_MS).toISOString();
   return await db
     .prepare(
       `SELECT id, getmeds_order_id, status
        FROM orders
        WHERE zoho_so_id IS NOT NULL
          AND status NOT IN (${TERMINAL.map(() => '?').join(',')})
-       ORDER BY COALESCE(last_reconciled_at, '') ASC, updated_at ASC
+         AND (
+           status <> 'tracking_shared'
+           OR last_reconciled_at IS NULL
+           OR last_reconciled_at <= ?
+         )
+       ORDER BY
+         CASE WHEN status = 'tracking_shared' THEN 1 ELSE 0 END ASC,
+         COALESCE(last_reconciled_at, '') ASC,
+         updated_at ASC
        LIMIT ?`
     )
-    .all(...TERMINAL, limit);
+    .all(...TERMINAL, trackingCutoff, limit);
 }
 
 async function markRefreshed(orderId, when = new Date().toISOString()) {
@@ -140,6 +151,8 @@ async function shouldRefreshOnOpen(order) {
   if (!order || !order.zoho_so_id) return false;
   if (TERMINAL.includes(order.status)) return false;
   if (!(await hasReconcileColumn())) return false;
+  const limitState = await zohoQuotaGuard.getDailyLimitStatus();
+  if (limitState.limited) return false;
   if (!order.last_reconciled_at) return true;
   const age = Date.now() - new Date(order.last_reconciled_at).getTime();
   return !Number.isFinite(age) || age >= OPEN_COOLDOWN_MS;
@@ -177,26 +190,32 @@ async function reconcileOne(order, source) {
 
 /** One pass over a batch. Never throws — a bad order must not stop the rest. */
 async function runOnce({ limit = BATCH_SIZE, source = 'auto_sync' } = {}) {
-  if (Date.now() < rateLimitPausedUntil) {
+  const limitState = await zohoQuotaGuard.getDailyLimitStatus();
+  if (limitState.limited) {
     return [];
   }
-  // Sep 11, 2026: Zoho's Salesperson list first — one read per tick. It goes
-  // BEFORE the orders so a rename is carried to every stored copy of the old
-  // name before any order is compared against Zoho; otherwise each order
-  // reconciled in the same tick would log the rename as a Salesperson edit.
+
+  // Gate Salesperson full-list sync to once every SALESPERSON_REFRESH_MS (4h)
+  // via sync_state instead of spending an extra API read on every poller tick.
   try {
-    const summary = await zohoSalespersonSync.refresh();
-    const changed = summary && ['added', 'renamed', 'deactivated', 'reactivated', 'removed', 'restored']
-      .filter((k) => summary[k]).map((k) => `${summary[k]} ${k}`);
-    if (changed && changed.length && !summary.first_run) {
-      console.log(`[ZOHO_AUTO_SYNC] Salesperson list: ${changed.join(', ')}`);
-      require('./salespersonService').clearCache();
+    const lastSpSyncRaw = await zohoQuotaGuard.readState(SALESPERSON_SYNC_KEY);
+    const lastSpSyncMs = lastSpSyncRaw ? Date.parse(lastSpSyncRaw) : NaN;
+    const spDue = !Number.isFinite(lastSpSyncMs) || Date.now() - lastSpSyncMs >= SALESPERSON_REFRESH_MS;
+    if (spDue) {
+      const summary = await zohoSalespersonSync.refresh();
+      await zohoQuotaGuard.writeState(SALESPERSON_SYNC_KEY, new Date().toISOString()).catch(() => {});
+      const changed = summary && ['added', 'renamed', 'deactivated', 'reactivated', 'removed', 'restored']
+        .filter((k) => summary[k]).map((k) => `${summary[k]} ${k}`);
+      if (changed && changed.length && !summary.first_run) {
+        console.log(`[ZOHO_AUTO_SYNC] Salesperson list: ${changed.join(', ')}`);
+        require('./salespersonService').clearCache();
+      }
     }
   } catch (err) {
     console.warn('[ZOHO_AUTO_SYNC] Salesperson list refresh failed:', err.message);
-    if (isZohoDailyLimitHit(err)) {
-      rateLimitPausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
-      console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — pausing background sync for 30 minutes.');
+    if (zohoQuotaGuard.isZohoDailyLimitError(err)) {
+      await zohoQuotaGuard.tripDailyLimit(err.message);
+      console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — tripping shared circuit breaker.');
       return [];
     }
   }
@@ -207,17 +226,19 @@ async function runOnce({ limit = BATCH_SIZE, source = 'auto_sync' } = {}) {
     try {
       const res = await reconcileOne(order, source);
       results.push({ order: order.getmeds_order_id, ...res });
-      if (!res?.ok && isZohoDailyLimitHit(res)) {
-        rateLimitPausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
-        console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — pausing rest of batch for 30 minutes.');
+      if (res?.ok) {
+        await zohoQuotaGuard.clearDailyLimit();
+      } else if (!res?.ok && zohoQuotaGuard.isZohoDailyLimitError(res)) {
+        await zohoQuotaGuard.tripDailyLimit(res.message);
+        console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — pausing rest of batch.');
         break;
       }
     } catch (err) {
       console.error(`[ZOHO_AUTO_SYNC] ${order.getmeds_order_id} threw:`, err.message);
       results.push({ order: order.getmeds_order_id, ok: false, message: err.message });
-      if (isZohoDailyLimitHit(err)) {
-        rateLimitPausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
-        console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — pausing rest of batch for 30 minutes.');
+      if (zohoQuotaGuard.isZohoDailyLimitError(err)) {
+        await zohoQuotaGuard.tripDailyLimit(err.message);
+        console.warn('[ZOHO_AUTO_SYNC] Zoho daily API rate limit hit — pausing rest of batch.');
         break;
       }
     }

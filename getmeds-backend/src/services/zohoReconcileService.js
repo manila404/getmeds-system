@@ -826,7 +826,7 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
     const updatedOrder = await db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
     const events = await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC').all(order.id);
 
-    return { ok: true, action, zohoStatus: soStatus, order: updatedOrder, events };
+    return { ok: true, action, zohoStatus: soStatus, order: updatedOrder, events, salesorder };
   } catch (err) {
     // Never throws. The background poller must not die because one order
     // hit a bad response, and a page load must not 500 because Zoho did.
@@ -859,10 +859,12 @@ async function reconcileOrder({ orderId, actorId = null, actorName = 'Auto Sync'
 async function reconcileOrderFully({ orderId, actorId = null, actorName = 'Auto Sync', source = 'auto_sync', maxPasses = 7, salesorder = null }) {
   const actions = [];
   let last = null;
+  let currentSo = salesorder;
 
   for (let pass = 0; pass < maxPasses; pass++) {
-    last = await reconcileOrder({ orderId, actorId, actorName, source, salesorder });
+    last = await reconcileOrder({ orderId, actorId, actorName, source, salesorder: currentSo });
     if (!last.ok) break;
+    if (!currentSo && last.salesorder) currentSo = last.salesorder;
     if (!last.action || last.action === 'NOTHING_NEW') break;
     actions.push(last.action);
   }

@@ -25,6 +25,7 @@ const deletedDraftPurge = require('../services/deletedDraftPurge');
 const stockHoldService = require('../services/stockHoldService');
 const { withLock } = require('../services/cronLock');
 const zohoInvoiceCopy = require('../services/zohoInvoiceCopy');
+const zohoQuotaGuard = require('../services/zohoQuotaGuard');
 
 /**
  * Authenticate the caller.
@@ -103,10 +104,28 @@ exports.autoSync = async (req, res, next) => {
 
     // Oct 21, 2026: nightly full check of the Zoho invoice copy (this month and last month), so
     // invoices deleted or voided in Zoho are caught. Own lock and try/catch, same reason as above.
+    // Nov 24, 2026: gated to at most once per Manila day (02:00+ PHT) via sync_state so 15-minute
+    // /api/cron/auto-sync ticks do not run full-month sweeps 96x/day.
     if (zohoInvoiceCopy.syncOn()) {
       try {
-        const out = await withLock('zoho_invoice_copy', 4 * 60 * 1000, async () => await zohoInvoiceCopy.reconcile());
-        retention.invoice_copy_reconcile = out.ran ? 'done' : 'another run holds the lock';
+        const limitState = await zohoQuotaGuard.getDailyLimitStatus();
+        const todayYmd = zohoQuotaGuard.manilaYmd();
+        const lastReconcileYmd = await zohoQuotaGuard.readState('zoho_invoice_copy:last_reconcile_ymd');
+        const pastNightWindow = zohoQuotaGuard.manilaHour() >= 2;
+        if (limitState.limited) {
+          retention.invoice_copy_reconcile = 'skipped (Zoho daily limit circuit open)';
+        } else if (lastReconcileYmd === todayYmd || (!lastReconcileYmd && !pastNightWindow)) {
+          retention.invoice_copy_reconcile = 'skipped (already reconciled today)';
+        } else if (pastNightWindow) {
+          const out = await withLock('zoho_invoice_copy', 4 * 60 * 1000, async () => {
+            const resReconcile = await zohoInvoiceCopy.reconcile();
+            await zohoQuotaGuard.writeState('zoho_invoice_copy:last_reconcile_ymd', todayYmd);
+            return resReconcile;
+          });
+          retention.invoice_copy_reconcile = out.ran ? 'done' : 'another run holds the lock';
+        } else {
+          retention.invoice_copy_reconcile = 'skipped (before 02:00 PHT window)';
+        }
       } catch (err) {
         console.error('[CRON] invoice copy reconcile failed:', err.message);
         retention.invoice_copy_reconcile = err.message;
@@ -224,10 +243,12 @@ exports.health = async (req, res, next) => {
     const rows = await db
       .prepare("SELECT key, value, updated_at FROM sync_state WHERE key ILIKE 'cron_lock:%' ORDER BY key")
       .all();
+    const zohoQuota = await zohoQuotaGuard.getUsageSnapshot().catch(() => null);
     res.json({
       success: true,
       data: {
         now: new Date().toISOString(),
+        zohoQuota,
         jobs: rows.map((r) => ({
           job: r.key.replace('cron_lock:', ''),
           lastRunAt: r.updated_at,

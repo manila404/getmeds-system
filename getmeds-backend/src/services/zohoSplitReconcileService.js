@@ -29,6 +29,8 @@ const zoho = require('../integrations/zoho');
 const { logEvent } = require('./auditService');
 const { syncLineItemsFromZoho } = require('./zohoLineSyncService');
 const { isImportedRef } = require('./orderOrigin');
+const { hasColumn } = require('./schemaColumns');
+const { normalizeEntityKey } = require('./orderClassificationService');
 
 const lc = (v) => String(v == null ? '' : v).trim().toLowerCase();
 
@@ -127,6 +129,26 @@ async function reconcileOneSplit(order, split, { actorName, source }) {
       await db.prepare("UPDATE order_split_sales_orders SET zoho_paid_status = 'paid', updated_at = ? WHERE id = ?").run(now, split.id);
       await log('ZOHO_PAYMENT_VERIFIED', `Invoice ${s.invoice.number || ''} is paid in Zoho.`.replace('  ', ' '));
       out.changes.push('paid');
+    }
+    if (s.invoice.number && (await hasColumn('delivery_receipts', 'si_number'))) {
+      const splitEnt = normalizeEntityKey(entity);
+      const pendingDrs = splitEnt
+        ? await db.prepare(`
+            SELECT id FROM delivery_receipts
+             WHERE order_id = ? AND entity_key = ? AND status IN ('draft', 'issued')
+               AND (si_number IS NULL OR TRIM(si_number) = '' OR UPPER(TRIM(si_number)) = 'PENDING SI')
+          `).all(order.id, splitEnt)
+        : [];
+      for (const drRow of pendingDrs || []) {
+        await db.prepare('UPDATE delivery_receipts SET si_number = ?, updated_at = ? WHERE id = ?')
+          .run(s.invoice.number, now, drRow.id);
+        await db.prepare(`
+          UPDATE delivery_receipt_items
+             SET si_or_to_no = ?
+           WHERE delivery_receipt_id = ?
+             AND (si_or_to_no IS NULL OR TRIM(si_or_to_no) = '' OR UPPER(TRIM(si_or_to_no)) = 'PENDING SI')
+        `).run(s.invoice.number, drRow.id);
+      }
     }
   }
 
