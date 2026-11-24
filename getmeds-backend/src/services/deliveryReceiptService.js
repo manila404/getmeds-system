@@ -678,6 +678,252 @@ async function voidDeliveryReceipt({ drId, user, reason, switchToNoSi = false, e
   return { ...printable, order_updated_at: now };
 }
 
+async function reissueDeliveryReceipt({
+  drId,
+  user,
+  entityKey,
+  reason = null,
+  siNumber = undefined,
+  externalRef = undefined,
+  dateIssued = null,
+  customerName = undefined,
+  deliveryAddress = undefined,
+  tin = undefined,
+  terms = undefined,
+  doctorName = undefined,
+  notes = null,
+  items = null
+}) {
+  await assertDrTablesReady();
+  const actor = await resolveActor(user);
+  const targetEntity = normalizeEntityKey(entityKey);
+  if (!targetEntity) {
+    throw new DispatchBatchError(422, 'INVALID_ENTITY', 'Entity must be GPI or 2MG.');
+  }
+
+  const sourcePreview = await db.prepare('SELECT * FROM delivery_receipts WHERE id = ?').get(drId);
+  if (!sourcePreview) {
+    throw new DispatchBatchError(404, 'NOT_FOUND', 'Source Delivery Receipt not found.');
+  }
+  if (sourcePreview.order_id) {
+    await assertCanActOnOrder({ orderId: sourcePreview.order_id, user });
+  }
+
+  const cleanReason = String(reason || '').trim();
+  if (sourcePreview.status !== 'void' && cleanReason.length < 3) {
+    throw new DispatchBatchError(
+      422,
+      'REASON_REQUIRED',
+      'A clear reason (at least 3 characters) is required to void the original DR before re-issuing.'
+    );
+  }
+
+  const sourceItems = await db
+    .prepare('SELECT * FROM delivery_receipt_items WHERE delivery_receipt_id = ? ORDER BY item_seq_no, id')
+    .all(sourcePreview.id);
+
+  const rawItems = Array.isArray(items) && items.length ? items : sourceItems;
+  if (!rawItems.length) {
+    throw new DispatchBatchError(422, 'MISSING_ITEMS', 'At least one item line is required to re-issue a DR.');
+  }
+  for (const it of rawItems) {
+    const qty = Number(it.quantity);
+    if (!String(it.item_name || '').trim() || !Number.isFinite(qty) || qty <= 0) {
+      throw new DispatchBatchError(422, 'INVALID_ITEM', 'Every item line must have an item name and quantity > 0.');
+    }
+  }
+
+  const cleanRef = String(externalRef !== undefined ? externalRef : (sourcePreview.external_ref || '')).trim() || null;
+  const rawSi = siNumber !== undefined ? siNumber : (targetEntity === sourcePreview.entity_key ? sourcePreview.si_number : null);
+  const cleanSi = String(rawSi || '').trim() || null;
+  const finalSi = sourcePreview.reference_type === 'transfer_order' ? (cleanRef || cleanSi) : cleanSi;
+
+  if (
+    sourcePreview.reference_type === 'sales_order' &&
+    targetEntity !== sourcePreview.entity_key &&
+    cleanSi &&
+    cleanSi.toUpperCase() !== 'PENDING SI' &&
+    cleanSi.toUpperCase() === String(sourcePreview.si_number || '').trim().toUpperCase()
+  ) {
+    throw new DispatchBatchError(
+      422,
+      'SAME_SI_ON_ENTITY_SWITCH',
+      `You switched entity from ${sourcePreview.entity_key} to ${targetEntity}. Enter the new ${targetEntity} SI # (or leave blank for PENDING SI) instead of reusing ${cleanSi}.`
+    );
+  }
+
+  const finalCustomer = String(customerName !== undefined ? customerName : (sourcePreview.customer_name || '')).trim();
+  if (!finalCustomer) {
+    throw new DispatchBatchError(422, 'MISSING_CUSTOMER', 'Client / Transfer Name is required.');
+  }
+  const finalAddress = String(deliveryAddress !== undefined ? deliveryAddress : (sourcePreview.delivery_address || '')).trim();
+  const finalTin = tin !== undefined ? (String(tin || '').trim() || null) : (sourcePreview.tin || null);
+  const finalTerms = String(terms !== undefined ? terms : (sourcePreview.terms || (sourcePreview.reference_type === 'transfer_order' ? 'TO' : 'COD'))).trim();
+  const finalDoctor = sourcePreview.reference_type === 'transfer_order'
+    ? null
+    : (String(doctorName !== undefined ? doctorName : (sourcePreview.doctor_name || 'NNH')).trim() || 'NNH');
+  const issueDate = dateIssued ? String(dateIssued).slice(0, 10) : manilaTodayDate();
+  const now = new Date().toISOString();
+
+  const newDrId = await db.transaction(async () => {
+    const source = await db.prepare('SELECT * FROM delivery_receipts WHERE id = ? FOR UPDATE').get(drId);
+    if (!source) throw new DispatchBatchError(404, 'NOT_FOUND', 'Source Delivery Receipt not found.');
+
+    // Never allow two active DRs for the same order/reference under the same company.
+    if (source.reference_type === 'sales_order' && source.order_id) {
+      const dup = await db.prepare(`
+        SELECT id, dr_number, entity_key
+          FROM delivery_receipts
+         WHERE order_id = ? AND entity_key = ? AND status IN ('draft', 'issued') AND id <> ?
+         LIMIT 1
+      `).get(source.order_id, targetEntity, source.id);
+      if (dup) {
+        throw new DispatchBatchError(
+          409,
+          'DR_ALREADY_EXISTS',
+          `${targetEntity} DR #${dup.dr_number} is already active for this order. Void it first before re-issuing under ${targetEntity}.`
+        );
+      }
+    } else if (cleanRef) {
+      const dup = await db.prepare(`
+        SELECT id, dr_number, entity_key, external_ref
+          FROM delivery_receipts
+         WHERE reference_type = ?
+           AND UPPER(TRIM(external_ref)) = UPPER(?)
+           AND entity_key = ?
+           AND status IN ('draft', 'issued')
+           AND id <> ?
+         LIMIT 1
+      `).get(source.reference_type, cleanRef, targetEntity, source.id);
+      if (dup) {
+        throw new DispatchBatchError(
+          409,
+          'DR_ALREADY_EXISTS',
+          `${targetEntity} DR #${dup.dr_number} is already active for ${dup.external_ref}. Void it first before re-issuing under ${targetEntity}.`
+        );
+      }
+    }
+
+    if (source.status !== 'void') {
+      await db.prepare(`
+        UPDATE delivery_receipts
+           SET status = 'void', void_reason = ?, voided_by = ?, voided_at = ?, updated_at = ?
+         WHERE id = ?
+      `).run(cleanReason, actor.id, now, now, source.id);
+
+      if (source.order_id) {
+        await logEvent({
+          orderId: source.order_id,
+          eventType: 'DR_VOIDED',
+          actorId: actor.id,
+          actorName: actor.name,
+          notes: `${source.entity_key} DR #${source.dr_number} marked VOID by ${actor.name} (re-issuing under ${targetEntity}): ${cleanReason}`,
+          metadata: { drId: source.id, entityKey: source.entity_key, drNumber: source.dr_number, targetEntity }
+        });
+      }
+    }
+
+    const seqRow = await db.prepare('SELECT last_dr_no, last_item_no FROM dr_sequences WHERE entity_key = ? FOR UPDATE').get(targetEntity);
+    if (!seqRow) throw new DispatchBatchError(500, 'MISSING_SEQUENCE', `DR sequence missing for ${targetEntity}.`);
+
+    const nextDrNo = Number(seqRow.last_dr_no) + 1;
+    let nextItemSeq = Number(seqRow.last_item_no);
+
+    await db.prepare('UPDATE dr_sequences SET last_dr_no = ?, last_item_no = ?, updated_at = ? WHERE entity_key = ?')
+      .run(nextDrNo, nextItemSeq + rawItems.length, now, targetEntity);
+
+    const ins = await db.prepare(`
+      INSERT INTO delivery_receipts (
+        entity_key, dr_number, reference_type, order_id, external_ref, si_number,
+        date_issued, customer_name, delivery_address, tin, lto_license_number,
+        terms, doctor_name, status, notes, issued_by, issued_by_name, issued_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?)
+    `).run(
+      targetEntity,
+      nextDrNo,
+      source.reference_type,
+      source.order_id || null,
+      cleanRef,
+      finalSi,
+      issueDate,
+      finalCustomer,
+      finalAddress,
+      finalTin,
+      source.lto_license_number || null,
+      finalTerms,
+      finalDoctor,
+      notes || `Re-issued from ${source.entity_key} DR #${source.dr_number}${cleanReason ? ` (${cleanReason})` : ''}`,
+      actor.id,
+      actor.name,
+      now,
+      now,
+      now
+    );
+
+    const itemRef = finalSi || cleanRef || 'PENDING SI';
+    for (const it of rawItems) {
+      nextItemSeq += 1;
+      const cleanItemName = String(it.item_name).trim();
+      const batchNo = it.batch_number ? String(it.batch_number).trim() : null;
+      const expDate = it.expiry_date ? String(it.expiry_date).slice(0, 10) : null;
+      const batchDesc = [batchNo ? `Batch: ${batchNo}` : null, expDate ? `Exp: ${expDate}` : null].filter(Boolean).join(' · ');
+      const displayItemName = batchDesc && !cleanItemName.includes('Batch:') ? `${cleanItemName} — ${batchDesc}` : cleanItemName;
+
+      await db.prepare(`
+        INSERT INTO delivery_receipt_items (
+          delivery_receipt_id, entity_key, order_item_id, item_seq_no, si_or_to_no,
+          product_id, item_name, batch_number, expiry_date, warehouse_name, quantity, unit, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        ins.lastInsertRowid,
+        targetEntity,
+        it.order_item_id || null,
+        nextItemSeq,
+        itemRef,
+        it.product_id || null,
+        displayItemName,
+        batchNo,
+        expDate,
+        it.warehouse_name || null,
+        Number(it.quantity),
+        String(it.unit || 'pc').trim() || 'pc',
+        now
+      );
+    }
+
+    if (source.order_id) {
+      await db.prepare('UPDATE orders SET updated_at = ? WHERE id = ?').run(now, source.order_id);
+      await logEvent({
+        orderId: source.order_id,
+        eventType: 'DR_ISSUED',
+        actorId: actor.id,
+        actorName: actor.name,
+        notes: `${targetEntity} DR #${nextDrNo} re-issued by ${actor.name} (replacing ${source.entity_key} DR #${source.dr_number}).`,
+        metadata: {
+          drId: ins.lastInsertRowid,
+          entityKey: targetEntity,
+          drNumber: nextDrNo,
+          reissuedFromDrId: source.id,
+          reissuedFromEntity: source.entity_key,
+          reissuedFromDrNumber: source.dr_number
+        }
+      });
+    }
+
+    return ins.lastInsertRowid;
+  })();
+
+  const printable = await getPrintableDr({ drId: newDrId });
+  return {
+    ...printable,
+    voided_dr_id: sourcePreview.id,
+    voided_entity_key: sourcePreview.entity_key,
+    voided_dr_number: sourcePreview.dr_number,
+    order_updated_at: now
+  };
+}
+
 async function recordDrPrint({ drId, user }) {
   await assertDrTablesReady();
   const actor = await resolveActor(user);
@@ -1395,6 +1641,7 @@ module.exports = {
   getZohoTransferOrderForDr,
   isExcludedTransferWarehouse,
   voidDeliveryReceipt,
+  reissueDeliveryReceipt,
   recordDrPrint,
   finalizeZohoInvoiceForOrder,
   shipInvoicedOrderInZoho,

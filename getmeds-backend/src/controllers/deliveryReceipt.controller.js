@@ -115,6 +115,24 @@ exports.voidDr = drAction((req) =>
     expectedUpdatedAt: req.body?.expected_updated_at || null
   }));
 
+exports.reissueDr = drAction((req) =>
+  drService.reissueDeliveryReceipt({
+    drId: req.params.drId,
+    user: req.user,
+    entityKey: req.body?.entity_key,
+    reason: req.body?.reason,
+    siNumber: req.body?.si_number,
+    externalRef: req.body?.external_ref,
+    dateIssued: req.body?.date_issued,
+    customerName: req.body?.customer_name,
+    deliveryAddress: req.body?.delivery_address,
+    tin: req.body?.tin,
+    terms: req.body?.terms,
+    doctorName: req.body?.doctor_name,
+    notes: req.body?.notes,
+    items: req.body?.items
+  }));
+
 exports.recordPrint = drAction((req) =>
   drService.recordDrPrint({
     drId: req.params.drId,

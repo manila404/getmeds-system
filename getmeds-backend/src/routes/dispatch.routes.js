@@ -87,5 +87,6 @@ router.post('/dr-ledger/transfer-order', drCtrl.issueTransferDr);
 router.get('/dr/:drId', drCtrl.getDr);
 router.post('/dr/:drId/print', drCtrl.recordPrint);
 router.post('/dr/:drId/void', drCtrl.voidDr);
+router.post('/dr/:drId/reissue', drCtrl.reissueDr);
 
 module.exports = router;

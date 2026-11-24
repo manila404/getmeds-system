@@ -955,4 +955,173 @@ describe('deliveryReceiptService end-to-end flows (mocked DB + MockZohoAdapter)'
     const detRes = await svc.getZohoTransferOrderForDr({ transferOrderId: 'MOCK-TO-379', adapter });
     expect(detRes.existing_drs.map((d) => `${d.entity_key}#${d.dr_number}`)).toEqual(['GPI#4593', '2MG#4954']);
   });
+
+  it('reissueDeliveryReceipt atomically voids old DR, switches entity sequentially, and blocks double-entry / stale SI', async () => {
+    jest.resetModules();
+    const seqState = {
+      '2MG': { last_dr_no: 4951, last_item_no: 1534 },
+      GPI: { last_dr_no: 4593, last_item_no: 759 }
+    };
+    const drs = [
+      {
+        id: 34,
+        entity_key: '2MG',
+        dr_number: 4951,
+        reference_type: 'sales_order',
+        order_id: 63989,
+        external_ref: 'SO-70408',
+        si_number: 'SI000005049',
+        date_issued: '2026-11-23',
+        customer_name: 'RSG MKTG CORP',
+        delivery_address: 'Manila',
+        tin: '123-456',
+        lto_license_number: 'LTO-1',
+        terms: 'COD',
+        doctor_name: 'NNH',
+        status: 'issued'
+      }
+    ];
+    const drItems = [
+      {
+        id: 63,
+        delivery_receipt_id: 34,
+        entity_key: '2MG',
+        order_item_id: 901,
+        item_seq_no: 1533,
+        si_or_to_no: 'SI000005049',
+        product_id: 10,
+        item_name: 'PemiGet 500mg',
+        batch_number: 'BPML2604YA',
+        expiry_date: '2028-06-30',
+        warehouse_name: null,
+        quantity: 1,
+        unit: 'pcs'
+      }
+    ];
+
+    jest.doMock('../src/services/schemaColumns', () => ({ hasColumn: jest.fn().mockResolvedValue(true) }));
+    jest.doMock('../src/services/dispatchBatchService', () => ({
+      DispatchBatchError: class extends Error { constructor(s, c, m) { super(m); this.status = s; this.code = c; } },
+      assertCanActOnOrder: jest.fn().mockResolvedValue(undefined)
+    }));
+    jest.doMock('../src/services/orderClaimService', () => ({ claimOrder: jest.fn(), releaseClaim: jest.fn() }));
+    jest.doMock('../src/services/orderCompletionService', () => ({ evaluateCompletion: jest.fn() }));
+    jest.doMock('../src/services/auditService', () => ({
+      resolveActor: async () => ({ id: 2, name: 'Tiara Jem Evangelista' }),
+      logEvent: jest.fn()
+    }));
+    jest.doMock('../src/db/database', () => ({
+      transaction: jest.fn((fn) => async (...a) => fn(...a)),
+      prepare: jest.fn((sql) => ({
+        get: jest.fn(async (...args) => {
+          if (/FROM delivery_receipts/i.test(sql) && /order_id = \? AND entity_key = \?/i.test(sql)) {
+            const [orderId, ent, excludeId] = args;
+            return drs.find(
+              (d) => d.order_id === Number(orderId) && d.entity_key === ent && ['draft', 'issued'].includes(d.status) && d.id !== Number(excludeId)
+            ) || null;
+          }
+          if (/FROM delivery_receipts WHERE id = \?/i.test(sql)) {
+            return drs.find((d) => d.id === Number(args[0])) || null;
+          }
+          if (/FROM dr_sequences WHERE entity_key/i.test(sql)) {
+            return seqState[args[0]];
+          }
+          return null;
+        }),
+        all: jest.fn(async (...args) => {
+          if (/FROM delivery_receipt_items/i.test(sql)) {
+            return drItems.filter((it) => it.delivery_receipt_id === Number(args[0]));
+          }
+          return [];
+        }),
+        run: jest.fn(async (...args) => {
+          if (/UPDATE delivery_receipts\s+SET status = 'void'/i.test(sql)) {
+            const target = drs.find((d) => d.id === Number(args[4]));
+            if (target) { target.status = 'void'; target.void_reason = args[0]; }
+          }
+          if (/UPDATE dr_sequences/i.test(sql)) {
+            seqState[args[3]] = { last_dr_no: args[0], last_item_no: args[1] };
+          }
+          if (/INSERT INTO delivery_receipts /i.test(sql)) {
+            const id = drs[drs.length - 1].id + 1;
+            drs.push({
+              id,
+              entity_key: args[0],
+              dr_number: args[1],
+              reference_type: args[2],
+              order_id: args[3],
+              external_ref: args[4],
+              si_number: args[5],
+              date_issued: args[6],
+              customer_name: args[7],
+              delivery_address: args[8],
+              tin: args[9],
+              lto_license_number: args[10],
+              terms: args[11],
+              doctor_name: args[12],
+              status: 'issued'
+            });
+            return { lastInsertRowid: id };
+          }
+          if (/INSERT INTO delivery_receipt_items/i.test(sql)) {
+            drItems.push({
+              id: drItems[drItems.length - 1].id + 1,
+              delivery_receipt_id: args[0],
+              entity_key: args[1],
+              item_seq_no: args[3],
+              si_or_to_no: args[4],
+              item_name: args[6],
+              quantity: args[10],
+              unit: args[11]
+            });
+          }
+          return { changes: 1 };
+        })
+      }))
+    }));
+
+    const svc = require('../src/services/deliveryReceiptService');
+
+    // 1. Rejects missing void reason
+    await expect(svc.reissueDeliveryReceipt({
+      drId: 34,
+      user: { id: 2, name: 'Tiara Jem Evangelista' },
+      entityKey: 'GPI',
+      reason: 'no',
+      siNumber: 'SI000003144'
+    })).rejects.toMatchObject({ status: 422, code: 'REASON_REQUIRED' });
+
+    // 2. Rejects reusing old 2MG SI# when switching to GPI
+    await expect(svc.reissueDeliveryReceipt({
+      drId: 34,
+      user: { id: 2, name: 'Tiara Jem Evangelista' },
+      entityKey: 'GPI',
+      reason: 'Invoice moved from 2MG to GPI',
+      siNumber: 'SI000005049'
+    })).rejects.toMatchObject({ status: 422, code: 'SAME_SI_ON_ENTITY_SWITCH' });
+
+    // 3. Atomically voids 2MG #4951 and issues GPI #4594 without touching 2MG sequence
+    const out = await svc.reissueDeliveryReceipt({
+      drId: 34,
+      user: { id: 2, name: 'Tiara Jem Evangelista' },
+      entityKey: 'GPI',
+      reason: 'Invoice moved from 2MG to GPI',
+      siNumber: 'SI000003144'
+    });
+    expect(drs[0].status).toBe('void');
+    expect(out.receipt.entity_key).toBe('GPI');
+    expect(out.receipt.dr_number).toBe(4594);
+    expect(out.receipt.si_number).toBe('SI000003144');
+    expect(seqState['2MG'].last_dr_no).toBe(4951);
+    expect(seqState['GPI'].last_dr_no).toBe(4594);
+
+    // 4. Rejects double re-issue into GPI (409 DR_ALREADY_EXISTS)
+    await expect(svc.reissueDeliveryReceipt({
+      drId: 34,
+      user: { id: 2, name: 'Tiara Jem Evangelista' },
+      entityKey: 'GPI',
+      reason: 'Accidental second click',
+      siNumber: 'SI000003145'
+    })).rejects.toMatchObject({ status: 409, code: 'DR_ALREADY_EXISTS' });
+  });
 });

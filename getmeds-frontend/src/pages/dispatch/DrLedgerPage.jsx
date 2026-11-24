@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { FileSpreadsheet, PlusCircle, Printer, Ban, Search, Trash2, RefreshCw } from 'lucide-react';
+import { FileSpreadsheet, PlusCircle, Printer, Ban, Search, Trash2, RefreshCw, ArrowLeftRight } from 'lucide-react';
 import client from '../../api/client';
 import DrPrintVoucherModal from '../../components/dispatch/DrPrintVoucherModal';
 
@@ -24,6 +24,23 @@ const DrLedgerPage = () => {
   const [page, setPage] = useState(1);
 
   const [printDrData, setPrintDrData] = useState(null);
+  const [reissueOpen, setReissueOpen] = useState(false);
+  const [loadingReissue, setLoadingReissue] = useState(false);
+  const [submittingReissue, setSubmittingReissue] = useState(false);
+  const [reissueSource, setReissueSource] = useState(null);
+  const [reissueForm, setReissueForm] = useState({
+    entity_key: 'GPI',
+    reason: '',
+    si_number: '',
+    external_ref: '',
+    date_issued: '',
+    customer_name: '',
+    delivery_address: '',
+    tin: '',
+    terms: '',
+    doctor_name: ''
+  });
+  const [reissueItems, setReissueItems] = useState([]);
   const [toOpen, setToOpen] = useState(false);
   const [toSearch, setToSearch] = useState('');
   const [selectedToId, setSelectedToId] = useState('');
@@ -104,6 +121,124 @@ const DrLedgerPage = () => {
       setPrintDrData(res.data);
     } catch (err) {
       toast.error(err?.response?.data?.error?.message || 'Failed to load DR voucher.');
+    }
+  };
+
+  const openReissue = async (drId) => {
+    setReissueOpen(true);
+    setLoadingReissue(true);
+    setReissueSource(null);
+    try {
+      const { data: res } = await client.get(`/api/dispatch/dr/${drId}`);
+      const src = res.data?.receipt;
+      const srcItems = res.data?.items || [];
+      const defaultTargetEntity = src?.entity_key === '2MG' ? 'GPI' : '2MG';
+      setReissueSource(src);
+      setReissueForm({
+        entity_key: defaultTargetEntity,
+        reason:
+          src?.status === 'void'
+            ? (src.void_reason || '')
+            : `Invoice moved from ${src?.entity_key} to ${defaultTargetEntity}`,
+        si_number: src?.reference_type === 'transfer_order' ? (src?.external_ref || '') : '',
+        external_ref: src?.external_ref || '',
+        date_issued: new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' }),
+        customer_name: src?.customer_name || '',
+        delivery_address: src?.delivery_address || '',
+        tin: src?.tin || '',
+        terms: src?.terms || '',
+        doctor_name: src?.doctor_name || ''
+      });
+      setReissueItems(
+        srcItems.map((it) => ({
+          include: true,
+          order_item_id: it.order_item_id || null,
+          product_id: it.product_id || null,
+          item_name: it.item_name || '',
+          batch_number: it.batch_number || '',
+          expiry_date: it.expiry_date || '',
+          warehouse_name: it.warehouse_name || '',
+          quantity: Number(it.quantity || 1),
+          unit: it.unit || 'pc'
+        }))
+      );
+    } catch (err) {
+      setReissueOpen(false);
+      toast.error(err?.response?.data?.error?.message || 'Failed to load DR details for re-issue.');
+    } finally {
+      setLoadingReissue(false);
+    }
+  };
+
+  const handleReissueEntityChange = (nextEntity) => {
+    setReissueForm((prev) => {
+      const switched = reissueSource && nextEntity !== reissueSource.entity_key;
+      const shouldClearOldSi =
+        switched &&
+        reissueSource?.reference_type === 'sales_order' &&
+        prev.si_number.trim().toUpperCase() === String(reissueSource?.si_number || '').trim().toUpperCase();
+      return {
+        ...prev,
+        entity_key: nextEntity,
+        si_number: shouldClearOldSi ? '' : prev.si_number,
+        reason:
+          reissueSource && reissueSource.status !== 'void' && /^Invoice moved from (2MG|GPI) to (2MG|GPI)$/i.test(prev.reason.trim())
+            ? `Invoice moved from ${reissueSource.entity_key} to ${nextEntity}`
+            : prev.reason
+      };
+    });
+  };
+
+  const submitReissue = async (e) => {
+    e.preventDefault();
+    if (!reissueSource) return;
+    const chosen = reissueItems
+      .filter((it) => it.include !== false)
+      .filter((it) => String(it.item_name || '').trim() && Number(it.quantity) > 0)
+      .map((it) => ({
+        order_item_id: it.order_item_id || null,
+        product_id: it.product_id || null,
+        item_name: String(it.item_name).trim(),
+        batch_number: String(it.batch_number || '').trim() || null,
+        expiry_date: String(it.expiry_date || '').trim() || null,
+        warehouse_name: String(it.warehouse_name || '').trim() || null,
+        quantity: Number(it.quantity),
+        unit: String(it.unit || 'pc').trim() || 'pc'
+      }));
+    if (!chosen.length) {
+      toast.error('Select at least one item line with quantity > 0.');
+      return;
+    }
+    setSubmittingReissue(true);
+    try {
+      const { data: res } = await client.post(`/api/dispatch/dr/${reissueSource.id}/reissue`, {
+        entity_key: reissueForm.entity_key,
+        reason: reissueForm.reason.trim(),
+        si_number: reissueForm.si_number.trim() || null,
+        external_ref: reissueForm.external_ref.trim() || null,
+        date_issued: reissueForm.date_issued || undefined,
+        customer_name: reissueForm.customer_name.trim(),
+        delivery_address: reissueForm.delivery_address.trim(),
+        tin: reissueForm.tin.trim() || null,
+        terms: reissueForm.terms.trim() || undefined,
+        doctor_name: reissueForm.doctor_name.trim() || undefined,
+        items: chosen
+      });
+      const r = res.data?.receipt;
+      toast.success(
+        reissueSource.status === 'void'
+          ? `Issued ${r.entity_key} DR #${r.dr_number}!`
+          : `Voided ${reissueSource.entity_key} DR #${reissueSource.dr_number} and issued ${r.entity_key} DR #${r.dr_number}!`
+      );
+      setReissueOpen(false);
+      setReissueSource(null);
+      qc.invalidateQueries({ queryKey: ['dr-ledger'] });
+      qc.invalidateQueries({ queryKey: ['zoho-transfer-orders'] });
+      setPrintDrData(res.data);
+    } catch (err) {
+      toast.error(err?.response?.data?.error?.message || 'Could not re-issue Delivery Receipt.');
+    } finally {
+      setSubmittingReissue(false);
     }
   };
 
@@ -342,6 +477,14 @@ const DrLedgerPage = () => {
                       <div className="inline-flex gap-1.5">
                         <button type="button" onClick={() => openPrint(r.dr_id)} className="px-2 py-1 border border-slate-300 rounded bg-white hover:bg-surface" title="Print DR">
                           <Printer className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openReissue(r.dr_id)}
+                          className="px-2 py-1 border border-blue-200 rounded bg-white text-getmeds-blue hover:bg-blue-50"
+                          title={r.status === 'void' ? 'Re-issue DR under new entity / details' : 'Void & Re-issue DR'}
+                        >
+                          <ArrowLeftRight className="w-3.5 h-3.5" />
                         </button>
                         {r.status !== 'void' && (
                           <button type="button" onClick={() => handleVoid(r.dr_id, r.dr_number)} className="px-2 py-1 border border-red-200 rounded bg-white text-red-700 hover:bg-red-50" title="Void DR">
@@ -604,6 +747,302 @@ const DrLedgerPage = () => {
                 {submittingTo ? 'Issuing DR…' : 'Issue & Print Transfer DR'}
               </button>
             </div>
+          </form>
+        </div>
+      )}
+
+      {reissueOpen && (
+        <div className="fixed inset-0 z-40 bg-slate-900/50 flex items-center justify-center p-4">
+          <form onSubmit={submitReissue} className="bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden border border-slate-200">
+            <div className="px-5 py-3.5 bg-surface border-b border-slate-200 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold text-ink-primary">
+                  {reissueSource?.status === 'void' ? 'Re-issue Delivery Receipt' : 'Void & Re-issue Delivery Receipt'}
+                </h3>
+                <p className="text-xs text-ink-secondary">
+                  Safely void the old DR (if active) and issue a brand-new sequential DR under the target company — zero number collisions.
+                </p>
+              </div>
+              <button type="button" onClick={() => setReissueOpen(false)} className="px-2.5 py-1 rounded border border-slate-300 bg-white text-xs font-semibold">
+                Close
+              </button>
+            </div>
+
+            {loadingReissue || !reissueSource ? (
+              <div className="p-8 text-center text-xs text-ink-secondary">Loading DR details…</div>
+            ) : (() => {
+              const switchedEntity = reissueForm.entity_key !== reissueSource.entity_key;
+              const reusedOldSi =
+                reissueSource.reference_type === 'sales_order' &&
+                switchedEntity &&
+                reissueForm.si_number.trim() &&
+                reissueForm.si_number.trim().toUpperCase() !== 'PENDING SI' &&
+                reissueForm.si_number.trim().toUpperCase() === String(reissueSource.si_number || '').trim().toUpperCase();
+              const reasonTooShort = reissueSource.status !== 'void' && reissueForm.reason.trim().length < 3;
+              const selectedCount = reissueItems.filter((it) => it.include !== false && String(it.item_name || '').trim() && Number(it.quantity) > 0).length;
+              const submitBlocked = submittingReissue || reusedOldSi || reasonTooShort || !selectedCount || !reissueForm.customer_name.trim();
+
+              return (
+                <>
+                  <div className="p-5 overflow-y-auto space-y-4 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="p-3 rounded-lg border border-red-200 bg-red-50/70">
+                        <div className="text-[10px] font-bold uppercase text-red-700">
+                          {reissueSource.status === 'void' ? 'Already Void' : 'Will Be Voided'}
+                        </div>
+                        <div className="font-bold text-sm text-red-950 mt-0.5">
+                          {reissueSource.entity_key} DR #{reissueSource.dr_number}
+                        </div>
+                        <div className="text-[11px] text-red-800 mt-0.5 font-mono">
+                          Ref: {reissueSource.si_number || reissueSource.external_ref || 'PENDING SI'}
+                        </div>
+                      </div>
+                      <div className="p-3 rounded-lg border border-emerald-200 bg-emerald-50/70">
+                        <div className="text-[10px] font-bold uppercase text-emerald-700">Will Issue New DR</div>
+                        <div className="font-bold text-sm text-emerald-950 mt-0.5">
+                          {reissueForm.entity_key} DR (Next Sequential #)
+                        </div>
+                        <div className="text-[11px] text-emerald-800 mt-0.5 font-mono">
+                          Ref: {reissueForm.si_number.trim() || (reissueSource.reference_type === 'transfer_order' ? reissueForm.external_ref : 'PENDING SI')}
+                        </div>
+                      </div>
+                    </div>
+
+                    {reissueSource.status !== 'void' && (
+                      <div className="space-y-1.5">
+                        <label className="block font-semibold text-ink-primary">Void Reason *</label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            `Invoice moved from ${reissueSource.entity_key} to ${reissueForm.entity_key}`,
+                            'Wrong SI / Customer details',
+                            'Wrong item / batch / qty'
+                          ].map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => setReissueForm((p) => ({ ...p, reason: preset }))}
+                              className="px-2 py-0.5 rounded border border-slate-300 bg-surface hover:bg-slate-100 text-[11px]"
+                            >
+                              {preset}
+                            </button>
+                          ))}
+                        </div>
+                        <input
+                          required
+                          type="text"
+                          value={reissueForm.reason}
+                          onChange={(e) => setReissueForm({ ...reissueForm, reason: e.target.value })}
+                          placeholder="Reason for voiding old DR (min 3 characters)"
+                          className="w-full px-2.5 py-1.5 border rounded"
+                        />
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                      <div>
+                        <label className="block font-semibold mb-1">Target Entity *</label>
+                        <select
+                          value={reissueForm.entity_key}
+                          onChange={(e) => handleReissueEntityChange(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border rounded bg-white font-semibold"
+                        >
+                          <option value="GPI">GPI (Getmeds Philippines Inc.)</option>
+                          <option value="2MG">2MG (2mg Incorporated)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block font-semibold mb-1">
+                          {reissueSource.reference_type === 'transfer_order' ? 'TO Reference' : `New ${reissueForm.entity_key} SI #`}
+                        </label>
+                        {reissueSource.reference_type === 'transfer_order' ? (
+                          <input
+                            type="text"
+                            value={reissueForm.external_ref}
+                            onChange={(e) => setReissueForm({ ...reissueForm, external_ref: e.target.value })}
+                            className="w-full px-2.5 py-1.5 border rounded font-mono"
+                          />
+                        ) : (
+                          <input
+                            type="text"
+                            value={reissueForm.si_number}
+                            onChange={(e) => setReissueForm({ ...reissueForm, si_number: e.target.value })}
+                            placeholder={switchedEntity ? `New ${reissueForm.entity_key} SI # or leave blank` : 'SI00000... or blank'}
+                            className={`w-full px-2.5 py-1.5 border rounded font-mono ${reusedOldSi ? 'border-red-500 bg-red-50' : ''}`}
+                          />
+                        )}
+                      </div>
+                      <div>
+                        <label className="block font-semibold mb-1">Date Issued</label>
+                        <input
+                          type="date"
+                          value={reissueForm.date_issued}
+                          onChange={(e) => setReissueForm({ ...reissueForm, date_issued: e.target.value })}
+                          className="w-full px-2.5 py-1.5 border rounded"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-semibold mb-1">Terms</label>
+                        <input
+                          type="text"
+                          value={reissueForm.terms}
+                          onChange={(e) => setReissueForm({ ...reissueForm, terms: e.target.value })}
+                          className="w-full px-2.5 py-1.5 border rounded"
+                        />
+                      </div>
+                    </div>
+
+                    {reusedOldSi && (
+                      <p className="text-[11px] text-red-700 font-semibold">
+                        You switched entity from {reissueSource.entity_key} to {reissueForm.entity_key} — enter the new {reissueForm.entity_key} SI # or leave blank for PENDING SI instead of reusing {reissueSource.si_number}.
+                      </p>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="sm:col-span-2">
+                        <label className="block font-semibold mb-1">Client / Transfer Name *</label>
+                        <input
+                          required
+                          type="text"
+                          value={reissueForm.customer_name}
+                          onChange={(e) => setReissueForm({ ...reissueForm, customer_name: e.target.value })}
+                          className="w-full px-2.5 py-1.5 border rounded"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-semibold mb-1">TIN</label>
+                        <input
+                          type="text"
+                          value={reissueForm.tin}
+                          onChange={(e) => setReissueForm({ ...reissueForm, tin: e.target.value })}
+                          className="w-full px-2.5 py-1.5 border rounded font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="sm:col-span-2">
+                        <label className="block font-semibold mb-1">Delivery Address</label>
+                        <input
+                          type="text"
+                          value={reissueForm.delivery_address}
+                          onChange={(e) => setReissueForm({ ...reissueForm, delivery_address: e.target.value })}
+                          className="w-full px-2.5 py-1.5 border rounded"
+                        />
+                      </div>
+                      {reissueSource.reference_type !== 'transfer_order' && (
+                        <div>
+                          <label className="block font-semibold mb-1">Doctor</label>
+                          <input
+                            type="text"
+                            value={reissueForm.doctor_name}
+                            onChange={(e) => setReissueForm({ ...reissueForm, doctor_name: e.target.value })}
+                            className="w-full px-2.5 py-1.5 border rounded"
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="border border-slate-200 rounded-lg overflow-x-auto">
+                      <table className="min-w-full text-xs">
+                        <thead className="bg-surface border-b border-slate-200 text-[11px] uppercase text-ink-secondary">
+                          <tr>
+                            <th className="px-2 py-1.5 text-center w-8">Use</th>
+                            <th className="px-2 py-1.5 text-left">Item Name *</th>
+                            <th className="px-2 py-1.5 text-left w-28">Batch #</th>
+                            <th className="px-2 py-1.5 text-left w-32">Expiry Date</th>
+                            <th className="px-2 py-1.5 text-left w-20">Qty *</th>
+                            <th className="px-2 py-1.5 text-left w-20">Unit</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {reissueItems.map((it, idx) => (
+                            <tr key={idx} className={it.include === false ? 'opacity-45 bg-slate-50' : ''}>
+                              <td className="px-2 py-1.5 text-center">
+                                <input
+                                  type="checkbox"
+                                  checked={it.include !== false}
+                                  onChange={(e) =>
+                                    setReissueItems((prev) => prev.map((row, i) => (i === idx ? { ...row, include: e.target.checked } : row)))
+                                  }
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  type="text"
+                                  value={it.item_name}
+                                  onChange={(e) =>
+                                    setReissueItems((prev) => prev.map((row, i) => (i === idx ? { ...row, item_name: e.target.value } : row)))
+                                  }
+                                  className="w-full px-2 py-1 border border-slate-300 rounded"
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  type="text"
+                                  value={it.batch_number}
+                                  onChange={(e) =>
+                                    setReissueItems((prev) => prev.map((row, i) => (i === idx ? { ...row, batch_number: e.target.value } : row)))
+                                  }
+                                  className="w-full px-2 py-1 border border-slate-300 rounded font-mono"
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  type="date"
+                                  value={it.expiry_date}
+                                  onChange={(e) =>
+                                    setReissueItems((prev) => prev.map((row, i) => (i === idx ? { ...row, expiry_date: e.target.value } : row)))
+                                  }
+                                  className="w-full px-2 py-1 border border-slate-300 rounded"
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={it.quantity}
+                                  onChange={(e) =>
+                                    setReissueItems((prev) => prev.map((row, i) => (i === idx ? { ...row, quantity: e.target.value } : row)))
+                                  }
+                                  className="w-full px-2 py-1 border border-slate-300 rounded"
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  type="text"
+                                  value={it.unit}
+                                  onChange={(e) =>
+                                    setReissueItems((prev) => prev.map((row, i) => (i === idx ? { ...row, unit: e.target.value } : row)))
+                                  }
+                                  className="w-full px-2 py-1 border border-slate-300 rounded"
+                                />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="px-5 py-3 bg-surface border-t border-slate-200 flex justify-end gap-2">
+                    <button type="button" onClick={() => setReissueOpen(false)} className="px-3 py-1.5 rounded border bg-white text-xs font-semibold">
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submitBlocked}
+                      className="px-4 py-1.5 rounded bg-getmeds-blue text-white text-xs font-semibold hover:bg-getmeds-blue-dark disabled:opacity-50"
+                    >
+                      {submittingReissue
+                        ? 'Processing…'
+                        : reissueSource.status === 'void'
+                          ? `Issue ${reissueForm.entity_key} DR & Print`
+                          : `Void ${reissueSource.entity_key} #${reissueSource.dr_number} & Issue ${reissueForm.entity_key} DR`}
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
           </form>
         </div>
       )}
