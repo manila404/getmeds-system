@@ -1544,6 +1544,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
       {printOpen && drData && (
         <DrPrintVoucherModal
           drData={drData}
+          sideBySide={detailsOpen}
           onClose={() => setPrintOpen(false)}
           onPrinted={(updated) => setDrData(updated)}
         />

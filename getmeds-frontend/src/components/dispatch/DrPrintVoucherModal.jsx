@@ -1,4 +1,5 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import toast from 'react-hot-toast';
 import { Printer, X } from 'lucide-react';
 import client from '../../api/client';
@@ -103,7 +104,7 @@ export function buildDrPrintableHtml(drData) {
   </style></head><body>${pageHtml}</body></html>`;
 }
 
-const DrPrintVoucherModal = ({ drData, onClose, onPrinted }) => {
+const DrPrintVoucherModal = ({ drData, onClose, onPrinted, sideBySide = false }) => {
   if (!drData?.receipt) return null;
   const { receipt, entity_profile: profile, pages = [[]], signatory } = drData;
 
@@ -126,8 +127,10 @@ const DrPrintVoucherModal = ({ drData, onClose, onPrinted }) => {
     setTimeout(() => w.print(), 250);
   };
 
-  return (
-    <div className="fixed inset-0 z-[70] bg-slate-900/50 flex items-center justify-center p-4">
+  return createPortal(
+    <div className={`fixed inset-0 z-[70] bg-slate-900/50 flex items-center p-3 sm:p-4 ${
+      sideBySide ? 'justify-center lg:justify-start lg:pr-[37rem]' : 'justify-center'
+    }`}>
       <div className="bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200">
         <div className="px-5 py-3.5 bg-surface border-b border-slate-200 flex items-center justify-between">
           <div>
@@ -241,7 +244,8 @@ const DrPrintVoucherModal = ({ drData, onClose, onPrinted }) => {
           ))}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
 

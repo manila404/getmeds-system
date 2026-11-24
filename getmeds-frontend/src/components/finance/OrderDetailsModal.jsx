@@ -412,7 +412,7 @@ const peso = (n) =>
 const Row = ({ label, value }) =>
   value === null || value === undefined || value === '' ? null : (
     <div className="flex gap-2 text-[13px] py-1 border-b border-slate-100 last:border-0">
-      <dt className="w-40 shrink-0 text-ink-secondary">{label}</dt>
+      <dt className="w-28 shrink-0 text-ink-secondary">{label}</dt>
       <dd className="min-w-0 flex-1 text-ink-primary break-words">{value}</dd>
     </div>
   );
