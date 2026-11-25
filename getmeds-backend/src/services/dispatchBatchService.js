@@ -564,15 +564,19 @@ async function fetchWarehouseBatchesForItems(
   }
 
   const availableBatchesByItemId = new Map();
+  const stockElsewhereByItemId = new Map();
   for (const it of items) {
     const raw = it.zoho_item_id ? (rawByZohoId.get(String(it.zoho_item_id)) || []) : [];
-    let sorted = filterAndSortBatchesForWarehouse(raw, it.effective_warehouse_id, { today });
+    const sorted = filterAndSortBatchesForWarehouse(raw, it.effective_warehouse_id, { today });
     if (!sorted.length && it.effective_warehouse_id && isNonBatchSupplyName(it.product_name || it.name)) {
-      sorted = supplyFallbackBatches(raw, { today });
+      const elsewhere = supplyFallbackBatches(raw, { today })
+        .filter((b) => String(b.warehouse_id) !== String(it.effective_warehouse_id));
+      const qty = elsewhere.reduce((s, b) => s + Number(b.available_quantity || 0), 0);
+      if (qty > 0) stockElsewhereByItemId.set(Number(it.id), qty);
     }
     availableBatchesByItemId.set(Number(it.id), sorted);
   }
-  return { availableBatchesByItemId, zohoUnavailable, zohoError };
+  return { availableBatchesByItemId, stockElsewhereByItemId, zohoUnavailable, zohoError };
 }
 
 /**
@@ -580,9 +584,14 @@ async function fetchWarehouseBatchesForItems(
  * batch-tracked in Zoho — one batch "NA", stocked in the main GPI warehouse
  * only. An order shipped from another warehouse (Davao) found no batch there,
  * sent the line without one, and Zoho refused the invoice ("The batch number
- * cannot be left empty"). For a packaging line with nothing in its own
- * warehouse, offer its batches from whichever warehouse holds them; the pick
- * keeps that warehouse, so the invoice line takes it from there.
+ * cannot be left empty").
+ *
+ * Taking the batch from the main warehouse instead does not work either: Zoho
+ * refuses an invoice line whose warehouse differs from its Sales Order line
+ * ("Warehouse cannot be changed in a invoice generated from a sales order").
+ * So this only tells WHERE the stock is: the line shows it, and invoicing
+ * stops with a clear message — the stock has to be transferred in Zoho to the
+ * warehouse the order ships from.
  */
 function supplyFallbackBatches(zohoBatches = [], { today = manilaTodayDate() } = {}) {
   const out = [];
@@ -603,20 +612,45 @@ function supplyFallbackBatches(zohoBatches = [], { today = manilaTodayDate() } =
 
 /**
  * Nov 25, 2026: at "Convert to Zoho Invoice", a packaging line with no batch
- * saved (e.g. batches saved before the fix above) gets one picked and saved
- * automatically, so the invoice never sends it to Zoho empty. Lines whose
- * batches cannot be found are left as they were.
+ * saved gets one picked from its own warehouse and saved automatically, so
+ * the invoice never sends it to Zoho empty. A packaging pick saved from a
+ * different warehouse (b12466d did that) is dropped first — Zoho refuses it.
+ * When the packaging is only stocked in another warehouse, this stops with a
+ * clear message instead of Zoho's.
  */
 async function autoPickSupplyBatches({ orderId, itemIds = null, user = null, adapter = zoho, today = manilaTodayDate() } = {}) {
   if (!(await hasColumn('order_item_batches', 'order_item_id'))) return [];
   const { order, items } = await loadOrderWithItemsForBatches(orderId);
+  const supplyItems = items.filter((it) => (!itemIds || itemIds.has(Number(it.id)))
+    && it.zoho_item_id && isNonBatchSupplyName(it.product_name || it.name));
+  if (!supplyItems.length) return [];
+
+  for (const it of supplyItems) {
+    if (!it.effective_warehouse_id) continue;
+    await db.prepare(`
+      DELETE FROM order_item_batches
+       WHERE order_id = ? AND order_item_id = ? AND warehouse_id IS NOT NULL AND warehouse_id <> ?
+    `).run(order.id, it.id, String(it.effective_warehouse_id));
+  }
   const saved = await db.prepare('SELECT order_item_id FROM order_item_batches WHERE order_id = ?').all(order.id);
   const have = new Set(saved.map((r) => Number(r.order_item_id)));
-  const targets = items.filter((it) => (!itemIds || itemIds.has(Number(it.id)))
-    && !have.has(Number(it.id)) && it.zoho_item_id && isNonBatchSupplyName(it.product_name || it.name));
+  const targets = supplyItems.filter((it) => !have.has(Number(it.id)));
   if (!targets.length) return [];
 
-  const { availableBatchesByItemId } = await fetchWarehouseBatchesForItems(targets, { adapter, today, failSoft: true });
+  const { availableBatchesByItemId, stockElsewhereByItemId } = await fetchWarehouseBatchesForItems(targets, { adapter, today, failSoft: true });
+  for (const it of targets) {
+    const own = (availableBatchesByItemId.get(Number(it.id)) || []).some((b) => !b.is_expired && Number(b.available_quantity) > 0);
+    const elsewhere = stockElsewhereByItemId.get(Number(it.id)) || 0;
+    if (!own && elsewhere > 0) {
+      throw new DispatchBatchError(
+        422,
+        'PACKAGING_NOT_IN_WAREHOUSE',
+        `"${it.product_name || it.name}" has no stock in ${it.effective_warehouse_name || 'this order\'s warehouse'} in Zoho `
+        + `(${elsewhere} pcs are in another warehouse). Ask the warehouse to transfer some to ${it.effective_warehouse_name || 'this warehouse'} `
+        + 'in Zoho (Transfer Order), then try again.'
+      );
+    }
+  }
   const actor = user ? await resolveActor(user) : { id: null, name: 'System (auto packaging batch)' };
   const now = new Date().toISOString();
   const picked = [];
@@ -686,7 +720,7 @@ async function getOrderBatchOptions({
       }
     }
   }
-  const { availableBatchesByItemId, zohoUnavailable, zohoError } = await fetchWarehouseBatchesForItems(items, {
+  const { availableBatchesByItemId, stockElsewhereByItemId, zohoUnavailable, zohoError } = await fetchWarehouseBatchesForItems(items, {
     adapter,
     today,
     failSoft: true,
@@ -745,6 +779,8 @@ async function getOrderBatchOptions({
       warehouse_id: it.effective_warehouse_id,
       warehouse_name: it.effective_warehouse_name,
       available_batches: avail,
+      // Nov 25, 2026: packaging with no stock here but some in another warehouse.
+      stock_elsewhere: stockElsewhereByItemId.get(Number(it.id)) || 0,
       saved_picks: saved,
       suggested_picks: saved.length ? saved : fefo.picks,
       unallocated_quantity: saved.length ? 0 : fefo.unallocated_quantity,

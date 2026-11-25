@@ -1039,9 +1039,15 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
                           <td className="px-3 py-2.5 font-semibold whitespace-nowrap">{ln.quantity} {ln.unit || 'pc'}</td>
                           <td className="px-3 py-2.5 space-y-1.5">
                             {(ln.is_csp || /^packaging\b/i.test(ln.product_name || '')) && !(ln.available_batches || []).length ? (
-                              <span className="text-ink-secondary">
-                                {ln.is_csp ? 'CSP non-stocked item' : 'Packaging / supply (no batch required)'}
-                              </span>
+                              Number(ln.stock_elsewhere) > 0 ? (
+                                <span className="block text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1 text-xs font-semibold">
+                                  No stock in {ln.warehouse_name || 'this warehouse'} in Zoho ({ln.stock_elsewhere} pcs are in another warehouse). Ask the warehouse to transfer some here in Zoho (Transfer Order), then reopen this order.
+                                </span>
+                              ) : (
+                                <span className="text-ink-secondary">
+                                  {ln.is_csp ? 'CSP non-stocked item' : 'Packaging / supply (no batch required)'}
+                                </span>
+                              )
                             ) : !(ln.available_batches || []).length && batchData?.zoho_batches_unavailable ? (
                               <>
                                 {linePicks.map((p, idx) => (
@@ -1107,7 +1113,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
                                     >
                                       {ln.available_batches.map((b) => (
                                         <option key={b.batch_number} value={b.batch_number} disabled={b.is_expired}>
-                                          {b.batch_number} · Exp {b.expiry_date || 'N/A'} · Avail {b.available_quantity}{b.is_expired ? ' (EXPIRED)' : ''}{b.other_warehouse ? ' · from another warehouse' : ''}
+                                          {b.batch_number} · Exp {b.expiry_date || 'N/A'} · Avail {b.available_quantity}{b.is_expired ? ' (EXPIRED)' : ''}
                                         </option>
                                       ))}
                                     </select>

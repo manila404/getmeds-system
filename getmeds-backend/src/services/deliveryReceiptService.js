@@ -1091,6 +1091,7 @@ async function finalizeZohoInvoiceForOrder({
     try {
       await autoPickSupplyBatches({ orderId: order.id, itemIds: new Set(entityItems.map((it) => Number(it.id))), user, adapter });
     } catch (err) {
+      if (err instanceof DispatchBatchError) throw err;
       console.warn(`[DR] auto packaging batch skipped for order ${order.id}:`, err.message);
     }
     const savedBatches = (await hasColumn('order_item_batches', 'order_item_id'))
