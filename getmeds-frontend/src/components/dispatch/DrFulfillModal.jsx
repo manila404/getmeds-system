@@ -1107,7 +1107,7 @@ const DrFulfillModal = ({ order, onClose, onCompleted, detailsOpen = false, onTo
                                     >
                                       {ln.available_batches.map((b) => (
                                         <option key={b.batch_number} value={b.batch_number} disabled={b.is_expired}>
-                                          {b.batch_number} · Exp {b.expiry_date || 'N/A'} · Avail {b.available_quantity}{b.is_expired ? ' (EXPIRED)' : ''}
+                                          {b.batch_number} · Exp {b.expiry_date || 'N/A'} · Avail {b.available_quantity}{b.is_expired ? ' (EXPIRED)' : ''}{b.other_warehouse ? ' · from another warehouse' : ''}
                                         </option>
                                       ))}
                                     </select>

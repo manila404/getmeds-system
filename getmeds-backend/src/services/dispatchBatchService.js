@@ -232,7 +232,12 @@ function validatePickedBatches({ items = [], picksByItemId = new Map(), availabl
         );
       }
 
-      const poolKey = `${it.effective_warehouse_id || match.warehouse_id || 'DEFAULT'}::${it.zoho_item_id || it.product_id || ''}::${match.batch_number}`;
+      // A packaging batch taken from another warehouse (see supplyFallbackBatches) is
+      // counted, saved and invoiced against the warehouse that holds it.
+      const pickWarehouseId = match.other_warehouse
+        ? match.warehouse_id
+        : (it.effective_warehouse_id || match.warehouse_id || null);
+      const poolKey = `${pickWarehouseId || 'DEFAULT'}::${it.zoho_item_id || it.product_id || ''}::${match.batch_number}`;
       const prevUsed = seenBatchUsage.get(poolKey) || 0;
       const nextUsed = prevUsed + qty;
       if (nextUsed > Number(match.available_quantity)) {
@@ -254,8 +259,8 @@ function validatePickedBatches({ items = [], picksByItemId = new Map(), availabl
         manufacturer_batch_no: match.manufacturer_batch_no || p.manufacturer_batch_no || null,
         manufactured_date: match.manufactured_date || p.manufactured_date || null,
         expiry_date: exp,
-        warehouse_id: it.effective_warehouse_id || match.warehouse_id || null,
-        warehouse_name: it.effective_warehouse_name || null,
+        warehouse_id: pickWarehouseId,
+        warehouse_name: match.other_warehouse ? null : (it.effective_warehouse_name || null),
         quantity: qty
       });
     }
@@ -561,10 +566,94 @@ async function fetchWarehouseBatchesForItems(
   const availableBatchesByItemId = new Map();
   for (const it of items) {
     const raw = it.zoho_item_id ? (rawByZohoId.get(String(it.zoho_item_id)) || []) : [];
-    const sorted = filterAndSortBatchesForWarehouse(raw, it.effective_warehouse_id, { today });
+    let sorted = filterAndSortBatchesForWarehouse(raw, it.effective_warehouse_id, { today });
+    if (!sorted.length && it.effective_warehouse_id && isNonBatchSupplyName(it.product_name || it.name)) {
+      sorted = supplyFallbackBatches(raw, { today });
+    }
     availableBatchesByItemId.set(Number(it.id), sorted);
   }
   return { availableBatchesByItemId, zohoUnavailable, zohoError };
+}
+
+/**
+ * Nov 25, 2026: packaging (e.g. "Packaging : Cake Roll with Cover-Styro") is
+ * batch-tracked in Zoho — one batch "NA", stocked in the main GPI warehouse
+ * only. An order shipped from another warehouse (Davao) found no batch there,
+ * sent the line without one, and Zoho refused the invoice ("The batch number
+ * cannot be left empty"). For a packaging line with nothing in its own
+ * warehouse, offer its batches from whichever warehouse holds them; the pick
+ * keeps that warehouse, so the invoice line takes it from there.
+ */
+function supplyFallbackBatches(zohoBatches = [], { today = manilaTodayDate() } = {}) {
+  const out = [];
+  for (const b of zohoBatches) {
+    const assoc = Array.isArray(b.associated_warehouses) && b.associated_warehouses.length
+      ? b.associated_warehouses
+      : (b.warehouse_id ? [{ warehouse_id: b.warehouse_id }] : []);
+    for (const w of assoc) {
+      if (!w.warehouse_id) continue;
+      for (const x of filterAndSortBatchesForWarehouse([b], w.warehouse_id, { today })) {
+        out.push({ ...x, other_warehouse: true });
+      }
+    }
+  }
+  out.sort((a, b) => (a.is_expired !== b.is_expired ? (a.is_expired ? 1 : -1) : Number(b.available_quantity) - Number(a.available_quantity)));
+  return out;
+}
+
+/**
+ * Nov 25, 2026: at "Convert to Zoho Invoice", a packaging line with no batch
+ * saved (e.g. batches saved before the fix above) gets one picked and saved
+ * automatically, so the invoice never sends it to Zoho empty. Lines whose
+ * batches cannot be found are left as they were.
+ */
+async function autoPickSupplyBatches({ orderId, itemIds = null, user = null, adapter = zoho, today = manilaTodayDate() } = {}) {
+  if (!(await hasColumn('order_item_batches', 'order_item_id'))) return [];
+  const { order, items } = await loadOrderWithItemsForBatches(orderId);
+  const saved = await db.prepare('SELECT order_item_id FROM order_item_batches WHERE order_id = ?').all(order.id);
+  const have = new Set(saved.map((r) => Number(r.order_item_id)));
+  const targets = items.filter((it) => (!itemIds || itemIds.has(Number(it.id)))
+    && !have.has(Number(it.id)) && it.zoho_item_id && isNonBatchSupplyName(it.product_name || it.name));
+  if (!targets.length) return [];
+
+  const { availableBatchesByItemId } = await fetchWarehouseBatchesForItems(targets, { adapter, today, failSoft: true });
+  const actor = user ? await resolveActor(user) : { id: null, name: 'System (auto packaging batch)' };
+  const now = new Date().toISOString();
+  const picked = [];
+  for (const it of targets) {
+    const avail = availableBatchesByItemId.get(Number(it.id)) || [];
+    const fefo = suggestFefoPicks(avail, it.quantity);
+    if (!fefo.picks.length || fefo.unallocated_quantity > 0) continue;
+    for (const p of fefo.picks) {
+      const fromOther = avail.find((b) => b.batch_number === p.batch_number && String(b.warehouse_id) === String(p.warehouse_id))?.other_warehouse;
+      const row = {
+        order_item_id: Number(it.id),
+        zoho_item_id: it.zoho_item_id,
+        zoho_batch_id: p.zoho_batch_id || null,
+        zoho_batch_in_id: p.zoho_batch_in_id || null,
+        batch_number: p.batch_number,
+        manufacturer_batch_no: p.manufacturer_batch_no || null,
+        manufactured_date: p.manufactured_date || null,
+        expiry_date: p.expiry_date || null,
+        warehouse_id: p.warehouse_id || it.effective_warehouse_id || null,
+        warehouse_name: fromOther ? null : (it.effective_warehouse_name || null),
+        quantity: p.quantity
+      };
+      await db.prepare(`
+        INSERT INTO order_item_batches (
+          order_id, order_item_id, zoho_item_id, zoho_batch_id, zoho_batch_in_id,
+          batch_number, manufacturer_batch_no, manufactured_date, expiry_date,
+          warehouse_id, warehouse_name, quantity, picked_by, picked_by_name, picked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        order.id, row.order_item_id, row.zoho_item_id, row.zoho_batch_id, row.zoho_batch_in_id,
+        row.batch_number, row.manufacturer_batch_no, row.manufactured_date, row.expiry_date,
+        row.warehouse_id, row.warehouse_name, row.quantity, actor.id, actor.name, now
+      );
+      picked.push(row);
+    }
+  }
+  return picked;
 }
 
 async function getOrderBatchOptions({
@@ -881,5 +970,7 @@ module.exports = {
   getOrderBatchOptions,
   saveOrderBatchPicks,
   saveOrderCustomerCompliance,
-  invalidateItemBatchesCache
+  invalidateItemBatchesCache,
+  supplyFallbackBatches,
+  autoPickSupplyBatches
 };

@@ -8,7 +8,7 @@ const {
   formatEntitySiNumber,
   classifyOrder
 } = require('./orderClassificationService');
-const { assertCanActOnOrder, DispatchBatchError, invalidateItemBatchesCache } = require('./dispatchBatchService');
+const { assertCanActOnOrder, DispatchBatchError, invalidateItemBatchesCache, autoPickSupplyBatches } = require('./dispatchBatchService');
 const { claimOrder, releaseClaim } = require('./orderClaimService');
 const { evaluateCompletion } = require('./orderCompletionService');
 const { logEvent, resolveActor } = require('./auditService');
@@ -1086,6 +1086,13 @@ async function finalizeZohoInvoiceForOrder({
   try {
     const entityItems = orderItems.filter((it) => (normalizeEntityKey(it.invoicing_from) || primaryEntity) === resolvedEntity);
     let so = await loadTargetSalesOrder(adapter, targetSoId, order, entityItems, splitTarget);
+    // Nov 25, 2026: packaging with no batch saved gets one picked now — Zoho
+    // refuses an invoice line for a batch-tracked item without a batch.
+    try {
+      await autoPickSupplyBatches({ orderId: order.id, itemIds: new Set(entityItems.map((it) => Number(it.id))), user, adapter });
+    } catch (err) {
+      console.warn(`[DR] auto packaging batch skipped for order ${order.id}:`, err.message);
+    }
     const savedBatches = (await hasColumn('order_item_batches', 'order_item_id'))
       ? await db.prepare('SELECT * FROM order_item_batches WHERE order_id = ? ORDER BY id').all(order.id)
       : [];
