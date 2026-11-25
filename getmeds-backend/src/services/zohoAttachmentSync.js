@@ -4,6 +4,7 @@ const db = require('../db/database');
 const proofStorage = require('./paymentProofStorage');
 const zoho = require('../integrations/zoho');
 const { hasColumn } = require('./schemaColumns');
+const { logEvent } = require('./auditService');
 
 /**
  * Oct 17, 2026: Zoho refuses a file whose extension it does not list ("File types with
@@ -87,6 +88,15 @@ async function pushUnsyncedAttachments(orderId, zohoSoId) {
       );
     }
   }
+
+  // Nov 25, 2026: plus the customer's own documents (BIR 2303, LTO, permits).
+  try {
+    const docs = await pushCustomerDocuments(orderId, zohoSoId);
+    pushed += docs.pushed;
+    failed += docs.failed;
+  } catch (err) {
+    console.warn(`[ZOHO_ATTACHMENT_SYNC] customer documents for order ${orderId}:`, err.message);
+  }
   return { pushed, failed };
 }
 
@@ -153,4 +163,66 @@ async function syncVerifiedPrescriptionsToZoho(orderId, zohoSoId, proofIds) {
   return { pushed, failed };
 }
 
-module.exports = { pushUnsyncedAttachments, syncVerifiedPrescriptionsToZoho, zohoFileName };
+/**
+ * Nov 25, 2026: a new customer's documents (BIR 2303, LTO permit, business
+ * permit — uploaded on the customer, table customer_documents) were only ever
+ * kept in the hub; nothing sent them to Zoho (GM-20261124-0074). They now go
+ * onto the Sales Order when it is created, like the order's own files.
+ *
+ * Each document goes up once per customer — onto the first Sales Order made
+ * after it was uploaded — not onto every later order. What was sent is
+ * recorded as a ZOHO_CUSTOMER_DOCS_ADDED event (metadata.customer_document_ids)
+ * on that order, so no database change is needed.
+ */
+async function pushCustomerDocuments(orderId, zohoSoId) {
+  if (!orderId || !zohoSoId) return { pushed: 0, failed: 0 };
+  if (!(await hasColumn('customer_documents', 'customer_id'))) return { pushed: 0, failed: 0 };
+  const order = await db.prepare('SELECT id, customer_id FROM orders WHERE id = ?').get(orderId);
+  if (!order || !order.customer_id) return { pushed: 0, failed: 0 };
+
+  const docs = await db
+    .prepare('SELECT * FROM customer_documents WHERE customer_id = ? ORDER BY id')
+    .all(order.customer_id);
+  if (!docs.length) return { pushed: 0, failed: 0 };
+
+  const sentEvents = await db.prepare(`
+    SELECT e.metadata FROM order_events e
+      JOIN orders o ON o.id = e.order_id
+     WHERE o.customer_id = ? AND e.event_type = 'ZOHO_CUSTOMER_DOCS_ADDED'
+  `).all(order.customer_id);
+  const alreadySent = new Set();
+  for (const e of sentEvents) {
+    let m = e.metadata;
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch { m = null; } }
+    for (const id of (m && m.customer_document_ids) || []) alreadySent.add(Number(id));
+  }
+
+  const sent = [];
+  let failed = 0;
+  for (const doc of docs.filter((d) => !alreadySent.has(Number(d.id)))) {
+    try {
+      const buffer = await proofStorage.downloadFile(doc.storage_path);
+      await zoho.addSalesOrderAttachment(zohoSoId, {
+        buffer,
+        filename: zohoFileName(doc.file_name),
+        contentType: doc.content_type || 'application/octet-stream',
+      });
+      sent.push(doc);
+    } catch (err) {
+      failed += 1;
+      console.warn(`[ZOHO_ATTACHMENT_SYNC] could not push customer_documents.id=${doc.id} onto SO ${zohoSoId}:`, err.message);
+    }
+  }
+
+  if (sent.length) {
+    await logEvent({
+      orderId,
+      eventType: 'ZOHO_CUSTOMER_DOCS_ADDED',
+      notes: `Customer documents attached to the Zoho Sales Order: ${sent.map((d) => d.file_name).join(', ')}.`,
+      metadata: { customer_document_ids: sent.map((d) => Number(d.id)), zoho_so_id: String(zohoSoId) },
+    });
+  }
+  return { pushed: sent.length, failed };
+}
+
+module.exports = { pushUnsyncedAttachments, syncVerifiedPrescriptionsToZoho, pushCustomerDocuments, zohoFileName };
