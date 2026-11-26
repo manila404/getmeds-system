@@ -433,6 +433,11 @@ class ZohoAdapter {
     throw new Error('Not implemented');
   }
 
+  /** Nov 26, 2026: attach one file to a customer (contact). See LiveZohoAdapter. */
+  async addContactAttachment(contactId, file) {
+    throw new Error('Not implemented');
+  }
+
   /**
    * Sep 22, 2026: read ONE existing attachment's bytes back off a Sales
    * Order — the first read this narrow exception has ever had. Still no

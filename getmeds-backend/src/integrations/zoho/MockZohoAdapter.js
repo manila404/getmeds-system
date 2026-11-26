@@ -694,6 +694,25 @@ class MockZohoAdapter extends ZohoAdapter {
     return { code: 0, message: 'Attachment added successfully [MOCK MODE]', document, documents: [...salesorder._attachments] };
   }
 
+  /** Nov 26, 2026: mirrors LiveZohoAdapter.addContactAttachment — records the file only. */
+  async addContactAttachment(contactId, file) {
+    const { filename, contentType, buffer } = file || {};
+    if (!contactId) throw new Error('addContactAttachment requires a Zoho contact id');
+    if (!buffer || !buffer.length) throw new Error('addContactAttachment requires non-empty file data');
+    this._contactAttachments = this._contactAttachments || new Map();
+    const list = this._contactAttachments.get(String(contactId)) || [];
+    const document = {
+      document_id: `MOCK-CDOC-${contactId}-${list.length + 1}`,
+      file_name: filename || 'attachment',
+      file_type: contentType || 'application/octet-stream',
+      file_size: buffer.length
+    };
+    list.push(document);
+    this._contactAttachments.set(String(contactId), list);
+    this._log(`[ZOHO_MOCK] Would POST /contacts/${contactId}/attachment: ${document.file_name}`);
+    return { code: 0, message: 'Attachment added successfully [MOCK MODE]', document, documents: [...list] };
+  }
+
   /** See ZohoAdapter.js's Sep 22, 2026 note. Mirrors LiveZohoAdapter's contract exactly. */
   async getSalesOrderAttachment(salesorderId, documentId) {
     const salesorder = this._salesOrders.get(salesorderId);

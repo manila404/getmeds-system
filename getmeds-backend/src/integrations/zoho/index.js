@@ -350,6 +350,8 @@ const facadeMethods = [
   // on ZohoAdapter/LiveZohoAdapter/MockZohoAdapter; without this line it
   // would be `undefined` through the facade every controller actually uses.
   'addSalesOrderAttachment',
+  // Nov 26, 2026: a customer's documents onto the Zoho customer itself.
+  'addContactAttachment',
   // Sep 22, 2026: same lesson, same list — getSalesOrderAttachment exists on
   // ZohoAdapter/LiveZohoAdapter/MockZohoAdapter; without this line it would
   // be `undefined` through the facade every controller actually uses.

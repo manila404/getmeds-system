@@ -179,6 +179,12 @@ const attachDocument = async (req, res, next) => {
     // Oct 3, 2026: move the staged upload into Sanity (best-effort).
     await storage.moveToSanityQuietly(storagePath, { contentType: body.content_type, fileName: body.file_name });
 
+    // Nov 26, 2026: a customer already in Zoho gets the file on its Zoho page
+    // straight away (a waiting one gets it when Management pushes it).
+    if (customer.zoho_contact_id) {
+      await require('../services/customerDocsZoho').pushCustomerDocsQuietly(customer.id);
+    }
+
     const doc = await db
       .prepare(
         `SELECT d.id, d.file_name, d.content_type, d.file_size, d.created_at, u.name AS uploaded_by_name

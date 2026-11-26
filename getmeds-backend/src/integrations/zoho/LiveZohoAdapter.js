@@ -1235,6 +1235,55 @@ class LiveZohoAdapter extends ZohoAdapter {
    * Content-Type: application/json, which is wrong for a multipart upload
    * — fetch needs to set its own boundary header from the FormData body.
    */
+  /**
+   * Nov 26, 2026: attach one file to a customer (contact) in Zoho — the
+   * paperclip on the customer's own page. Same multipart shape as
+   * addSalesOrderAttachment. Verified live: POST /contacts/{id}/attachment on
+   * the Inventory API exists (an empty upload answers 33003 "Attachment not
+   * found."); the Books v3 API refuses our token for it.
+   */
+  async addContactAttachment(contactId, file) {
+    if (!contactId) throw new Error('addContactAttachment requires a Zoho contact id');
+    const { buffer, filename, contentType } = file || {};
+    if (!buffer || !buffer.length) throw new Error('addContactAttachment requires non-empty file data');
+
+    this._assertOrgAllowed();
+    this._assertCallAllowed('POST', `/contacts/${contactId}/attachment`);
+    const params = new URLSearchParams({ organization_id: this.organizationId });
+    const url = `${this.baseUrl}/contacts/${contactId}/attachment?${params.toString()}`;
+    this._log(
+      `[ZOHO_${this._modeLabel.toUpperCase()}] POST /contacts/${contactId}/attachment ` +
+        `(org=${this.organizationId}, file=${filename || 'attachment'})`
+    );
+
+    let resp;
+    try {
+      resp = await this._fetchAuthed((token) => {
+        const form = new FormData();
+        form.append('attachment', new Blob([buffer], { type: contentType || 'application/octet-stream' }), filename || 'attachment');
+        return fetch(url, {
+          method: 'POST',
+          headers: { Authorization: `Zoho-oauthtoken ${token}` },
+          body: form,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        });
+      });
+    } catch (err) {
+      throw describeNetworkError(err, url, 'POST');
+    }
+    const json = await resp.json().catch(() => ({}));
+    if (!resp.ok || (json.code !== undefined && Number(json.code) !== 0)) {
+      const err = new Error(json.message || `Zoho API error (HTTP ${resp.status})`);
+      err.zohoResponse = json;
+      err.httpStatus = resp.status;
+      throw err;
+    }
+    const documents = Array.isArray(json.documents) ? json.documents : (json.document ? [json.document] : []);
+    const wantedName = filename || 'attachment';
+    const document = [...documents].reverse().find((d) => d.file_name === wantedName) || documents[documents.length - 1] || null;
+    return { code: 0, message: json.message || 'Attachment added successfully', document, documents };
+  }
+
   async addSalesOrderAttachment(salesorderId, file) {
     if (!salesorderId) throw new Error('addSalesOrderAttachment requires a Zoho Sales Order id');
     const { buffer, filename, contentType } = file || {};

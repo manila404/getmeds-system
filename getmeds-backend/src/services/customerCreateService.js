@@ -2,6 +2,7 @@
 
 const db = require('../db/database');
 const zoho = require('../integrations/zoho');
+const { hasColumn } = require('./schemaColumns');
 // Sep 11, 2026: releasing orders held on a pending customer. Required lazily
 // inside the function — zohoRetryService requires this module's siblings, and
 // a top-level require here closes a cycle that leaves one of them undefined.
@@ -503,6 +504,12 @@ async function linkHeldToExisting(heldId, targetId, actor, { details = null, zoh
 
   await db.transaction(async () => {
     await db.prepare('UPDATE orders SET customer_id = ?, updated_at = ? WHERE customer_id = ?').run(target.id, now, held.id);
+    // Nov 26, 2026: the waiting customer's documents (BIR 2303, LTO, permits)
+    // move with it. customer_documents is ON DELETE CASCADE, so the DELETE
+    // below used to wipe them out together with the waiting customer.
+    if (await hasColumn('customer_documents', 'customer_id')) {
+      await db.prepare('UPDATE customer_documents SET customer_id = ? WHERE customer_id = ?').run(target.id, held.id);
+    }
     // Deleted before the fill below, so the two rows never hold the same
     // licence at once.
     await db.prepare('DELETE FROM customers WHERE id = ?').run(held.id);
@@ -575,6 +582,8 @@ async function linkHeldToExisting(heldId, targetId, actor, { details = null, zoh
   })();
 
   const released = await releaseWaitingOrders(target.id, orders.map((o) => o.id));
+  // Nov 26, 2026: and onto the Zoho customer itself.
+  await require('./customerDocsZoho').pushCustomerDocsQuietly(target.id);
   return { ok: true, moved: orders.length, released, target: { id: target.id, name: target.name } };
 }
 
@@ -965,6 +974,10 @@ async function syncHeldCustomer(customerId, { allowMatches = false, allowLacking
     // zoho_sync_status 'pending' forever, and somebody has to notice each one
     // and push it by hand. See releaseWaitingOrders.
     const released = await releaseWaitingOrders(customerId);
+
+    // Nov 26, 2026: the documents uploaded with the customer (BIR 2303, LTO,
+    // permits) onto the new Zoho customer — see customerDocsZoho.js.
+    await require('./customerDocsZoho').pushCustomerDocsQuietly(customerId);
 
     return { ok: true, zoho_contact_id: contactId, released };
   } catch (err) {

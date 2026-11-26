@@ -38,6 +38,8 @@ const APPROVED_WRITES = [
   write('POST', '/salesorders/:id/attachment', 'attach payment proof to the Sales Order'),
   write('POST', '/contacts', 'create a customer from the order form'),
   write('PUT', '/contacts/:id', "update a customer's TIN / TDS"),
+  // Nov 26, 2026: a new customer's BIR 2303 / LTO / permits onto the Zoho customer itself.
+  write('POST', '/contacts/:id/attachment', "attach a customer's documents (BIR 2303, LTO, permits) to the customer"),
   // Dispatch in GetMeds (only runs when GETMEDS_WORKFLOW_V2=true)
   write('POST', '/invoices', 'Dispatch creates the invoice'),
   write('POST', '/invoices/:id/status/sent', 'Dispatch marks the invoice sent'),
