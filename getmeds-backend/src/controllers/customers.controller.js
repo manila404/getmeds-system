@@ -22,6 +22,27 @@ const SALES_VISIBLE_FIELDS = [
   'id', 'name', 'type', 'category', 'contact_person', 'contact_number', 'address',
   'email', 'is_active', 'is_test_customer'
 ];
+// Nov 12, 2026: a Zoho contact's phone number. This org keeps it in the mandatory custom field
+// "Contact Number" (cf_contact_number), the one Zoho shows on the contact and the one this app
+// writes when it creates a customer. The standard Phone and Mobile fields are usually empty, and
+// reading only those left the directory blank for most clients (e.g. Rudy Jalasco).
+const zohoContactNumber = (contact) =>
+  [contact.cf_contact_number_unformatted, contact.cf_contact_number, contact.phone, contact.mobile]
+    .map((v) => String(v == null ? '' : v).trim())
+    .find(Boolean) || null;
+
+// The first address on a Zoho contact that actually has something in it. Zoho sends an address
+// object even when it is empty, so "billing or else shipping" never reached the shipping one.
+const zohoAddressText = (contact) => {
+  for (const a of [contact.billing_address, contact.shipping_address]) {
+    if (!a) continue;
+    const text = [a.address, a.street2, a.city, a.state, a.zip, a.country]
+      .map((v) => String(v == null ? '' : v).trim()).filter(Boolean).join(', ');
+    if (text) return text;
+  }
+  return null;
+};
+
 const pickSalesFields = (row) =>
   SALES_VISIBLE_FIELDS.reduce((out, k) => (k in row ? { ...out, [k]: row[k] } : out), {});
 
@@ -398,9 +419,11 @@ async function reconcileContacts(contacts, opts = {}) {
       contactPerson: contact.first_name
         ? `${contact.first_name} ${contact.last_name || ''}`.trim()
         : null,
-      phone: contact.phone || contact.mobile || null,
+      phone: zohoContactNumber(contact),
+      // Zoho's contact list carries no address (only the single-contact call does), so this is
+      // almost always null here; the upsert below keeps whatever is already stored.
       address: contact.billing_address
-        ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ')
+        ? [contact.billing_address.address, contact.billing_address.city].filter(Boolean).join(', ') || null
         : null,
       isActive: String(contact.status || '').toLowerCase() === 'inactive' ? 0 : 1,
       tin: compliance.tin,
@@ -430,9 +453,15 @@ async function reconcileContacts(contacts, opts = {}) {
   let updated = 0;
   let written = 0;
 
-  const txn = db.transaction(async () => {
-    for (let i = 0; i < unique.length; i += RECONCILE_BATCH_SIZE) {
-      const batch = unique.slice(i, i + RECONCILE_BATCH_SIZE);
+  // Nov 27, 2026: one transaction PER BATCH, not one around the whole sync. A Full Resync
+  // rewrites about 95,000 rows; inside a single transaction every one of them stayed locked
+  // until the very end, so anything else that touches a customer row in the meantime (a MedRep
+  // picking that customer on the order form saves its address) waited for minutes. Each batch
+  // of 500 now commits on its own and releases its rows straight away. The upsert is safe to
+  // repeat, so a sync stopped halfway keeps what it has saved and the next run finishes the rest.
+  for (let i = 0; i < unique.length; i += RECONCILE_BATCH_SIZE) {
+    const batch = unique.slice(i, i + RECONCILE_BATCH_SIZE);
+    await db.transaction(async () => {
 
       // One probe per batch to learn which of these already exist. The upsert
       // below would work without it, but `created` vs `updated` would then
@@ -458,6 +487,10 @@ async function reconcileContacts(contacts, opts = {}) {
       // ON CONFLICT names the partial index predicate; `type` and `source` stay
       // untouched on update, while `tin` and `lto_license_number` use COALESCE so
       // blank Zoho values never overwrite local entries.
+      //
+      // Nov 12, 2026: `contact_number` and `address` are kept the same way. The list this sync
+      // reads has no address at all, so a flat overwrite erased, on every sync, the address the
+      // order form had fetched and saved for that customer.
       await db
         .prepare(
           `INSERT INTO customers (name, type, zoho_contact_id, source, contact_person, contact_number, address, last_synced_at, is_active, tin, lto_license_number, outstanding_receivable)
@@ -466,8 +499,8 @@ async function reconcileContacts(contacts, opts = {}) {
            DO UPDATE SET
              name = EXCLUDED.name,
              contact_person = EXCLUDED.contact_person,
-             contact_number = EXCLUDED.contact_number,
-             address = EXCLUDED.address,
+             contact_number = COALESCE(EXCLUDED.contact_number, customers.contact_number),
+             address = COALESCE(EXCLUDED.address, customers.address),
              is_active = EXCLUDED.is_active,
              last_synced_at = EXCLUDED.last_synced_at,
              tin = COALESCE(EXCLUDED.tin, customers.tin),
@@ -481,10 +514,9 @@ async function reconcileContacts(contacts, opts = {}) {
       updated += batch.length - newRows;
 
       written += batch.length;
-      if (onProgress) onProgress(written);
-    }
-  });
-  await txn();
+    })();
+    if (onProgress) onProgress(written);
+  }
 
   return { created, updated: updated + duplicateHits, skipped, vendorsSkipped };
 }
@@ -681,14 +713,11 @@ async function getZohoAddress(req, res, next) {
       });
     }
 
-    const billing = contact.billing_address || contact.shipping_address || null;
-    const address = billing
-      ? [billing.address, billing.street2, billing.city, billing.state, billing.zip, billing.country].filter(Boolean).join(', ')
-      : customer.address;
+    const address = zohoAddressText(contact) || customer.address;
     const contactPerson = contact.first_name
       ? `${contact.first_name} ${contact.last_name || ''}`.trim()
       : (customer.contact_person || null);
-    const contactNumber = contact.phone || contact.mobile || customer.contact_number || null;
+    const contactNumber = zohoContactNumber(contact) || customer.contact_number || null;
     // Sep 18, 2026: same reasoning as reconcileContacts' tin column — take
     // Zoho's cf_tin when it has one, otherwise keep whatever's stored
     // locally rather than blanking it. Picking a customer on the order form

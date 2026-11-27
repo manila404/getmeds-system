@@ -110,6 +110,38 @@ describe('Customers — Zoho sync (read-only) and single-TEST-customer gate', ()
     expect(row.tin).toBe('LOCAL-ONLY-999');
   });
 
+  // Nov 12, 2026: this org's phone number lives in the custom field "Contact Number"
+  // (cf_contact_number); Phone and Mobile are usually empty. Reading only those two left the
+  // Clients Directory blank for clients whose number is plainly visible in Zoho.
+  test('sync reads the Contact Number custom field when Phone and Mobile are empty', async () => {
+    // The mock hands back its own stored contact, so this edits what the next sync will read.
+    Object.assign((await zoho.getContact('CONTACT-FIX-1001')).contact, { phone: '', mobile: '', cf_contact_number: '09176821224' });
+
+    const res = await request(app)
+      .post('/api/customers/sync-from-zoho')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+
+    const row = await db.prepare(`SELECT contact_number FROM customers WHERE zoho_contact_id = 'CONTACT-FIX-1001'`).get();
+    expect(row.contact_number).toBe('09176821224');
+  });
+
+  // The contact list has no address, so a sync must leave a stored one alone.
+  test('sync never blanks a stored address or contact number that the Zoho list does not carry', async () => {
+    // The mock hands back its own stored contact, so this edits what the next sync will read.
+    Object.assign((await zoho.getContact('CONTACT-FIX-1002')).contact, { phone: '', mobile: '', cf_contact_number: '', billing_address: undefined });
+    await db.prepare(`UPDATE customers SET address = 'Kept St, Taguig', contact_number = '09170000001' WHERE zoho_contact_id = 'CONTACT-FIX-1002'`).run();
+
+    const res = await request(app)
+      .post('/api/customers/sync-from-zoho')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+
+    const row = await db.prepare(`SELECT address, contact_number FROM customers WHERE zoho_contact_id = 'CONTACT-FIX-1002'`).get();
+    expect(row.address).toBe('Kept St, Taguig');
+    expect(row.contact_number).toBe('09170000001');
+  });
+
   test('RBAC: MedRep cannot trigger the Zoho customer pull', async () => {
     const res = await request(app)
       .post('/api/customers/sync-from-zoho')
