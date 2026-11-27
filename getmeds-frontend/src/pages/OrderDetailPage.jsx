@@ -17,6 +17,7 @@ import ProductAutocomplete from '../components/orders/ProductAutocomplete';
 import PaymentProofPanel from '../components/orders/PaymentProofPanel';
 import OrderItemsEditor from '../components/orders/OrderItemsEditor';
 import ResubmitHoldModal from '../components/orders/ResubmitHoldModal';
+import OrderThreadPanel from '../components/orders/OrderThreadPanel';
 import ResumeOrderModal, { stageLabel } from '../components/orders/ResumeOrderModal';
 import ResubmitPrescriptionModal from '../components/orders/ResubmitPrescriptionModal';
 import AttachFileField from '../components/orders/AttachFileField';
@@ -1012,7 +1013,9 @@ const OrderDetailPage = () => {
   ];
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    // Nov 27, 2026: the order on the left, its Conversation on the right (below on a phone).
+    <div className="max-w-7xl mx-auto lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-6 lg:items-start">
+    <div className="space-y-6 min-w-0">
       <button onClick={() => navigate(-1)} className="flex items-center gap-1.5 text-sm text-ink-secondary hover:text-ink-primary">
         <ArrowLeft className="w-4 h-4" /> Back
       </button>
@@ -2439,6 +2442,8 @@ const OrderDetailPage = () => {
           )}
         </div>
       </div>
+    </div>
+    <OrderThreadPanel order={order} events={events} user={user} canActOnOrder={canActOnOrder} />
     </div>
   );
 };

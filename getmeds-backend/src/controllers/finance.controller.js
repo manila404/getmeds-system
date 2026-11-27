@@ -814,6 +814,8 @@ exports.getPayment = async (req, res, next) => {
 exports.verifyAccount = async (req, res, next) => {
   try {
     const { approved, reason, pricesChecked, proofChecked, evidence_attachment_ids } = req.body || {};
+    // Nov 27, 2026: what the hold says needs fixing (services/holdItems.js).
+    const holdItems = approved === false ? require('../services/holdItems').cleanHoldItems((req.body || {}).hold_items) : [];
     if (typeof approved !== 'boolean') {
       return res.status(400).json({
         success: false,
@@ -983,6 +985,7 @@ exports.verifyAccount = async (req, res, next) => {
         metadata: {
           approved,
           reason: reason ? String(reason).trim() : null,
+          ...(holdItems.length ? { hold_items: holdItems } : {}),
           // Recorded so the trail says what evidence was on the order at the
           // moment of the decision — including that there was none, which is
           // the point of a soft gate.
@@ -1151,6 +1154,7 @@ exports.verifyAccount = async (req, res, next) => {
 exports.verifySplitAccount = async (req, res, next) => {
   try {
     const { approved, reason } = req.body || {};
+    const holdItems = approved === false ? require('../services/holdItems').cleanHoldItems((req.body || {}).hold_items) : [];
     if (typeof approved !== 'boolean') {
       return res.status(400).json({
         success: false,
@@ -1202,7 +1206,7 @@ exports.verifySplitAccount = async (req, res, next) => {
       notes: approved
         ? `[${split.invoicing_from}] Customer account verified in Zoho Books.`
         : `[${split.invoicing_from}] Rejected by Finance: ${String(reason).trim()}`,
-      metadata: { approved, reason: reason ? String(reason).trim() : null, invoicingFrom: split.invoicing_from, splitId: split.id }
+      metadata: { approved, reason: reason ? String(reason).trim() : null, invoicingFrom: split.invoicing_from, splitId: split.id, ...(holdItems.length ? { hold_items: holdItems } : {}) }
     });
 
     // A rejection on EITHER entity holds the whole order — it's one

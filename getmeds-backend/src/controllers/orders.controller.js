@@ -4539,7 +4539,16 @@ exports.updateDetails = async (req, res, next) => {
     }
     const isManagementCaller = ['management', 'admin'].includes((req.user.role || '').toLowerCase());
     const wasAlreadySynced = Boolean(order.zoho_so_id);
+    // Nov 27, 2026: a hold that names what to fix (services/holdItems.js) lets the
+    // MedRep change exactly those fields on an order already in Zoho — and only
+    // those, only while that hold is open. The edit goes to Zoho like Management's.
+    let flaggedFix = false;
     if (wasAlreadySynced && !isManagementCaller) {
+      const flagged = await require('../services/holdItems').flaggedEditableFields(db, order);
+      const asked = Object.keys(req.body || {}).filter((k) => (req.body || {})[k] !== undefined);
+      flaggedFix = flagged.size > 0 && asked.length > 0 && asked.every((k) => flagged.has(k));
+    }
+    if (wasAlreadySynced && !isManagementCaller && !flaggedFix) {
       return res.status(409).json({
         success: false,
         error: {

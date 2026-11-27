@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { HOLD_FIELDS, HOLD_OTHER, HOLD_ATTACHMENTS } from '../../constants/holdItems';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { X, FileText, ExternalLink, Paperclip, AlertTriangle, Loader2, ShieldCheck, XCircle, Download, ChevronDown, RotateCcw, Pill, Printer } from 'lucide-react';
@@ -427,6 +429,36 @@ const Section = ({ title, children }) => (
 // Sep 15, 2026: `footer` — Dispatch opens this same panel as the order's
 // receipt (what to prepare), and puts its own actions there instead of
 // Finance's Confirm. Without `onConfirm` no Confirm button can appear anyway.
+/**
+ * Nov 27, 2026: "What needs fixing?" — tick the details or missing documents the
+ * hold is about. The MedRep gets each one as a checklist item with its own fix
+ * (change that field, upload that document), then fixes and resubmits in one step.
+ */
+const HoldItemPicker = ({ selected, onToggle, disabled }) => {
+  const chip = (it) => {
+    const on = selected.includes(it.key);
+    return (
+      <button
+        key={it.key}
+        type="button"
+        disabled={disabled}
+        onClick={() => onToggle(it.key)}
+        className={`px-2 py-0.5 rounded-full border text-[11px] font-semibold ${on ? 'bg-red-600 border-red-600 text-white' : 'bg-white border-slate-300 text-ink-secondary hover:border-red-400'}`}
+      >
+        {on ? '✓ ' : ''}{it.label}
+      </button>
+    );
+  };
+  return (
+    <div className="mt-1.5 space-y-1">
+      <p className="text-xs font-semibold text-ink-primary">What needs fixing? <span className="font-normal text-ink-secondary">(optional — the MedRep can fix each one)</span></p>
+      <div className="flex flex-wrap gap-1">{[...HOLD_FIELDS, ...HOLD_OTHER].map(chip)}</div>
+      <p className="text-xs font-semibold text-ink-primary pt-1">Missing document</p>
+      <div className="flex flex-wrap gap-1">{HOLD_ATTACHMENTS.map(chip)}</div>
+    </div>
+  );
+};
+
 const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = null, onOpenConfirm = null, confirming, workflowV2 = false, footer = null, sideBySide = false }) => {
   const detail = useQuery({
     queryKey: ['finance-order-detail', orderId],
@@ -513,12 +545,15 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = n
   const [holdReason, setHoldReason] = useState('');
   const [holdFiles, setHoldFiles] = useState([]);
   const [holdBusy, setHoldBusy] = useState(false);
+  // Nov 27, 2026: what needs fixing — the MedRep gets a checklist with a fix for each.
+  const [holdItems, setHoldItems] = useState([]);
+  const toggleHoldItem = (key) => setHoldItems((p) => (p.includes(key) ? p.filter((k) => k !== key) : [...p, key]));
   // Oct 15, 2026: bring a hold Finance itself applied back for verification.
   const canReopen = Boolean(onReopen) && order?.status === 'on_hold' && order?.finance_hold === true;
   const [reopening, setReopening] = useState(false);
   const [reopenReason, setReopenReason] = useState('');
   useEffect(() => {
-    setRejecting(false); setHoldReason(''); setHoldFiles([]); setReopening(false); setReopenReason('');
+    setRejecting(false); setHoldReason(''); setHoldFiles([]); setHoldItems([]); setReopening(false); setReopenReason('');
   }, [orderId]);
 
   // The screenshots are attached FIRST, while the order is still with Finance, then the hold
@@ -531,10 +566,11 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = n
         const saved = await uploadOrderAttachment(client, order.id, f, 'other');
         if (saved?.id) ids.push(saved.id);
       }
-      onReject(order.id, holdReason.trim(), ids);
+      onReject(order.id, holdReason.trim(), ids, holdItems.map((key) => ({ key })));
       setRejecting(false);
       setHoldReason('');
       setHoldFiles([]);
+      setHoldItems([]);
     } catch (err) {
       toast.error(err.response?.data?.error?.message || err.message || 'Could not attach the screenshot. Nothing was held.');
     } finally {
@@ -836,6 +872,69 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = n
           </div>
         )}
         </div>
+        {/* Nov 27, 2026: Hold is its own pop-up (it outgrew the footer once it gained "What needs fixing?"). */}
+        {rejecting && createPortal(
+          <div
+            className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4"
+            onMouseDown={(e) => { if (e.target === e.currentTarget && !holdBusy) { setRejecting(false); setHoldReason(''); setHoldFiles([]); setHoldItems([]); } }}
+          >
+            <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl bg-white shadow-2xl">
+              <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200">
+                <div>
+                  <h3 className="text-base font-bold text-ink-primary flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-state-error" /> Hold {order?.getmeds_order_id}
+                  </h3>
+                  <p className="text-xs text-ink-secondary mt-0.5">
+                    {order?.customer_name}{order?.medrep_name ? ` · MedRep: ${order.medrep_name}` : ''}. The MedRep sees the reason and fixes what you tick.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={holdBusy}
+                  onClick={() => { setRejecting(false); setHoldReason(''); setHoldFiles([]); setHoldItems([]); }}
+                  className="text-ink-secondary hover:text-ink-primary"
+                  aria-label="Close"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="px-5 py-4 space-y-3">
+                <label className="block">
+                  <span className="text-xs font-semibold text-ink-primary">Reason <span className="text-state-error">*</span></span>
+                  <textarea
+                    autoFocus
+                    rows={3}
+                    value={holdReason}
+                    onChange={(e) => setHoldReason(e.target.value)}
+                    placeholder="Why is this order being held? The MedRep sees this."
+                    className="mt-1 w-full text-sm rounded-md border border-red-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-300 resize-none"
+                  />
+                </label>
+                <HoldItemPicker selected={holdItems} onToggle={toggleHoldItem} disabled={holdBusy} />
+                <HoldProofField files={holdFiles} onChange={setHoldFiles} disabled={holdBusy} />
+              </div>
+              <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 bg-surface rounded-b-xl">
+                <button
+                  type="button"
+                  onClick={() => { setRejecting(false); setHoldReason(''); setHoldFiles([]); setHoldItems([]); }}
+                  disabled={holdBusy}
+                  className="px-4 py-2 rounded-md border border-slate-200 bg-white text-sm font-semibold text-ink-secondary hover:text-ink-primary"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!holdReason.trim() || confirming || holdBusy}
+                  onClick={confirmHold}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-state-error text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {holdBusy ? 'Attaching…' : holdItems.length ? `Confirm hold (${holdItems.length} to fix)` : 'Confirm hold'}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
         <div className="px-5 py-3 border-t border-slate-200 bg-white flex items-center justify-between gap-3 shrink-0">
           {/* Says why there is no Confirm button, rather than leaving its
               absence to be read as the panel being broken.
@@ -853,18 +952,6 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = n
                 placeholder="Why is this going back for verification? (e.g. balance settled, customer called)"
                 className="w-full text-xs rounded-md border border-slate-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-getmeds-blue resize-none"
               />
-            </div>
-          ) : rejecting ? (
-            <div className="min-w-0 flex-1">
-              <textarea
-                autoFocus
-                rows={2}
-                value={holdReason}
-                onChange={(e) => setHoldReason(e.target.value)}
-                placeholder="Why is this order being held? The MedRep sees this."
-                className="w-full text-xs rounded-md border border-red-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-400 resize-none"
-              />
-              <HoldProofField files={holdFiles} onChange={setHoldFiles} disabled={holdBusy} />
             </div>
           ) : footer ? (
             <div className="min-w-0">{footer}</div>
@@ -931,23 +1018,6 @@ const OrderDetailsModal = ({ orderId, onClose, onConfirm, onReject, onReopen = n
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-getmeds-blue text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50"
                 >
                   Bring back
-                </button>
-              </>
-            ) : rejecting ? (
-              <>
-                <button
-                  onClick={() => { setRejecting(false); setHoldReason(''); setHoldFiles([]); }}
-                  disabled={holdBusy}
-                  className="px-4 py-2 rounded-md border border-slate-200 text-sm font-semibold text-ink-secondary hover:bg-surface hover:text-ink-primary"
-                >
-                  Cancel
-                </button>
-                <button
-                  disabled={!holdReason.trim() || confirming || holdBusy}
-                  onClick={confirmHold}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-state-error text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {holdBusy ? 'Attaching…' : 'Confirm hold'}
                 </button>
               </>
             ) : (

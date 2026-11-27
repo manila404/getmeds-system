@@ -253,10 +253,12 @@ const FinanceQueuePage = () => {
 
   // ── Verify mutation ─────────────────────────────────────────────────────────
   const verifyMutation = useMutation({
-    mutationFn: ({ id, approved, reason, evidence }) =>
+    mutationFn: ({ id, approved, reason, evidence, holdItems }) =>
       client.post(`/api/finance/orders/${id}/verify`, {
         approved, reason,
         ...(evidence && evidence.length ? { evidence_attachment_ids: evidence } : {}),
+        // Nov 27, 2026: what the hold says needs fixing (constants/holdItems.js).
+        ...(holdItems && holdItems.length ? { hold_items: holdItems } : {}),
         pricesChecked: approved ? true : undefined,
         proofChecked:  approved ? true : undefined,
       }).then((r) => r.data),
@@ -711,7 +713,7 @@ const FinanceQueuePage = () => {
           onConfirm={(id, panelChecks) =>
             verifyMutation.mutate({ id, approved: true, pricesChecked: panelChecks?.prices, proofChecked: panelChecks?.proof })
           }
-          onReject={(id, reason, evidence) => verifyMutation.mutate({ id, approved: false, reason, evidence })}
+          onReject={(id, reason, evidence, holdItems) => verifyMutation.mutate({ id, approved: false, reason, evidence, holdItems })}
           onReopen={(id, reason) => reopenMutation.mutate({ id, reason })}
           confirming={verifyMutation.isPending || reopenMutation.isPending}
           workflowV2={workflowV2}

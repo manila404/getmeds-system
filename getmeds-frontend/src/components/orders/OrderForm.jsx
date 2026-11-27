@@ -33,6 +33,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { useProducts, useCustomers } from '../../hooks/useOrderData';
 import { fetchCustomerZohoAddress, fetchCustomers } from '../../api/queries';
 import { ATTACHMENT_TYPES } from '../../constants/attachmentTypes';
+import { attachmentName, orderRef, withName, numberDuplicates, TYPE_NAME, cleanFileBase } from '../../utils/attachmentNames';
 import { ORDER_SOURCES } from '../../constants/orderSources';
 import { divisionForSalesperson, salespersonForDivision } from '../../constants/divisions';
 import { PAYMENT_TERMS_SUGGESTIONS, paymentTermsProofHint, isPaidTerms } from '../../constants/paymentTerms';
@@ -1129,7 +1130,8 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
         toast.error(`"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB. The limit is 15 MB.`);
         continue;
       }
-      accepted.push({ localId: `${Date.now()}-${Math.random().toString(36).slice(2)}`, file, fileType: 'payment_proof' });
+      // Nov 27, 2026: starts as "Other" — the MedRep picks what it is, or names it.
+      accepted.push({ localId: `${Date.now()}-${Math.random().toString(36).slice(2)}`, file, fileType: 'other', customName: '' });
     }
     if (!accepted.length) return;
 
@@ -1180,6 +1182,10 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   const handleAttachmentTypeChange = (localId, fileType) => {
     setStagedAttachments(prev => prev.map(a => (a.localId === localId ? { ...a, fileType } : a)));
   };
+  // Nov 27, 2026: what an "Other" file is called (BIR 2303, LTO, …) — part of its uploaded name.
+  const handleAttachmentNameChange = (localId, customName) => {
+    setStagedAttachments(prev => prev.map(a => (a.localId === localId ? { ...a, customName } : a)));
+  };
 
   /**
    * The three-step handshake, run once the order exists, for every staged
@@ -1196,9 +1202,18 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
    * which ones to re-attach from the order's Attachments tab rather than a
    * blanket "something failed".
    */
-  const uploadAttachments = async (orderId, attachments) => {
+  const uploadAttachments = async (order, attachments) => {
+    const orderId = order.id;
     const failed = [];
-    for (const { file, fileType } of attachments) {
+    // Nov 27, 2026: proof_of_payment_<ref>.jpeg, <typed name>_<ref>.pdf … (utils/attachmentNames.js)
+    const ref = orderRef(order);
+    const keys = attachments.map((a) => ({ key: attachmentName(a.file, a.fileType, ref, { customName: a.customName }) }));
+    const nums = numberDuplicates(keys);
+    const named = attachments.map((a, i) => ({
+      fileType: a.fileType,
+      file: withName(a.file, attachmentName(a.file, a.fileType, ref, { customName: a.customName, n: nums[i] })),
+    }));
+    for (const { file, fileType } of named) {
       try {
         const { data: urlRes } = await client.post(`/api/orders/${orderId}/attachments/upload-url`, {
           contentType: file.type, fileName: file.name, fileSize: file.size, file_type: fileType,
@@ -1427,6 +1442,13 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
   // Step 3: Submit via React Query useMutation
   const mutation = useMutation({
     mutationFn: async () => {
+      // Nov 27, 2026: every "Other" attachment needs a name (it becomes the file name in Zoho).
+      const unnamed = stagedAttachments.filter((a) => a.fileType === 'other' && !cleanFileBase(a.customName));
+      if (unnamed.length) {
+        const err = new Error(`Name the "Other" attachment${unnamed.length > 1 ? 's' : ''} (e.g. BIR 2303), or choose what ${unnamed.length > 1 ? 'they are' : 'it is'}: ${unnamed.map((a) => a.file.name).join(', ')}`);
+        err.isLocal = true;
+        throw err;
+      }
       // POST /api/orders (no `status: 'draft'` override) already runs the
       // full workflow gate in one call: it generates the Getmeds Order ID,
       // creates the Zoho Sales Order, and sets the final status
@@ -1545,7 +1567,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
       // order's Attachments tab; a phantom failure is not.
       let failedAttachments = [];
       if (stagedAttachments.length) {
-        failedAttachments = await uploadAttachments(order.id, stagedAttachments);
+        failedAttachments = await uploadAttachments(order, stagedAttachments);
       }
       return { ...order, _failedAttachments: failedAttachments };
     },
@@ -1586,7 +1608,7 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
       }
     },
     onError: (err) => {
-      toast.error(err.response?.data?.error?.message || 'Failed to submit order');
+      toast.error(err.response?.data?.error?.message || (err.isLocal ? err.message : 'Failed to submit order'), { duration: err.isLocal ? 8000 : 4000 });
     }
   });
 
@@ -2855,11 +2877,30 @@ const OrderForm = ({ orderForMode = null, onChangeOrderOwner, onCancel, onSucces
                       key={a.localId}
                       className="flex items-center justify-between gap-2 bg-pharmacy-green/10 border border-pharmacy-green/40 rounded-xl px-3 py-2.5 text-sm"
                     >
-                      <span className="flex items-center gap-2 min-w-0 text-ink-primary font-medium truncate">
-                        <Paperclip size={14} className="shrink-0 text-pharmacy-green-dark" />
-                        <span className="truncate">{a.file.name}</span>
-                        <span className="text-xs text-ink-secondary shrink-0">
-                          ({(a.file.size / 1024 / 1024).toFixed(1)} MB)
+                      <span className="flex flex-col min-w-0 flex-1">
+                        <span className="flex items-center gap-2 min-w-0 text-ink-primary font-medium">
+                          <Paperclip size={14} className="shrink-0 text-pharmacy-green-dark" />
+                          <span className="truncate">{a.file.name}</span>
+                          <span className="text-xs text-ink-secondary shrink-0">
+                            ({(a.file.size / 1024 / 1024).toFixed(1)} MB)
+                          </span>
+                        </span>
+                        {a.fileType === 'other' && (
+                          <input
+                            type="text"
+                            value={a.customName || ''}
+                            onChange={(e) => handleAttachmentNameChange(a.localId, e.target.value)}
+                            placeholder="Name this file * (e.g. BIR 2303, LTO, Mayor's Permit)"
+                            maxLength={60}
+                            className={`mt-1.5 w-full text-xs rounded-lg border px-2 py-1 bg-white ${cleanFileBase(a.customName) ? 'border-slate-300' : 'border-amber-400'}`}
+                          />
+                        )}
+                        <span className="mt-1 text-[11px] text-ink-secondary truncate">
+                          Uploads as <span className="font-mono text-ink-primary">
+                            {a.fileType === 'other'
+                              ? `${cleanFileBase(a.customName) || '…'}_<GM order no.>`
+                              : `${TYPE_NAME[a.fileType] || a.fileType}_<GM order no.>`}{(a.file.name.match(/\.[A-Za-z0-9]+$/) || [''])[0].toLowerCase()}
+                          </span>
                         </span>
                       </span>
                       <span className="flex items-center gap-2 shrink-0">
