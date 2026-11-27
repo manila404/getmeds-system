@@ -109,8 +109,13 @@ async function notify({ orderId, recipientIds, message, eventType, orderData = {
       INSERT INTO notifications (order_id, recipient_id, channel, message, payload, sent_at)
       VALUES (?, ?, 'in_app', ?, ?, ?)
     `);
+    // Nov 27, 2026: what kind of notice this is, kept with it, so the app can
+    // tell a hold apart from anything else (the "order on hold" sound —
+    // frontend hooks/useAlertSounds.js). Added to whatever payload there is.
+    const plain = payload === null || payload === undefined || (typeof payload === 'object' && !Array.isArray(payload));
+    const stored = eventType && plain ? { ...(payload || {}), event_type: eventType } : payload;
     for (const rid of recipientIds) {
-      if (rid) await ins.run(orderId || null, rid, message, payload ? JSON.stringify(payload) : null, now);
+      if (rid) await ins.run(orderId || null, rid, message, stored ? JSON.stringify(stored) : null, now);
     }
   }
 

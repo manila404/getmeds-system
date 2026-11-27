@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../hooks/useAuth';
 import { useNotifications } from '../../hooks/useNotifications';
+import { useAlertSounds } from '../../hooks/useAlertSounds';
+import { isAlertSoundOn, setAlertSoundOn, playAlertSound } from '../../utils/alertSound';
 import NotificationBell from '../ui/NotificationBell';
 import ConfirmDialog from '../ui/ConfirmDialog';
 import client from '../../api/client';
@@ -18,7 +20,9 @@ import {
   ChevronDown,
   Users,
   Pill,
-  Loader2
+  Loader2,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { formatPHT } from '../../utils/dateUtils';
@@ -34,7 +38,10 @@ const roleBadgeStyles = {
 
 const Topbar = ({ onToggleSidebar }) => {
   const { user, logout } = useAuth();
-  const { notifications, unreadCount, markAsRead, markAllAsRead } = useNotifications();
+  const { notifications, unreadCount, markAsRead, markAllAsRead, isLoading: notificationsLoading } = useNotifications();
+  // Nov 27, 2026: the "order on hold" / "order to approve" sounds.
+  useAlertSounds({ role: user?.role, notifications, notificationsLoaded: !notificationsLoading });
+  const [soundOn, setSoundOn] = useState(isAlertSoundOn);
   const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   // Sep 5, 2026: the user identity block became a dropdown (Profile
@@ -331,14 +338,30 @@ const Topbar = ({ onToggleSidebar }) => {
                     </span>
                   )}
                 </div>
-                {unreadCount > 0 && (
+                <div className="flex items-center gap-3">
+                  {/* Nov 27, 2026: alert sounds on/off (this browser). Turning them on plays a sample. */}
                   <button
-                    onClick={() => markAllAsRead()}
-                    className="text-xs text-getmeds-blue hover:text-getmeds-blue-dark flex items-center gap-1 font-medium"
+                    type="button"
+                    onClick={() => {
+                      const next = !soundOn;
+                      setAlertSoundOn(next);
+                      setSoundOn(next);
+                      if (next) playAlertSound(['finance', 'management'].includes(roleKey) ? 'approval' : 'hold', { force: true });
+                    }}
+                    title={soundOn ? 'Alert sounds are on — click to turn off' : 'Alert sounds are off — click to turn on'}
+                    className="text-xs text-ink-secondary hover:text-ink-primary flex items-center gap-1 font-medium"
                   >
-                    <CheckCheck size={14} /> Mark all
+                    {soundOn ? <Volume2 size={14} /> : <VolumeX size={14} />} Sound {soundOn ? 'on' : 'off'}
                   </button>
-                )}
+                  {unreadCount > 0 && (
+                    <button
+                      onClick={() => markAllAsRead()}
+                      className="text-xs text-getmeds-blue hover:text-getmeds-blue-dark flex items-center gap-1 font-medium"
+                    >
+                      <CheckCheck size={14} /> Mark all
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">

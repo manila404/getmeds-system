@@ -49,3 +49,39 @@ exports.markAllRead = async (req, res, next) => {
     res.json({ success: true });
   } catch (err) { next(err); }
 };
+
+/**
+ * Nov 27, 2026: GET /api/notifications/attention — the orders waiting on THIS
+ * person to approve, for the "new order to approve" sound (frontend
+ * hooks/useAlertSounds.js). Only ids, newest first, so polling it is cheap:
+ *
+ *   finance     orders Finance has to verify (financeStages ACTIONABLE),
+ *               leaving out imported Zoho history — the same rule as
+ *               Finance's own "waiting on you" list
+ *   management  the Approval Queue (pending_management_approval), within
+ *               the person's own division scope
+ *
+ * Anyone else gets an empty list. Finance gets no notification when an
+ * approved order reaches its queue, so this — not the bell — is what rings.
+ */
+exports.getAttention = async (req, res, next) => {
+  try {
+    const role = String(req.user?.role || '').toLowerCase();
+    const { loadScope, scopeSql } = require('../services/orderScopeService');
+    const { importedSql } = require('../services/orderOrigin');
+    const { ACTIONABLE } = require('../services/financeStages');
+    let statuses = null;
+    if (role === 'finance') statuses = ACTIONABLE;
+    else if (role === 'management') statuses = ['pending_management_approval'];
+    if (!statuses) return res.json({ success: true, data: { role, ids: [] } });
+
+    const { sql: scopeClause, params: scopeParams } = scopeSql(await loadScope(req.user), 'o');
+    const rows = await db.prepare(`
+      SELECT o.id FROM orders o
+       WHERE o.status = ANY(?) AND NOT (${importedSql('o')})${scopeClause ? ` AND ${scopeClause}` : ''}
+       ORDER BY o.id DESC
+       LIMIT 200
+    `).all([statuses, ...scopeParams]);
+    res.json({ success: true, data: { role, ids: rows.map((r) => Number(r.id)) } });
+  } catch (err) { next(err); }
+};
