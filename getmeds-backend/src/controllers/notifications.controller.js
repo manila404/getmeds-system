@@ -73,15 +73,31 @@ exports.getAttention = async (req, res, next) => {
     let statuses = null;
     if (role === 'finance') statuses = ACTIONABLE;
     else if (role === 'management') statuses = ['pending_management_approval'];
-    if (!statuses) return res.json({ success: true, data: { role, ids: [] } });
+    if (!statuses) return res.json({ success: true, data: { role, ids: [], items: [], server_now: new Date().toISOString() } });
 
     const { sql: scopeClause, params: scopeParams } = scopeSql(await loadScope(req.user), 'o');
+    // Nov 27, 2026 (2): `since` — when the order reached this list (its latest
+    // event moving it into the status), for the 5-minute reminder and the
+    // 10-minute bell. server_now so the browser's own clock does not matter.
     const rows = await db.prepare(`
-      SELECT o.id FROM orders o
+      SELECT o.id,
+             COALESCE(
+               (SELECT MAX(e.created_at) FROM order_events e WHERE e.order_id = o.id AND e.new_status = o.status),
+               o.updated_at
+             ) AS since
+        FROM orders o
        WHERE o.status = ANY(?) AND NOT (${importedSql('o')})${scopeClause ? ` AND ${scopeClause}` : ''}
        ORDER BY o.id DESC
        LIMIT 200
     `).all([statuses, ...scopeParams]);
-    res.json({ success: true, data: { role, ids: rows.map((r) => Number(r.id)) } });
+    res.json({
+      success: true,
+      data: {
+        role,
+        ids: rows.map((r) => Number(r.id)),
+        items: rows.map((r) => ({ id: Number(r.id), since: r.since ? new Date(r.since).toISOString() : null })),
+        server_now: new Date().toISOString(),
+      },
+    });
   } catch (err) { next(err); }
 };

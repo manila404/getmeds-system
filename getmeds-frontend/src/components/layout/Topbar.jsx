@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../hooks/useAuth';
 import { useNotifications } from '../../hooks/useNotifications';
 import { useAlertSounds } from '../../hooks/useAlertSounds';
-import { isAlertSoundOn, setAlertSoundOn, playAlertSound } from '../../utils/alertSound';
+import { isAlertSoundOn, setAlertSoundOn, playAlertSound, isAlertSoundLocked, onAlertSoundLockChange, unlockAlertSound } from '../../utils/alertSound';
 import NotificationBell from '../ui/NotificationBell';
 import ConfirmDialog from '../ui/ConfirmDialog';
 import client from '../../api/client';
@@ -42,6 +42,11 @@ const Topbar = ({ onToggleSidebar }) => {
   // Nov 27, 2026: the "order on hold" / "order to approve" sounds.
   useAlertSounds({ role: user?.role, notifications, notificationsLoaded: !notificationsLoading });
   const [soundOn, setSoundOn] = useState(isAlertSoundOn);
+  // Nov 27, 2026 (2): the browser blocks sound until the page is clicked once.
+  // Until then, a button beside the bell says so (the click itself unlocks it).
+  const [soundLocked, setSoundLocked] = useState(isAlertSoundLocked);
+  useEffect(() => onAlertSoundLockChange(() => setSoundLocked(isAlertSoundLocked())), []);
+  const soundRole = ['medrep', 'team_lead', 'finance', 'management'].includes(String(user?.role || '').toLowerCase());
   const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   // Sep 5, 2026: the user identity block became a dropdown (Profile
@@ -318,6 +323,21 @@ const Topbar = ({ onToggleSidebar }) => {
             </div>
           )}
         </div>
+
+        {/* Nov 27, 2026 (2): sound alerts are on, but the browser has not let this page play them yet. */}
+        {soundRole && soundOn && soundLocked && (
+          <button
+            type="button"
+            onClick={() => {
+              unlockAlertSound();
+              playAlertSound(['finance', 'management'].includes(roleKey) ? 'approval' : 'hold', { force: true });
+            }}
+            title="Your browser plays sound only after you click on the page once"
+            className="hidden sm:inline-flex items-center gap-1.5 mr-1 px-2.5 py-1 rounded-full border border-amber-300 bg-amber-50 text-amber-900 text-xs font-semibold hover:bg-amber-100 animate-pulse"
+          >
+            <Volume2 size={14} /> Click to turn on sound
+          </button>
+        )}
 
         {/* Notification Bell & Dropdown */}
         <div ref={dropdownRef}>

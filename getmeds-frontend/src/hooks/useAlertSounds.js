@@ -12,6 +12,9 @@ import { playAlertSound, unlockAlertSound } from '../utils/alertSound';
  *   Finance / Management 'approval' when an order joins the list waiting on
  *                        them — Finance's "to verify", Management's Approval
  *                        Queue (GET /api/notifications/attention).
+ *                        Nov 27, 2026 (2): still waiting after 5 minutes ->
+ *                        'approval' again; after 10 minutes -> 'bell', and the
+ *                        bell again every 5 minutes until it is acted on.
  *
  * Only for what arrives while the hub is open: whatever is already there
  * when the page loads stays quiet. Both checks keep running while the tab
@@ -27,6 +30,8 @@ const HOLD_EVENTS = new Set([
 ]);
 const HOLD_ROLES = new Set(['medrep', 'team_lead']);
 const APPROVER_ROLES = new Set(['finance', 'management']);
+const REMIND_MIN = 5;
+const BELL_MIN = 10;
 
 const eventTypeOf = (n) => {
   if (!n || !n.payload) return null;
@@ -87,20 +92,45 @@ export function useAlertSounds({ role, notifications = [], notificationsLoaded =
   // ── 'approval' ──────────────────────────────────────────────────────────
   const attention = useQuery({
     queryKey: ['notifications', 'attention'],
-    queryFn: async () => (await client.get('/api/notifications/attention')).data.data.ids || [],
+    queryFn: async () => {
+      const d = (await client.get('/api/notifications/attention')).data.data || {};
+      const items = d.items || (d.ids || []).map((id) => ({ id, since: null }));
+      return { items, serverNow: d.server_now || null };
+    },
     refetchInterval: 30000,
     refetchIntervalInBackground: true,
     enabled: wantsApproval,
   });
-  const seenApprovals = useRef(null);
+  // For each waiting order, the last reminder step already sounded:
+  //   0 arrived · 1 five minutes · 2 ten minutes (bell) · 3 fifteen (bell) · …
+  // On page load every order starts at its current step, quietly; only steps
+  // reached after that make a sound. One sound per check, the loudest due.
+  const stepById = useRef(null);
   useEffect(() => {
     if (!wantsApproval || !attention.data) return;
-    if (seenApprovals.current === null) {
-      seenApprovals.current = new Set(attention.data);
-      return;
+    const { items, serverNow } = attention.data;
+    const now = serverNow ? Date.parse(serverNow) : Date.now();
+    const stepOf = (since) => {
+      const mins = since ? (now - Date.parse(since)) / 60000 : 0;
+      if (!(mins >= REMIND_MIN)) return 0;
+      if (mins < BELL_MIN) return 1;
+      return 2 + Math.floor((mins - BELL_MIN) / REMIND_MIN);
+    };
+    const first = stepById.current === null;
+    const prev = stepById.current || new Map();
+    const next = new Map();
+    let sound = null;
+    for (const it of items) {
+      const step = stepOf(it.since);
+      next.set(it.id, step);
+      if (first) continue;
+      const before = prev.has(it.id) ? prev.get(it.id) : -1;
+      if (step > before) {
+        const kind = step >= 2 ? 'bell' : 'approval';
+        if (kind === 'bell' || !sound) sound = kind;
+      }
     }
-    const fresh = attention.data.filter((id) => !seenApprovals.current.has(id));
-    fresh.forEach((id) => seenApprovals.current.add(id));
-    if (fresh.length) playAlertSound('approval');
+    stepById.current = next;
+    if (sound) playAlertSound(sound);
   }, [wantsApproval, attention.data]);
 }
