@@ -1,6 +1,7 @@
 const ZohoAdapter = require('./ZohoAdapter');
 const { findSalesperson, SalespersonNotFoundError } = require('./salespersonName');
 const { assertZohoCallAllowed } = require('./zohoWriteLock');
+const { invoiceFieldsFromSo, invoiceLineFieldsFromSo } = require('./invoiceFromSalesOrder');
 const zohoQuotaGuard = require('../../services/zohoQuotaGuard');
 
 // Sep 2, 2026 — network resilience, added after a Full Resync died with the
@@ -1427,6 +1428,8 @@ class LiveZohoAdapter extends ZohoAdapter {
           rate: li.rate,
           quantity: Number(li.quantity || 0) - Number(li.quantity_invoiced || 0)
         };
+        // Nov 28, 2026: the SO line's tax, discount, unit and description.
+        Object.assign(out, invoiceLineFieldsFromSo(li, out.quantity));
         if (warehouseId) out.warehouse_id = warehouseId;
         if (linePicks.length) {
           out.batches = linePicks.map((p) => ({
@@ -1450,6 +1453,10 @@ class LiveZohoAdapter extends ZohoAdapter {
     // Zoho UI's "Convert to Invoice" sets reference_number to the Sales Order number (SO-...),
     // which kpiService & kpiScorecardService use to join zoho_invoices to orders.zoho_so_number.
     const body = {
+      // Nov 28, 2026: payment terms, tax preference, terms and notes come from
+      // the Sales Order. Without them Zoho used the customer's defaults, which
+      // is how a "Net 15" SO got a "Paid" invoice. See invoiceFromSalesOrder.js.
+      ...invoiceFieldsFromSo(salesorder),
       customer_id: salesorder.customer_id,
       reference_number: salesorder.salesorder_number || salesorder.reference_number,
       date: opts.date,
