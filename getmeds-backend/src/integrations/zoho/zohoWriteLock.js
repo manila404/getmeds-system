@@ -49,6 +49,16 @@ const APPROVED_WRITES = [
   write('POST', '/shipmentorders/:id/status/delivered', 'Dispatch marks the shipment delivered'),
 ];
 
+/**
+ * Nov 28, 2026 (Aaron approved): editing an invoice, for ONE purpose —
+ * scripts/fix-invoice-terms-from-so.js correcting invoices made before 4948870
+ * with the customer's terms instead of the Sales Order's. Allowed only while
+ * ZOHO_ALLOW_INVOICE_CORRECTION=1, which only that script sets. The app itself
+ * never edits an invoice, so on the server this stays refused.
+ */
+const INVOICE_CORRECTION = write('PUT', '/invoices/:id', 'correct an invoice to match its Sales Order (fix-invoice-terms-from-so.js only)');
+const invoiceCorrectionOn = () => process.env.ZOHO_ALLOW_INVOICE_CORRECTION === '1';
+
 class ZohoCallBlockedError extends Error {
   constructor(method, path, reason) {
     super(`Blocked by the Zoho write lock: ${method} ${path} — ${reason}`);
@@ -66,6 +76,7 @@ function assertZohoCallAllowed(method, path) {
   if (m === 'DELETE') throw new ZohoCallBlockedError(m, p, 'nothing is ever deleted in Zoho from this app.');
   if (m === 'GET') return;
   if (APPROVED_WRITES.some((w) => w.method === m && w.re.test(p))) return;
+  if (invoiceCorrectionOn() && INVOICE_CORRECTION.method === m && INVOICE_CORRECTION.re.test(p)) return;
   throw new ZohoCallBlockedError(m, p, 'this change is not on the approved list (src/integrations/zoho/zohoWriteLock.js).');
 }
 

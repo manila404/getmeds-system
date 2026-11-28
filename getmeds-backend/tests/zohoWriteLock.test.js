@@ -40,6 +40,22 @@ test('soft deletes and anything else not on the list are refused', () => {
   blocked('PUT', '/salesorders/123/../../items/1');
 });
 
+test('editing an invoice is allowed only for the correction script (Nov 28, 2026)', () => {
+  delete process.env.ZOHO_ALLOW_INVOICE_CORRECTION;
+  blocked('PUT', '/invoices/123');
+  process.env.ZOHO_ALLOW_INVOICE_CORRECTION = '1';
+  try {
+    expect(allowed('PUT', '/invoices/123')).toBe(true);
+    blocked('DELETE', '/invoices/123');
+    blocked('POST', '/invoices/123/status/void');
+    blocked('PUT', '/invoices/123/extra');
+    blocked('PUT', '/creditnotes/123');
+  } finally {
+    delete process.env.ZOHO_ALLOW_INVOICE_CORRECTION;
+  }
+  blocked('PUT', '/invoices/123');
+});
+
 test('a refused call never reaches Zoho, and says why', async () => {
   const realFetch = global.fetch;
   const sent = [];
